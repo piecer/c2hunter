@@ -16,8 +16,12 @@ export async function installApiFixture(page: Page) {
     if (path === '/sensors/sensor-a') return fulfill(route, sensor);
     if (path === '/analysis-jobs' && method === 'GET') return fulfill(route, { items: [{ id: 'job-1', name: 'E2E investigation', status: 'COMPLETED', candidate_count: 1 }] });
     if (path === '/analysis-jobs' && method === 'POST') return fulfill(route, { id: 'job-1', name: 'E2E investigation', status: 'CREATED' }, 201);
-    if (path === '/analysis-jobs/job-1') return fulfill(route, { id: 'job-1', name: 'E2E investigation', status: 'ANALYZING', progress_percent: 72, packet_count: 720000, flow_count: 18000, candidate_count: 1 });
+    if (path === '/analysis-jobs/job-1' && method === 'PATCH') { const body = request.postDataJSON(); return fulfill(route, { id: 'job-1', name: body.name, description: body.description, status: 'COMPLETED' }); }
+    if (path === '/analysis-jobs/job-1' && method === 'DELETE') return fulfill(route, undefined, 204);
+    if (path === '/analysis-jobs/job-1' && method === 'GET') return fulfill(route, { id: 'job-1', name: 'E2E investigation', status: 'ANALYZING', progress_percent: 72, packet_count: 720000, flow_count: 18000, candidate_count: 1 });
     if (path === '/analysis-jobs/job-1/cancel') return fulfill(route, { status: 'CANCELLED' });
+    if (path === '/pcap-analysis-jobs' && method === 'POST') return fulfill(route, { id: 'upload-job', name: 'Uploaded E2E capture', status: 'COMPLETED' }, 201);
+    if (path === '/analysis-jobs/upload-job' && method === 'GET') return fulfill(route, { id: 'upload-job', name: 'Uploaded E2E capture', status: 'COMPLETED', source_type: 'PCAP_UPLOAD', source: { filename: 'fixture.pcap', size_bytes: 4 }, packet_count: 1, flow_count: 1, candidate_count: 0 });
     if (path === '/candidates') return fulfill(route, { items: [candidate] });
     if (path === '/candidates/candidate-1') return fulfill(route, candidate);
     if (path === '/pcap-exports' && method === 'POST') return fulfill(route, { id: 'export-1', status: 'PENDING' }, 201);

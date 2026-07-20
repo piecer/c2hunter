@@ -15,6 +15,8 @@ Alert on offline/degraded sensors, queue depth, spool bytes, capture drops, cloc
 
 Defaults are raw PCAP 7 days, Flow 30, results 180, audit 365, and heartbeat detail 30. Set organization policy before capture. Monitor Docker volume and sensor spool filesystems with byte and inode thresholds. PCAP is opt-in; narrow BPF and shorter capture/rotation reduce risk. Cleanup must be paged and audited. An expired PCAP changes availability; it must not delete candidate evidence.
 
+Offline PCAP upload defaults to 100 MiB and 2,000,000 packets. Tune `C2HUNTER_PCAP_UPLOAD_MAX_BYTES` and `C2HUNTER_PCAP_UPLOAD_MAX_PACKETS` below available Controller/Redis/PostgreSQL capacity, because decoded records and retained packet bytes are part of the analysis dataset. Use Analysis history for metadata correction; use reanalysis for detector changes. Only terminal jobs can be manually deleted, and manual deletion intentionally cascades to candidates and generated exports.
+
 At 70% disk, investigate growth; at 80%, shorten optional retention or add capacity; at 90%, stop new PCAP capture before metadata/audit integrity is endangered. Never manually delete database files from a mounted volume.
 
 ## Packet drops and backpressure
