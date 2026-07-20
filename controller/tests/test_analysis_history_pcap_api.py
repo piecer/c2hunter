@@ -6,11 +6,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi.testclient import TestClient
+from test_analysis_job_api import api, payload, synthetic_flows
 
 from c2hunter_controller.app import create_app
 from c2hunter_controller.config import Settings
 from c2hunter_controller.repositories import MemoryRepository, SQLiteRepository
-from test_analysis_job_api import api, payload, synthetic_flows
 
 
 def _checksum(data: bytes) -> int:
