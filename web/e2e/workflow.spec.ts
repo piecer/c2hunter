@@ -36,3 +36,28 @@ test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', 
   await page.getByRole('button', { name: 'Delete 203.0.113.10' }).click();
   await expect(page.getByText('No allowlist entries')).toBeVisible();
 });
+
+test('analyst can manage history and upload an offline PCAP', async ({ page }) => {
+  await installApiFixture(page);
+  await page.goto('/login');
+  await page.getByLabel('Username').fill('analyst');
+  await page.getByRole('button', { name: 'Development login' }).click();
+
+  await page.getByRole('link', { name: 'Analysis history' }).click();
+  await expect(page.getByRole('table', { name: 'Analysis history' })).toBeVisible();
+  await page.getByRole('button', { name: 'Edit E2E investigation' }).click();
+  await page.getByLabel('Analyst note').fill('Reviewed in E2E');
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  await expect(page.getByRole('dialog', { name: 'Edit analysis metadata' })).not.toBeVisible();
+
+  await page.getByRole('link', { name: 'Upload PCAP', exact: true }).first().click();
+  await page.getByLabel('Analysis name').fill('Uploaded E2E capture');
+  await page.getByLabel('Capture file').setInputFiles({
+    name: 'fixture.pcap',
+    mimeType: 'application/vnd.tcpdump.pcap',
+    buffer: Buffer.from([0xd4, 0xc3, 0xb2, 0xa1]),
+  });
+  await page.getByRole('button', { name: 'Upload and analyze' }).click();
+  await expect(page.getByRole('heading', { name: 'Uploaded E2E capture' })).toBeVisible();
+  await expect(page.getByText('PCAP upload')).toBeVisible();
+});

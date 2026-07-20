@@ -6,7 +6,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = localStorage.getItem('c2hunter-token');
   const headers = new Headers(init.headers);
   headers.set('accept', 'application/json');
-  if (init.body) headers.set('content-type', 'application/json');
+  if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
   if (token) headers.set('authorization', `Bearer ${token}`);
   const response = await fetch(`/api/v1${path}`, { ...init, headers: Object.fromEntries(headers.entries()) });
   // Read a clone so repeated test adapters and cache layers that return the same
@@ -23,5 +23,7 @@ export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body?: unknown) => request<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) }),
   put: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PUT', body: body === undefined ? undefined : JSON.stringify(body) }),
+  patch: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PATCH', body: body === undefined ? undefined : JSON.stringify(body) }),
+  upload: <T>(path: string, body: Blob, contentType = 'application/octet-stream') => request<T>(path, { method: 'POST', body, headers: { 'content-type': contentType } }),
   delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
 };

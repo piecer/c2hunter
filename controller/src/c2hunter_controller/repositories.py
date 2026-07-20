@@ -22,6 +22,7 @@ class Repository(Protocol):
     def save_job(self, job: dict[str, Any]) -> dict[str, Any]: ...
     def get_job(self, job_id: str) -> dict[str, Any] | None: ...
     def list_jobs(self) -> list[dict[str, Any]]: ...
+    def delete_job(self, job_id: str) -> bool: ...
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None: ...
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]: ...
     def save_allowlist(self, entry: dict[str, Any]) -> dict[str, Any]: ...
@@ -100,6 +101,23 @@ class MemoryRepository:
 
     def list_jobs(self) -> list[dict[str, Any]]:
         return deepcopy(list(self.jobs.values()))
+
+    def delete_job(self, job_id: str) -> bool:
+        with self._lock:
+            job = self.jobs.pop(job_id, None)
+            if job is None:
+                return False
+            self.idempotency_keys.pop(str(job["idempotency_key"]), None)
+            self.candidates.pop(job_id, None)
+            export_ids = [
+                export_id
+                for export_id, metadata in self.exports.items()
+                if metadata.get("job_id") == job_id
+            ]
+            for export_id in export_ids:
+                self.exports.pop(export_id, None)
+                self.export_content.pop(export_id, None)
+            return True
 
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None:
         with self._lock:
@@ -285,6 +303,33 @@ class SQLiteRepository:
 
     def list_jobs(self) -> list[dict[str, Any]]:
         return self._list("job")
+
+    def delete_job(self, job_id: str) -> bool:
+        with self._lock:
+            job = self.get_job(job_id)
+            if job is None:
+                return False
+            export_rows = self.connection.execute(
+                "SELECT id FROM objects WHERE kind='export' AND json_extract(data, '$.job_id')=?",
+                (job_id,),
+            ).fetchall()
+            export_ids = [str(row[0]) for row in export_rows]
+            if export_ids:
+                placeholders = ",".join("?" for _ in export_ids)
+                self.connection.execute(
+                    f"DELETE FROM export_blobs WHERE export_id IN ({placeholders})", export_ids
+                )
+                self.connection.execute(
+                    f"DELETE FROM objects WHERE kind='export' AND id IN ({placeholders})",
+                    export_ids,
+                )
+            self.connection.execute("DELETE FROM candidates WHERE job_id=?", (job_id,))
+            self.connection.execute("DELETE FROM idempotency WHERE job_id=?", (job_id,))
+            cursor = self.connection.execute(
+                "DELETE FROM objects WHERE kind='job' AND id=?", (job_id,)
+            )
+            self.connection.commit()
+            return cursor.rowcount > 0
 
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None:
         with self._lock:

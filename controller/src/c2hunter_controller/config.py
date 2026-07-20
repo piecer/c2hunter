@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     s3_secret_key: str = ""
     s3_bucket: str = "c2hunter"
     queue_visibility_timeout_seconds: int = Field(default=300, gt=0)
+    pcap_upload_max_bytes: int = Field(default=100 * 1024 * 1024, gt=0)
+    pcap_upload_max_packets: int = Field(default=2_000_000, gt=0)
     inline_flow_records_enabled: bool | None = None
     # This only enables the explicitly limited development token minting endpoint.
     # It does not install production authentication or authorization middleware.

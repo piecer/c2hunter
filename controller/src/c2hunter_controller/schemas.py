@@ -242,7 +242,7 @@ class AnalysisJobCreate(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=200)
     sensor_ids: list[str] = Field(min_length=1)
     sensor_group_id: str | None = None
-    mode: str = Field(pattern=r"^(LIVE|HISTORICAL|REANALYSIS)$")
+    mode: str = Field(pattern=r"^(LIVE|HISTORICAL|REANALYSIS|PCAP_UPLOAD)$")
     start_time: datetime
     end_time: datetime
     capture: CaptureParameters
@@ -256,6 +256,30 @@ class AnalysisJobCreate(BaseModel):
             raise ValueError("end_time must be after start_time")
         if len(self.sensor_ids) != len(set(self.sensor_ids)):
             raise ValueError("sensor_ids must be unique")
+        return self
+
+
+class AnalysisJobUpdate(BaseModel):
+    """Mutable analyst metadata; captured data and detector parameters stay immutable."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=5000)
+
+    @field_validator("name")
+    @classmethod
+    def nonblank_name(cls, value: str | None) -> str | None:
+        if value is None:
+            raise ValueError("name must not be null")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("name must not be blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def contains_change(self) -> AnalysisJobUpdate:
+        if not self.model_fields_set:
+            raise ValueError("at least one mutable field is required")
         return self
 
 

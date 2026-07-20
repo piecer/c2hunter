@@ -50,6 +50,9 @@ class MinioBlobStore:
             response.close()
             response.release_conn()
 
+    def delete(self, key: str) -> None:
+        self.client.remove_object(self.bucket, key)
+
 
 class PostgresRepository:
     """PostgreSQL JSONB control-plane repository with MinIO export blobs and audit rows."""
@@ -192,6 +195,40 @@ class PostgresRepository:
 
     def list_jobs(self) -> list[dict[str, Any]]:
         return self._list("job")
+
+    def delete_job(self, job_id: str) -> bool:
+        with self._lock, self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
+                (job_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                self.connection.commit()
+                return False
+            cursor.execute(
+                "SELECT data->>'object_key' FROM controller_objects "
+                "WHERE kind='export' AND data->>'job_id'=%s",
+                (job_id,),
+            )
+            object_keys = [str(item[0]) for item in cursor.fetchall() if item[0]]
+            cursor.execute(
+                "DELETE FROM controller_objects WHERE kind='export' AND data->>'job_id'=%s",
+                (job_id,),
+            )
+            cursor.execute("DELETE FROM job_candidates WHERE job_id=%s", (job_id,))
+            cursor.execute("DELETE FROM job_idempotency WHERE job_id=%s", (job_id,))
+            cursor.execute("DELETE FROM controller_objects WHERE kind='job' AND id=%s", (job_id,))
+            self._audit("job-delete", job_id, {"id": job_id})
+            self.connection.commit()
+        for object_key in object_keys:
+            try:
+                self.blob_store.delete(object_key)
+            except Exception:
+                # Metadata deletion remains authoritative; object-store lifecycle policies
+                # provide a second cleanup path if the immediate removal is unavailable.
+                pass
+        return True
 
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None:
         with self._lock, self.connection.cursor() as cursor:

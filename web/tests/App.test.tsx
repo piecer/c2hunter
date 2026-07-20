@@ -1,12 +1,12 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import App from '../src/App';
 
 const responses: Record<string, unknown> = {
-  '/api/v1/analysis-jobs': { items: [{ id: 'job-1', name: 'Investigation', status: 'ANALYZING', candidate_count: 2 }] },
+  '/api/v1/analysis-jobs': { items: [{ id: 'job-1', name: 'Investigation', description: 'Initial note', status: 'COMPLETED', source_type: 'PCAP_UPLOAD', source: { filename: 'capture.pcap', size_bytes: 2048 }, created_at: '2026-07-20T10:10:00Z', start_time: '2026-07-20T10:00:00Z', end_time: '2026-07-20T10:05:00Z', packet_count: 100, flow_count: 50, candidate_count: 2 }] },
   '/api/v1/sensors': { items: [{ sensor_id: 'sensor-a', name: 'Sensor A', status: 'ONLINE', last_heartbeat: '2026-07-20T10:00:00Z', interfaces: [{ name: 'eth0', direction: 'INBOUND' }], version: '0.1.0', cpu_percent: 10, memory_percent: 20, disk_percent: 30, received_packets: 1000, dropped_packets: 2 }, { sensor_id: 'sensor-b', name: 'Sensor B', status: 'ONLINE', interfaces: [{ name: 'eth1', direction: 'OUTBOUND' }] }] },
   '/api/v1/analysis-jobs/job-1': { id: 'job-1', name: 'Investigation', status: 'ANALYZING' },
   '/api/v1/candidates/candidate-1': { id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', distinct_internal_hosts: 4, sensor_ids: ['sensor-a'], protocols: ['TCP'], ports: [443], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', evidence: [{ type: 'PERIODIC_BEACON', score: 40, description: 'Periodic traffic' }] },
@@ -103,5 +103,61 @@ describe('C2Hunter UI', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/analysis-jobs/job-1/cancel', expect.objectContaining({ method: 'POST' })));
     const call = fetchMock.mock.calls.find(([url]) => url === '/api/v1/analysis-jobs/job-1/cancel');
     expect(JSON.parse(String(call?.[1]?.body))).toEqual({ reason: 'operator requested from web console' });
+  });
+
+  it('lists analysis history and sends metadata updates and confirmed deletion', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.startsWith('/api/v1/analysis-jobs?')) return new Response(JSON.stringify(responses['/api/v1/analysis-jobs']), { status: 200 });
+      if (path === '/api/v1/analysis-jobs/job-1' && init?.method === 'PATCH') return new Response(JSON.stringify({ id: 'job-1', name: 'Renamed investigation', status: 'COMPLETED' }), { status: 200 });
+      if (path === '/api/v1/analysis-jobs/job-1' && init?.method === 'DELETE') return new Response(null, { status: 204 });
+      return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404 });
+    });
+    localStorage.setItem('c2hunter-token', 'token');
+    vi.stubGlobal('fetch', fetchMock);
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses']}><App /></MemoryRouter></QueryClientProvider>);
+    const user = userEvent.setup();
+
+    expect(await screen.findByRole('table', { name: 'Analysis history' })).toBeInTheDocument();
+    expect(screen.getByText('capture.pcap · 2.0 KiB')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Edit Investigation' }));
+    await user.clear(screen.getByLabelText('Analysis name'));
+    await user.type(screen.getByLabelText('Analysis name'), 'Renamed investigation');
+    await user.clear(screen.getByLabelText('Analyst note'));
+    await user.type(screen.getByLabelText('Analyst note'), 'Reviewed evidence');
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/analysis-jobs/job-1', expect.objectContaining({ method: 'PATCH' })));
+    const patchCall = fetchMock.mock.calls.find(([url, init]) => url === '/api/v1/analysis-jobs/job-1' && init?.method === 'PATCH');
+    expect(JSON.parse(String(patchCall?.[1]?.body))).toEqual({ name: 'Renamed investigation', description: 'Reviewed evidence' });
+
+    await user.click(screen.getByRole('button', { name: 'Delete Investigation' }));
+    expect(screen.getByRole('dialog', { name: 'Delete analysis' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Delete permanently' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/analysis-jobs/job-1', expect.objectContaining({ method: 'DELETE' })));
+  });
+
+  it('uploads a selected PCAP as the binary request body', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.startsWith('/api/v1/pcap-analysis-jobs?') && init?.method === 'POST') return new Response(JSON.stringify({ id: 'upload-job', name: 'Offline case', status: 'COMPLETED' }), { status: 201 });
+      if (path === '/api/v1/analysis-jobs/upload-job') return new Response(JSON.stringify({ id: 'upload-job', name: 'Offline case', status: 'COMPLETED' }), { status: 200 });
+      return new Response(JSON.stringify({ error: { message: 'missing fixture' } }), { status: 404 });
+    });
+    localStorage.setItem('c2hunter-token', 'token');
+    vi.stubGlobal('fetch', fetchMock);
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/upload']}><App /></MemoryRouter></QueryClientProvider>);
+    const user = userEvent.setup();
+    const file = new File([new Uint8Array([0xd4, 0xc3, 0xb2, 0xa1])], 'sample.pcap', { type: 'application/vnd.tcpdump.pcap' });
+    await user.type(screen.getByLabelText('Analysis name'), 'Offline case');
+    await user.upload(screen.getByLabelText('Capture file'), file);
+    fireEvent.submit(screen.getByRole('button', { name: 'Upload and analyze' }).closest('form')!);
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => String(url).startsWith('/api/v1/pcap-analysis-jobs?') && init?.method === 'POST')).toBe(true));
+    const uploadCall = fetchMock.mock.calls.find(([url]) => String(url).startsWith('/api/v1/pcap-analysis-jobs?'));
+    const url = new URL(String(uploadCall?.[0]), 'http://localhost');
+    expect(url.searchParams.get('name')).toBe('Offline case');
+    expect(url.searchParams.get('filename')).toBe('sample.pcap');
+    expect(uploadCall?.[1]?.body).toBe(file);
+    expect(uploadCall?.[1]?.headers).toEqual(expect.objectContaining({ 'content-type': 'application/vnd.tcpdump.pcap' }));
   });
 });

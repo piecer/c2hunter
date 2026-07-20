@@ -22,6 +22,10 @@ Threats include malicious sensor enrollment, stolen credentials, forged telemetr
 
 Payload/PCAP retention is opt-in and shortest-necessary. Prefer flow statistics and hashes. Validate export filters (candidate, internal host, time, port, protocol, direction, sensor), stream with size limits, generate object keys and filenames server-side, authorize both creation and download, and use short-lived signed URLs. Audit request/result/bytes without storing signed URLs or payload. Use encryption at rest and restricted backup access.
 
+Offline uploads are untrusted binary input. The Controller enforces a byte limit before buffering, a packet-count limit while parsing, validates PCAP/PCAPNG block lengths and timestamps, supports only explicit link types, and strips client path components from the displayed filename. Keep the defaults conservative, reject unsupported media types, and never invoke external packet tools or contact addresses found in a capture. Uploaded packet bytes are restricted evidence and follow the analysis-result retention policy.
+
+Analysis metadata edits cannot alter source data, time range, detector settings, evidence, or scores. Job deletion is limited to terminal jobs and removes the associated candidates and generated exports; require an explicit UI confirmation and retain the append-only deletion audit in production.
+
 ## Input and resource defenses
 
 Validate REST/Pydantic and protobuf fields, normalized IP/CIDR/domain/fingerprint values, BPF policy, pagination limits, capture packet/byte/time limits, decompression/object size, checksums, and schema versions. Use bounded chunks/queues, timeouts, quotas, retry backoff, and idempotency ledgers. Never interpolate user input into paths, object keys, SQL, shell commands, or `Content-Disposition` filenames.

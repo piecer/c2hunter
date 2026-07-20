@@ -38,6 +38,8 @@ services:
       C2HUNTER_S3_ACCESS_KEY: "${MINIO_ROOT_USER}"
       C2HUNTER_S3_SECRET_KEY: "${MINIO_ROOT_PASSWORD}"
       C2HUNTER_DEV_LOGIN_ENABLED: "${C2HUNTER_DEV_LOGIN_ENABLED:-true}"
+      C2HUNTER_PCAP_UPLOAD_MAX_BYTES: "${C2HUNTER_PCAP_UPLOAD_MAX_BYTES:-104857600}"
+      C2HUNTER_PCAP_UPLOAD_MAX_PACKETS: "${C2HUNTER_PCAP_UPLOAD_MAX_PACKETS:-2000000}"
     ports: ["${CONTROLLER_PORT:-8000}:8000"]
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, clickhouse: { condition: service_healthy }, minio: { condition: service_healthy } }
     healthcheck: { test: [CMD, python, -m, c2hunter_controller.healthcheck], interval: 10s, timeout: 5s, retries: 15 }

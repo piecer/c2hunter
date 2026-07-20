@@ -38,7 +38,7 @@
 
 | 엔터티 | 핵심 필드/제약 |
 |---|---|
-| `analysis_jobs` | id, owner, name, unique `(owner,idempotency_key)`, mode(`LIVE/HISTORICAL/REANALYSIS`), current_status, capture/analysis parameter snapshot JSON, dataset FK, created/started/completed time, cancellation, partial/failure summary |
+| `analysis_jobs` | id, owner, name/analyst note, unique `(owner,idempotency_key)`, mode(`LIVE/HISTORICAL/REANALYSIS/PCAP_UPLOAD`), source type/upload metadata, current_status, capture/analysis parameter snapshot JSON, dataset FK, created/updated/started/completed time, cancellation, partial/failure summary |
 | `analysis_job_sensors` | `(job_id,sensor_id)` unique, source group, command/status, packet/byte/flow counts, loss count, capture/upload/ingest times, failure code/detail |
 | `job_state_transitions` | id, job FK, from/to status, occurred_at, actor type/id, reason/error code; append-only |
 | `capture_datasets` | id, start/end, immutable flag, selected sensors, completeness, flow watermark, pcap availability |
@@ -46,6 +46,8 @@
 | `ingest_batches` | unique `(sensor_id,batch_id)`, job/dataset, schema version, checksum, row count, byte count, status, received/committed time; 중복 ACK ledger |
 
 Job 상태 enum은 `CREATED, WAITING_FOR_SENSOR, CAPTURING, UPLOADING, INGESTING, ANALYZING, COMPLETED, PARTIALLY_COMPLETED, FAILED, CANCELLED`다. terminal 상태는 되돌리지 않는다.
+
+이력 화면에서 수정 가능한 값은 `name`과 analyst note뿐이다. source/dataset, capture·analysis snapshot, 시간 범위, 후보와 evidence는 불변이며 탐지 조건 변경은 새 `analysis_runs`를 만드는 reanalysis로 처리한다. 사용자가 terminal job을 명시적으로 삭제하면 해당 job의 후보와 생성 export를 함께 삭제하지만 append-only 삭제 감사 이벤트는 유지한다. 보관 정책에 의한 PCAP 만료는 이 명시적 job 삭제와 달리 후보를 삭제하지 않는다.
 
 캡처 파라미터 snapshot은 시작/종료/기간/packet·byte limit, directions, BPF, src/dst CIDR와 port, protocols, IP version, payload/PCAP flags, timeout을 포함한다. 여러 종료 조건 중 먼저 충족된 이유를 `analysis_job_sensors.stop_reason`에 기록한다.
 

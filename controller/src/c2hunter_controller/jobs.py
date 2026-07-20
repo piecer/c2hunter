@@ -65,6 +65,9 @@ class StateMachine:
                 "reason": reason,
             }
         )
+        job["updated_at"] = occurred
+        if target in TERMINAL:
+            job["completed_at"] = occurred
 
 
 def build_job(
@@ -77,8 +80,10 @@ def build_job(
         "dataset_id": dataset_id or str(uuid.uuid4()),
         "parent_job_id": parent_job_id,
         "name": payload.name,
+        "description": "",
         "idempotency_key": payload.idempotency_key,
         "mode": payload.mode,
+        "source_type": "PCAP_UPLOAD" if payload.mode == "PCAP_UPLOAD" else "SENSOR_CAPTURE",
         "status": JobState.CREATED.value,
         "sensor_ids": payload.sensor_ids,
         "start_time": payload.start_time.isoformat(),
@@ -88,6 +93,11 @@ def build_job(
         "internal_networks": payload.internal_networks,
         "flow_records": [item.model_dump(mode="json") for item in payload.flow_records],
         "created_at": now,
+        "updated_at": now,
+        "completed_at": None,
+        "packet_count": sum(item.packet_count for item in payload.flow_records),
+        "flow_count": len(payload.flow_records),
+        "candidate_count": 0,
         "transitions": [
             {
                 "from_status": None,
