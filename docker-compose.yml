@@ -1,0 +1,58 @@
+services:
+  postgres:
+    image: postgres:16.6-alpine3.21
+    environment: { POSTGRES_DB: "${POSTGRES_DB:-c2hunter}", POSTGRES_USER: "${POSTGRES_USER:-c2hunter}", POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}" }
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck: { test: [CMD-SHELL, "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"], interval: 10s, timeout: 5s, retries: 10 }
+    restart: unless-stopped
+  redis:
+    image: redis:7.4.2-alpine3.21
+    command: [redis-server, --appendonly, "yes"]
+    volumes: [redis-data:/data]
+    healthcheck: { test: [CMD, redis-cli, ping], interval: 10s, timeout: 3s, retries: 10 }
+    restart: unless-stopped
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8.12.28-alpine
+    environment: { CLICKHOUSE_DB: "${CLICKHOUSE_DB:-c2hunter}", CLICKHOUSE_USER: "${CLICKHOUSE_USER:-c2hunter}", CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}" }
+    volumes: [clickhouse-data:/var/lib/clickhouse]
+    healthcheck: { test: [CMD-SHELL, "wget -q -O- 'http://127.0.0.1:8123/ping' | grep -q Ok"], interval: 10s, timeout: 5s, retries: 15 }
+    restart: unless-stopped
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-02-07T23-21-09Z
+    command: server /data --console-address :9001
+    environment: { MINIO_ROOT_USER: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER}", MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}" }
+    volumes: [minio-data:/data]
+    healthcheck: { test: [CMD, curl, -f, http://127.0.0.1:9000/minio/health/live], interval: 10s, timeout: 5s, retries: 15 }
+    restart: unless-stopped
+  controller:
+    build: { context: ., dockerfile: scripts/controller.Dockerfile }
+    environment:
+      C2HUNTER_ENVIRONMENT: "${C2HUNTER_ENVIRONMENT:-development}"
+      C2HUNTER_DATABASE_URL: "postgresql://${POSTGRES_USER:-c2hunter}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-c2hunter}"
+      C2HUNTER_REDIS_URL: redis://redis:6379/0
+      C2HUNTER_CLICKHOUSE_URL: http://clickhouse:8123
+      C2HUNTER_CLICKHOUSE_DATABASE: "${CLICKHOUSE_DB:-c2hunter}"
+      C2HUNTER_CLICKHOUSE_USER: "${CLICKHOUSE_USER:-c2hunter}"
+      C2HUNTER_CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD}"
+      C2HUNTER_S3_ENDPOINT: http://minio:9000
+      C2HUNTER_S3_ACCESS_KEY: "${MINIO_ROOT_USER}"
+      C2HUNTER_S3_SECRET_KEY: "${MINIO_ROOT_PASSWORD}"
+      C2HUNTER_DEV_LOGIN_ENABLED: "${C2HUNTER_DEV_LOGIN_ENABLED:-true}"
+    ports: ["${CONTROLLER_PORT:-8000}:8000"]
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, clickhouse: { condition: service_healthy }, minio: { condition: service_healthy } }
+    healthcheck: { test: [CMD, python, -m, c2hunter_controller.healthcheck], interval: 10s, timeout: 5s, retries: 15 }
+    restart: unless-stopped
+  worker:
+    build: { context: ., dockerfile: scripts/worker.Dockerfile }
+    environment: { C2HUNTER_REDIS_URL: redis://redis:6379/0, C2HUNTER_DATABASE_URL: "postgresql://${POSTGRES_USER:-c2hunter}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-c2hunter}" }
+    depends_on: { controller: { condition: service_healthy }, redis: { condition: service_healthy } }
+    healthcheck: { test: [CMD, python, -m, c2hunter_worker, healthcheck, --max-age, "30"], interval: 15s, timeout: 5s, retries: 5 }
+    restart: unless-stopped
+  web:
+    build: ./web
+    ports: ["${WEB_PORT:-8080}:8080"]
+    depends_on: { controller: { condition: service_healthy } }
+    healthcheck: { test: [CMD, wget, -q, -O-, http://127.0.0.1:8080/healthz], interval: 10s, timeout: 3s, retries: 10 }
+    restart: unless-stopped
+volumes: { postgres-data: {}, redis-data: {}, clickhouse-data: {}, minio-data: {} }
+networks: { default: { name: c2hunter } }

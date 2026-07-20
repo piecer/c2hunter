@@ -1,0 +1,2 @@
+# SPEC.md is an immutable imported specification; preserve its original EOF whitespace.
+SPEC.md whitespace=-blank-at-eof

@@ -1,0 +1,31 @@
+[Unit]
+Description=C2Hunter external network sensor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=c2hunter-sensor
+Group=c2hunter-sensor
+EnvironmentFile=-/etc/c2hunter-sensor/environment
+Environment=C2HUNTER_CONFIG=/etc/c2hunter-sensor/config.yaml
+ExecStart=/usr/local/bin/c2hunter-sensor
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_PACKET
+ReadWritePaths=/var/lib/c2hunter-sensor
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

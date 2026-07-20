@@ -1,0 +1,14 @@
+.git
+.github
+.env
+.venv
+**/__pycache__
+**/.pytest_cache
+web/node_modules
+web/dist
+web/test-results
+artifacts
+testdata/generated
+*.key
+*.pem
+*.p12

@@ -1,0 +1,82 @@
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: c2hunter-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.23.6', cache-dependency-path: sensor/go.sum }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: make setup
+      - run: make lint
+  unit:
+    needs: lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.23.6', cache-dependency-path: sensor/go.sum }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: make setup
+      - run: make test-unit
+  integration:
+    needs: unit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.23.6', cache-dependency-path: sensor/go.sum }
+      - run: make setup
+      - run: make test-integration
+      - run: make test-e2e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: integration-artifacts, path: artifacts/ }
+  build:
+    needs: integration
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.23.6', cache-dependency-path: sensor/go.sum }
+      - run: make setup
+      - run: make build
+  security:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: npm --prefix web ci --ignore-scripts
+      - run: npm --prefix web audit --omit=dev --audit-level=high
+      - run: pip install pip-audit==2.9.0 && pip-audit -r requirements.lock
+      - uses: gitleaks/gitleaks-action@v2
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+      - uses: aquasecurity/trivy-action@0.30.0
+        with: { scan-type: fs, scan-ref: '.', severity: 'HIGH,CRITICAL', ignore-unfixed: true, exit-code: '1' }

@@ -1,0 +1,20 @@
+controller:
+  url: https://controller.example.com
+sensor:
+  name: edge-sensor
+agent:
+  # Prefer C2HUNTER_ENROLLMENT_TOKEN in /etc/c2hunter-sensor/environment.
+  state_file: /var/lib/c2hunter-sensor/state/agent.json
+  config_poll_interval_seconds: 30
+capture_sources: []
+internal_networks: []
+batch:
+  max_items: 1000
+  max_bytes: 1048576
+capture:
+  job_id: continuous
+  packet_queue_size: 4096
+spool:
+  directory: /var/lib/c2hunter-sensor/spool
+  max_bytes: 1073741824
+  max_age_seconds: 86400
