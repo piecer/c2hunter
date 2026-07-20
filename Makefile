@@ -48,23 +48,23 @@ test-unit:
 	cd sensor && go test ./...
 	$(PYTEST) -q controller/tests analysis/tests
 	PYTHONPATH=sensor/worker/src $(PYTEST) -q sensor/worker/tests
-	python3 tools/traffic-generator/test_generate.py
-	python3 tools/benchmark/test_benchmark.py
+	$(VENV)/bin/python tools/traffic-generator/test_generate.py
+	$(VENV)/bin/python tools/benchmark/test_benchmark.py
 	npm --prefix web run test
 
 test-integration:
 	$(PYTEST) -q controller/tests analysis/tests -m "not e2e"
-	python3 tools/traffic-generator/generate.py --output testdata/generated
+	$(VENV)/bin/python tools/traffic-generator/generate.py --output testdata/generated
 
 test-e2e:
 	npm --prefix web exec playwright install chromium
 	npm --prefix web run test:e2e
 
 generate-test-pcaps:
-	python3 tools/traffic-generator/generate.py --output testdata/generated --seed 20260720
+	$(VENV)/bin/python tools/traffic-generator/generate.py --output testdata/generated --seed 20260720
 
 benchmark-1m:
-	python3 tools/benchmark/benchmark.py --packets 1000000 --chunk-size 10000 --output artifacts --seed 20260720
+	$(VENV)/bin/python tools/benchmark/benchmark.py --packets 1000000 --chunk-size 10000 --output artifacts --seed 20260720
 
 clean:
 	rm -rf web/dist web/coverage web/test-results artifacts/web-coverage artifacts/playwright-report testdata/generated/*
