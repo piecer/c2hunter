@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
@@ -27,6 +27,89 @@ class JobState(StrEnum):
 
 
 TERMINAL = {JobState.COMPLETED, JobState.PARTIALLY_COMPLETED, JobState.FAILED, JobState.CANCELLED}
+
+
+def summarize_candidate_traffic(
+    records: list[dict[str, Any]], candidate_ips: set[str]
+) -> dict[str, dict[str, Any]]:
+    if not candidate_ips:
+        return {}
+    grouped: dict[str, list[dict[str, Any]]] = {candidate: [] for candidate in candidate_ips}
+    for record in records:
+        for address in {record.get("source_ip"), record.get("destination_ip")} & candidate_ips:
+            grouped[str(address)].append(record)
+
+    result: dict[str, dict[str, Any]] = {}
+    for candidate_ip, matched in grouped.items():
+        timestamped: list[tuple[datetime, dict[str, Any]]] = []
+        for record in matched:
+            raw_timestamp = record.get("timestamp")
+            try:
+                timestamp = (
+                    raw_timestamp
+                    if isinstance(raw_timestamp, datetime)
+                    else datetime.fromisoformat(str(raw_timestamp))
+                )
+            except (TypeError, ValueError):
+                continue
+            timestamped.append((timestamp, record))
+        timestamped.sort(key=lambda item: item[0])
+
+        buckets: list[dict[str, Any]] = []
+        if timestamped:
+            first, last = timestamped[0][0], timestamped[-1][0]
+            span_seconds = max(0.0, (last - first).total_seconds())
+            bucket_count = 1 if span_seconds == 0 else min(24, len(timestamped))
+            bucket_width = max(1.0, span_seconds / bucket_count)
+            aggregate: dict[int, dict[str, int]] = {}
+            for timestamp, record in timestamped:
+                index = min(
+                    bucket_count - 1,
+                    int((timestamp - first).total_seconds() / bucket_width),
+                )
+                bucket = aggregate.setdefault(index, {"packets": 0, "bytes": 0, "flows": 0})
+                bucket["packets"] += int(record.get("packet_count", 1) or 0)
+                bucket["bytes"] += int(record.get("total_bytes", 0) or 0)
+                bucket["flows"] += 1
+            buckets = [
+                {
+                    "start": (first + timedelta(seconds=index * bucket_width)).isoformat(),
+                    **aggregate[index],
+                }
+                for index in sorted(aggregate)
+            ]
+
+        ports: set[int] = set()
+        for record in matched:
+            raw_port = (
+                record.get("destination_port")
+                if record.get("destination_ip") == candidate_ip
+                else record.get("source_port")
+            )
+            if isinstance(raw_port, int) and not isinstance(raw_port, bool):
+                ports.add(raw_port)
+        result[candidate_ip] = {
+            "protocols": sorted(
+                {str(record["protocol"]).upper() for record in matched if record.get("protocol")}
+            ),
+            "ports": sorted(ports),
+            "domains": sorted(
+                {str(record["domain"]) for record in matched if record.get("domain")}
+            ),
+            "related_attack_targets": sorted(
+                {
+                    str(record["attack_target_ip"])
+                    for record in matched
+                    if record.get("attack_target_ip")
+                }
+            ),
+            "flow_count": len(matched),
+            "packet_count": sum(int(record.get("packet_count", 1) or 0) for record in matched),
+            "byte_count": sum(int(record.get("total_bytes", 0) or 0) for record in matched),
+            "traffic_buckets": buckets,
+            "traffic_series": [bucket["packets"] for bucket in buckets],
+        }
+    return result
 
 
 class StateMachine:
@@ -148,11 +231,14 @@ def calculate(
         minimum_samples=int(job["analysis"]["periodicity_min_samples"]),
     )
     minimum_score = int(job["analysis"]["minimum_candidate_score"])
+    retained = [candidate for candidate in scored if candidate.score >= minimum_score]
+    traffic = summarize_candidate_traffic(
+        job["flow_records"], {candidate.candidate_ip for candidate in retained}
+    )
     result: list[dict[str, Any]] = []
-    for candidate in scored:
-        if candidate.score < minimum_score:
-            continue
+    for candidate in retained:
         serialized = asdict(candidate)
         serialized["id"] = str(uuid.uuid4())
+        serialized.update(traffic.get(candidate.candidate_ip, {}))
         result.append(serialized)
     return result

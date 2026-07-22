@@ -3,12 +3,13 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const repositoryRoot = resolve(import.meta.dirname, '../..');
+const python = process.env.C2HUNTER_PYTHON ?? resolve(repositoryRoot, '.venv/bin/python');
 const pythonPath = [
   resolve(repositoryRoot, 'controller/src'),
   resolve(repositoryRoot, 'analysis/src'),
 ].join(':');
 
-const openapi = JSON.parse(execFileSync('python', ['-c', [
+const openapi = JSON.parse(execFileSync(python, ['-c', [
   'import json',
   'from c2hunter_controller.app import create_app',
   'from c2hunter_controller.config import Settings',

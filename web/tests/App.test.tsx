@@ -8,8 +8,10 @@ import App from '../src/App';
 const responses: Record<string, unknown> = {
   '/api/v1/analysis-jobs': { items: [{ id: 'job-1', name: 'Investigation', description: 'Initial note', status: 'COMPLETED', source_type: 'PCAP_UPLOAD', source: { filename: 'capture.pcap', size_bytes: 2048 }, created_at: '2026-07-20T10:10:00Z', start_time: '2026-07-20T10:00:00Z', end_time: '2026-07-20T10:05:00Z', packet_count: 100, flow_count: 50, candidate_count: 2 }] },
   '/api/v1/sensors': { items: [{ sensor_id: 'sensor-a', name: 'Sensor A', status: 'ONLINE', last_heartbeat: '2026-07-20T10:00:00Z', interfaces: [{ name: 'eth0', direction: 'INBOUND' }], version: '0.1.0', cpu_percent: 10, memory_percent: 20, disk_percent: 30, received_packets: 1000, dropped_packets: 2 }, { sensor_id: 'sensor-b', name: 'Sensor B', status: 'ONLINE', interfaces: [{ name: 'eth1', direction: 'OUTBOUND' }] }] },
-  '/api/v1/analysis-jobs/job-1': { id: 'job-1', name: 'Investigation', status: 'ANALYZING' },
-  '/api/v1/candidates/candidate-1': { id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', distinct_internal_hosts: 4, sensor_ids: ['sensor-a'], protocols: ['TCP'], ports: [443], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', evidence: [{ type: 'PERIODIC_BEACON', score: 40, description: 'Periodic traffic' }] },
+  '/api/v1/analysis-jobs/job-1': { id: 'job-1', dataset_id: 'dataset-1', name: 'Investigation', status: 'ANALYZING', sensor_ids: ['sensor-a'], internal_networks: ['10.0.0.0/8'], capture: { max_packets: 2000, directions: ['OUTBOUND'] }, analysis: { profile: 'ddos_botnet', minimum_candidate_score: 60 }, transitions: [{ to_status: 'CREATED', occurred_at: '2026-07-20T10:00:00Z', reason: 'analysis requested' }], packet_count: 100, flow_count: 50, candidate_count: 1 },
+  '/api/v1/analysis-jobs/job-1/candidates?page_size=200': { items: [{ id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', hosts: ['10.0.0.5'], sensors: ['sensor-a'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', contribution: 15, description: 'Periodic traffic' }] }] },
+  '/api/v1/candidates': { items: [{ id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', hosts: ['10.0.0.5'], sensors: ['sensor-a'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', contribution: 15, description: 'Periodic traffic' }] }] },
+  '/api/v1/candidates/candidate-1': { id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', hosts: ['10.0.0.5'], sensors: ['sensor-a'], protocols: ['TCP'], ports: [443], domains: ['c2.example'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', flow_count: 5, packet_count: 20, byte_count: 2048, traffic_buckets: [{ start: '2026-07-20T10:00:00Z', flows: 5, packets: 20, bytes: 2048 }], evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', version: '1.0.0', raw_score: 15, contribution: 15, confidence: 0.9, description: 'Periodic traffic', hosts: ['10.0.0.5'], sensors: ['sensor-a'], metrics: { sample_count: 7, period_seconds: 30 } }], adjustments: [{ kind: 'SINGLE_HOST', points: -20, explanation: 'Single internal host observed' }] },
 };
 
 function renderAt(route: string) {
@@ -34,6 +36,22 @@ describe('C2Hunter UI', () => {
     expect(await screen.findByRole('link', { name: 'Sensor A' })).toBeInTheDocument();
     expect(screen.getByText('INBOUND')).toBeInTheDocument();
     expect(screen.getByRole('table', { name: 'Sensors' })).toBeInTheDocument();
+  });
+
+  it('renders raw Controller candidates without assuming optional arrays exist', async () => {
+    renderAt('/candidates');
+    expect(await screen.findByRole('table', { name: 'C2 candidates' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '203.0.113.9' })).toBeInTheDocument();
+    expect(screen.getByText('Unknown')).toBeInTheDocument();
+    expect(screen.getByText('PERIODIC_BEACON')).toBeInTheDocument();
+  });
+
+  it('shows detector settings, state history, and candidates on analysis detail', async () => {
+    renderAt('/analyses/job-1');
+    expect(await screen.findByRole('heading', { name: 'Detector settings' })).toBeInTheDocument();
+    expect(screen.getByText('ddos_botnet')).toBeInTheDocument();
+    expect(await screen.findByRole('table', { name: 'Analysis candidates' })).toBeInTheDocument();
+    expect(screen.getByText('analysis requested')).toBeInTheDocument();
   });
 
   it('renders an error state with retry when a request fails', async () => {
@@ -82,6 +100,9 @@ describe('C2Hunter UI', () => {
     await screen.findByRole('heading', { name: '203.0.113.9' });
     await user.click(screen.getByRole('button', { name: 'Export candidate PCAP' }));
     await user.click(screen.getByRole('button', { name: 'Reanalyze' }));
+
+    expect(screen.getByText('Sample Count')).toBeInTheDocument();
+    expect(screen.getByRole('table', { name: 'Candidate traffic buckets' })).toBeInTheDocument();
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/analysis-jobs/job-1/reanalyze', expect.objectContaining({ method: 'POST' })));
     const exportCall = fetchMock.mock.calls.find(([url]) => url === '/api/v1/pcap-exports');
