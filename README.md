@@ -17,7 +17,7 @@ The control plane, flow store, object store, and queue are intentionally separat
 
 - 중앙 서버: Linux 또는 WSL2, Docker Engine 27+와 Compose v2.30+
 - 외부 Sensor: systemd가 있는 Linux, AF_PACKET 지원 커널, 중앙 서버로의 outbound HTTPS
-- Python 3.12, Go 1.23.6, Node.js 22.14.0 and npm 10+
+- Python 3.12, Go 1.25.12, Node.js 22.14.0 and npm 10+
 - Development: 4 CPU, 8 GiB RAM, 20 GiB free disk
 - Reference benchmark: 8 vCPU, 16 GiB RAM, NVMe
 
