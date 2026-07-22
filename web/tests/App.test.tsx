@@ -63,6 +63,7 @@ describe('C2Hunter UI', () => {
   });
 
   it('submits every required Controller analysis field', async () => {
+    vi.stubGlobal('crypto', {});
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path === '/api/v1/analysis-jobs' && init?.method === 'POST') {

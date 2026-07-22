@@ -28,7 +28,12 @@ type TrafficBucket = { start: string; packets: number; bytes: number; flows: num
 type Candidate = { id: string; job_id?: string; candidate_ip: string; score: number; severity: string; distinct_internal_hosts?: number; hosts?: string[]; internal_hosts?: string[]; sensors?: string[]; sensor_ids?: string[]; protocols?: string[]; ports?: number[]; domains?: string[]; first_seen?: string; last_seen?: string; evidence?: Evidence[]; evidence_count?: number; adjustments?: ScoreAdjustment[]; traffic_series?: number[]; traffic_buckets?: TrafficBucket[]; related_attack_targets?: string[]; flow_count?: number; packet_count?: number; byte_count?: number };
 type AllowEntry = { id: string; type: string; value: string; description?: string; expires_at?: string };
 const sensorStatus = (sensor: Sensor) => sensor.status ?? sensor.derived_status ?? 'OFFLINE';
-const idempotencyKey = () => `${Date.now()}-${crypto.randomUUID()}`;
+let idempotencySequence = 0;
+const idempotencyKey = () => {
+  idempotencySequence += 1;
+  const randomPart = globalThis.crypto?.randomUUID?.() ?? `${idempotencySequence}-${Math.random().toString(36).slice(2)}`;
+  return `${Date.now()}-${randomPart}`;
+};
 const terminalStatuses = new Set(['COMPLETED', 'PARTIALLY_COMPLETED', 'FAILED', 'CANCELLED']);
 const strings = (value?: string[]) => Array.isArray(value) ? value : [];
 const numbers = (value?: number[]) => Array.isArray(value) ? value : [];
