@@ -90,12 +90,12 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		s.ActiveJobs = []string{p.cfg.JobID}
 		s.LastError = ""
 		s.StopReason = ""
-		s.Interfaces = []InterfaceSnapshot{{Interface: p.cfg.Interface, Direction: p.cfg.Direction, Status: "RUNNING"}}
+		s.Interfaces = []InterfaceSnapshot{{Interface: p.cfg.Interface, Direction: p.cfg.Direction, Status: "CAPTURING"}}
 	})
 	defer p.update(func(s *CaptureSnapshot) {
 		s.ActiveJobs = nil
-		if len(s.Interfaces) > 0 && s.Interfaces[0].Status == "RUNNING" {
-			s.Interfaces[0].Status = "STOPPED"
+		if len(s.Interfaces) > 0 && s.Interfaces[0].Status == "CAPTURING" {
+			s.Interfaces[0].Status = "ONLINE"
 		}
 	})
 
@@ -214,6 +214,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 func (p *Pipeline) readPackets(ctx context.Context, reader capture.Reader, events chan<- packetEvent) {
 	for {
 		pkt, err := reader.Next(ctx)
+		if errors.Is(err, capture.ErrPollTimeout) || errors.Is(err, capture.ErrUnsupportedPacket) {
+			continue
+		}
 		if err != nil {
 			select {
 			case events <- packetEvent{err: err}:

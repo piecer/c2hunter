@@ -175,3 +175,37 @@ func TestPipelineAppliesStartFilterAndPacketLimit(t *testing.T) {
 		t.Fatalf("batches=%+v snapshot=%+v", uploader.batches, pipeline.Snapshot())
 	}
 }
+
+func TestPipelineTreatsPacketPollTimeoutAsIdleCapture(t *testing.T) {
+	now := time.Unix(400, 0).UTC()
+	source := &pollTimeoutSource{}
+	pipeline, err := NewPipeline(PipelineConfig{
+		SensorID: "sensor-a", JobID: "job-a", BatchMaxItems: 10, BatchMaxBytes: 64 << 10, PacketQueueSize: 1,
+		Source: func() (capture.Reader, error) { return source, nil },
+		Spool:  openTestSpool(t, t.TempDir(), func() time.Time { return now }), Uploader: &uploadStub{}, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pipeline.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := pipeline.Snapshot()
+	if source.calls != 3 || snapshot.LastError != "" || len(snapshot.Interfaces) != 1 || snapshot.Interfaces[0].Status != "ONLINE" {
+		t.Fatalf("calls = %d, snapshot = %+v", source.calls, pipeline.Snapshot())
+	}
+}
+
+type pollTimeoutSource struct{ calls int }
+
+func (s *pollTimeoutSource) Next(context.Context) (packet.Packet, error) {
+	s.calls++
+	if s.calls == 1 {
+		return packet.Packet{}, capture.ErrPollTimeout
+	}
+	if s.calls == 2 {
+		return packet.Packet{}, capture.ErrUnsupportedPacket
+	}
+	return packet.Packet{}, io.EOF
+}
+func (*pollTimeoutSource) Close() error { return nil }

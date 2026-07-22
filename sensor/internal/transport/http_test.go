@@ -70,11 +70,15 @@ func TestHTTPTransportUploadsFlowBatchAndRequiresMatchingACK(t *testing.T) {
 		if request.URL.Path != "/api/v1/sensors/sensor-a/flow-batches" {
 			t.Fatalf("path = %s", request.URL.Path)
 		}
-		var body flowbatch.Batch
+		var body struct {
+			BatchID string                 `json:"batch_id"`
+			Records []flowbatch.FlowRecord `json:"records"`
+			Flows   json.RawMessage        `json:"flows"`
+		}
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if body.BatchID != "batch-a" || len(body.Flows) != 1 {
+		if body.BatchID != "batch-a" || len(body.Records) != 1 || body.Flows != nil {
 			t.Fatalf("body = %+v", body)
 		}
 		_ = json.NewEncoder(w).Encode(flowbatch.ACK{BatchID: body.BatchID, Duplicate: true})

@@ -120,7 +120,11 @@ func (h *HTTP) Heartbeat(ctx context.Context, heartbeat telemetry.Heartbeat) err
 }
 
 func (h *HTTP) UploadFlowBatch(ctx context.Context, batch flowbatch.Batch) (flowbatch.ACK, error) {
-	body, err := json.Marshal(batch)
+	payload := struct {
+		BatchID string                 `json:"batch_id"`
+		Records []flowbatch.FlowRecord `json:"records"`
+	}{BatchID: batch.BatchID, Records: batch.Flows}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return flowbatch.ACK{}, fmt.Errorf("encode flow batch: %w", err)
 	}
