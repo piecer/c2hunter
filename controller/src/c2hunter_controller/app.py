@@ -449,7 +449,7 @@ def create_app(
         if status != "OK" or enrollment is None:
             http_status, code, message = errors[status]
             raise ApiError(http_status, code, message)
-        sensor_id = str(uuid.uuid4())
+        sensor_id = enrollment.get("sensor_id") or str(uuid.uuid4())
         agent_token = secrets.token_urlsafe(48)
         capture_sources = [
             {**source, "validation_status": "VALID"} for source in enrollment["capture_sources"]
@@ -720,6 +720,11 @@ def create_app(
 
     machine = StateMachine()
 
+    def begin_live_capture(job: dict[str, Any]) -> dict[str, Any]:
+        machine.transition(job, JobState.WAITING_FOR_SENSOR, "sensor selection validated")
+        machine.transition(job, JobState.CAPTURING, "waiting for live capture range")
+        return repo.save_job(job)
+
     def enqueue_analysis(job: dict[str, Any]) -> dict[str, Any]:
         snapshot = flows.snapshot(
             list(job["sensor_ids"]),
@@ -728,13 +733,24 @@ def create_app(
         )
         job["dataset_id"] = snapshot.dataset_id
         job["flow_records"] = [dict(record) for record in snapshot.records]
-        for state, reason in (
-            (JobState.WAITING_FOR_SENSOR, "sensor selection validated"),
-            (JobState.CAPTURING, "stored capture range selected"),
-            (JobState.UPLOADING, "persisted flow batches selected"),
-            (JobState.INGESTING, "immutable dataset snapshot created"),
-            (JobState.ANALYZING, "durable analysis job enqueued"),
-        ):
+        transitions: list[tuple[JobState, str]] = []
+        current_state = JobState(job["status"])
+        if current_state == JobState.CREATED:
+            transitions.extend(
+                [
+                    (JobState.WAITING_FOR_SENSOR, "sensor selection validated"),
+                    (JobState.CAPTURING, "stored capture range selected"),
+                ]
+            )
+        if current_state != JobState.UPLOADING:
+            transitions.append((JobState.UPLOADING, "persisted flow batches selected"))
+        transitions.extend(
+            [
+                (JobState.INGESTING, "immutable dataset snapshot created"),
+                (JobState.ANALYZING, "durable analysis job enqueued"),
+            ]
+        )
+        for state, reason in transitions:
             machine.transition(job, state, reason)
         saved = repo.save_job(job)
         work_queue.enqueue({"id": job["id"], "payload": saved})
@@ -779,11 +795,41 @@ def create_app(
         return True
 
     app.state.process_results_once = process_results_once
+
+    def process_due_live_jobs_once() -> bool:
+        now = datetime.now(UTC)
+        processed = False
+        for candidate in repo.list_jobs():
+            status = candidate.get("status")
+            if candidate.get("mode") != "LIVE" or status not in {"CAPTURING", "UPLOADING"}:
+                continue
+            end_time = datetime.fromisoformat(str(candidate["end_time"]))
+            if end_time > now:
+                continue
+            current = repo.get_job(str(candidate["id"]))
+            if current is None or current.get("status") != status:
+                continue
+            if status == "CAPTURING":
+                machine.transition(
+                    current,
+                    JobState.UPLOADING,
+                    "capture ended; waiting for sensor flow batches",
+                )
+                repo.save_job(current)
+            elif end_time + timedelta(seconds=config.flow_ingestion_grace_seconds) <= now:
+                enqueue_analysis(current)
+            else:
+                continue
+            processed = True
+        return processed
+
+    app.state.process_due_live_jobs_once = process_due_live_jobs_once
     result_stop = threading.Event()
 
     def consume_results() -> None:
         while not result_stop.is_set():
             try:
+                process_due_live_jobs_once()
                 result = work_queue.claim_result(timeout=1)
                 if result is not None:
                     persist_claimed_result(result)
@@ -839,7 +885,7 @@ def create_app(
         if payload.flow_records:
             job = execute_analysis(job)
         elif not config.inline_flow_records_enabled:
-            job = enqueue_analysis(job)
+            job = begin_live_capture(job) if payload.mode == "LIVE" else enqueue_analysis(job)
         return _public_job(job)
 
     @app.post("/api/v1/pcap-analysis-jobs", status_code=201)

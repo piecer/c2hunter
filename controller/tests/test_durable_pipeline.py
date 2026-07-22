@@ -151,6 +151,53 @@ def test_job_references_stored_immutable_snapshot_and_is_enqueued() -> None:
     assert len(queued["payload"]["flow_records"]) == 1
 
 
+def test_live_job_waits_for_capture_end_before_enqueuing_analysis() -> None:
+    queue = QueueStub()
+    repository = MemoryRepository()
+    app = create_app(
+        Settings(
+            environment="test",
+            inline_flow_records_enabled=False,
+            flow_ingestion_grace_seconds=60,
+        ),
+        repository,
+        flow_store=MemoryFlowStore(),
+        queue=queue,
+    )
+    api = TestClient(app)
+    register_sensor(api)
+    payload = job_payload()
+    payload.update(
+        {
+            "mode": "LIVE",
+            "start_time": datetime.now(UTC).isoformat(),
+            "end_time": (datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+        }
+    )
+
+    created = api.post("/api/v1/analysis-jobs", json=payload)
+
+    assert created.status_code == 201
+    assert created.json()["status"] == "CAPTURING"
+    assert queue.jobs == []
+    job = repository.get_job(created.json()["id"])
+    assert job is not None
+    job["end_time"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    repository.save_job(job)
+    assert app.state.process_due_live_jobs_once() is True
+    assert queue.jobs == []
+    uploading = repository.get_job(job["id"])
+    assert uploading is not None
+    assert uploading["status"] == "UPLOADING"
+    uploading["end_time"] = (datetime.now(UTC) - timedelta(seconds=61)).isoformat()
+    repository.save_job(uploading)
+    assert app.state.process_due_live_jobs_once() is True
+    assert len(queue.jobs) == 1
+    updated = repository.get_job(job["id"])
+    assert updated is not None
+    assert updated["status"] == "ANALYZING"
+
+
 def test_controller_persists_worker_result_before_ack() -> None:
     store = MemoryFlowStore()
     queue = QueueStub()

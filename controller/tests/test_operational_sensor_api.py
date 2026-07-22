@@ -96,6 +96,15 @@ def test_sensor_registration_heartbeat_clock_skew_and_listing() -> None:
         "dropped_packets": 2,
         "pending_bytes": 0,
         "last_error": None,
+        "interfaces": [
+            {
+                "interface": "eth0",
+                "direction": "OUTBOUND",
+                "status": "ONLINE",
+                "received_packets": 30,
+                "dropped_packets": 2,
+            }
+        ],
     }
     response = api.post(
         "/api/v1/sensors/s1/heartbeat",
@@ -104,6 +113,7 @@ def test_sensor_registration_heartbeat_clock_skew_and_listing() -> None:
     )
     assert response.status_code == 200
     assert response.json()["derived_status"] == "DEGRADED"
+    assert response.json()["interfaces"][0]["interface"] == "eth0"
     assert response.json()["clock_offset_ms"] >= 2900
     listed = api.get("/api/v1/sensors?page=1&page_size=1&sort=name&status=DEGRADED").json()
     assert listed["total"] == 1
