@@ -65,32 +65,39 @@ class PostgresRepository:
 
     @property
     def connection(self) -> Any:
-        if self._connection is not None and not self._connection.closed:
-            return self._connection
-        import psycopg
+        with self._lock:
+            if self._connection is not None and not self._connection.closed:
+                return self._connection
+            import psycopg
 
-        self._connection = psycopg.connect(self.database_url, autocommit=False)
-        with self._connection.cursor() as cursor:
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS controller_objects (
-                  kind text NOT NULL, id text NOT NULL, data jsonb NOT NULL,
-                  PRIMARY KEY(kind,id)
-                );
-                CREATE TABLE IF NOT EXISTS job_idempotency (
-                  idempotency_key text PRIMARY KEY, job_id text NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS job_candidates (
-                  job_id text PRIMARY KEY, data jsonb NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS audit_events (
-                  sequence bigserial PRIMARY KEY, kind text NOT NULL, object_id text NOT NULL,
-                  occurred_at timestamptz NOT NULL, data jsonb NOT NULL
-                );
-                """
-            )
-        self._connection.commit()
-        return self._connection
+            connection = psycopg.connect(self.database_url, autocommit=False)
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS controller_objects (
+                          kind text NOT NULL, id text NOT NULL, data jsonb NOT NULL,
+                          PRIMARY KEY(kind,id)
+                        );
+                        CREATE TABLE IF NOT EXISTS job_idempotency (
+                          idempotency_key text PRIMARY KEY, job_id text NOT NULL
+                        );
+                        CREATE TABLE IF NOT EXISTS job_candidates (
+                          job_id text PRIMARY KEY, data jsonb NOT NULL
+                        );
+                        CREATE TABLE IF NOT EXISTS audit_events (
+                          sequence bigserial PRIMARY KEY, kind text NOT NULL,
+                          object_id text NOT NULL,
+                          occurred_at timestamptz NOT NULL, data jsonb NOT NULL
+                        );
+                        """
+                    )
+                connection.commit()
+            except Exception:
+                connection.close()
+                raise
+            self._connection = connection
+            return connection
 
     @staticmethod
     def _json(value: Any) -> str:
