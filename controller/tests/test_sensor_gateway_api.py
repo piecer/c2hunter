@@ -130,6 +130,24 @@ def test_claim_rejects_undiscovered_desired_interface_without_consuming_token() 
     assert replay.json()["error"]["code"] == "ENROLLMENT_ALREADY_CLAIMED"
 
 
+def test_claim_generates_sensor_id_when_persisted_value_is_null() -> None:
+    api, repo = api_and_repo()
+    created = api.post("/api/v1/sensor-enrollments", json=enrollment_payload()).json()
+    enrollment = repo.get_enrollment(created["enrollment_id"])
+    assert enrollment is not None
+    enrollment["sensor_id"] = None
+    repo.save_enrollment(enrollment)
+
+    claimed = api.post(
+        f"/api/v1/sensor-enrollments/{created['enrollment_token']}/claim",
+        json=claim_payload(),
+    )
+
+    assert claimed.status_code == 201
+    assert claimed.json()["sensor_id"]
+    assert api.get(f"/api/v1/sensors/{claimed.json()['sensor_id']}").status_code == 200
+
+
 def test_memory_claim_is_atomic() -> None:
     api, _ = api_and_repo()
     token = api.post("/api/v1/sensor-enrollments", json=enrollment_payload()).json()[

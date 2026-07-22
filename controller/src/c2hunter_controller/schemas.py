@@ -156,6 +156,16 @@ class SensorRegistration(BaseModel):
     dropped_packets: int = Field(ge=0)
 
 
+class HeartbeatInterface(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    interface: str = Field(min_length=1, max_length=128)
+    direction: Direction
+    status: SensorStatus
+    received_packets: int = Field(ge=0)
+    dropped_packets: int = Field(ge=0)
+    last_error: str | None = Field(default=None, max_length=2000)
+
+
 class Heartbeat(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reported_at: datetime
@@ -168,6 +178,7 @@ class Heartbeat(BaseModel):
     dropped_packets: int = Field(ge=0)
     pending_bytes: int = Field(ge=0)
     last_error: str | None = Field(default=None, max_length=2000)
+    interfaces: list[HeartbeatInterface] = Field(default_factory=list)
 
 
 class SensorGroupCreate(BaseModel):
