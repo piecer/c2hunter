@@ -135,6 +135,15 @@ def test_analysis_is_idempotent_and_candidates_are_calculated_from_flows() -> No
     assert candidates["total"] == 1
     assert candidates["items"][0]["candidate_ip"] == "203.0.113.77"
     assert candidates["items"][0]["score"] >= 60
+    assert candidates["items"][0]["internal_hosts"] == [
+        "10.0.0.1",
+        "10.0.0.2",
+        "10.0.0.3",
+        "10.0.0.4",
+    ]
+    assert candidates["items"][0]["sensor_ids"] == ["s1"]
+    assert candidates["items"][0]["protocols"] == ["TCP"]
+    assert candidates["items"][0]["ports"] == [4444]
     detail = client.get(
         f"/api/v1/analysis-jobs/{job_id}/candidates/{candidates['items'][0]['id']}"
     ).json()
@@ -142,6 +151,10 @@ def test_analysis_is_idempotent_and_candidates_are_calculated_from_flows() -> No
         "COMMON_DESTINATION",
         "PERIODIC_BEACON",
     }
+    assert detail["flow_count"] == 28
+    assert detail["packet_count"] == 28
+    assert detail["byte_count"] == 1680
+    assert sum(bucket["packets"] for bucket in detail["traffic_buckets"]) == 28
     assert len(first.json()["transitions"]) == 7
 
 

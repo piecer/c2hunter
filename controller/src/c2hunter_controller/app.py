@@ -21,7 +21,7 @@ from prometheus_client import (
 )
 
 from .config import Settings
-from .jobs import JobState, StateMachine, build_job, calculate
+from .jobs import JobState, StateMachine, build_job, calculate, summarize_candidate_traffic
 from .pcap import build_pcap, filter_records
 from .production import MinioBlobStore, PostgresRepository
 from .queueing import ControllerQueue, MemoryControllerQueue, RedisControllerQueue
@@ -89,6 +89,79 @@ def _page(items: list[dict[str, Any]], page: int, page_size: int) -> dict[str, A
 def _public_job(job: dict[str, Any]) -> dict[str, Any]:
     """Never return retained packet bytes through control-plane job responses."""
     return {key: value for key, value in job.items() if key != "flow_records"}
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list | tuple | set):
+        return []
+    return sorted({str(item) for item in value if item is not None and str(item)})
+
+
+def _public_candidate(
+    candidate: dict[str, Any], job: dict[str, Any], *, include_traffic: bool = False
+) -> dict[str, Any]:
+    """Expose a stable candidate contract plus bounded traffic-derived context."""
+    hosts = _string_list(candidate.get("hosts") or candidate.get("internal_hosts"))
+    sensors = _string_list(candidate.get("sensors") or candidate.get("sensor_ids"))
+    raw_evidence = candidate.get("evidence")
+    evidence: list[dict[str, Any]] = (
+        [item for item in raw_evidence if isinstance(item, dict)]
+        if isinstance(raw_evidence, list | tuple)
+        else []
+    )
+    raw_adjustments = candidate.get("adjustments")
+    adjustments: list[dict[str, Any]] = (
+        [item for item in raw_adjustments if isinstance(item, dict)]
+        if isinstance(raw_adjustments, list | tuple)
+        else []
+    )
+    traffic: dict[str, Any] = {
+        "protocols": candidate.get("protocols") or [],
+        "ports": candidate.get("ports") or [],
+        "domains": candidate.get("domains") or [],
+        "flow_count": int(candidate.get("flow_count", 0) or 0),
+        "packet_count": int(candidate.get("packet_count", 0) or 0),
+        "byte_count": int(candidate.get("byte_count", 0) or 0),
+        "traffic_buckets": candidate.get("traffic_buckets") or [],
+        "traffic_series": candidate.get("traffic_series") or [],
+    }
+    if include_traffic and not traffic["traffic_buckets"]:
+        raw_records = job.get("flow_records")
+        records: list[dict[str, Any]] = (
+            [item for item in raw_records if isinstance(item, dict)]
+            if isinstance(raw_records, list)
+            else []
+        )
+        traffic.update(
+            summarize_candidate_traffic(records, {str(candidate.get("candidate_ip", ""))}).get(
+                str(candidate.get("candidate_ip", "")), {}
+            )
+        )
+    related_targets = (
+        set(_string_list(candidate.get("related_attack_targets")))
+        | set(_string_list(traffic.get("related_attack_targets")))
+        | {
+            str(metrics["attack_target"])
+            for item in evidence
+            if isinstance(item, dict)
+            and isinstance((metrics := item.get("metrics")), dict)
+            and metrics.get("attack_target")
+        }
+    )
+    return {
+        **candidate,
+        "job_id": job["id"],
+        "hosts": hosts,
+        "internal_hosts": hosts,
+        "distinct_internal_hosts": len(hosts),
+        "sensors": sensors,
+        "sensor_ids": sensors,
+        "evidence": evidence,
+        "evidence_count": len(evidence),
+        "adjustments": adjustments,
+        **traffic,
+        "related_attack_targets": sorted(related_targets),
+    }
 
 
 def _token_hash(token: str) -> str:
@@ -1049,9 +1122,14 @@ def create_app(
         minimum_score: int = Query(0, ge=0, le=100),
         sort: str = "-score",
     ) -> dict[str, Any]:
-        if repo.get_job(job_id) is None:
+        job = repo.get_job(job_id)
+        if job is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
-        items = [item for item in repo.get_candidates(job_id) if item["score"] >= minimum_score]
+        items = [
+            _public_candidate(item, job)
+            for item in repo.get_candidates(job_id)
+            if item["score"] >= minimum_score
+        ]
         if severity:
             items = [item for item in items if item["severity"] == severity]
         descending = sort.startswith("-")
@@ -1063,15 +1141,15 @@ def create_app(
 
     @app.get("/api/v1/analysis-jobs/{job_id}/candidates/{candidate_id}")
     def get_candidate(job_id: str, candidate_id: str) -> dict[str, Any]:
+        job = repo.get_job(job_id)
+        if job is None:
+            raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
         candidate = next(
             (item for item in repo.get_candidates(job_id) if item["id"] == candidate_id), None
         )
         if candidate is None:
             raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
-        return candidate
-
-    def candidate_with_job(candidate: dict[str, Any], job_id: str) -> dict[str, Any]:
-        return {**candidate, "job_id": job_id}
+        return _public_candidate(candidate, job, include_traffic=True)
 
     @app.get("/api/v1/candidates")
     def list_all_candidates(
@@ -1082,7 +1160,7 @@ def create_app(
         sort: str = "-score",
     ) -> dict[str, Any]:
         items = [
-            candidate_with_job(candidate, job["id"])
+            _public_candidate(candidate, job)
             for job in repo.list_jobs()
             for candidate in repo.get_candidates(job["id"])
             if candidate["score"] >= minimum_score
@@ -1104,7 +1182,7 @@ def create_app(
                 None,
             )
             if candidate is not None:
-                return candidate_with_job(candidate, job["id"])
+                return _public_candidate(candidate, job, include_traffic=True)
         raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
 
     @app.post("/api/v1/allowlist", status_code=201)

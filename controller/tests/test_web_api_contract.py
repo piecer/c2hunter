@@ -44,10 +44,16 @@ def test_global_candidate_routes_return_job_context_required_by_web_actions() ->
     assert candidates.status_code == 200
     candidate = candidates.json()["items"][0]
     assert candidate["job_id"] == job["id"]
+    assert candidate["distinct_internal_hosts"] == len(candidate["internal_hosts"])
+    assert candidate["sensor_ids"] == candidate["sensors"]
+    assert candidate["protocols"] == ["TCP"]
+    assert candidate["ports"] == [4444]
 
     detail = client.get(f"/api/v1/candidates/{candidate['id']}")
     assert detail.status_code == 200
     assert detail.json()["job_id"] == job["id"]
+    assert detail.json()["traffic_series"]
+    assert detail.json()["evidence_count"] == len(detail.json()["evidence"])
 
 
 def test_cancel_accepts_the_web_reason_body_and_rejects_unknown_fields() -> None:
