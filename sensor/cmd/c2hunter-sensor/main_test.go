@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net"
+	"os"
 	"strings"
 	"testing"
 
@@ -65,4 +66,23 @@ func TestBuildRegistrationAllowsInterfaceWithoutMACAddress(t *testing.T) {
 	if len(registration.Interfaces) != 1 || registration.Interfaces[0].MAC != "" {
 		t.Fatalf("interfaces = %+v", registration.Interfaces)
 	}
+}
+
+func TestServiceSandboxAllowsNetlinkInterfaceDiscovery(t *testing.T) {
+	data, err := os.ReadFile("../../../deploy/sensor/c2hunter-sensor.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "RestrictAddressFamilies=") {
+			continue
+		}
+		for _, family := range strings.Fields(strings.TrimPrefix(line, "RestrictAddressFamilies=")) {
+			if family == "AF_NETLINK" {
+				return
+			}
+		}
+		t.Fatalf("AF_NETLINK missing from %q", line)
+	}
+	t.Fatal("RestrictAddressFamilies is not configured")
 }

@@ -71,6 +71,28 @@ func TestRunPropagatesReaderError(t *testing.T) {
 	}
 }
 
+func TestRunTreatsPacketPollTimeoutAsIdleCapture(t *testing.T) {
+	reader := &timeoutThenEndReader{}
+	result, err := Run(context.Background(), reader, Limits{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Reason != StopEndOfInput || reader.calls != 2 {
+		t.Fatalf("result = %+v, calls = %d", result, reader.calls)
+	}
+}
+
+type timeoutThenEndReader struct{ calls int }
+
+func (r *timeoutThenEndReader) Next(context.Context) (packet.Packet, error) {
+	r.calls++
+	if r.calls == 1 {
+		return packet.Packet{}, ErrPollTimeout
+	}
+	return packet.Packet{}, EndOfInput
+}
+func (*timeoutThenEndReader) Close() error { return nil }
+
 type errorReader struct{ err error }
 
 func (r errorReader) Next(context.Context) (packet.Packet, error) { return packet.Packet{}, r.err }

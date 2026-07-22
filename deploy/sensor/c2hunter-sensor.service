@@ -23,7 +23,7 @@ PrivateDevices=false
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_PACKET
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
 ReadWritePaths=/var/lib/c2hunter-sensor
 UMask=0077
 

@@ -111,7 +111,7 @@ func decodePacket(data []byte, info gopacket.CaptureInfo, iface string, classifi
 		p.SourceIP = src
 		p.DestinationIP = dst
 	} else {
-		return packet.Packet{}, fmt.Errorf("non-IP packet")
+		return packet.Packet{}, fmt.Errorf("%w: non-IP packet", ErrUnsupportedPacket)
 	}
 	if layer := decoded.Layer(layers.LayerTypeTCP); layer != nil {
 		tcp := layer.(*layers.TCP)
