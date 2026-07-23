@@ -27,6 +27,7 @@ type ScoreAdjustment = { kind: string; points: number; explanation: string };
 type TrafficBucket = { start: string; packets: number; bytes: number; flows: number };
 type Candidate = { id: string; job_id?: string; candidate_ip: string; score: number; severity: string; distinct_internal_hosts?: number; hosts?: string[]; internal_hosts?: string[]; sensors?: string[]; sensor_ids?: string[]; protocols?: string[]; ports?: number[]; domains?: string[]; first_seen?: string; last_seen?: string; evidence?: Evidence[]; evidence_count?: number; adjustments?: ScoreAdjustment[]; traffic_series?: number[]; traffic_buckets?: TrafficBucket[]; related_attack_targets?: string[]; flow_count?: number; packet_count?: number; byte_count?: number };
 type AllowEntry = { id: string; type: string; value: string; description?: string; expires_at?: string };
+const PCAP_UPLOAD_MAX_BYTES = 500 * 1024 * 1024;
 const sensorStatus = (sensor: Sensor) => sensor.status ?? sensor.derived_status ?? 'OFFLINE';
 let idempotencySequence = 0;
 const idempotencyKey = () => {
@@ -40,7 +41,7 @@ const numbers = (value?: number[]) => Array.isArray(value) ? value : [];
 const candidateHosts = (candidate: Candidate) => strings(candidate.internal_hosts ?? candidate.hosts);
 const candidateSensors = (candidate: Candidate) => strings(candidate.sensor_ids ?? candidate.sensors);
 const candidateEvidence = (candidate: Candidate) => Array.isArray(candidate.evidence) ? candidate.evidence : [];
-const humanize = (value: string) => value.replaceAll('_', ' ').replace(/\b\w/g, letter => letter.toUpperCase());
+const humanize = (value: unknown) => String(value ?? '').replace(/_/g, ' ').replace(/\b\w/g, letter => letter.toUpperCase());
 const formatValue = (value: unknown): string => {
   if (value === null || value === undefined || value === '') return 'Not reported';
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
@@ -198,6 +199,7 @@ function PcapUpload() {
     event.preventDefault();
     setValidationError('');
     if (!file) { setValidationError('Select a PCAP or PCAPNG file.'); return; }
+    if (file.size > PCAP_UPLOAD_MAX_BYTES) { setValidationError('PCAP files must be 500 MiB or smaller.'); return; }
     const form = new FormData(event.currentTarget);
     const query = new URLSearchParams({
       name: String(form.get('name')),
@@ -211,7 +213,7 @@ function PcapUpload() {
     });
     mutation.mutate({ file, query });
   };
-  return <><header className="header-actions"><div><p className="eyebrow">OFFLINE INVESTIGATION</p><h1>Upload PCAP</h1><p className="muted">Analyze an existing capture with the same C2 correlation and scoring pipeline used for sensor traffic.</p></div><Link to="/analyses">View analysis history</Link></header><form className="panel form" onSubmit={submit}><label>Analysis name<input name="name" required maxLength={200} /></label><label>Analyst note<textarea name="description" rows={3} maxLength={5000} placeholder="Case, ticket, or collection context" /></label><label>Capture file<input name="pcap" type="file" accept=".pcap,.pcapng,.cap,application/vnd.tcpdump.pcap,application/octet-stream" onChange={event => setFile(event.target.files?.[0])} required /></label>{file && <div className="file-summary" role="status"><strong>{file.name}</strong><span>{formatBytes(file.size)}</span></div>}<div className="grid"><label>Internal networks<input name="internal_networks" defaultValue="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" required /></label><label>Minimum score<input name="score" type="number" min="0" max="100" defaultValue="0" required /></label><label>Minimum internal hosts<input name="hosts" type="number" min="2" defaultValue="3" required /></label><label>Beacon minimum samples<input name="samples" type="number" min="3" defaultValue="5" required /></label></div><p className="muted">Supported containers: classic PCAP and PCAPNG. Supported packet links include Ethernet, raw IP, Linux cooked capture v1/v2, and loopback. The default server limit is 100 MiB and 2,000,000 packets.</p>{(validationError || mutation.error) && <p role="alert" className="error-text">{validationError || mutation.error?.message}</p>}<button disabled={mutation.isPending}>{mutation.isPending ? 'Uploading and analyzing…' : 'Upload and analyze'}</button></form></>;
+  return <><header className="header-actions"><div><p className="eyebrow">OFFLINE INVESTIGATION</p><h1>Upload PCAP</h1><p className="muted">Analyze an existing capture with the same C2 correlation and scoring pipeline used for sensor traffic.</p></div><Link to="/analyses">View analysis history</Link></header><form className="panel form" onSubmit={submit}><label>Analysis name<input name="name" required maxLength={200} /></label><label>Analyst note<textarea name="description" rows={3} maxLength={5000} placeholder="Case, ticket, or collection context" /></label><label>Capture file<input name="pcap" type="file" accept=".pcap,.pcapng,.cap,application/vnd.tcpdump.pcap,application/octet-stream" onChange={event => { const selected = event.currentTarget.files?.[0]; mutation.reset(); setValidationError(''); if (selected && selected.size > PCAP_UPLOAD_MAX_BYTES) { event.currentTarget.value = ''; setFile(undefined); setValidationError('PCAP files must be 500 MiB or smaller.'); return; } setFile(selected); }} required /></label>{file && <div className="file-summary" role="status"><strong>{file.name}</strong><span>{formatBytes(file.size)}</span></div>}<div className="grid"><label>Internal networks<input name="internal_networks" defaultValue="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" required /></label><label>Minimum score<input name="score" type="number" min="0" max="100" defaultValue="0" required /></label><label>Minimum internal hosts<input name="hosts" type="number" min="2" defaultValue="3" required /></label><label>Beacon minimum samples<input name="samples" type="number" min="3" defaultValue="5" required /></label></div><p className="muted">Supported containers: classic PCAP and PCAPNG. Supported packet links include Ethernet, raw IP, Linux cooked capture v1/v2, and loopback. The upload limit is 500 MiB and 2,000,000 packets.</p>{(validationError || mutation.error) && <p role="alert" className="error-text">{validationError || mutation.error?.message}</p>}<button disabled={mutation.isPending}>{mutation.isPending ? 'Uploading and analyzing…' : 'Upload and analyze'}</button></form></>;
 }
 
 function NewAnalysis() {

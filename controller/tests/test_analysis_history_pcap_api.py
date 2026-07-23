@@ -146,8 +146,21 @@ def test_pcap_upload_runs_existing_detectors_and_appears_in_history() -> None:
 
 
 def test_pcap_upload_validates_media_format_size_and_packet_limit() -> None:
+    assert Settings(environment="test").pcap_upload_max_bytes == 500 * 1024 * 1024
     client = api()
     params = {"name": "bad", "filename": "capture.pcap"}
+    default_too_large = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params=params,
+        content=_pcap(),
+        headers={
+            "content-type": "application/octet-stream",
+            "content-length": str(500 * 1024 * 1024 + 1),
+        },
+    )
+    assert default_too_large.status_code == 413
+    assert default_too_large.json()["error"]["code"] == "PCAP_TOO_LARGE"
+
     unsupported_media = client.post(
         "/api/v1/pcap-analysis-jobs",
         params=params,

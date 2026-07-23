@@ -40,7 +40,7 @@ Repeat with a unique key and identity per sensor. In production, use the organiz
 
 Compose is a development/single-host artifact. Before production:
 
-1. Terminate HTTPS at a maintained reverse proxy; disable development login.
+1. Terminate HTTPS at a maintained reverse proxy; disable development login. For offline analysis, configure that proxy to accept at least 500 MiB request bodies and allow at least 10 minutes for upload processing.
 2. Require Controller↔Sensor mTLS and validate identity, EKU, expiry, and revocation.
 3. Use managed or independently backed-up PostgreSQL/ClickHouse/Redis/object storage.
 4. Put storage and Controller on private networks and expose only HTTPS.
