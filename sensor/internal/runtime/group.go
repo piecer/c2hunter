@@ -54,6 +54,7 @@ func (g *CaptureGroup) Snapshot() CaptureSnapshot {
 		snapshot := member.Snapshot()
 		out.ReceivedPackets += snapshot.ReceivedPackets
 		out.DroppedPackets += snapshot.DroppedPackets
+		out.DecodeErrors += snapshot.DecodeErrors
 		if snapshot.PendingBytes > out.PendingBytes {
 			out.PendingBytes = snapshot.PendingBytes
 		}

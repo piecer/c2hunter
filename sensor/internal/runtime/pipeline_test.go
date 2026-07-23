@@ -176,7 +176,7 @@ func TestPipelineAppliesStartFilterAndPacketLimit(t *testing.T) {
 	}
 }
 
-func TestPipelineTreatsPacketPollTimeoutAsIdleCapture(t *testing.T) {
+func TestPipelineKeepsCapturingAcrossRecoverablePacketErrors(t *testing.T) {
 	now := time.Unix(400, 0).UTC()
 	source := &pollTimeoutSource{}
 	pipeline, err := NewPipeline(PipelineConfig{
@@ -191,7 +191,7 @@ func TestPipelineTreatsPacketPollTimeoutAsIdleCapture(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := pipeline.Snapshot()
-	if source.calls != 3 || snapshot.LastError != "" || len(snapshot.Interfaces) != 1 || snapshot.Interfaces[0].Status != "ONLINE" {
+	if source.calls != 4 || snapshot.LastError != "" || snapshot.DecodeErrors != 1 || snapshot.DroppedPackets != 3 || len(snapshot.Interfaces) != 1 || snapshot.Interfaces[0].Status != "ONLINE" || snapshot.Interfaces[0].DecodeErrors != 1 || snapshot.Interfaces[0].DroppedPackets != 3 {
 		t.Fatalf("calls = %d, snapshot = %+v", source.calls, pipeline.Snapshot())
 	}
 }
@@ -206,6 +206,10 @@ func (s *pollTimeoutSource) Next(context.Context) (packet.Packet, error) {
 	if s.calls == 2 {
 		return packet.Packet{}, capture.ErrUnsupportedPacket
 	}
+	if s.calls == 3 {
+		return packet.Packet{}, capture.ErrMalformedPacket
+	}
 	return packet.Packet{}, io.EOF
 }
-func (*pollTimeoutSource) Close() error { return nil }
+func (*pollTimeoutSource) Close() error           { return nil }
+func (*pollTimeoutSource) DroppedPackets() uint64 { return 2 }

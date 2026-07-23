@@ -40,6 +40,7 @@ type PipelineConfig struct {
 type CaptureSnapshot struct {
 	ReceivedPackets uint64
 	DroppedPackets  uint64
+	DecodeErrors    uint64
 	PendingBytes    uint64
 	LostBatches     uint64
 	LostBytes       uint64
@@ -55,6 +56,7 @@ type InterfaceSnapshot struct {
 	Status          string `json:"status"`
 	ReceivedPackets uint64 `json:"received_packets"`
 	DroppedPackets  uint64 `json:"dropped_packets"`
+	DecodeErrors    uint64 `json:"decode_errors"`
 	LastError       string `json:"last_error,omitempty"`
 }
 
@@ -191,14 +193,13 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			}
 			capturedPackets++
 			capturedBytes += uint64(pkt.WireLength)
+			sourceDrops := droppedPackets(reader)
 			p.update(func(s *CaptureSnapshot) {
 				s.ReceivedPackets++
+				s.DroppedPackets = sourceDrops + s.DecodeErrors
 				if len(s.Interfaces) > 0 {
 					s.Interfaces[0].ReceivedPackets++
-					if counter, ok := reader.(capture.DropCounter); ok {
-						s.DroppedPackets = counter.DroppedPackets()
-						s.Interfaces[0].DroppedPackets = s.DroppedPackets
-					}
+					s.Interfaces[0].DroppedPackets = s.DroppedPackets
 				}
 			})
 			if p.cfg.Limits.MaxPackets > 0 && capturedPackets >= p.cfg.Limits.MaxPackets {
@@ -217,6 +218,18 @@ func (p *Pipeline) readPackets(ctx context.Context, reader capture.Reader, event
 		if errors.Is(err, capture.ErrPollTimeout) || errors.Is(err, capture.ErrUnsupportedPacket) {
 			continue
 		}
+		if errors.Is(err, capture.ErrMalformedPacket) {
+			sourceDrops := droppedPackets(reader)
+			p.update(func(s *CaptureSnapshot) {
+				s.DecodeErrors++
+				s.DroppedPackets = sourceDrops + s.DecodeErrors
+				if len(s.Interfaces) > 0 {
+					s.Interfaces[0].DecodeErrors++
+					s.Interfaces[0].DroppedPackets = s.DroppedPackets
+				}
+			})
+			continue
+		}
 		if err != nil {
 			select {
 			case events <- packetEvent{err: err}:
@@ -230,6 +243,13 @@ func (p *Pipeline) readPackets(ctx context.Context, reader capture.Reader, event
 			return
 		}
 	}
+}
+
+func droppedPackets(reader capture.Reader) uint64 {
+	if counter, ok := reader.(capture.DropCounter); ok {
+		return counter.DroppedPackets()
+	}
+	return 0
 }
 
 func (p *Pipeline) asynchronousStop(ctx context.Context, started time.Time) capture.StopReason {

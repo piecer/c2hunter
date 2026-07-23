@@ -93,6 +93,31 @@ func (r *timeoutThenEndReader) Next(context.Context) (packet.Packet, error) {
 }
 func (*timeoutThenEndReader) Close() error { return nil }
 
+func TestRunSkipsMalformedPacketsWithoutFailingCapture(t *testing.T) {
+	reader := &malformedThenEndReader{}
+	result, err := Run(context.Background(), reader, Limits{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Reason != StopEndOfInput || reader.calls != 3 {
+		t.Fatalf("result = %+v, calls = %d", result, reader.calls)
+	}
+}
+
+type malformedThenEndReader struct{ calls int }
+
+func (r *malformedThenEndReader) Next(context.Context) (packet.Packet, error) {
+	r.calls++
+	if r.calls == 1 {
+		return packet.Packet{}, ErrMalformedPacket
+	}
+	if r.calls == 2 {
+		return packet.Packet{}, ErrUnsupportedPacket
+	}
+	return packet.Packet{}, EndOfInput
+}
+func (*malformedThenEndReader) Close() error { return nil }
+
 type errorReader struct{ err error }
 
 func (r errorReader) Next(context.Context) (packet.Packet, error) { return packet.Packet{}, r.err }

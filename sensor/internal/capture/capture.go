@@ -12,6 +12,7 @@ import (
 var EndOfInput = io.EOF
 var ErrPollTimeout = errors.New("packet poll timeout expired")
 var ErrUnsupportedPacket = errors.New("unsupported packet")
+var ErrMalformedPacket = errors.New("malformed packet")
 
 type Reader interface {
 	Next(context.Context) (packet.Packet, error)
@@ -75,7 +76,7 @@ func Run(ctx context.Context, r Reader, limits Limits, consume func(packet.Packe
 			result.Reason = StopEndOfInput
 			return result, nil
 		}
-		if errors.Is(err, ErrPollTimeout) || errors.Is(err, ErrUnsupportedPacket) {
+		if errors.Is(err, ErrPollTimeout) || errors.Is(err, ErrUnsupportedPacket) || errors.Is(err, ErrMalformedPacket) {
 			continue
 		}
 		if err != nil {
