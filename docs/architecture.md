@@ -100,12 +100,12 @@ UI는 REST API만 사용한다. TanStack Query로 서버 상태를 관리하고 
 
 | 저장소 | 권위 데이터 | 접근 주체 |
 |---|---|---|
-| PostgreSQL | identity, sensor/group, job/run/state transition, candidate/evidence summary, allowlist, pcap object/export, audit, retention config, ingest ledger | API/Worker |
+| PostgreSQL | identity, sensor/group, job/run/state transition, compact job metadata, immutable normalized job-flow payload, candidate/evidence summary, allowlist, pcap object/export, audit, retention config, ingest ledger. Job metadata and job-flow JSONB are physically separated. | API/Worker |
 | ClickHouse | flow, protocol metadata, time buckets, packet fingerprint 및 sensor observation | Worker/API read model |
-| MinIO | raw rotated PCAP, filtered export, benchmark/report artifact | Sensor/API/Worker |
-| Redis | queue message, short-lived cache/lock | API/Worker |
+| MinIO | raw uploaded/rotated PCAP, filtered export, benchmark/report artifact | Sensor/API/Worker |
+| Redis | job-ID queue message, short-lived cache/lock; 분석 payload 원문은 저장하지 않음 | API/Worker |
 
-Redis는 시스템 기록의 권위 저장소가 아니다. 작업 상태는 PostgreSQL이 권위이며 queue redelivery가 안전해야 한다.
+Redis는 시스템 기록의 권위 저장소가 아니다. 작업 상태는 PostgreSQL이 권위이며 queue redelivery가 안전해야 한다. Controller의 목록·상세·스케줄러 경로는 compact metadata만 읽고, Worker가 분석을 시작할 때만 job ID로 immutable flow payload를 로드한다.
 
 ## 4. 주요 데이터 흐름
 
@@ -126,7 +126,7 @@ Redis는 시스템 기록의 권위 저장소가 아니다. 작업 상태는 Pos
 4. 각 센서 outbound stream에 동일 job command를 전달한다.
 5. 센서는 종료 조건 중 최초 충족까지 캡처하고 Flow batch/선택적 PCAP을 업로드한다.
 6. 상태: `UPLOADING → INGESTING`; ingestion watermark가 완료되면 `ANALYZING`.
-7. Worker가 detector와 scoring을 실행하고 후보/evidence를 저장한다.
+7. Controller는 payload가 아닌 job ID만 queue에 넣고, Worker가 PostgreSQL에서 해당 job의 immutable flow payload를 한 번 로드해 detector와 scoring을 실행하고 후보/evidence를 저장한다.
 8. 전 센서 성공은 `COMPLETED`, 일부 실패지만 분석 가능하면 `PARTIALLY_COMPLETED`, 분석 불능은 `FAILED`.
 9. 모든 전환 시각·행위자·이유를 audit/state transition에 기록한다.
 
@@ -164,6 +164,7 @@ CREATED → WAITING_FOR_SENSOR → CAPTURING → UPLOADING → INGESTING → ANA
 - 100만 패킷 benchmark는 wall time, peak RSS, 각 단계 처리량을 JSON/Markdown에 기록한다. 목표는 180초, Controller peak RSS < 8GB, OOM/데이터 손실 없음은 필수다.
 - 센서 100,000 PPS/drop ≤1%는 목표치로 측정·기록한다.
 - Celery task는 `acks_late`, bounded retry/backoff와 DB idempotency key를 사용해 worker/Redis/Controller 재시작을 견딘다.
+- 대용량 job-flow payload는 metadata와 별도 저장하고 queue에는 reference만 전달한다. 상태 전환, 이력 조회, 완료된 UI 화면은 payload를 재직렬화하거나 반복 polling하지 않는다.
 - readiness는 PostgreSQL/Redis/ClickHouse/MinIO 연결을 검사하고 health는 프로세스 생존만 검사한다.
 - cleanup은 작은 page 단위로 삭제하고 참조 PCAP 만료를 결과에 반영한다.
 

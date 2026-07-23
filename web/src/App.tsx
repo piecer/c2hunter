@@ -225,8 +225,16 @@ function NewAnalysis() {
 function JobDetail() {
   const { id } = useParams();
   const [notice, setNotice] = useState('');
-  const q = useQuery<Job, Error>({ queryKey: ['job', id], queryFn: () => api.get(`/analysis-jobs/${id}`), refetchInterval: 3000 });
-  const candidates = useQuery<List<Candidate>, Error>({ queryKey: ['job-candidates', id], queryFn: () => api.get(`/analysis-jobs/${id}/candidates?page_size=200`), refetchInterval: 3000 });
+  const q = useQuery<Job, Error>({
+    queryKey: ['job', id],
+    queryFn: () => api.get(`/analysis-jobs/${id}`),
+    refetchInterval: query => terminalStatuses.has(query.state.data?.status ?? '') ? false : 3000,
+  });
+  const candidates = useQuery<List<Candidate>, Error>({
+    queryKey: ['job-candidates', id],
+    queryFn: () => api.get(`/analysis-jobs/${id}/candidates?page_size=200`),
+    refetchInterval: () => terminalStatuses.has(q.data?.status ?? '') ? false : 3000,
+  });
   const cancel = useMutation({ mutationFn: () => api.post(`/analysis-jobs/${id}/cancel`, { reason: 'operator requested from web console' }), onSuccess: () => { setNotice('Cancellation requested'); q.refetch(); } });
   return <AsyncState query={q}>{j => {
     const terminal = terminalStatuses.has(j.status);

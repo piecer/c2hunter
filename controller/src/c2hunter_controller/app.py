@@ -19,6 +19,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
+from starlette.concurrency import run_in_threadpool
 
 from .config import Settings
 from .jobs import JobState, StateMachine, build_job, calculate, summarize_candidate_traffic
@@ -720,10 +721,16 @@ def create_app(
 
     machine = StateMachine()
 
+    def enqueue_worker_job(job: dict[str, Any]) -> None:
+        envelope: dict[str, Any] = {"id": job["id"]}
+        if isinstance(work_queue, MemoryControllerQueue):
+            envelope["payload"] = job
+        work_queue.enqueue(envelope)
+
     def begin_live_capture(job: dict[str, Any]) -> dict[str, Any]:
         machine.transition(job, JobState.WAITING_FOR_SENSOR, "sensor selection validated")
         machine.transition(job, JobState.CAPTURING, "waiting for live capture range")
-        return repo.save_job(job)
+        return repo.save_job_metadata(job)
 
     def enqueue_analysis(job: dict[str, Any]) -> dict[str, Any]:
         snapshot = flows.snapshot(
@@ -733,6 +740,10 @@ def create_app(
         )
         job["dataset_id"] = snapshot.dataset_id
         job["flow_records"] = [dict(record) for record in snapshot.records]
+        job["flow_count"] = len(job["flow_records"])
+        job["packet_count"] = sum(
+            int(record.get("packet_count", 1)) for record in job["flow_records"]
+        )
         transitions: list[tuple[JobState, str]] = []
         current_state = JobState(job["status"])
         if current_state == JobState.CREATED:
@@ -753,12 +764,12 @@ def create_app(
         for state, reason in transitions:
             machine.transition(job, state, reason)
         saved = repo.save_job(job)
-        work_queue.enqueue({"id": job["id"], "payload": saved})
+        enqueue_worker_job(job)
         return saved
 
     def persist_claimed_result(result: dict[str, Any]) -> None:
         receipt = str(result.get("receipt", ""))
-        job = repo.get_job(str(result.get("job_id", "")))
+        job = repo.get_job_summary(str(result.get("job_id", "")))
         if job is None:
             work_queue.ack_result(receipt)
             return
@@ -776,15 +787,11 @@ def create_app(
                 candidate.setdefault("id", str(uuid.uuid4()))
             repo.save_candidates(job["id"], candidates)
             job["candidate_count"] = len(candidates)
-            job["flow_count"] = len(job.get("flow_records", []))
-            job["packet_count"] = sum(
-                int(record.get("packet_count", 1)) for record in job.get("flow_records", [])
-            )
             machine.transition(job, JobState.COMPLETED, "worker result persisted")
         else:
             job["error"] = str(result.get("error", "worker analysis failed"))
             machine.transition(job, JobState.FAILED, "worker returned an error")
-        repo.save_job(job)
+        repo.save_job_metadata(job)
         work_queue.ack_result(receipt)
 
     def process_results_once() -> bool:
@@ -799,10 +806,8 @@ def create_app(
     def process_due_live_jobs_once() -> bool:
         now = datetime.now(UTC)
         processed = False
-        for candidate in repo.list_jobs():
+        for candidate in repo.list_active_live_jobs():
             status = candidate.get("status")
-            if candidate.get("mode") != "LIVE" or status not in {"CAPTURING", "UPLOADING"}:
-                continue
             end_time = datetime.fromisoformat(str(candidate["end_time"]))
             if end_time > now:
                 continue
@@ -815,7 +820,7 @@ def create_app(
                     JobState.UPLOADING,
                     "capture ended; waiting for sensor flow batches",
                 )
-                repo.save_job(current)
+                repo.save_job_metadata(current)
             elif end_time + timedelta(seconds=config.flow_ingestion_grace_seconds) <= now:
                 enqueue_analysis(current)
             else:
@@ -862,7 +867,7 @@ def create_app(
             int(record.get("packet_count", 1)) for record in job.get("flow_records", [])
         )
         machine.transition(job, JobState.COMPLETED, "analysis completed")
-        return repo.save_job(job)
+        return repo.save_job_metadata(job)
 
     @app.post("/api/v1/analysis-jobs", status_code=201)
     def create_analysis_job(payload: AnalysisJobCreate) -> dict[str, Any]:
@@ -938,6 +943,8 @@ def create_app(
             uploaded.extend(chunk)
         if not uploaded:
             raise ApiError(422, "EMPTY_PCAP", "업로드된 PCAP 파일이 비어 있습니다")
+        uploaded_bytes = bytes(uploaded)
+        del uploaded
 
         normalized_name = name.strip()
         if not normalized_name:
@@ -946,14 +953,16 @@ def create_app(
         if not safe_filename:
             raise ApiError(422, "INVALID_FILENAME", "PCAP 파일명이 유효하지 않습니다")
         cidrs = [value.strip() for value in internal_networks.split(",") if value.strip()]
-        digest = hashlib.sha256(uploaded).hexdigest()
+        digest = hashlib.sha256(uploaded_bytes).hexdigest()
         sensor_id = f"pcap-upload:{digest[:12]}"
         try:
-            parsed = parse_pcap(
-                bytes(uploaded),
+            parsed = await run_in_threadpool(
+                parse_pcap,
+                uploaded_bytes,
                 sensor_id=sensor_id,
                 internal_networks=cidrs,
                 max_packets=config.pcap_upload_max_packets,
+                retain_packet_bytes=False,
             )
         except PcapParseError as exc:
             status = 413 if exc.code == "PCAP_PACKET_LIMIT_EXCEEDED" else 422
@@ -990,8 +999,9 @@ def create_app(
         job["source"] = {
             "filename": safe_filename,
             "capture_format": parsed.capture_format,
-            "size_bytes": len(uploaded),
+            "size_bytes": len(uploaded_bytes),
             "sha256": digest,
+            "packet_bytes_retained": True,
             "captured_packet_count": parsed.captured_packet_count,
             "parsed_packet_count": parsed.parsed_packet_count,
             "skipped_packet_count": parsed.skipped_packet_count,
@@ -1000,6 +1010,16 @@ def create_app(
         job, created = repo.create_job(job)
         if not created:
             return _public_job(job)
+        try:
+            repo.save_job_capture(job["id"], uploaded_bytes)
+        except Exception as exc:
+            repo.delete_job(job["id"])
+            raise ApiError(
+                503,
+                "PCAP_STORAGE_UNAVAILABLE",
+                "업로드한 PCAP 원본을 저장하지 못했습니다",
+            ) from exc
+        del uploaded_bytes
         if isinstance(work_queue, MemoryControllerQueue):
             return _public_job(execute_analysis(job))
         for state, reason in (
@@ -1010,8 +1030,8 @@ def create_app(
             (JobState.ANALYZING, "uploaded capture analysis enqueued"),
         ):
             machine.transition(job, state, reason)
-        saved = repo.save_job(job)
-        work_queue.enqueue({"id": job["id"], "payload": saved})
+        saved = repo.save_job_metadata(job)
+        enqueue_worker_job(job)
         return _public_job(saved)
 
     @app.get("/api/v1/analysis-jobs")
@@ -1057,14 +1077,14 @@ def create_app(
 
     @app.get("/api/v1/analysis-jobs/{job_id}")
     def get_analysis_job(job_id: str) -> dict[str, Any]:
-        job = repo.get_job(job_id)
+        job = repo.get_job_summary(job_id)
         if job is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
         return _public_job(job)
 
     @app.patch("/api/v1/analysis-jobs/{job_id}")
     def update_analysis_job(job_id: str, payload: AnalysisJobUpdate) -> dict[str, Any]:
-        job = repo.get_job(job_id)
+        job = repo.get_job_summary(job_id)
         if job is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
         changes: dict[str, dict[str, Any]] = {}
@@ -1079,12 +1099,12 @@ def create_app(
             job.setdefault("metadata_updates", []).append(
                 {"occurred_at": occurred_at, "changes": changes}
             )
-            return _public_job(repo.save_job(job))
+            return _public_job(repo.save_job_metadata(job))
         return _public_job(job)
 
     @app.delete("/api/v1/analysis-jobs/{job_id}", status_code=204)
     def delete_analysis_job(job_id: str) -> Response:
-        job = repo.get_job(job_id)
+        job = repo.get_job_summary(job_id)
         if job is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
         if JobState(job["status"]) not in {
@@ -1100,7 +1120,7 @@ def create_app(
 
     @app.post("/api/v1/analysis-jobs/{job_id}/cancel")
     def cancel_analysis_job(job_id: str, payload: CancelRequest) -> dict[str, Any]:
-        job = repo.get_job(job_id)
+        job = repo.get_job_summary(job_id)
         if job is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
         if job["status"] == JobState.CANCELLED:
@@ -1112,7 +1132,7 @@ def create_app(
         }:
             raise ApiError(409, "INVALID_JOB_STATE", "종료된 작업은 취소할 수 없습니다")
         machine.transition(job, JobState.CANCELLED, payload.reason)
-        return _public_job(repo.save_job(job))
+        return _public_job(repo.save_job_metadata(job))
 
     @app.post("/api/v1/analysis-jobs/{job_id}/reanalyze", status_code=201)
     def reanalyze(job_id: str, payload: ReanalysisRequest) -> dict[str, Any]:
@@ -1154,8 +1174,8 @@ def create_app(
                 (JobState.ANALYZING, "durable reanalysis job enqueued"),
             ):
                 machine.transition(job, state, reason)
-            saved = repo.save_job(job)
-            work_queue.enqueue({"id": job["id"], "payload": saved})
+            saved = repo.save_job_metadata(job)
+            enqueue_worker_job(job)
             return _public_job(saved)
         return _public_job(execute_analysis(job) if job["flow_records"] else job)
 
@@ -1168,7 +1188,7 @@ def create_app(
         minimum_score: int = Query(0, ge=0, le=100),
         sort: str = "-score",
     ) -> dict[str, Any]:
-        job = repo.get_job(job_id)
+        job = repo.get_job_summary(job_id)
         if job is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
         items = [
@@ -1187,7 +1207,7 @@ def create_app(
 
     @app.get("/api/v1/analysis-jobs/{job_id}/candidates/{candidate_id}")
     def get_candidate(job_id: str, candidate_id: str) -> dict[str, Any]:
-        job = repo.get_job(job_id)
+        job = repo.get_job_summary(job_id)
         if job is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
         candidate = next(
@@ -1195,6 +1215,8 @@ def create_app(
         )
         if candidate is None:
             raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
+        if "traffic_buckets" not in candidate:
+            job = repo.get_job(job_id) or job
         return _public_candidate(candidate, job, include_traffic=True)
 
     @app.get("/api/v1/candidates")
@@ -1205,12 +1227,17 @@ def create_app(
         minimum_score: int = Query(0, ge=0, le=100),
         sort: str = "-score",
     ) -> dict[str, Any]:
-        items = [
-            _public_candidate(candidate, job)
-            for job in repo.list_jobs()
-            for candidate in repo.get_candidates(job["id"])
-            if candidate["score"] >= minimum_score
-        ]
+        jobs = {str(job["id"]): job for job in repo.list_jobs()}
+        items = []
+        for job_id, candidates in repo.list_candidate_sets().items():
+            job = jobs.get(job_id)
+            if job is None:
+                continue
+            items.extend(
+                _public_candidate(candidate, job)
+                for candidate in candidates
+                if candidate["score"] >= minimum_score
+            )
         if severity:
             items = [item for item in items if item["severity"] == severity]
         descending = sort.startswith("-")
@@ -1222,12 +1249,18 @@ def create_app(
 
     @app.get("/api/v1/candidates/{candidate_id}")
     def get_global_candidate(candidate_id: str) -> dict[str, Any]:
-        for job in repo.list_jobs():
+        jobs = {str(job["id"]): job for job in repo.list_jobs()}
+        for job_id, candidates in repo.list_candidate_sets().items():
             candidate = next(
-                (item for item in repo.get_candidates(job["id"]) if item["id"] == candidate_id),
+                (item for item in candidates if item["id"] == candidate_id),
                 None,
             )
             if candidate is not None:
+                job = jobs.get(job_id)
+                if job is None:
+                    break
+                if "traffic_buckets" not in candidate:
+                    job = repo.get_job(job_id) or job
                 return _public_candidate(candidate, job, include_traffic=True)
         raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
 
@@ -1286,7 +1319,19 @@ def create_app(
             candidate_ip = candidate["candidate_ip"]
         normalized = payload.model_dump(mode="json")
         normalized["candidate_ip"] = candidate_ip
-        records = filter_records(job["flow_records"], normalized)
+        source_records = job["flow_records"]
+        if source_records and not any(record.get("raw_packet_hex") for record in source_records):
+            retained_capture = repo.get_job_capture(payload.job_id)
+            if retained_capture is not None:
+                parsed = parse_pcap(
+                    retained_capture,
+                    sensor_id=str(job["sensor_ids"][0]),
+                    internal_networks=list(job["internal_networks"]),
+                    max_packets=config.pcap_upload_max_packets,
+                    retain_packet_bytes=True,
+                )
+                source_records = list(parsed.records)
+        records = filter_records(source_records, normalized)
         content, packet_count = build_pcap(records)
         export_id = str(uuid.uuid4())
         status = "COMPLETED" if packet_count else "FAILED"

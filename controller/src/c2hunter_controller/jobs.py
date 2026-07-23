@@ -174,7 +174,9 @@ def build_job(
         "capture": payload.capture.model_dump(mode="json"),
         "analysis": payload.analysis.model_dump(mode="json"),
         "internal_networks": payload.internal_networks,
-        "flow_records": [item.model_dump(mode="json") for item in payload.flow_records],
+        "flow_records": [
+            item.model_dump(mode="json", exclude_none=True) for item in payload.flow_records
+        ],
         "created_at": now,
         "updated_at": now,
         "completed_at": None,

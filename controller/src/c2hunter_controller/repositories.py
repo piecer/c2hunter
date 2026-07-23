@@ -20,11 +20,17 @@ class Repository(Protocol):
     def list_groups(self) -> list[dict[str, Any]]: ...
     def create_job(self, job: dict[str, Any]) -> tuple[dict[str, Any], bool]: ...
     def save_job(self, job: dict[str, Any]) -> dict[str, Any]: ...
+    def save_job_metadata(self, job: dict[str, Any]) -> dict[str, Any]: ...
     def get_job(self, job_id: str) -> dict[str, Any] | None: ...
+    def get_job_summary(self, job_id: str) -> dict[str, Any] | None: ...
     def list_jobs(self) -> list[dict[str, Any]]: ...
+    def list_active_live_jobs(self) -> list[dict[str, Any]]: ...
     def delete_job(self, job_id: str) -> bool: ...
+    def save_job_capture(self, job_id: str, content: bytes) -> None: ...
+    def get_job_capture(self, job_id: str) -> bytes | None: ...
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None: ...
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]: ...
+    def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]: ...
     def save_allowlist(self, entry: dict[str, Any]) -> dict[str, Any]: ...
     def list_allowlist(self) -> list[dict[str, Any]]: ...
     def delete_allowlist(self, entry_id: str) -> bool: ...
@@ -51,6 +57,7 @@ class MemoryRepository:
         self.jobs: dict[str, dict[str, Any]] = {}
         self.idempotency_keys: dict[str, str] = {}
         self.candidates: dict[str, list[dict[str, Any]]] = {}
+        self.job_captures: dict[str, bytes] = {}
         self.allowlist: dict[str, dict[str, Any]] = {}
         self.exports: dict[str, dict[str, Any]] = {}
         self.export_content: dict[str, bytes] = {}
@@ -92,15 +99,39 @@ class MemoryRepository:
 
     def save_job(self, job: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
-            self.jobs[job["id"]] = deepcopy(job)
+            stored = deepcopy(job)
+            existing = self.jobs.get(job["id"])
+            if "flow_records" not in stored and existing is not None:
+                stored["flow_records"] = deepcopy(existing.get("flow_records", []))
+            self.jobs[job["id"]] = stored
             return deepcopy(job)
+
+    def save_job_metadata(self, job: dict[str, Any]) -> dict[str, Any]:
+        summary = {key: value for key, value in job.items() if key != "flow_records"}
+        return self.save_job(summary)
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         value = self.jobs.get(job_id)
         return deepcopy(value) if value else None
 
+    def get_job_summary(self, job_id: str) -> dict[str, Any] | None:
+        value = self.jobs.get(job_id)
+        if value is None:
+            return None
+        return deepcopy({key: item for key, item in value.items() if key != "flow_records"})
+
     def list_jobs(self) -> list[dict[str, Any]]:
-        return deepcopy(list(self.jobs.values()))
+        return [
+            deepcopy({key: item for key, item in job.items() if key != "flow_records"})
+            for job in self.jobs.values()
+        ]
+
+    def list_active_live_jobs(self) -> list[dict[str, Any]]:
+        return [
+            deepcopy({key: item for key, item in job.items() if key != "flow_records"})
+            for job in self.jobs.values()
+            if job.get("mode") == "LIVE" and job.get("status") in {"CAPTURING", "UPLOADING"}
+        ]
 
     def delete_job(self, job_id: str) -> bool:
         with self._lock:
@@ -109,6 +140,7 @@ class MemoryRepository:
                 return False
             self.idempotency_keys.pop(str(job["idempotency_key"]), None)
             self.candidates.pop(job_id, None)
+            self.job_captures.pop(job_id, None)
             export_ids = [
                 export_id
                 for export_id, metadata in self.exports.items()
@@ -119,12 +151,23 @@ class MemoryRepository:
                 self.export_content.pop(export_id, None)
             return True
 
+    def save_job_capture(self, job_id: str, content: bytes) -> None:
+        with self._lock:
+            self.job_captures[job_id] = bytes(content)
+
+    def get_job_capture(self, job_id: str) -> bytes | None:
+        content = self.job_captures.get(job_id)
+        return bytes(content) if content is not None else None
+
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None:
         with self._lock:
             self.candidates[job_id] = deepcopy(candidates)
 
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]:
         return deepcopy(self.candidates.get(job_id, []))
+
+    def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]:
+        return deepcopy(self.candidates)
 
     def save_allowlist(self, entry: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -221,10 +264,17 @@ class SQLiteRepository:
             CREATE TABLE IF NOT EXISTS candidates (
               job_id TEXT PRIMARY KEY, data TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS job_flow_records (
+              job_id TEXT PRIMARY KEY, data TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS job_capture_blobs (
+              job_id TEXT PRIMARY KEY, content BLOB NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS export_blobs (
               export_id TEXT PRIMARY KEY, content BLOB NOT NULL
             );
         """)
+        self._migrate_embedded_job_flows()
         self.connection.commit()
 
     @staticmethod
@@ -252,6 +302,35 @@ class SQLiteRepository:
             "SELECT data FROM objects WHERE kind=? ORDER BY rowid", (kind,)
         ).fetchall()
         return [json.loads(row[0]) for row in rows]
+
+    def _migrate_embedded_job_flows(self) -> None:
+        rows = self.connection.execute(
+            "SELECT id,data FROM objects WHERE kind='job' "
+            "AND json_type(data, '$.flow_records') IS NOT NULL"
+        ).fetchall()
+        for job_id, raw in rows:
+            job = json.loads(raw)
+            records = job.pop("flow_records", [])
+            self.connection.execute(
+                "INSERT INTO job_flow_records(job_id,data) VALUES(?,?) "
+                "ON CONFLICT(job_id) DO NOTHING",
+                (job_id, self._serialize(records)),
+            )
+            self.connection.execute(
+                "UPDATE objects SET data=? WHERE kind='job' AND id=?",
+                (self._serialize(job), job_id),
+            )
+
+    def _save_job_parts(self, job: dict[str, Any]) -> None:
+        metadata = {key: value for key, value in job.items() if key != "flow_records"}
+        self._put("job", job["id"], metadata)
+        if "flow_records" in job:
+            self.connection.execute(
+                "INSERT INTO job_flow_records(job_id,data) VALUES(?,?) "
+                "ON CONFLICT(job_id) DO UPDATE SET data=excluded.data",
+                (job["id"], self._serialize(job["flow_records"])),
+            )
+            self.connection.commit()
 
     def ready(self) -> bool:
         try:
@@ -287,7 +366,7 @@ class SQLiteRepository:
                 if existing is None:
                     raise RuntimeError("idempotency ledger references missing job")
                 return existing, False
-            self._put("job", job["id"], job)
+            self._save_job_parts(job)
             self.connection.execute(
                 "INSERT INTO idempotency(key,job_id) VALUES(?,?)",
                 (job["idempotency_key"], job["id"]),
@@ -296,13 +375,38 @@ class SQLiteRepository:
             return deepcopy(job), True
 
     def save_job(self, job: dict[str, Any]) -> dict[str, Any]:
-        return self._put("job", job["id"], job)
+        with self._lock:
+            self._save_job_parts(job)
+            return deepcopy(job)
+
+    def save_job_metadata(self, job: dict[str, Any]) -> dict[str, Any]:
+        metadata = {key: value for key, value in job.items() if key != "flow_records"}
+        return self._put("job", job["id"], metadata)
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
+        job = self._get("job", job_id)
+        if job is None:
+            return None
+        row = self.connection.execute(
+            "SELECT data FROM job_flow_records WHERE job_id=?", (job_id,)
+        ).fetchone()
+        job["flow_records"] = json.loads(row[0]) if row else []
+        return job
+
+    def get_job_summary(self, job_id: str) -> dict[str, Any] | None:
         return self._get("job", job_id)
 
     def list_jobs(self) -> list[dict[str, Any]]:
         return self._list("job")
+
+    def list_active_live_jobs(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT data FROM objects WHERE kind='job' "
+            "AND json_extract(data, '$.mode')='LIVE' "
+            "AND json_extract(data, '$.status') IN ('CAPTURING','UPLOADING') "
+            "ORDER BY rowid"
+        ).fetchall()
+        return [json.loads(row[0]) for row in rows]
 
     def delete_job(self, job_id: str) -> bool:
         with self._lock:
@@ -324,12 +428,29 @@ class SQLiteRepository:
                     export_ids,
                 )
             self.connection.execute("DELETE FROM candidates WHERE job_id=?", (job_id,))
+            self.connection.execute("DELETE FROM job_flow_records WHERE job_id=?", (job_id,))
+            self.connection.execute("DELETE FROM job_capture_blobs WHERE job_id=?", (job_id,))
             self.connection.execute("DELETE FROM idempotency WHERE job_id=?", (job_id,))
             cursor = self.connection.execute(
                 "DELETE FROM objects WHERE kind='job' AND id=?", (job_id,)
             )
             self.connection.commit()
             return cursor.rowcount > 0
+
+    def save_job_capture(self, job_id: str, content: bytes) -> None:
+        with self._lock:
+            self.connection.execute(
+                "INSERT INTO job_capture_blobs(job_id,content) VALUES(?,?) "
+                "ON CONFLICT(job_id) DO UPDATE SET content=excluded.content",
+                (job_id, content),
+            )
+            self.connection.commit()
+
+    def get_job_capture(self, job_id: str) -> bytes | None:
+        row = self.connection.execute(
+            "SELECT content FROM job_capture_blobs WHERE job_id=?", (job_id,)
+        ).fetchone()
+        return bytes(row[0]) if row else None
 
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None:
         with self._lock:
@@ -345,6 +466,10 @@ class SQLiteRepository:
             "SELECT data FROM candidates WHERE job_id=?", (job_id,)
         ).fetchone()
         return json.loads(row[0]) if row else []
+
+    def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]:
+        rows = self.connection.execute("SELECT job_id,data FROM candidates").fetchall()
+        return {str(job_id): json.loads(data) for job_id, data in rows}
 
     def save_allowlist(self, entry: dict[str, Any]) -> dict[str, Any]:
         return self._put("allowlist", entry["id"], entry)

@@ -10,7 +10,12 @@ def filter_records(records: list[dict[str, Any]], filters: dict[str, Any]) -> li
     start = datetime.fromisoformat(filters["start_time"]) if filters.get("start_time") else None
     end = datetime.fromisoformat(filters["end_time"]) if filters.get("end_time") else None
     for record in records:
-        timestamp = datetime.fromisoformat(record["timestamp"])
+        raw_timestamp = record["timestamp"]
+        timestamp = (
+            raw_timestamp
+            if isinstance(raw_timestamp, datetime)
+            else datetime.fromisoformat(raw_timestamp)
+        )
         if filters.get("candidate_ip") not in {None, record["source_ip"], record["destination_ip"]}:
             continue
         if filters.get("internal_host_ip") not in {
@@ -45,7 +50,13 @@ def build_pcap(records: list[dict[str, Any]]) -> tuple[bytes, int]:
         if not raw_hex:
             continue
         packet = bytes.fromhex(raw_hex)
-        timestamp = datetime.fromisoformat(record["timestamp"]).timestamp()
+        raw_timestamp = record["timestamp"]
+        parsed_timestamp = (
+            raw_timestamp
+            if isinstance(raw_timestamp, datetime)
+            else datetime.fromisoformat(raw_timestamp)
+        )
+        timestamp = parsed_timestamp.timestamp()
         seconds = int(timestamp)
         microseconds = int((timestamp - seconds) * 1_000_000)
         output.extend(struct.pack("<IIII", seconds, microseconds, len(packet), len(packet)))

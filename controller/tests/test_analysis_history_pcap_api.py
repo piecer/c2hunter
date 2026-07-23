@@ -103,7 +103,9 @@ def test_analysis_history_rejects_immutable_updates_and_active_deletion() -> Non
 
 
 def test_pcap_upload_runs_existing_detectors_and_appears_in_history() -> None:
-    client = api()
+    repository = MemoryRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    capture = _pcap()
     response = client.post(
         "/api/v1/pcap-analysis-jobs",
         params={
@@ -113,7 +115,7 @@ def test_pcap_upload_runs_existing_detectors_and_appears_in_history() -> None:
             "minimum_candidate_score": 0,
             "minimum_distinct_clients": 3,
         },
-        content=_pcap(),
+        content=capture,
         headers={"content-type": "application/vnd.tcpdump.pcap"},
     )
 
@@ -129,12 +131,19 @@ def test_pcap_upload_runs_existing_detectors_and_appears_in_history() -> None:
     assert job["source"]["parsed_packet_count"] == 18
     assert job["flow_count"] == 18
     assert job["packet_count"] == 18
+    stored = repository.get_job(job["id"])
+    assert stored is not None
+    assert all("raw_packet_hex" not in record for record in stored["flow_records"])
+    assert repository.get_job_capture(job["id"]) == capture
 
     candidates = client.get(f"/api/v1/analysis-jobs/{job['id']}/candidates").json()
     assert candidates["total"] == 1
     assert candidates["items"][0]["candidate_ip"] == "203.0.113.77"
     history = client.get("/api/v1/analysis-jobs", params={"source_type": "PCAP_UPLOAD"}).json()
     assert history["items"][0]["source"]["sha256"] == job["source"]["sha256"]
+    exported = client.post("/api/v1/pcap-exports", json={"job_id": job["id"]}).json()
+    assert exported["status"] == "COMPLETED"
+    assert exported["matched_packet_count"] == 18
 
     rerun = client.post(
         f"/api/v1/analysis-jobs/{job['id']}/reanalyze",
@@ -207,13 +216,26 @@ def test_sqlite_job_delete_cascades_candidates_and_exports(tmp_path: Any) -> Non
         "id": "job-1",
         "idempotency_key": "delete-me",
         "status": "COMPLETED",
+        "mode": "PCAP_UPLOAD",
+        "flow_records": [{"source_ip": "10.0.0.1"}],
     }
     repository.create_job(job)
+    repository.save_job_capture("job-1", b"source-pcap")
     repository.save_candidates("job-1", [{"id": "candidate-1"}])
     repository.save_export({"id": "export-1", "job_id": "job-1"}, b"pcap")
 
+    assert "flow_records" not in repository.get_job_summary("job-1")  # type: ignore[operator]
+    assert "flow_records" not in repository.list_jobs()[0]
+    assert repository.get_job("job-1")["flow_records"] == [  # type: ignore[index]
+        {"source_ip": "10.0.0.1"}
+    ]
+    repository.save_job_metadata({**repository.get_job_summary("job-1"), "name": "renamed"})  # type: ignore[arg-type]
+    assert repository.get_job("job-1")["flow_records"] == [  # type: ignore[index]
+        {"source_ip": "10.0.0.1"}
+    ]
     assert repository.delete_job("job-1") is True
     assert repository.get_job("job-1") is None
     assert repository.get_candidates("job-1") == []
     assert repository.get_export("export-1") is None
+    assert repository.get_job_capture("job-1") is None
     assert repository.delete_job("job-1") is False

@@ -85,11 +85,25 @@ class PostgresRepository:
                         CREATE TABLE IF NOT EXISTS job_candidates (
                           job_id text PRIMARY KEY, data jsonb NOT NULL
                         );
+                        CREATE TABLE IF NOT EXISTS job_flow_records (
+                          job_id text PRIMARY KEY, data jsonb NOT NULL
+                        );
                         CREATE TABLE IF NOT EXISTS audit_events (
                           sequence bigserial PRIMARY KEY, kind text NOT NULL,
                           object_id text NOT NULL,
                           occurred_at timestamptz NOT NULL, data jsonb NOT NULL
                         );
+                        CREATE INDEX IF NOT EXISTS controller_objects_active_live_jobs
+                          ON controller_objects ((data->>'status'))
+                          WHERE kind='job' AND data->>'mode'='LIVE';
+                        INSERT INTO job_flow_records(job_id,data)
+                          SELECT id,data->'flow_records'
+                          FROM controller_objects
+                          WHERE kind='job' AND data ? 'flow_records'
+                          ON CONFLICT(job_id) DO NOTHING;
+                        UPDATE controller_objects
+                          SET data=data-'flow_records'
+                          WHERE kind='job' AND data ? 'flow_records';
                         """
                     )
                 connection.commit()
@@ -166,6 +180,7 @@ class PostgresRepository:
         return self._list("group")
 
     def create_job(self, job: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        metadata = {key: value for key, value in job.items() if key != "flow_records"}
         with self._lock, self.connection.cursor() as cursor:
             cursor.execute(
                 "INSERT INTO job_idempotency(idempotency_key,job_id) VALUES(%s,%s) "
@@ -188,20 +203,67 @@ class PostgresRepository:
                 return existing, False
             cursor.execute(
                 "INSERT INTO controller_objects(kind,id,data) VALUES('job',%s,%s::jsonb)",
-                (job["id"], self._json(job)),
+                (job["id"], self._json(metadata)),
             )
-            self._audit("job", job["id"], job)
+            cursor.execute(
+                "INSERT INTO job_flow_records(job_id,data) VALUES(%s,%s::jsonb)",
+                (job["id"], self._json(job.get("flow_records", []))),
+            )
+            self._audit("job", job["id"], metadata)
             self.connection.commit()
             return deepcopy(job), True
 
     def save_job(self, job: dict[str, Any]) -> dict[str, Any]:
-        return self._put("job", job["id"], job)
+        metadata = {key: value for key, value in job.items() if key != "flow_records"}
+        with self._lock, self.connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO controller_objects(kind,id,data) VALUES('job',%s,%s::jsonb) "
+                "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                (job["id"], self._json(metadata)),
+            )
+            if "flow_records" in job:
+                cursor.execute(
+                    "INSERT INTO job_flow_records(job_id,data) VALUES(%s,%s::jsonb) "
+                    "ON CONFLICT(job_id) DO UPDATE SET data=excluded.data",
+                    (job["id"], self._json(job["flow_records"])),
+                )
+            self._audit("job", job["id"], metadata)
+            self.connection.commit()
+        return deepcopy(job)
+
+    def save_job_metadata(self, job: dict[str, Any]) -> dict[str, Any]:
+        metadata = {key: value for key, value in job.items() if key != "flow_records"}
+        return self._put("job", job["id"], metadata)
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
+        job = self.get_job_summary(job_id)
+        if job is None:
+            return None
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT data FROM job_flow_records WHERE job_id=%s", (job_id,))
+            row = cursor.fetchone()
+        if row is None:
+            job["flow_records"] = []
+        else:
+            value = row[0]
+            job["flow_records"] = value if isinstance(value, list) else json.loads(value)
+        return job
+
+    def get_job_summary(self, job_id: str) -> dict[str, Any] | None:
         return self._get("job", job_id)
 
     def list_jobs(self) -> list[dict[str, Any]]:
         return self._list("job")
+
+    def list_active_live_jobs(self) -> list[dict[str, Any]]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT data FROM controller_objects "
+                "WHERE kind='job' AND data->>'mode'='LIVE' "
+                "AND data->>'status' IN ('CAPTURING','UPLOADING') ORDER BY id"
+            )
+            rows = cursor.fetchall()
+        return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
 
     def delete_job(self, job_id: str) -> bool:
         with self._lock, self.connection.cursor() as cursor:
@@ -224,6 +286,7 @@ class PostgresRepository:
                 (job_id,),
             )
             cursor.execute("DELETE FROM job_candidates WHERE job_id=%s", (job_id,))
+            cursor.execute("DELETE FROM job_flow_records WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM job_idempotency WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM controller_objects WHERE kind='job' AND id=%s", (job_id,))
             self._audit("job-delete", job_id, {"id": job_id})
@@ -235,7 +298,24 @@ class PostgresRepository:
                 # Metadata deletion remains authoritative; object-store lifecycle policies
                 # provide a second cleanup path if the immediate removal is unavailable.
                 pass
+        try:
+            self.blob_store.delete(self._capture_key(job_id))
+        except Exception:
+            pass
         return True
+
+    @staticmethod
+    def _capture_key(job_id: str) -> str:
+        return f"captures/{job_id}.pcap"
+
+    def save_job_capture(self, job_id: str, content: bytes) -> None:
+        self.blob_store.put(self._capture_key(job_id), content)
+
+    def get_job_capture(self, job_id: str) -> bytes | None:
+        try:
+            return self.blob_store.get(self._capture_key(job_id))
+        except Exception:
+            return None
 
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None:
         with self._lock, self.connection.cursor() as cursor:
@@ -254,6 +334,15 @@ class PostgresRepository:
         if not row:
             return []
         return row[0] if isinstance(row[0], list) else json.loads(row[0])
+
+    def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]:
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT job_id,data FROM job_candidates")
+            rows = cursor.fetchall()
+        return {
+            str(job_id): data if isinstance(data, list) else json.loads(data)
+            for job_id, data in rows
+        }
 
     def save_allowlist(self, entry: dict[str, Any]) -> dict[str, Any]:
         return self._put("allowlist", entry["id"], entry)

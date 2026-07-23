@@ -18,6 +18,12 @@ class JobQueue(Protocol):
     def close(self) -> None: ...
 
 
+class JobPayloadLoader(Protocol):
+    def load(self, job_id: str) -> dict[str, Any]: ...
+
+    def close(self) -> None: ...
+
+
 class Worker:
     def __init__(
         self,
@@ -25,10 +31,12 @@ class Worker:
         queue: JobQueue,
         execute: Callable[[dict[str, Any]], dict[str, Any]],
         health_path: Path,
+        payload_loader: JobPayloadLoader | None = None,
     ) -> None:
         self.queue = queue
         self.execute = execute
         self.health_path = health_path
+        self.payload_loader = payload_loader
         self.processed_jobs = 0
         self.last_error: str | None = None
 
@@ -60,6 +68,8 @@ class Worker:
                 self._write_health("RUNNING")
         finally:
             self.queue.close()
+            if self.payload_loader is not None:
+                self.payload_loader.close()
             self._write_health("STOPPED")
 
     def _execute_job(self, job: dict[str, Any]) -> dict[str, Any]:
@@ -67,7 +77,14 @@ class Worker:
         if not job_id:
             return {"job_id": "", "status": "ERROR", "error": "job id is required"}
         try:
-            result = self.execute(dict(job.get("payload", {})))
+            raw_payload = job.get("payload")
+            if isinstance(raw_payload, dict):
+                payload = dict(raw_payload)
+            elif self.payload_loader is not None:
+                payload = self.payload_loader.load(job_id)
+            else:
+                raise ValueError("job payload or configured payload loader is required")
+            result = self.execute(payload)
         except Exception as error:
             self.last_error = str(error)
             return {"job_id": job_id, "status": "ERROR", "error": str(error)}

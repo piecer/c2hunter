@@ -44,6 +44,7 @@
 | `capture_datasets` | id, start/end, immutable flag, selected sensors, completeness, flow watermark, pcap availability |
 | `analysis_runs` | id, job/dataset FK, profile and detector-version snapshot, internal networks, allowlist snapshot timestamp/hash, started/completed time, warning JSON |
 | `ingest_batches` | unique `(sensor_id,batch_id)`, job/dataset, schema version, checksum, row count, byte count, status, received/committed time; 중복 ACK ledger |
+| `job_flow_records` | job ID PK, immutable normalized flow-record payload JSONB. job metadata와 물리적으로 분리하며 분석 Worker만 job ID로 로드 |
 
 Job 상태 enum은 `CREATED, WAITING_FOR_SENSOR, CAPTURING, UPLOADING, INGESTING, ANALYZING, COMPLETED, PARTIALLY_COMPLETED, FAILED, CANCELLED`다. terminal 상태는 되돌리지 않는다.
 
@@ -73,6 +74,7 @@ Evidence `metrics`에는 detector 입력값을 machine-readable 형태로 보존
 | 엔터티 | 핵심 필드/제약 |
 |---|---|
 | `pcap_objects` | id, job/dataset/sensor FK, server-generated object key, start/end, size, SHA-256, packet count, rotation reason, state, retention/delete time |
+| uploaded source PCAP | `captures/{job_id}.pcap` server-generated key로 MinIO에 한 번 저장. normalized flow에는 기본적으로 raw packet hex를 중복 보관하지 않음 |
 | `flow_pcap_refs` | flow identity/range와 object FK, byte/time index 힌트 |
 | `pcap_exports` | id, requester, candidate/job FK, normalized filter JSON, status, estimated/actual size, output object FK, expires_at, error |
 | `download_audits` | export/object/user, request IP, time, result, bytes |
@@ -158,7 +160,7 @@ Flow logical key:
 
 ## 6. API read model
 
-후보 상세 응답은 Candidate + Evidence + InternalHost + SensorObservation + AttackTarget + PcapObject availability를 조합한다. 목록은 PostgreSQL summary를 사용하고 Flow 목록/차트만 ClickHouse를 조회하여 일반 응답 5초 목표를 지킨다. 모든 목록은 cursor 또는 page pagination, allowlisted filter, deterministic sorting을 적용한다.
+후보 상세 응답은 Candidate + Evidence + InternalHost + SensorObservation + AttackTarget + PcapObject availability를 조합한다. Job 목록·상세·상태 전환과 live-job scheduler는 PostgreSQL의 compact metadata만 사용하며 `job_flow_records`를 hydrate하지 않는다. 분석 queue에는 job ID만 전달하고 Worker가 분석 시작 시 payload를 한 번 로드한다. 목록은 PostgreSQL summary를 사용하고 Flow 목록/차트만 ClickHouse를 조회하여 일반 응답 5초 목표를 지킨다. 모든 목록은 cursor 또는 page pagination, allowlisted filter, deterministic sorting을 적용한다.
 
 ## 7. 마이그레이션·보관
 

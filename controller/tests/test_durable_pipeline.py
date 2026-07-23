@@ -122,10 +122,11 @@ def test_flow_batch_is_persisted_and_batch_id_is_deduplicated() -> None:
 def test_job_references_stored_immutable_snapshot_and_is_enqueued() -> None:
     store = MemoryFlowStore()
     queue = QueueStub()
+    repository = MemoryRepository()
     client = TestClient(
         create_app(
             Settings(environment="test", inline_flow_records_enabled=False),
-            MemoryRepository(),
+            repository,
             flow_store=store,
             queue=queue,
         )
@@ -144,11 +145,14 @@ def test_job_references_stored_immutable_snapshot_and_is_enqueued() -> None:
     assert len(queue.jobs) == 1
     queued = queue.jobs[0]
     assert queued["id"] == response.json()["id"]
-    assert queued["payload"]["dataset_id"] == response.json()["dataset_id"]
-    assert len(queued["payload"]["flow_records"]) == 1
-    assert queued["payload"]["flow_records"][0]["destination_ip"] == "203.0.113.1"
+    assert "payload" not in queued
+    stored = repository.get_job(response.json()["id"])
+    assert stored is not None
+    assert stored["dataset_id"] == response.json()["dataset_id"]
+    assert len(stored["flow_records"]) == 1
+    assert stored["flow_records"][0]["destination_ip"] == "203.0.113.1"
     store.ingest_batch("s1", "later", [flow(2)])
-    assert len(queued["payload"]["flow_records"]) == 1
+    assert len(repository.get_job(response.json()["id"])["flow_records"]) == 1  # type: ignore[index]
 
 
 def test_live_job_waits_for_capture_end_before_enqueuing_analysis() -> None:
