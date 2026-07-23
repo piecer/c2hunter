@@ -21,7 +21,7 @@ At 70% disk, investigate growth; at 80%, shorten optional retention or add capac
 
 ## Packet drops and backpressure
 
-Compare `captured_packets_total`, `dropped_packets_total`, pending/spool bytes, interface counters, and job sensor loss. Validate capture privileges, ring/buffer sizing, CPU affinity, storage latency, BPF selectivity, batch size, and Controller ingestion rate. Backpressure order is memory queue → file spool → smaller batches → retry → explicit deletion or capture stop. Any loss must be reported, never silently discarded.
+Compare `captured_packets_total`, `dropped_packets_total`, pending/spool bytes, interface counters, and job sensor loss. Validate capture privileges, ring/buffer sizing, CPU affinity, storage latency, BPF selectivity, batch size, and Controller ingestion rate. Application payloads on well-known ports are retained without invoking unrelated application decoders; for example, a non-SIP payload on UDP/5060 remains analyzable. Malformed or truncated L2-L4 frames are isolated to that packet, counted as decode errors and dropped packets, and do not degrade the sensor. Source, queue, spool, or transport failures remain health errors. Backpressure order is memory queue → file spool → smaller batches → retry → explicit deletion or capture stop. Any loss must be reported, never silently discarded.
 
 ## Time synchronization
 
