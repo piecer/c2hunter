@@ -80,6 +80,21 @@ Scores are `LOW 0–39`, `MEDIUM 40–59`, `HIGH 60–79`, and `CRITICAL 80–10
 
 Candidate detail supports asynchronous filtered PCAP export. Download URLs are expected to be authorized, audited, short-lived, and server-named.
 
+### Analyst-guided Payload detection
+
+Candidate detail lists its source flows, while Analysis detail can search every flow even when no
+detector produced a candidate. An analyst can explicitly preview at most 256 bytes from a retained
+PCAP, record an append-only `C2` or `BENIGN` verdict, and optionally create a versioned Payload
+signature from a C2 flow. New analyses snapshot enabled signatures and detect either an exact Payload
+SHA-256 match or a guarded structural match using prefix hash, length, entropy, and SimHash. Exact
+matches are high-confidence alerts; structural matches are monitor-only until reviewed.
+
+Use **Payload signatures** to edit thresholds or enable/disable a signature. Completed results never
+change in place; create a reanalysis to apply current signatures to existing evidence. The workflow,
+match rules, privacy boundary, acceptance criteria, and implementation phases are defined in the
+[technical specification](docs/human-guided-detection.md) and
+[development plan](docs/human-guided-detection-plan.md).
+
 ## Tests and fixtures
 
 ```bash
@@ -105,7 +120,7 @@ Playwright fixtures exist only under `web/e2e`; production bundles contain no fa
 - Compose는 Controller, Worker, Web, PostgreSQL, Redis, ClickHouse, MinIO만 실행하는 단일 호스트 개발 토폴로지이며 production HA 구성이 아니다.
 - The deterministic browser fixture validates UI behavior without a backend; it does not validate server authorization.
 - AF_PACKET availability and packet-drop goals depend on host kernel, NIC, mirror quality, and privileges.
-- Offline upload currently retains decoded packet bytes in the job dataset for filtered export; set conservative upload limits and retention for sensitive or high-volume captures.
+- Offline upload retains the original PCAP object for explicit preview/export; set conservative upload limits and retention for sensitive or high-volume captures.
 
 ## Troubleshooting
 

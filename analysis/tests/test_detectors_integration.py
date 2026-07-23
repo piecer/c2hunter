@@ -1,16 +1,20 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from c2hunter_analysis.detectors import (
+    AnalystPayloadSignatureDetector,
     CommandAttackDetector,
     CommonDestinationDetector,
     MultiSensorDetector,
     PeriodicBeaconDetector,
     PersistenceRarityDetector,
     ProtocolSimilarityDetector,
+    SingleHostCompositeBeaconDetector,
     SynchronizedCommunicationDetector,
     run_detectors,
 )
 from c2hunter_analysis.domain import AnalysisContext, Flow
+from c2hunter_analysis.payload_features import extract_payload_features
 from c2hunter_analysis.scoring import score_candidates
 
 START = datetime(2026, 7, 20, tzinfo=UTC)
@@ -94,6 +98,58 @@ def test_periodic_beacon_preserves_meaningful_sub_five_second_period() -> None:
 
     assert evidence[0].metrics["period_seconds"] == 1.0
     assert evidence[0].metrics["matching_hosts"] == 1
+
+
+def test_single_host_composite_beacon_remains_a_hunting_candidate() -> None:
+    flows = [flow(index * 30, "10.0.0.1", packets=2) for index in range(6)]
+
+    evidence = SingleHostCompositeBeaconDetector().analyze(
+        context(flows, periodicity_min_samples=5)
+    )
+    candidate = score_candidates(evidence, minimum_samples=5)[0]
+
+    assert evidence[0].metrics["payload_stability"] == 1.0
+    assert candidate.score == 25
+    assert candidate.severity == "LOW"
+    assert candidate.adjustments[0].points == -10
+    irregular = [flow(second, "10.0.0.1") for second in (1, 2, 50, 55, 180, 181)]
+    assert (
+        SingleHostCompositeBeaconDetector().analyze(context(irregular, periodicity_min_samples=5))
+        == []
+    )
+
+
+def test_analyst_payload_signature_distinguishes_exact_structural_and_context() -> None:
+    source = extract_payload_features(b"BOT|CMD=PING|ID=123456")
+    changed = extract_payload_features(b"BOT|CMD=PING|ID=654321")
+    assert source is not None and changed is not None
+    signature = {
+        "id": "signature-1",
+        "name": "confirmed beacon",
+        "version": 1,
+        "enabled": True,
+        "protocol": "TCP",
+        "direction": "OUTBOUND",
+        "service_port": 4444,
+        **source.as_dict(),
+    }
+    exact_flow = replace(flow(1, "10.0.0.1"), **source.as_dict())
+    structural_flow = replace(flow(2, "10.0.0.2"), **changed.as_dict())
+    detector = AnalystPayloadSignatureDetector()
+
+    exact = detector.analyze(context([exact_flow], payload_signatures=[signature]))
+    structural = detector.analyze(context([structural_flow], payload_signatures=[signature]))
+
+    assert exact[0].metrics["match_mode"] == "EXACT"
+    assert exact[0].confidence == 1.0
+    assert score_candidates(exact)[0].score == 80
+    assert structural[0].metrics["match_mode"] == "STRUCTURAL"
+    assert structural[0].metrics["comparisons"][0]["simhash_distance"] == 8
+    assert structural[0].confidence == 0.7
+    wrong_port = replace(structural_flow, destination_port=443)
+    assert detector.analyze(context([wrong_port], payload_signatures=[signature])) == []
+    disabled = {**signature, "enabled": False}
+    assert detector.analyze(context([exact_flow], payload_signatures=[disabled])) == []
 
 
 def test_synchronization_needs_repeated_multi_host_windows() -> None:

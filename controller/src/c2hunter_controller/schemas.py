@@ -228,6 +228,12 @@ class FlowRecord(BaseModel):
     packet_count: int = Field(default=1, ge=1)
     total_bytes: int = Field(default=0, ge=0)
     payload_hash: str | None = None
+    payload_prefix_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    payload_length: int | None = Field(default=None, ge=0)
+    payload_entropy: float | None = Field(default=None, ge=0, le=8)
+    payload_printable_ratio: float | None = Field(default=None, ge=0, le=1)
+    payload_simhash: str | None = Field(default=None, pattern=r"^[0-9a-f]{16}$")
+    payload_feature_version: str | None = Field(default=None, pattern=r"^[0-9]{1,8}$")
     tls_fingerprint: str | None = None
     certificate_fingerprint: str | None = None
     domain: str | None = None
@@ -310,6 +316,41 @@ class ReanalysisRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=200)
     minimum_candidate_score: int | None = Field(default=None, ge=0, le=100)
     minimum_distinct_clients: int | None = Field(default=None, ge=2)
+
+
+class FlowLabelCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    flow_id: str = Field(pattern=r"^[0-9a-f]{24}$")
+    verdict: str = Field(pattern=r"^(C2|BENIGN)$")
+    confidence: str = Field(pattern=r"^(CONFIRMED|HIGH|MEDIUM)$")
+    note: str = Field(min_length=1, max_length=5000)
+    create_signature: bool = False
+    signature_name: str | None = Field(default=None, min_length=1, max_length=200)
+    signature_description: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def signature_requires_c2_verdict(self) -> FlowLabelCreate:
+        if self.create_signature and self.verdict != "C2":
+            raise ValueError("only a C2 label can create a payload signature")
+        return self
+
+
+class PayloadSignatureUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    enabled: bool | None = None
+    length_tolerance_ratio: float | None = Field(default=None, ge=0, le=1)
+    entropy_tolerance: float | None = Field(default=None, ge=0, le=4)
+    simhash_max_distance: int | None = Field(default=None, ge=0, le=32)
+
+    @model_validator(mode="after")
+    def contains_update(self) -> PayloadSignatureUpdate:
+        if not self.model_fields_set:
+            raise ValueError("at least one signature field is required")
+        if any(getattr(self, field) is None for field in self.model_fields_set):
+            raise ValueError("signature fields must not be null")
+        return self
 
 
 class AllowlistCreate(BaseModel):

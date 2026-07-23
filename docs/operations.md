@@ -17,6 +17,13 @@ Defaults are raw PCAP 7 days, Flow 30, results 180, audit 365, and heartbeat det
 
 Offline PCAP upload defaults to 500 MiB and 2,000,000 packets. The bundled web proxy accepts the same size, streams request bodies to the Controller, and allows up to 10 minutes for upload processing. Configure any external reverse proxy with a matching or larger request-body limit and timeout. Tune `C2HUNTER_PCAP_UPLOAD_MAX_BYTES` and `C2HUNTER_PCAP_UPLOAD_MAX_PACKETS` below available Controller/Worker memory, PostgreSQL I/O, and MinIO capacity. The original upload is retained once in MinIO, normalized flow records are stored separately from job metadata, and Redis carries only a job reference. Raw packet bytes are reconstructed from the retained object only for an explicit export. Use Analysis history for metadata correction; use reanalysis for detector changes. Only terminal jobs can be manually deleted, and manual deletion intentionally cascades to candidates, the retained source capture, and generated exports.
 
+Analyst-guided Payload signatures are also snapshotted outside compact job metadata. Signature changes
+affect only analyses created afterward; use reanalysis to apply them to retained evidence. Structural
+matches are monitor-only until reviewed. Disabling a bad signature preserves its versions and source
+label while excluding it from future snapshots. Payload preview reparses the retained source capture
+only after an explicit analyst action and returns at most 256 bytes; repeated previews of large captures
+are CPU/I/O intensive and should not be used as a polling endpoint.
+
 At 70% disk, investigate growth; at 80%, shorten optional retention or add capacity; at 90%, stop new PCAP capture before metadata/audit integrity is endangered. Never manually delete database files from a mounted volume.
 
 ## Packet drops and backpressure
@@ -58,9 +65,9 @@ Run `make benchmark-1m`; archive `artifacts/benchmark-1m.json` and `.md` with ho
 
 ### Controller/PostgreSQL latency
 
-Job metadata and immutable normalized flow records are stored separately. Controller schedulers, history/detail APIs, state transitions, and terminal UI polling must not hydrate the flow payload. Worker queue messages contain a job ID and the Worker loads the immutable payload from PostgreSQL only when analysis starts.
+Job metadata, immutable normalized flow records, and per-job Payload signature snapshots are stored separately. Controller schedulers, history/detail APIs, state transitions, and terminal UI polling must not hydrate the flow/signature payload. Worker queue messages contain a job ID and the Worker loads both immutable snapshots from PostgreSQL only when analysis starts.
 
-The first Controller start after upgrading migrates legacy `flow_records` out of `controller_objects` into `job_flow_records`. This is idempotent, but a database with large historical uploads can temporarily consume substantial CPU, I/O, and free disk while the transaction runs. Back up PostgreSQL, provide disk headroom, deploy during a maintenance window, and wait for `/ready` before judging steady-state latency. After a successful migration, run ordinary online statistics maintenance:
+The first Controller start after upgrading migrates legacy `flow_records` out of `controller_objects` into `job_flow_records` and embedded `payload_signatures` into `job_payload_signatures`. This is idempotent, but a database with large historical uploads can temporarily consume substantial CPU, I/O, and free disk while the transaction runs. Back up PostgreSQL, provide disk headroom, deploy during a maintenance window, and wait for `/ready` before judging steady-state latency. After a successful migration, run ordinary online statistics maintenance:
 
 ```bash
 docker compose --env-file .env exec -T postgres sh -lc \
@@ -96,20 +103,29 @@ SELECT count(*) AS legacy_jobs_with_inline_flows
 FROM controller_objects
 WHERE kind = 'job' AND data ? 'flow_records';
 
+SELECT count(*) AS legacy_jobs_with_inline_signatures
+FROM controller_objects
+WHERE kind = 'job' AND data ? 'payload_signatures';
+
 SELECT count(*) AS flow_payload_jobs,
        pg_size_pretty(COALESCE(sum(pg_column_size(data)), 0)::bigint) AS payload_size
 FROM job_flow_records;
+
+SELECT count(*) AS signature_snapshot_jobs,
+       pg_size_pretty(COALESCE(sum(pg_column_size(data)), 0)::bigint) AS payload_size
+FROM job_payload_signatures;
 
 SELECT relname,
        pg_size_pretty(pg_total_relation_size(relid)) AS total_size,
        n_live_tup, n_dead_tup, last_autovacuum, last_autoanalyze
 FROM pg_stat_user_tables
-WHERE relname IN ('controller_objects', 'job_flow_records', 'job_candidates', 'audit_events')
+WHERE relname IN ('controller_objects', 'job_flow_records', 'job_payload_signatures',
+                  'job_candidates', 'audit_events')
 ORDER BY pg_total_relation_size(relid) DESC;
 SQL
 ```
 
-`legacy_jobs_with_inline_flows` must be zero after readiness succeeds. If latency persists, collect the command output, `c2hunter-latency.log`, request path and UTC time range, job count, largest upload size, PostgreSQL/Controller CPU and memory limits, storage type, and whether the spike occurs during upload, analysis, history browsing, or idle time. Do not include PCAP contents, credentials, or bearer tokens.
+Both legacy counters must be zero after readiness succeeds. If latency persists, collect the command output, `c2hunter-latency.log`, request path and UTC time range, job count, largest upload size, active signature count, PostgreSQL/Controller CPU and memory limits, storage type, and whether the spike occurs during upload, analysis, flow review, history browsing, or idle time. Do not include PCAP contents, credentials, bearer tokens, or Payload previews.
 
 ## Common commands
 

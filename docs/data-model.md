@@ -45,6 +45,7 @@
 | `analysis_runs` | id, job/dataset FK, profile and detector-version snapshot, internal networks, allowlist snapshot timestamp/hash, started/completed time, warning JSON |
 | `ingest_batches` | unique `(sensor_id,batch_id)`, job/dataset, schema version, checksum, row count, byte count, status, received/committed time; 중복 ACK ledger |
 | `job_flow_records` | job ID PK, immutable normalized flow-record payload JSONB. job metadata와 물리적으로 분리하며 분석 Worker만 job ID로 로드 |
+| `job_payload_signatures` | job ID PK, 해당 run에 고정한 활성 Payload signature snapshot JSONB. compact job metadata와 분리하며 Worker만 분석 시작 시 로드 |
 
 Job 상태 enum은 `CREATED, WAITING_FOR_SENSOR, CAPTURING, UPLOADING, INGESTING, ANALYZING, COMPLETED, PARTIALLY_COMPLETED, FAILED, CANCELLED`다. terminal 상태는 되돌리지 않는다.
 
@@ -65,11 +66,23 @@ Job 상태 enum은 `CREATED, WAITING_FOR_SENSOR, CAPTURING, UPLOADING, INGESTING
 
 Evidence `metrics`에는 detector 입력값을 machine-readable 형태로 보존한다. 최종 점수만 저장해 계산 근거를 잃지 않는다.
 
-### 2.5 Allowlist
+### 2.5 분석가 Flow 판정과 Payload signature
+
+| 엔터티 | 핵심 필드/제약 |
+|---|---|
+| `flow_labels` | append-only id, job/flow ID, verdict(`C2/BENIGN`), confidence, note, 안전한 Flow/비가역 Payload 특징 snapshot, actor/time |
+| `payload_signatures` | id, name/description, version, enabled, source job/flow/label, protocol/direction/service-port guard, Payload hash/prefix hash/length/entropy/printable ratio/SimHash, structural threshold, creator/timestamps |
+
+라벨 정정은 기존 행 수정이 아니라 새 라벨 append이며 가장 최근 라벨이 현재 판정이다.
+Signature 조건 변경은 version을 증가시키고 비활성화해도 provenance는 삭제하지 않는다.
+동일 Payload hash에 대한 최신 `BENIGN` 라벨이 있으면 새 C2 signature 생성을 거부한다.
+Payload 원문과 미리보기는 라벨, signature, job snapshot, 감사 로그에 저장하지 않는다.
+
+### 2.6 Allowlist
 
 `allowlist_entries`: id, type(`IP/CIDR/DOMAIN_SUFFIX/TLS_FINGERPRINT/CERT_FINGERPRINT`), normalized value, description, expires_at, enabled, creator, created/updated time. IP/CIDR 명시 match는 후보 제외, 다른 공용/업무 인프라 정책은 score adjustment로 처리한다. `allowlist_suppression_stats`에 run, entry, match count, candidate IP hash/reference, timestamp를 남겨 제외 결과도 감사 가능하게 한다.
 
-### 2.6 PCAP/object
+### 2.7 PCAP/object
 
 | 엔터티 | 핵심 필드/제약 |
 |---|---|
@@ -81,7 +94,7 @@ Evidence `metrics`에는 detector 입력값을 machine-readable 형태로 보존
 
 Export 필터는 candidate IP, internal host IP, time range, port, protocol, direction, sensor를 포함한다. signed URL 자체를 장기 저장하지 않고 만료 시간만 기록한다.
 
-### 2.7 감사·설정·보관
+### 2.8 감사·설정·보관
 
 `audit_logs`: actor user/sensor, occurred_at, source IP, action, target type/id, result, request ID, safe detail JSON. 로그인, 분석 생성/취소, download, allowlist 변경, sensor 등록/해제, 설정/권한 변경, 삭제를 기록하며 secret/payload는 넣지 않는다.
 
@@ -107,6 +120,8 @@ Flow logical key:
 - `packet_size_min/max/avg`, `tcp_flag_counts`
 - `bidirectional`, `payload_length_min/max/avg`
 - `first_payload_hash`, `last_payload_hash`, `pcap_object_id`
+- `payload_prefix_hash`, `first_payload_length`, `payload_entropy`,
+  `payload_printable_ratio`, `payload_simhash`, `payload_feature_version`
 - `ingest_batch_id`, `schema_version`
 
 권장 partition/order: 월/일 partition, `(dataset_id, destination_ip, start_time, sensor_id)` order. 분석은 dataset/time predicate를 항상 포함한다.

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from .domain import AnalysisContext, Detector, Evidence, Flow
+from .payload_features import simhash_hamming_distance
 
 
 def _candidate_host(context: AnalysisContext, flow: Flow) -> tuple[str, str] | None:
@@ -25,6 +26,14 @@ def _groups(context: AnalysisContext) -> dict[str, list[tuple[str, Flow]]]:
         if role:
             grouped[role[0]].append((role[1], flow))
     return grouped
+
+
+def _service_port(context: AnalysisContext, flow: Flow) -> int | None:
+    if context.is_internal(flow.source_ip) and not context.is_internal(flow.destination_ip):
+        return flow.destination_port
+    if context.is_internal(flow.destination_ip) and not context.is_internal(flow.source_ip):
+        return flow.source_port
+    return None
 
 
 def _base_evidence(
@@ -199,6 +208,222 @@ class PeriodicBeaconDetector:
                 )
             )
         return result
+
+
+@dataclass(frozen=True)
+class SingleHostCompositeBeaconDetector:
+    name: str = "single_host_composite_beacon"
+    version: str = "1.0.0"
+
+    def analyze(self, context: AnalysisContext) -> list[Evidence]:
+        minimum = int(context.parameters.get("periodicity_min_samples", 5))
+        maximum_cv = float(context.parameters.get("maximum_beacon_cv", 0.30))
+        result: list[Evidence] = []
+        for candidate, rows in _groups(context).items():
+            if len({host for host, _ in rows}) != 1 or len(rows) < minimum:
+                continue
+            ordered = sorted(rows, key=lambda item: item[1].timestamp)
+            intervals = [
+                (right[1].timestamp - left[1].timestamp).total_seconds()
+                for left, right in zip(ordered, ordered[1:], strict=False)
+            ]
+            mean_interval = statistics.fmean(intervals)
+            interval_cv = (
+                statistics.pstdev(intervals) / mean_interval if mean_interval else math.inf
+            )
+            if mean_interval <= 0 or interval_cv > maximum_cv:
+                continue
+            hashes = Counter(flow.payload_hash for _, flow in rows if flow.payload_hash)
+            payload_stability = max(hashes.values()) / len(rows) if hashes else 0.0
+            sizes = [size for _, flow in rows for size in flow.packet_sizes] or [
+                flow.total_bytes for _, flow in rows
+            ]
+            average_size = statistics.fmean(sizes) if sizes else 0.0
+            size_cv = statistics.pstdev(sizes) / average_size if average_size else math.inf
+            average_packets = statistics.fmean(flow.packet_count for _, flow in rows)
+            if (payload_stability < 0.60 and size_cv > 0.20) or average_packets > 10:
+                continue
+            metrics = {
+                "sample_count": len(rows),
+                "period_seconds": round(mean_interval, 6),
+                "coefficient_of_variation": interval_cv,
+                "payload_stability": payload_stability,
+                "size_coefficient_of_variation": size_cv,
+                "average_packets": average_packets,
+                "distinct_sensors": len({flow.sensor_id for _, flow in rows}),
+            }
+            result.append(
+                _base_evidence(
+                    candidate,
+                    "SINGLE_HOST_BEACON",
+                    self.name,
+                    35,
+                    rows,
+                    metrics,
+                    "단일 내부 호스트의 저용량 주기 통신과 안정된 Payload/크기 패턴",
+                    confidence=0.7,
+                )
+            )
+        return result
+
+
+@dataclass(frozen=True)
+class AnalystPayloadSignatureDetector:
+    name: str = "analyst_payload_signature"
+    version: str = "1.0.0"
+
+    def analyze(self, context: AnalysisContext) -> list[Evidence]:
+        raw_signatures = context.parameters.get("payload_signatures", ())
+        if not isinstance(raw_signatures, list | tuple):
+            return []
+        signatures = [
+            item for item in raw_signatures if isinstance(item, Mapping) and item.get("enabled")
+        ]
+        matched: dict[
+            tuple[str, str], list[tuple[str, Flow, str, dict[str, object], Mapping[str, object]]]
+        ] = defaultdict(list)
+        for flow in context.scoped_flows():
+            role = _candidate_host(context, flow)
+            if role is None:
+                continue
+            candidate, host = role
+            for signature in signatures:
+                comparison = self._match(context, flow, signature)
+                if comparison is None:
+                    continue
+                mode, metrics = comparison
+                signature_id = str(signature.get("id", ""))
+                if not signature_id:
+                    continue
+                matched[(candidate, signature_id)].append((host, flow, mode, metrics, signature))
+
+        result: list[Evidence] = []
+        for (candidate, _signature_id), values in matched.items():
+            exact = [value for value in values if value[2] == "EXACT"]
+            selected = exact or values
+            mode = "EXACT" if exact else "STRUCTURAL"
+            rows = [(host, flow) for host, flow, *_rest in selected]
+            signature = selected[0][4]
+            comparisons = [value[3] for value in selected]
+            metrics: dict[str, object] = {
+                "signature_id": str(signature["id"]),
+                "signature_name": str(signature.get("name", signature["id"])),
+                "signature_version": int(signature.get("version", 1)),
+                "match_mode": mode,
+                "matched_flow_count": len(selected),
+                "sample_count": len(selected),
+                "action": "alert" if mode == "EXACT" else "monitor",
+                "comparisons": comparisons[:20],
+                "analyst_confirmed": mode == "EXACT",
+            }
+            result.append(
+                _base_evidence(
+                    candidate,
+                    "ANALYST_PAYLOAD_SIGNATURE",
+                    self.name,
+                    80 if mode == "EXACT" else 60,
+                    rows,
+                    metrics,
+                    (
+                        "분석가가 승인한 Payload signature와 정확히 일치"
+                        if mode == "EXACT"
+                        else "분석가가 승인한 Payload signature의 구조 특징과 일치"
+                    ),
+                    confidence=1.0 if mode == "EXACT" else 0.7,
+                    warnings=() if mode == "EXACT" else ("structural_match_review",),
+                )
+            )
+        return result
+
+    @staticmethod
+    def _match(
+        context: AnalysisContext, flow: Flow, signature: Mapping[str, object]
+    ) -> tuple[str, dict[str, object]] | None:
+        protocol = str(signature.get("protocol", "")).upper()
+        if protocol and flow.protocol.upper() != protocol:
+            return None
+        direction = str(signature.get("direction", "")).upper()
+        if direction and flow.direction.upper() != direction:
+            return None
+        raw_service_port = signature.get("service_port")
+        if raw_service_port is not None and _service_port(context, flow) != int(raw_service_port):
+            return None
+
+        signature_hash = signature.get("payload_hash")
+        if signature_hash and flow.payload_hash == str(signature_hash):
+            return (
+                "EXACT",
+                {
+                    "payload_hash": flow.payload_hash,
+                    "service_port": _service_port(context, flow),
+                },
+            )
+
+        feature_version = signature.get("payload_feature_version")
+        if feature_version and flow.payload_feature_version != str(feature_version):
+            return None
+        prefix_match = bool(
+            signature.get("payload_prefix_hash")
+            and flow.payload_prefix_hash == str(signature["payload_prefix_hash"])
+        )
+        simhash_distance: int | None = None
+        if signature.get("payload_simhash") and flow.payload_simhash:
+            try:
+                simhash_distance = simhash_hamming_distance(
+                    str(signature["payload_simhash"]), flow.payload_simhash
+                )
+            except ValueError:
+                return None
+        max_distance = int(signature.get("simhash_max_distance", 8))
+        strong_content = prefix_match or (
+            simhash_distance is not None and simhash_distance <= max_distance
+        )
+        if not strong_content:
+            return None
+
+        raw_length = signature.get("payload_length")
+        raw_entropy = signature.get("payload_entropy")
+        if (
+            raw_length is None
+            or flow.payload_length is None
+            or raw_entropy is None
+            or flow.payload_entropy is None
+        ):
+            return None
+        source_length = int(raw_length)
+        length_difference = abs(flow.payload_length - source_length)
+        length_tolerance = max(
+            16,
+            round(source_length * float(signature.get("length_tolerance_ratio", 0.15))),
+        )
+        entropy_difference = abs(flow.payload_entropy - float(raw_entropy))
+        entropy_tolerance = float(signature.get("entropy_tolerance", 0.75))
+        if length_difference > length_tolerance or entropy_difference > entropy_tolerance:
+            return None
+        comparable = (
+            3
+            + int(simhash_distance is not None)
+            + int(
+                flow.payload_printable_ratio is not None
+                and signature.get("payload_printable_ratio") is not None
+            )
+        )
+        if comparable < 3:
+            return None
+        return (
+            "STRUCTURAL",
+            {
+                "prefix_match": prefix_match,
+                "simhash_distance": simhash_distance,
+                "simhash_max_distance": max_distance,
+                "length_difference": length_difference,
+                "length_tolerance": length_tolerance,
+                "entropy_difference": round(entropy_difference, 4),
+                "entropy_tolerance": entropy_tolerance,
+                "comparable_features": comparable,
+                "service_port": _service_port(context, flow),
+            },
+        )
 
 
 @dataclass(frozen=True)
@@ -461,6 +686,8 @@ class MultiSensorDetector:
 DEFAULT_DETECTORS: tuple[Detector, ...] = (
     CommonDestinationDetector(),
     PeriodicBeaconDetector(),
+    SingleHostCompositeBeaconDetector(),
+    AnalystPayloadSignatureDetector(),
     SynchronizedCommunicationDetector(),
     CommandAttackDetector(),
     PersistenceRarityDetector(),

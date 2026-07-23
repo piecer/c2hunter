@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import struct
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from typing import Any
+
+from .payload_features import extract_payload_features
 
 
 class PcapParseError(ValueError):
@@ -60,10 +62,13 @@ def parse_pcap(
     internal_networks: Sequence[str],
     max_packets: int = 2_000_000,
     retain_packet_bytes: bool = True,
+    retain_payload_sample_bytes: int = 0,
 ) -> PcapParseResult:
     """Parse bounded PCAP/PCAPNG bytes into the existing flow-analysis contract."""
     if max_packets < 1:
         raise ValueError("max_packets must be positive")
+    if not 0 <= retain_payload_sample_bytes <= 256:
+        raise ValueError("retain_payload_sample_bytes must be between 0 and 256")
     networks = _networks(internal_networks)
     if content[:4] in _CLASSIC_MAGIC:
         capture_format = "PCAP"
@@ -79,7 +84,13 @@ def parse_pcap(
     for packet in packets:
         captured_packet_count += 1
         link_types.add(packet.link_type)
-        decoded = _decode_packet(packet, sensor_id, networks, retain_packet_bytes)
+        decoded = _decode_packet(
+            packet,
+            sensor_id,
+            networks,
+            retain_packet_bytes,
+            retain_payload_sample_bytes,
+        )
         if decoded is not None:
             records.append(decoded)
     if captured_packet_count == 0:
@@ -100,6 +111,44 @@ def parse_pcap(
         min(timestamps),
         max(timestamps),
     )
+
+
+def find_pcap_record(
+    content: bytes,
+    *,
+    sensor_id: str,
+    internal_networks: Sequence[str],
+    predicate: Callable[[dict[str, Any]], bool],
+    max_packets: int = 2_000_000,
+    retain_payload_sample_bytes: int = 0,
+) -> dict[str, Any] | None:
+    """Decode until a target record is found without materializing the full capture."""
+    if max_packets < 1:
+        raise ValueError("max_packets must be positive")
+    if not 0 <= retain_payload_sample_bytes <= 256:
+        raise ValueError("retain_payload_sample_bytes must be between 0 and 256")
+    networks = _networks(internal_networks)
+    if content[:4] in _CLASSIC_MAGIC:
+        packets = _iter_classic_pcap(content, max_packets)
+    elif content[:4] == _PCAPNG_SECTION:
+        packets = _iter_pcapng(content, max_packets)
+    else:
+        raise PcapParseError("file is not a classic PCAP or PCAPNG capture")
+    captured_packet_count = 0
+    for packet in packets:
+        captured_packet_count += 1
+        decoded = _decode_packet(
+            packet,
+            sensor_id,
+            networks,
+            False,
+            retain_payload_sample_bytes,
+        )
+        if decoded is not None and predicate(decoded):
+            return decoded
+    if captured_packet_count == 0:
+        raise PcapParseError("capture does not contain timestamped packets", "EMPTY_PCAP")
+    return None
 
 
 def _networks(values: Sequence[str]) -> tuple[Network, ...]:
@@ -273,6 +322,7 @@ def _decode_packet(
     sensor_id: str,
     networks: tuple[Network, ...],
     retain_packet_bytes: bool,
+    retain_payload_sample_bytes: int,
 ) -> dict[str, Any] | None:
     network = _network_packet(captured.data, captured.link_type)
     if network is None:
@@ -287,6 +337,7 @@ def _decode_packet(
     source_port = decoded.get("source_port")
     destination_port = decoded.get("destination_port")
     protocol = str(decoded["protocol"])
+    features = extract_payload_features(payload)
     record: dict[str, Any] = {
         "sensor_id": sensor_id,
         "timestamp": captured.timestamp,
@@ -302,6 +353,10 @@ def _decode_packet(
         "domain": _application_domain(protocol, source_port, destination_port, payload),
         "packet_sizes": (len(captured.data),),
     }
+    if features is not None:
+        record.update(features.as_dict())
+    if retain_payload_sample_bytes and payload:
+        record["payload_sample_hex"] = payload[:retain_payload_sample_bytes].hex()
     if retain_packet_bytes:
         record["raw_packet_hex"] = captured.data.hex()
     return record

@@ -1,8 +1,6 @@
 package flow
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"net/netip"
 	"sort"
 	"time"
@@ -10,6 +8,7 @@ import (
 	"c2hunter/sensor/internal/direction"
 	"c2hunter/sensor/internal/metadata"
 	"c2hunter/sensor/internal/packet"
+	"c2hunter/sensor/internal/payloadfeature"
 )
 
 type Key struct {
@@ -33,6 +32,10 @@ type Record struct {
 	MinPayloadLength, MaxPayloadLength uint32
 	AvgPayloadLength                   float64
 	FirstPayloadHash, LastPayloadHash  string
+	PayloadPrefixHash, PayloadSimHash  string
+	FirstPayloadLength                 uint32
+	PayloadEntropy, PayloadPrintable   float64
+	PayloadFeatureVersion              string
 	PCAPObjectReference                string
 	ProtocolMetadata                   metadata.Metadata
 	packetSizeSum, payloadLengthSum    uint64
@@ -80,12 +83,17 @@ func (a *Aggregator) AddWithMetadata(p packet.Packet, protocolMetadata metadata.
 		r.MaxPayloadLength = payloadLen
 	}
 	if len(p.Payload) > 0 {
-		h := sha256.Sum256(p.Payload)
-		encoded := hex.EncodeToString(h[:])
+		features := payloadfeature.Compute(p.Payload)
 		if r.FirstPayloadHash == "" {
-			r.FirstPayloadHash = encoded
+			r.FirstPayloadHash = features.Hash
+			r.PayloadPrefixHash = features.PrefixHash
+			r.FirstPayloadLength = features.Length
+			r.PayloadEntropy = features.Entropy
+			r.PayloadPrintable = features.PrintableRatio
+			r.PayloadSimHash = features.SimHash
+			r.PayloadFeatureVersion = features.Version
 		}
-		r.LastPayloadHash = encoded
+		r.LastPayloadHash = features.Hash
 	}
 	addFlags(&r.TCPFlags, p.TCPFlags)
 	if protocolMetadata.Kind != "" {

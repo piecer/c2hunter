@@ -31,6 +31,11 @@ class Repository(Protocol):
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None: ...
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]: ...
     def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]: ...
+    def save_flow_label(self, label: dict[str, Any]) -> dict[str, Any]: ...
+    def list_flow_labels(self, job_id: str | None = None) -> list[dict[str, Any]]: ...
+    def save_payload_signature(self, signature: dict[str, Any]) -> dict[str, Any]: ...
+    def get_payload_signature(self, signature_id: str) -> dict[str, Any] | None: ...
+    def list_payload_signatures(self) -> list[dict[str, Any]]: ...
     def save_allowlist(self, entry: dict[str, Any]) -> dict[str, Any]: ...
     def list_allowlist(self) -> list[dict[str, Any]]: ...
     def delete_allowlist(self, entry_id: str) -> bool: ...
@@ -58,6 +63,8 @@ class MemoryRepository:
         self.idempotency_keys: dict[str, str] = {}
         self.candidates: dict[str, list[dict[str, Any]]] = {}
         self.job_captures: dict[str, bytes] = {}
+        self.flow_labels: dict[str, dict[str, Any]] = {}
+        self.payload_signatures: dict[str, dict[str, Any]] = {}
         self.allowlist: dict[str, dict[str, Any]] = {}
         self.exports: dict[str, dict[str, Any]] = {}
         self.export_content: dict[str, bytes] = {}
@@ -103,11 +110,19 @@ class MemoryRepository:
             existing = self.jobs.get(job["id"])
             if "flow_records" not in stored and existing is not None:
                 stored["flow_records"] = deepcopy(existing.get("flow_records", []))
+            if "payload_signatures" not in stored and existing is not None:
+                stored["payload_signatures"] = deepcopy(
+                    existing.get("payload_signatures", [])
+                )
             self.jobs[job["id"]] = stored
             return deepcopy(job)
 
     def save_job_metadata(self, job: dict[str, Any]) -> dict[str, Any]:
-        summary = {key: value for key, value in job.items() if key != "flow_records"}
+        summary = {
+            key: value
+            for key, value in job.items()
+            if key not in {"flow_records", "payload_signatures"}
+        }
         return self.save_job(summary)
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
@@ -118,17 +133,35 @@ class MemoryRepository:
         value = self.jobs.get(job_id)
         if value is None:
             return None
-        return deepcopy({key: item for key, item in value.items() if key != "flow_records"})
+        return deepcopy(
+            {
+                key: item
+                for key, item in value.items()
+                if key not in {"flow_records", "payload_signatures"}
+            }
+        )
 
     def list_jobs(self) -> list[dict[str, Any]]:
         return [
-            deepcopy({key: item for key, item in job.items() if key != "flow_records"})
+            deepcopy(
+                {
+                    key: item
+                    for key, item in job.items()
+                    if key not in {"flow_records", "payload_signatures"}
+                }
+            )
             for job in self.jobs.values()
         ]
 
     def list_active_live_jobs(self) -> list[dict[str, Any]]:
         return [
-            deepcopy({key: item for key, item in job.items() if key != "flow_records"})
+            deepcopy(
+                {
+                    key: item
+                    for key, item in job.items()
+                    if key not in {"flow_records", "payload_signatures"}
+                }
+            )
             for job in self.jobs.values()
             if job.get("mode") == "LIVE" and job.get("status") in {"CAPTURING", "UPLOADING"}
         ]
@@ -168,6 +201,32 @@ class MemoryRepository:
 
     def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]:
         return deepcopy(self.candidates)
+
+    def save_flow_label(self, label: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self.flow_labels[label["id"]] = deepcopy(label)
+            return deepcopy(label)
+
+    def list_flow_labels(self, job_id: str | None = None) -> list[dict[str, Any]]:
+        labels = list(self.flow_labels.values())
+        if job_id is not None:
+            labels = [label for label in labels if label.get("job_id") == job_id]
+        return sorted(deepcopy(labels), key=lambda item: str(item["created_at"]))
+
+    def save_payload_signature(self, signature: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self.payload_signatures[signature["id"]] = deepcopy(signature)
+            return deepcopy(signature)
+
+    def get_payload_signature(self, signature_id: str) -> dict[str, Any] | None:
+        value = self.payload_signatures.get(signature_id)
+        return deepcopy(value) if value else None
+
+    def list_payload_signatures(self) -> list[dict[str, Any]]:
+        return sorted(
+            deepcopy(list(self.payload_signatures.values())),
+            key=lambda item: str(item["created_at"]),
+        )
 
     def save_allowlist(self, entry: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -267,6 +326,9 @@ class SQLiteRepository:
             CREATE TABLE IF NOT EXISTS job_flow_records (
               job_id TEXT PRIMARY KEY, data TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS job_payload_signatures (
+              job_id TEXT PRIMARY KEY, data TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS job_capture_blobs (
               job_id TEXT PRIMARY KEY, content BLOB NOT NULL
             );
@@ -275,6 +337,7 @@ class SQLiteRepository:
             );
         """)
         self._migrate_embedded_job_flows()
+        self._migrate_embedded_job_signatures()
         self.connection.commit()
 
     @staticmethod
@@ -321,14 +384,43 @@ class SQLiteRepository:
                 (self._serialize(job), job_id),
             )
 
+    def _migrate_embedded_job_signatures(self) -> None:
+        rows = self.connection.execute(
+            "SELECT id,data FROM objects WHERE kind='job' "
+            "AND json_type(data, '$.payload_signatures') IS NOT NULL"
+        ).fetchall()
+        for job_id, raw in rows:
+            job = json.loads(raw)
+            signatures = job.pop("payload_signatures", [])
+            self.connection.execute(
+                "INSERT INTO job_payload_signatures(job_id,data) VALUES(?,?) "
+                "ON CONFLICT(job_id) DO NOTHING",
+                (job_id, self._serialize(signatures)),
+            )
+            self.connection.execute(
+                "UPDATE objects SET data=? WHERE kind='job' AND id=?",
+                (self._serialize(job), job_id),
+            )
+
     def _save_job_parts(self, job: dict[str, Any]) -> None:
-        metadata = {key: value for key, value in job.items() if key != "flow_records"}
+        metadata = {
+            key: value
+            for key, value in job.items()
+            if key not in {"flow_records", "payload_signatures"}
+        }
         self._put("job", job["id"], metadata)
         if "flow_records" in job:
             self.connection.execute(
                 "INSERT INTO job_flow_records(job_id,data) VALUES(?,?) "
                 "ON CONFLICT(job_id) DO UPDATE SET data=excluded.data",
                 (job["id"], self._serialize(job["flow_records"])),
+            )
+            self.connection.commit()
+        if "payload_signatures" in job:
+            self.connection.execute(
+                "INSERT INTO job_payload_signatures(job_id,data) VALUES(?,?) "
+                "ON CONFLICT(job_id) DO UPDATE SET data=excluded.data",
+                (job["id"], self._serialize(job["payload_signatures"])),
             )
             self.connection.commit()
 
@@ -380,7 +472,11 @@ class SQLiteRepository:
             return deepcopy(job)
 
     def save_job_metadata(self, job: dict[str, Any]) -> dict[str, Any]:
-        metadata = {key: value for key, value in job.items() if key != "flow_records"}
+        metadata = {
+            key: value
+            for key, value in job.items()
+            if key not in {"flow_records", "payload_signatures"}
+        }
         return self._put("job", job["id"], metadata)
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
@@ -391,6 +487,10 @@ class SQLiteRepository:
             "SELECT data FROM job_flow_records WHERE job_id=?", (job_id,)
         ).fetchone()
         job["flow_records"] = json.loads(row[0]) if row else []
+        row = self.connection.execute(
+            "SELECT data FROM job_payload_signatures WHERE job_id=?", (job_id,)
+        ).fetchone()
+        job["payload_signatures"] = json.loads(row[0]) if row else []
         return job
 
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None:
@@ -429,6 +529,9 @@ class SQLiteRepository:
                 )
             self.connection.execute("DELETE FROM candidates WHERE job_id=?", (job_id,))
             self.connection.execute("DELETE FROM job_flow_records WHERE job_id=?", (job_id,))
+            self.connection.execute(
+                "DELETE FROM job_payload_signatures WHERE job_id=?", (job_id,)
+            )
             self.connection.execute("DELETE FROM job_capture_blobs WHERE job_id=?", (job_id,))
             self.connection.execute("DELETE FROM idempotency WHERE job_id=?", (job_id,))
             cursor = self.connection.execute(
@@ -470,6 +573,27 @@ class SQLiteRepository:
     def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]:
         rows = self.connection.execute("SELECT job_id,data FROM candidates").fetchall()
         return {str(job_id): json.loads(data) for job_id, data in rows}
+
+    def save_flow_label(self, label: dict[str, Any]) -> dict[str, Any]:
+        return self._put("flow_label", label["id"], label)
+
+    def list_flow_labels(self, job_id: str | None = None) -> list[dict[str, Any]]:
+        labels = self._list("flow_label")
+        if job_id is not None:
+            labels = [label for label in labels if label.get("job_id") == job_id]
+        return sorted(labels, key=lambda item: str(item["created_at"]))
+
+    def save_payload_signature(self, signature: dict[str, Any]) -> dict[str, Any]:
+        return self._put("payload_signature", signature["id"], signature)
+
+    def get_payload_signature(self, signature_id: str) -> dict[str, Any] | None:
+        return self._get("payload_signature", signature_id)
+
+    def list_payload_signatures(self) -> list[dict[str, Any]]:
+        return sorted(
+            self._list("payload_signature"),
+            key=lambda item: str(item["created_at"]),
+        )
 
     def save_allowlist(self, entry: dict[str, Any]) -> dict[str, Any]:
         return self._put("allowlist", entry["id"], entry)

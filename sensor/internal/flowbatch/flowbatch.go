@@ -24,6 +24,12 @@ type FlowRecord struct {
 	PacketCount            uint64    `json:"packet_count"`
 	TotalBytes             uint64    `json:"total_bytes"`
 	PayloadHash            string    `json:"payload_hash,omitempty"`
+	PayloadPrefixHash      string    `json:"payload_prefix_hash,omitempty"`
+	PayloadLength          *uint32   `json:"payload_length,omitempty"`
+	PayloadEntropy         *float64  `json:"payload_entropy,omitempty"`
+	PayloadPrintableRatio  *float64  `json:"payload_printable_ratio,omitempty"`
+	PayloadSimHash         string    `json:"payload_simhash,omitempty"`
+	PayloadFeatureVersion  string    `json:"payload_feature_version,omitempty"`
 	TLSFingerprint         string    `json:"tls_fingerprint,omitempty"`
 	CertificateFingerprint string    `json:"certificate_fingerprint,omitempty"`
 	Domain                 string    `json:"domain,omitempty"`
@@ -80,7 +86,14 @@ func fromRecord(record flow.Record) FlowRecord {
 		SourcePort: record.Key.SourcePort, DestinationPort: record.Key.DestinationPort,
 		Protocol: protocolName(record.Key.Protocol), Direction: record.Key.Direction.String(),
 		PacketCount: record.PacketCount, TotalBytes: record.TotalBytes,
-		PayloadHash: record.FirstPayloadHash,
+		PayloadHash: record.FirstPayloadHash, PayloadPrefixHash: record.PayloadPrefixHash,
+		PayloadSimHash:        record.PayloadSimHash,
+		PayloadFeatureVersion: record.PayloadFeatureVersion,
+	}
+	if record.FirstPayloadHash != "" {
+		out.PayloadLength = &record.FirstPayloadLength
+		out.PayloadEntropy = &record.PayloadEntropy
+		out.PayloadPrintableRatio = &record.PayloadPrintable
 	}
 	if record.MinPacketSize == record.MaxPacketSize {
 		out.PacketSizes = []uint32{record.MinPacketSize}

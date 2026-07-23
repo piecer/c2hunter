@@ -20,6 +20,12 @@ class Flow:
     packet_count: int = 1
     total_bytes: int = 0
     payload_hash: str | None = None
+    payload_prefix_hash: str | None = None
+    payload_length: int | None = None
+    payload_entropy: float | None = None
+    payload_printable_ratio: float | None = None
+    payload_simhash: str | None = None
+    payload_feature_version: str | None = None
     tls_fingerprint: str | None = None
     certificate_fingerprint: str | None = None
     domain: str | None = None

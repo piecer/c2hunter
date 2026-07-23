@@ -14,6 +14,10 @@ def test_openapi_exposes_every_top_level_web_route() -> None:
     assert schema["paths"]["/api/v1/auth/dev-login"]["post"]
     assert schema["paths"]["/api/v1/candidates"]["get"]
     assert schema["paths"]["/api/v1/candidates/{candidate_id}"]["get"]
+    assert schema["paths"]["/api/v1/analysis-jobs/{job_id}/flows"]["get"]
+    assert schema["paths"]["/api/v1/analysis-jobs/{job_id}/flow-labels"]["post"]
+    assert schema["paths"]["/api/v1/payload-signatures"]["get"]
+    assert schema["paths"]["/api/v1/payload-signatures/{signature_id}"]["patch"]
 
 
 def test_development_login_is_disabled_by_default_and_explicit_when_enabled() -> None:

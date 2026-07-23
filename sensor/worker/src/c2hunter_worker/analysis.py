@@ -18,9 +18,11 @@ def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
             record["timestamp"] = datetime.fromisoformat(timestamp)
         record["packet_sizes"] = tuple(record.get("packet_sizes", ()))
         record.pop("raw_packet_hex", None)
+        record.pop("payload_sample_hex", None)
         flows.append(Flow(**record))
 
     analysis = dict(payload.get("analysis", {}))
+    analysis["payload_signatures"] = list(payload.get("payload_signatures", ()))
     context = AnalysisContext(
         dataset_id=str(payload["dataset_id"]),
         start=datetime.fromisoformat(str(payload["start_time"])),

@@ -4,7 +4,8 @@ import { Link, Navigate, Route, Routes, useNavigate, useParams } from 'react-rou
 import { api } from './api';
 import './styles.css';
 
-type List<T> = { items: T[] } | T[];
+type Page<T> = { items: T[]; page?: number; page_size?: number; total?: number };
+type List<T> = Page<T> | T[];
 const items = <T,>(value?: List<T>) => Array.isArray(value) ? value : value?.items ?? [];
 const fmt = (value?: string) => value ? new Date(value).toLocaleString() : 'Not reported';
 const formatBytes = (value?: number) => {
@@ -26,6 +27,10 @@ type Evidence = { type: string; detector?: string; version?: string; raw_score?:
 type ScoreAdjustment = { kind: string; points: number; explanation: string };
 type TrafficBucket = { start: string; packets: number; bytes: number; flows: number };
 type Candidate = { id: string; job_id?: string; candidate_ip: string; score: number; severity: string; distinct_internal_hosts?: number; hosts?: string[]; internal_hosts?: string[]; sensors?: string[]; sensor_ids?: string[]; protocols?: string[]; ports?: number[]; domains?: string[]; first_seen?: string; last_seen?: string; evidence?: Evidence[]; evidence_count?: number; adjustments?: ScoreAdjustment[]; traffic_series?: number[]; traffic_buckets?: TrafficBucket[]; related_attack_targets?: string[]; flow_count?: number; packet_count?: number; byte_count?: number };
+type FlowLabel = { id: string; verdict: 'C2' | 'BENIGN'; confidence: 'CONFIRMED' | 'HIGH' | 'MEDIUM'; note: string; created_by?: string; created_at: string };
+type FlowRecordReview = { flow_id: string; job_id: string; sensor_id?: string; timestamp: string; source_ip: string; destination_ip: string; source_port?: number; destination_port?: number; internal_ip?: string; external_ip?: string; service_port?: number; protocol: string; direction: string; packet_count?: number; total_bytes?: number; payload_hash?: string; payload_prefix_hash?: string; payload_length?: number; payload_entropy?: number; payload_printable_ratio?: number; payload_simhash?: string; payload_feature_version?: string; has_payload: boolean; current_label?: FlowLabel | null };
+type PayloadPreview = { flow_id: string; payload_hex: string; payload_ascii: string; sample_bytes: number; payload_length?: number; truncated: boolean; payload_hash?: string };
+type PayloadSignature = { id: string; name: string; description?: string; version: number; enabled: boolean; source_job_id: string; source_flow_id: string; source_label_id: string; protocol?: string; direction?: string; service_port?: number; payload_hash?: string; payload_prefix_hash?: string; payload_length?: number; payload_entropy?: number; payload_printable_ratio?: number; payload_simhash?: string; payload_feature_version?: string; length_tolerance_ratio: number; entropy_tolerance: number; simhash_max_distance: number; created_by?: string; created_at: string; updated_at?: string };
 type AllowEntry = { id: string; type: string; value: string; description?: string; expires_at?: string };
 const PCAP_UPLOAD_MAX_BYTES = 500 * 1024 * 1024;
 const sensorStatus = (sensor: Sensor) => sensor.status ?? sensor.derived_status ?? 'OFFLINE';
@@ -66,7 +71,7 @@ function Login() {
 
 function Shell({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
-  return <div className="shell"><aside><div className="brand">C2<span>Hunter</span></div><nav aria-label="Primary"><Link to="/">Dashboard</Link><Link to="/sensors">Sensors</Link><Link to="/external-sensors">External sensors</Link><Link className="nav-child" to="/external-sensors/enroll">Enroll sensor</Link><Link to="/analyses">Analysis history</Link><Link className="nav-child" to="/analyses/new">New analysis</Link><Link className="nav-child" to="/analyses/upload">Upload PCAP</Link><Link to="/candidates">Candidates</Link><Link to="/allowlist">Allowlist</Link></nav><button className="quiet" onClick={() => { localStorage.removeItem('c2hunter-token'); navigate('/login'); }}>Sign out</button></aside><main className="content">{children}</main></div>;
+  return <div className="shell"><aside><div className="brand">C2<span>Hunter</span></div><nav aria-label="Primary"><Link to="/">Dashboard</Link><Link to="/sensors">Sensors</Link><Link to="/external-sensors">External sensors</Link><Link className="nav-child" to="/external-sensors/enroll">Enroll sensor</Link><Link to="/analyses">Analysis history</Link><Link className="nav-child" to="/analyses/new">New analysis</Link><Link className="nav-child" to="/analyses/upload">Upload PCAP</Link><Link to="/candidates">Candidates</Link><Link to="/payload-signatures">Payload signatures</Link><Link to="/allowlist">Allowlist</Link></nav><button className="quiet" onClick={() => { localStorage.removeItem('c2hunter-token'); navigate('/login'); }}>Sign out</button></aside><main className="content">{children}</main></div>;
 }
 
 function Dashboard() {
@@ -219,7 +224,7 @@ function PcapUpload() {
 function NewAnalysis() {
   const navigate = useNavigate(); const sensors = useQuery<List<Sensor>, Error>({ queryKey: ['sensors'], queryFn: () => api.get('/sensors') }); const mutation = useMutation({ mutationFn: (body: unknown) => api.post<Job>('/analysis-jobs', body), onSuccess: j => navigate(`/analyses/${j.id}`) });
   const submit = (e: FormEvent<HTMLFormElement>) => { e.preventDefault(); const f = new FormData(e.currentTarget); const start = new Date(); const end = new Date(start.getTime() + Number(f.get('duration')) * 1000); mutation.mutate({ name: f.get('name'), idempotency_key: idempotencyKey(), sensor_ids: f.getAll('sensor_ids'), mode: f.get('mode'), start_time: start.toISOString(), end_time: end.toISOString(), internal_networks: String(f.get('internal_networks')).split(',').map(value => value.trim()).filter(Boolean), capture: { duration_seconds: Number(f.get('duration')), max_packets: Number(f.get('max_packets')), directions: f.getAll('directions'), bpf_filter: f.get('bpf'), store_pcap: f.get('store_pcap') === 'on' }, analysis: { profile: 'ddos_botnet', minimum_candidate_score: Number(f.get('score')), minimum_distinct_clients: Number(f.get('hosts')) } }); };
-  return <><header><p className="eyebrow">INVESTIGATION</p><h1>New analysis</h1></header><form className="panel form" onSubmit={submit}><label>Analysis name<input name="name" required /></label><fieldset><legend>Sensors</legend><AsyncState query={sensors}>{d => <>{items(d).map(s => <label className="check" key={s.sensor_id}><input type="checkbox" name="sensor_ids" value={s.sensor_id} aria-label={s.name}/>{s.name}</label>)}</>}</AsyncState></fieldset><div className="grid"><label>Data source<select name="mode"><option value="LIVE">Live capture</option><option value="HISTORICAL">Historical</option></select></label><label>Duration (seconds)<input name="duration" type="number" min="1" defaultValue="300" /></label><label>Internal networks<input name="internal_networks" defaultValue="10.0.0.0/8" required /></label><label>Maximum packets<input name="max_packets" type="number" min="1" defaultValue="2000000" /></label><label>BPF filter<input name="bpf" defaultValue="ip" /></label><label>Minimum score<input name="score" type="number" min="0" max="100" defaultValue="60" /></label><label>Minimum internal hosts<input name="hosts" type="number" min="2" defaultValue="5" /></label></div><fieldset><legend>Directions</legend>{['INBOUND','OUTBOUND'].map(v => <label className="check" key={v}><input type="checkbox" name="directions" value={v} defaultChecked/>{v}</label>)}</fieldset><label className="check"><input type="checkbox" name="store_pcap" defaultChecked/>Store PCAP</label>{mutation.error && <p role="alert">{mutation.error.message}</p>}<button disabled={mutation.isPending}>{mutation.isPending ? 'Starting…' : 'Start analysis'}</button></form></>;
+  return <><header><p className="eyebrow">INVESTIGATION</p><h1>New analysis</h1></header><form className="panel form" onSubmit={submit}><label>Analysis name<input name="name" required /></label><fieldset><legend>Sensors</legend><AsyncState query={sensors}>{d => <>{items(d).map(s => <label className="check" key={s.sensor_id}><input type="checkbox" name="sensor_ids" value={s.sensor_id} aria-label={s.name}/>{s.name}</label>)}</>}</AsyncState></fieldset><div className="grid"><label>Data source<select name="mode"><option value="LIVE">Live capture</option><option value="HISTORICAL">Historical</option></select></label><label>Duration (seconds)<input name="duration" type="number" min="1" defaultValue="300" /></label><label>Internal networks<input name="internal_networks" defaultValue="10.0.0.0/8" required /></label><label>Maximum packets<input name="max_packets" type="number" min="1" defaultValue="2000000" /></label><label>BPF filter<input name="bpf" defaultValue="ip" /></label><label>Minimum score<input name="score" type="number" min="0" max="100" defaultValue="20" /></label><label>Minimum internal hosts<input name="hosts" type="number" min="2" defaultValue="3" /></label></div><fieldset><legend>Directions</legend>{['INBOUND','OUTBOUND'].map(v => <label className="check" key={v}><input type="checkbox" name="directions" value={v} defaultChecked/>{v}</label>)}</fieldset><label className="check"><input type="checkbox" name="store_pcap" defaultChecked/>Store PCAP</label>{mutation.error && <p role="alert">{mutation.error.message}</p>}<button disabled={mutation.isPending}>{mutation.isPending ? 'Starting…' : 'Start analysis'}</button></form></>;
 }
 
 function JobDetail() {
@@ -258,6 +263,7 @@ function JobDetail() {
         <article className="panel"><h2>Detector settings</h2>{Object.keys(j.analysis ?? {}).length ? <dl>{Object.entries(j.analysis ?? {}).map(([key, value]) => <Fragment key={key}><dt>{humanize(key)}</dt><dd>{formatValue(value)}</dd></Fragment>)}</dl> : <p className="muted">No detector parameters were recorded.</p>}</article>
       </section>
       <section className="panel compact"><h2>Detected candidates</h2><AsyncState query={candidates} empty={data => items(data).length === 0}>{data => <div className="table-wrap"><table aria-label="Analysis candidates"><thead><tr><th>Candidate</th><th>Score</th><th>Hosts / sensors</th><th>Network context</th><th>Evidence</th><th>Observed</th></tr></thead><tbody>{items(data).map(candidate => { const hosts = candidateHosts(candidate); const sensors = candidateSensors(candidate); const protocols = strings(candidate.protocols); const ports = numbers(candidate.ports); const evidence = candidateEvidence(candidate); return <tr key={candidate.id}><td><Link to={`/candidates/${candidate.id}`}>{candidate.candidate_ip}</Link><small className={candidate.severity.toLowerCase()}>{candidate.severity}</small></td><td><strong>{candidate.score}</strong></td><td>{hosts.length || candidate.distinct_internal_hosts || 0} host(s)<small>{sensors.length} sensor(s)</small></td><td>{protocols.length ? protocols.join(', ') : 'Unknown protocol'}<small>{ports.length ? `Ports ${ports.join(', ')}` : 'No service port'}</small></td><td>{candidate.evidence_count ?? evidence.length}<small>{evidence.map(item => item.type).join(', ') || 'No evidence details'}</small></td><td>{fmt(candidate.first_seen)}<small>to {fmt(candidate.last_seen)}</small></td></tr>; })}</tbody></table></div>}</AsyncState></section>
+      <JobFlowReviewPanel jobId={j.id} />
       <section className="panel compact"><h2>State transitions</h2>{j.transitions?.length ? <ol className="timeline">{j.transitions.map((transition, index) => <li key={`${transition.to_status}-${transition.occurred_at}-${index}`}><strong>{transition.to_status}</strong><span>{fmt(transition.occurred_at)}</span><p>{transition.reason ?? 'No transition reason recorded'}{transition.from_status ? ` · from ${transition.from_status}` : ''}</p></li>)}</ol> : <p className="muted">No state transition history was recorded.</p>}</section>
     </>;
   }}</AsyncState>;
@@ -288,12 +294,159 @@ function CandidateDetail() {
       <header className="header-actions"><div><p className="eyebrow">CANDIDATE DETAIL</p><h1>{candidate.candidate_ip}</h1><span className={`badge ${candidate.severity.toLowerCase()}`}>{candidate.score} · {candidate.severity}</span><p className="record-id">Candidate {candidate.id}</p></div>{candidate.job_id && <Link to={`/analyses/${candidate.job_id}`}>View source analysis</Link>}</header>
       <section className="metrics compact"><article><strong>{hosts.length || candidate.distinct_internal_hosts || 0}</strong><span>Internal hosts</span></article><article><strong>{sensors.length}</strong><span>Sensors</span></article><article><strong>{(candidate.flow_count ?? 0).toLocaleString()}</strong><span>Flows</span></article><article><strong>{(candidate.packet_count ?? 0).toLocaleString()}</strong><span>Packets</span></article><article><strong>{formatBytes(candidate.byte_count)}</strong><span>Traffic bytes</span></article><article><strong>{evidence.length}</strong><span>Evidence signals</span></article></section>
       <div className="grid compact"><section className="panel"><h2>Traffic over time</h2>{traffic.length ? <MiniChart values={traffic} label="Traffic over time" /> : <p className="muted">No traffic series was retained for this candidate.</p>}{buckets.length > 0 && <div className="table-wrap"><table aria-label="Candidate traffic buckets"><thead><tr><th>Bucket start</th><th>Flows</th><th>Packets</th><th>Bytes</th></tr></thead><tbody>{buckets.map(bucket => <tr key={bucket.start}><td>{fmt(bucket.start)}</td><td>{bucket.flows}</td><td>{bucket.packets}</td><td>{formatBytes(bucket.bytes)}</td></tr>)}</tbody></table></div>}</section><section className="panel"><h2>Network context</h2><dl><dt>Protocols</dt><dd>{formatValue(protocols)}</dd><dt>Service ports</dt><dd>{formatValue(ports)}</dd><dt>Domains</dt><dd>{formatValue(domains)}</dd><dt>First observed</dt><dd>{fmt(candidate.first_seen)}</dd><dt>Last observed</dt><dd>{fmt(candidate.last_seen)}</dd><dt>Internal hosts</dt><dd>{formatValue(hosts)}</dd><dt>Sensors</dt><dd>{formatValue(sensors)}</dd><dt>Related attack targets</dt><dd>{formatValue(candidate.related_attack_targets)}</dd></dl></section></div>
+      <FlowReviewPanel candidate={candidate} />
       <section className="panel compact"><h2>Detection evidence</h2>{evidence.length ? evidence.map((item, index) => <article className="evidence detailed" key={`${item.detector ?? item.type}-${index}`}><div><strong>{item.type}</strong><small>{item.detector ?? 'Unknown detector'}{item.version ? ` · v${item.version}` : ''}</small></div><span>+{formatValue(item.contribution ?? item.score ?? item.raw_score ?? 0)}</span><p>{item.description ?? 'No evidence description was recorded.'}</p><dl><dt>Raw score</dt><dd>{formatValue(item.raw_score)}</dd><dt>Confidence</dt><dd>{item.confidence === undefined ? 'Not reported' : `${Math.round(item.confidence * 100)}%`}</dd><dt>Observed</dt><dd>{fmt(item.first_seen)} – {fmt(item.last_seen)}</dd><dt>Hosts</dt><dd>{formatValue(item.hosts)}</dd><dt>Sensors</dt><dd>{formatValue(item.sensors)}</dd></dl>{item.metrics && Object.keys(item.metrics).length > 0 && <div className="evidence-metrics">{Object.entries(item.metrics).map(([key, value]) => <span key={key}><b>{humanize(key)}</b>{formatValue(value)}</span>)}</div>}{strings(item.warnings).map(warning => <p className="warning" key={warning}>{warning}</p>)}</article>) : <p className="muted">No evidence details were recorded.</p>}</section>
       <section className="panel compact"><h2>Score adjustments</h2>{adjustments.length ? <ul className="adjustments">{adjustments.map((adjustment, index) => <li key={`${adjustment.kind}-${index}`}><strong className={adjustment.points < 0 ? 'critical' : 'low'}>{adjustment.points > 0 ? '+' : ''}{adjustment.points}</strong><span>{humanize(adjustment.kind)} · {adjustment.explanation}</span></li>)}</ul> : <p className="muted">No score adjustments were applied.</p>}<div className="actions"><button disabled={!candidate.job_id || exportPcap.isPending} onClick={() => exportPcap.mutate()}>{exportPcap.isPending ? 'Requesting export…' : 'Export candidate PCAP'}</button><button className="secondary" disabled={!candidate.job_id || reanalyze.isPending} onClick={() => reanalyze.mutate()}>{reanalyze.isPending ? 'Creating reanalysis…' : 'Reanalyze'}</button></div>{(exportPcap.error || reanalyze.error) && <p role="alert" className="error-text">{exportPcap.error?.message ?? reanalyze.error?.message}</p>}{notice && <p role="status">{notice}</p>}</section>
     </>;
   }}</AsyncState>;
 }
 
+function JobFlowReviewPanel({ jobId }: { jobId: string }) {
+  const defaults = { candidateIp: '', direction: '', protocol: '', port: '', payloadOnly: true };
+  const [draft, setDraft] = useState(defaults);
+  const [filters, setFilters] = useState(defaults);
+  const [page, setPage] = useState(1);
+  const query = useQuery<Page<FlowRecordReview>, Error>({
+    queryKey: ['job-flows', jobId, filters, page],
+    queryFn: () => {
+      const parameters = new URLSearchParams({ page: String(page), page_size: '50' });
+      if (filters.candidateIp) parameters.set('candidate_ip', filters.candidateIp);
+      if (filters.direction) parameters.set('direction', filters.direction);
+      if (filters.protocol) parameters.set('protocol', filters.protocol);
+      if (filters.port) parameters.set('port', filters.port);
+      if (filters.payloadOnly) parameters.set('has_payload', 'true');
+      return api.get(`/analysis-jobs/${jobId}/flows?${parameters.toString()}`);
+    },
+  });
+  const applyFilters = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setPage(1);
+    setFilters({ ...draft });
+  };
+  const resetFilters = () => {
+    setDraft(defaults);
+    setFilters(defaults);
+    setPage(1);
+  };
+  return <section className="panel compact"><h2>All analysis flows</h2><p className="muted">Browse and label a flow even when no detector promoted its external IP to a candidate. Payload-bearing flows are shown by default.</p><form className="flow-filters" onSubmit={applyFilters}><label>Endpoint IP<input value={draft.candidateIp} onChange={event => setDraft({ ...draft, candidateIp: event.target.value })} placeholder="Internal or external IP" /></label><label>Direction<select value={draft.direction} onChange={event => setDraft({ ...draft, direction: event.target.value })}><option value="">Any</option>{directions.map(direction => <option key={direction}>{direction}</option>)}</select></label><label>Protocol<input value={draft.protocol} onChange={event => setDraft({ ...draft, protocol: event.target.value })} placeholder="TCP or UDP" /></label><label>External service port<input value={draft.port} onChange={event => setDraft({ ...draft, port: event.target.value })} type="number" min="0" max="65535" /></label><label className="check"><input type="checkbox" checked={draft.payloadOnly} onChange={event => setDraft({ ...draft, payloadOnly: event.target.checked })} />Payload only</label><button>Apply filters</button><button type="button" className="secondary" onClick={resetFilters}>Reset</button></form><AsyncState query={query} empty={data => items(data).length === 0}>{data => <><div className="table-wrap"><table aria-label="Analysis flows"><thead><tr><th>Observed</th><th>Direction</th><th>Endpoints</th><th>Protocol</th><th>Volume</th><th>Payload features</th><th>Current label</th><th>Review</th></tr></thead><tbody>{items(data).map(flow => <FlowReviewRow key={flow.flow_id} flow={flow} />)}</tbody></table></div><FlowPagination data={data} page={page} onPage={setPage} /></>}</AsyncState></section>;
+}
+
+function FlowPagination({ data, page, onPage }: { data: Page<FlowRecordReview>; page: number; onPage: (page: number) => void }) {
+  const pageSize = data.page_size ?? 50;
+  const total = data.total ?? items(data).length;
+  const current = data.page ?? page;
+  return <div className="pagination"><span>Flows {(current - 1) * pageSize + 1}–{Math.min(current * pageSize, total)} of {total}</span><div className="row-actions"><button type="button" className="secondary" disabled={page <= 1} onClick={() => onPage(Math.max(1, page - 1))}>Previous flows</button><button type="button" className="secondary" disabled={page * pageSize >= total} onClick={() => onPage(page + 1)}>Next flows</button></div></div>;
+}
+
+function FlowReviewPanel({ candidate }: { candidate: Candidate }) {
+  const [page, setPage] = useState(1);
+  const query = useQuery<Page<FlowRecordReview>, Error>({
+    queryKey: ['candidate-flows', candidate.job_id, candidate.candidate_ip, page],
+    queryFn: () => api.get(`/analysis-jobs/${candidate.job_id}/flows?candidate_ip=${encodeURIComponent(candidate.candidate_ip)}&page=${page}&page_size=50`),
+    enabled: Boolean(candidate.job_id),
+  });
+  if (!candidate.job_id) return <section className="panel compact"><h2>Flow review</h2><p className="muted">The source analysis is unavailable, so its flows cannot be reviewed.</p></section>;
+  return <section className="panel compact"><h2>Flow review</h2><p className="muted">Inspect a retained payload only when needed, then record an analyst verdict. C2 labels can create a reusable, non-reversible payload signature for future analyses.</p><AsyncState query={query} empty={data => items(data).length === 0}>{data => <><div className="table-wrap"><table aria-label="Candidate flows"><thead><tr><th>Observed</th><th>Direction</th><th>Endpoints</th><th>Protocol</th><th>Volume</th><th>Payload features</th><th>Current label</th><th>Review</th></tr></thead><tbody>{items(data).map(flow => <FlowReviewRow key={flow.flow_id} flow={flow} candidateIp={candidate.candidate_ip} />)}</tbody></table></div><FlowPagination data={data} page={page} onPage={setPage} /></>}</AsyncState></section>;
+}
+
+function FlowReviewRow({ flow, candidateIp }: { flow: FlowRecordReview; candidateIp?: string }) {
+  const client = useQueryClient();
+  const [verdict, setVerdict] = useState<'C2' | 'BENIGN'>();
+  const [confidence, setConfidence] = useState<'CONFIRMED' | 'HIGH' | 'MEDIUM'>('HIGH');
+  const [note, setNote] = useState('');
+  const [createSignature, setCreateSignature] = useState(true);
+  const [signatureName, setSignatureName] = useState('');
+  const [notice, setNotice] = useState('');
+  const preview = useMutation<PayloadPreview, Error>({
+    mutationFn: () => api.get(`/analysis-jobs/${flow.job_id}/flows/${flow.flow_id}/payload-preview`),
+  });
+  const label = useMutation<{ label: FlowLabel; signature?: PayloadSignature | null }, Error>({
+    mutationFn: () => api.post(`/analysis-jobs/${flow.job_id}/flow-labels`, {
+      flow_id: flow.flow_id,
+      verdict,
+      confidence,
+      note,
+      create_signature: verdict === 'C2' && createSignature,
+      signature_name: verdict === 'C2' && createSignature ? signatureName : undefined,
+      signature_description: verdict === 'C2' && createSignature ? note : '',
+    }),
+    onSuccess: result => {
+      setNotice(result.signature ? `C2 label and signature "${result.signature.name}" saved.` : `${result.label.verdict} label saved.`);
+      setVerdict(undefined);
+      setNote('');
+      client.invalidateQueries({ queryKey: ['candidate-flows'] });
+      client.invalidateQueries({ queryKey: ['job-flows', flow.job_id] });
+      client.invalidateQueries({ queryKey: ['payload-signatures'] });
+    },
+  });
+  const startReview = (nextVerdict: 'C2' | 'BENIGN') => {
+    label.reset();
+    setNotice('');
+    setVerdict(nextVerdict);
+    setCreateSignature(nextVerdict === 'C2');
+    if (nextVerdict === 'C2' && !signatureName) setSignatureName(`${flow.protocol} ${flow.external_ip ?? candidateIp ?? 'unknown'} payload`);
+  };
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    label.mutate();
+  };
+  return <Fragment>
+    <tr>
+      <td>{fmt(flow.timestamp)}<small>{flow.sensor_id ?? 'Unknown sensor'}</small></td>
+      <td><code>{flow.direction}</code></td>
+      <td><code>{flow.source_ip}:{flow.source_port ?? '–'}</code><small>→ {flow.destination_ip}:{flow.destination_port ?? '–'}</small></td>
+      <td>{flow.protocol}<small>External service {flow.service_port ?? 'unknown'}</small></td>
+      <td>{(flow.packet_count ?? 0).toLocaleString()} packets<small>{formatBytes(flow.total_bytes)}</small></td>
+      <td>{flow.has_payload ? <><span>{formatBytes(flow.payload_length)}</span><small>entropy {formatValue(flow.payload_entropy)} · printable {flow.payload_printable_ratio === undefined ? 'unknown' : `${Math.round(flow.payload_printable_ratio * 100)}%`}</small><small className="hash-value">SHA-256 {flow.payload_hash?.slice(0, 16)}… · SimHash {flow.payload_simhash ?? 'unavailable'}</small></> : <span className="muted">No payload</span>}</td>
+      <td>{flow.current_label ? <><span className={`badge ${flow.current_label.verdict === 'C2' ? 'critical' : 'low'}`}>{flow.current_label.verdict}</span><small>{flow.current_label.confidence} · {fmt(flow.current_label.created_at)}</small><small>{flow.current_label.note}</small></> : <span className="muted">Unreviewed</span>}</td>
+      <td><div className="row-actions"><button type="button" className="secondary" disabled={!flow.has_payload || preview.isPending} aria-label={`Preview payload ${flow.flow_id}`} onClick={() => preview.mutate()}>{preview.isPending ? 'Loading…' : 'Preview payload'}</button><button type="button" className="danger" aria-label={`Mark C2 ${flow.flow_id}`} onClick={() => startReview('C2')}>Mark C2</button><button type="button" className="secondary" aria-label={`Mark benign ${flow.flow_id}`} onClick={() => startReview('BENIGN')}>Mark benign</button></div></td>
+    </tr>
+    {(preview.data || preview.error) && <tr className="expanded-row"><td colSpan={8}><section aria-label={`Payload preview ${flow.flow_id}`} className="payload-preview"><div className="header-actions"><div><strong>Explicit payload preview</strong><small>{preview.data ? `${preview.data.sample_bytes} of ${preview.data.payload_length ?? preview.data.sample_bytes} bytes${preview.data.truncated ? ' (truncated)' : ''}` : 'Preview unavailable'}</small></div><button type="button" className="secondary" onClick={() => preview.reset()}>Close preview</button></div>{preview.error ? <p role="alert" className="error-text">{preview.error.message}</p> : <><p><strong>ASCII</strong></p><pre>{preview.data?.payload_ascii}</pre><p><strong>Hex</strong></p><pre>{preview.data?.payload_hex}</pre></>}</section></td></tr>}
+    {verdict && <tr className="expanded-row"><td colSpan={8}><form className="flow-review-form" onSubmit={submit}><h3>Record {verdict} verdict</h3><div className="grid"><label>Confidence<select value={confidence} onChange={event => setConfidence(event.target.value as typeof confidence)}><option>CONFIRMED</option><option>HIGH</option><option>MEDIUM</option></select></label><label>Analyst note<textarea value={note} onChange={event => setNote(event.target.value)} maxLength={5000} rows={3} required /></label></div>{verdict === 'C2' && <fieldset><legend>Future detection</legend><label className="check"><input type="checkbox" checked={createSignature} onChange={event => setCreateSignature(event.target.checked)} disabled={!flow.has_payload} />Create payload signature</label>{createSignature && <label>Signature name<input value={signatureName} onChange={event => setSignatureName(event.target.value)} maxLength={200} required /></label>}<p className="muted">Exact payload matches alert at high confidence. Structural matches remain monitor-only and keep protocol, direction, and service-port guards.</p></fieldset>}{label.error && <p role="alert" className="error-text">{label.error.message}</p>}<div className="actions"><button disabled={label.isPending}>{label.isPending ? 'Saving…' : `Save ${verdict} label`}</button><button type="button" className="secondary" onClick={() => setVerdict(undefined)}>Cancel</button></div></form></td></tr>}
+    {notice && <tr className="expanded-row"><td colSpan={8}><p role="status">{notice}</p></td></tr>}
+  </Fragment>;
+}
+
+function PayloadSignatures() {
+  const query = useQuery<List<PayloadSignature>, Error>({ queryKey: ['payload-signatures'], queryFn: () => api.get('/payload-signatures?page_size=200') });
+  return <><header><p className="eyebrow">ANALYST-GUIDED DETECTION</p><h1>Payload signatures</h1><p className="muted">Manage versioned signatures created from confirmed C2 flows. Disabled signatures retain their provenance but are excluded from future analysis snapshots.</p></header><AsyncState query={query} empty={data => items(data).length === 0}>{data => <div className="table-wrap"><table aria-label="Payload signatures"><thead><tr><th>Signature</th><th>Status</th><th>Guards</th><th>Match features</th><th>Thresholds</th><th>Provenance</th><th>Manage</th></tr></thead><tbody>{items(data).map(signature => <PayloadSignatureRow key={signature.id} signature={signature} />)}</tbody></table></div>}</AsyncState></>;
+}
+
+function PayloadSignatureRow({ signature }: { signature: PayloadSignature }) {
+  const client = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const update = useMutation<PayloadSignature, Error, Partial<PayloadSignature>>({
+    mutationFn: changes => api.patch(`/payload-signatures/${signature.id}`, changes),
+    onSuccess: () => {
+      setEditing(false);
+      client.invalidateQueries({ queryKey: ['payload-signatures'] });
+    },
+  });
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    update.mutate({
+      name: String(form.get('name')),
+      description: String(form.get('description') ?? ''),
+      length_tolerance_ratio: Number(form.get('length_tolerance_ratio')),
+      entropy_tolerance: Number(form.get('entropy_tolerance')),
+      simhash_max_distance: Number(form.get('simhash_max_distance')),
+    });
+  };
+  return <Fragment>
+    <tr>
+      <td><strong>{signature.name}</strong><small>{signature.description || 'No description'}</small><small>Version {signature.version}</small></td>
+      <td><span className={`badge ${signature.enabled ? 'online' : 'offline'}`}>{signature.enabled ? 'ENABLED' : 'DISABLED'}</span></td>
+      <td>{signature.protocol ?? 'Any protocol'}<small>{signature.direction ?? 'Any direction'} · port {signature.service_port ?? 'any'}</small></td>
+      <td>Exact SHA-256<small>{signature.payload_prefix_hash || signature.payload_simhash ? 'Structural comparison available' : 'Exact only'}</small><small className="hash-value">{signature.payload_hash?.slice(0, 20)}…</small></td>
+      <td>Length ±{Math.round(signature.length_tolerance_ratio * 100)}%<small>Entropy ±{signature.entropy_tolerance} · SimHash ≤ {signature.simhash_max_distance}</small></td>
+      <td><Link to={`/analyses/${signature.source_job_id}`}>Source analysis</Link><small>Flow {signature.source_flow_id}</small><small>{fmt(signature.created_at)} · {signature.created_by ?? 'analyst'}</small></td>
+      <td><div className="row-actions"><button type="button" className={signature.enabled ? 'danger' : ''} disabled={update.isPending} aria-label={`${signature.enabled ? 'Disable' : 'Enable'} ${signature.name}`} onClick={() => update.mutate({ enabled: !signature.enabled })}>{signature.enabled ? 'Disable' : 'Enable'}</button><button type="button" className="secondary" aria-label={`Edit ${signature.name}`} onClick={() => { update.reset(); setEditing(true); }}>Edit</button></div>{update.error && !editing && <p role="alert" className="error-text">{update.error.message}</p>}</td>
+    </tr>
+    {editing && <tr className="expanded-row"><td colSpan={7}><form className="flow-review-form" onSubmit={submit}><h3>Edit payload signature</h3><div className="grid"><label>Name<input name="name" defaultValue={signature.name} maxLength={200} required /></label><label>Description<textarea name="description" defaultValue={signature.description} maxLength={2000} rows={3} /></label><label>Length tolerance ratio<input name="length_tolerance_ratio" type="number" min="0" max="1" step="0.01" defaultValue={signature.length_tolerance_ratio} required /></label><label>Entropy tolerance<input name="entropy_tolerance" type="number" min="0" max="4" step="0.01" defaultValue={signature.entropy_tolerance} required /></label><label>SimHash maximum distance<input name="simhash_max_distance" type="number" min="0" max="32" defaultValue={signature.simhash_max_distance} required /></label></div><p className="muted">Saving creates the next signature version. Existing completed analyses keep their original snapshot.</p>{update.error && <p role="alert" className="error-text">{update.error.message}</p>}<div className="actions"><button disabled={update.isPending}>{update.isPending ? 'Saving…' : 'Save signature'}</button><button type="button" className="secondary" onClick={() => setEditing(false)}>Cancel</button></div></form></td></tr>}
+  </Fragment>;
+}
+
 function Allowlist() { const client = useQueryClient(); const q = useQuery<List<AllowEntry>, Error>({ queryKey: ['allowlist'], queryFn: () => api.get('/allowlist') }); const add = useMutation({ mutationFn: (body: unknown) => api.post('/allowlist', body), onSuccess: () => client.invalidateQueries({ queryKey: ['allowlist'] }) }); const remove = useMutation({ mutationFn: (id: string) => api.delete(`/allowlist/${id}`), onSuccess: () => client.invalidateQueries({ queryKey: ['allowlist'] }) }); const submit = (e: FormEvent<HTMLFormElement>) => { e.preventDefault(); const f = new FormData(e.currentTarget); add.mutate(Object.fromEntries(f.entries())); e.currentTarget.reset(); }; return <><header><p className="eyebrow">FALSE-POSITIVE CONTROL</p><h1>Allowlist</h1></header><form className="panel form-inline" onSubmit={submit}><label>Type<select name="type"><option>IP</option><option>CIDR</option><option>DOMAIN_SUFFIX</option><option>TLS_FINGERPRINT</option><option>CERT_FINGERPRINT</option></select></label><label>Value<input name="value" required /></label><label>Description<input name="description" /></label><label>Expires at<input name="expires_at" type="datetime-local" /></label><button>Add entry</button></form><AsyncState query={q}>{d => items(d).length ? <ul className="entries">{items(d).map(e => <li key={e.id}><code>{e.type}</code><strong>{e.value}</strong><span>{e.description}</span><button className="danger" aria-label={`Delete ${e.value}`} onClick={() => remove.mutate(e.id)}>Delete</button></li>)}</ul> : <div className="state">No allowlist entries</div>}</AsyncState></>; }
 
-export default function App() { const authenticated = Boolean(localStorage.getItem('c2hunter-token')); return <Routes><Route path="/login" element={<Login/>}/><Route path="*" element={!authenticated ? <Navigate to="/login" replace/> : <Shell><Routes><Route path="/" element={<Dashboard/>}/><Route path="/sensors" element={<Sensors/>}/><Route path="/sensors/:id" element={<SensorDetail/>}/><Route path="/external-sensors" element={<ExternalSensors/>}/><Route path="/external-sensors/enroll" element={<EnrollSensor/>}/><Route path="/analyses" element={<AnalysisHistory/>}/><Route path="/analyses/new" element={<NewAnalysis/>}/><Route path="/analyses/upload" element={<PcapUpload/>}/><Route path="/analyses/:id" element={<JobDetail/>}/><Route path="/candidates" element={<Candidates/>}/><Route path="/candidates/:id" element={<CandidateDetail/>}/><Route path="/allowlist" element={<Allowlist/>}/><Route path="*" element={<div className="state"><h1>Page not found</h1><Link to="/">Return to dashboard</Link></div>}/></Routes></Shell>}/></Routes>; }
+export default function App() { const authenticated = Boolean(localStorage.getItem('c2hunter-token')); return <Routes><Route path="/login" element={<Login/>}/><Route path="*" element={!authenticated ? <Navigate to="/login" replace/> : <Shell><Routes><Route path="/" element={<Dashboard/>}/><Route path="/sensors" element={<Sensors/>}/><Route path="/sensors/:id" element={<SensorDetail/>}/><Route path="/external-sensors" element={<ExternalSensors/>}/><Route path="/external-sensors/enroll" element={<EnrollSensor/>}/><Route path="/analyses" element={<AnalysisHistory/>}/><Route path="/analyses/new" element={<NewAnalysis/>}/><Route path="/analyses/upload" element={<PcapUpload/>}/><Route path="/analyses/:id" element={<JobDetail/>}/><Route path="/candidates" element={<Candidates/>}/><Route path="/candidates/:id" element={<CandidateDetail/>}/><Route path="/payload-signatures" element={<PayloadSignatures/>}/><Route path="/allowlist" element={<Allowlist/>}/><Route path="*" element={<div className="state"><h1>Page not found</h1><Link to="/">Return to dashboard</Link></div>}/></Routes></Shell>}/></Routes>; }

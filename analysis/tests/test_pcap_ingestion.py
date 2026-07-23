@@ -5,7 +5,7 @@ import struct
 
 import pytest
 
-from c2hunter_analysis.pcap import PcapParseError, parse_pcap
+from c2hunter_analysis.pcap import PcapParseError, find_pcap_record, parse_pcap
 
 
 def udp_packet() -> bytes:
@@ -77,7 +77,50 @@ def test_parse_pcap_and_pcapng_to_directional_flow(capture: bytes, capture_forma
     assert record["direction"] == "OUTBOUND"
     assert record["total_bytes"] == len(udp_packet())
     assert record["packet_sizes"] == (len(udp_packet()),)
+    assert record["payload_length"] == len(b"beacon")
+    assert record["payload_entropy"] == 2.585
+    assert record["payload_printable_ratio"] == 1.0
+    assert record["payload_simhash"] == "e627bf19152d67b3"
     assert record["raw_packet_hex"] == udp_packet().hex()
+
+
+def test_payload_preview_is_bounded_and_opt_in() -> None:
+    without_preview = parse_pcap(
+        classic_pcap(udp_packet()),
+        sensor_id="uploaded",
+        internal_networks=["10.0.0.0/8"],
+        retain_packet_bytes=False,
+    )
+    with_preview = parse_pcap(
+        classic_pcap(udp_packet()),
+        sensor_id="uploaded",
+        internal_networks=["10.0.0.0/8"],
+        retain_packet_bytes=False,
+        retain_payload_sample_bytes=4,
+    )
+
+    assert "payload_sample_hex" not in without_preview.records[0]
+    assert with_preview.records[0]["payload_sample_hex"] == b"beac".hex()
+
+
+def test_targeted_payload_preview_stops_without_materializing_capture() -> None:
+    inspected: list[str] = []
+
+    def select(record: dict[str, object]) -> bool:
+        inspected.append(str(record["timestamp"]))
+        return True
+
+    selected = find_pcap_record(
+        classic_pcap(udp_packet(), count=3),
+        sensor_id="uploaded",
+        internal_networks=["10.0.0.0/8"],
+        retain_payload_sample_bytes=4,
+        predicate=select,
+    )
+
+    assert selected is not None
+    assert selected["payload_sample_hex"] == b"beac".hex()
+    assert len(inspected) == 1
 
 
 def test_linux_cooked_capture_and_packet_limit() -> None:

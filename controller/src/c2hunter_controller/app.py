@@ -8,7 +8,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from c2hunter_analysis.pcap import PcapParseError, parse_pcap
+from c2hunter_analysis.pcap import PcapParseError, find_pcap_record, parse_pcap
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
@@ -22,6 +22,12 @@ from prometheus_client import (
 from starlette.concurrency import run_in_threadpool
 
 from .config import Settings
+from .flow_review import (
+    filter_flows,
+    flow_id,
+    label_snapshot,
+    payload_ascii,
+)
 from .jobs import JobState, StateMachine, build_job, calculate, summarize_candidate_traffic
 from .pcap import build_pcap, filter_records
 from .production import MinioBlobStore, PostgresRepository
@@ -38,7 +44,9 @@ from .schemas import (
     EnrollmentCreate,
     EnrollmentCreateResponse,
     FlowBatchCreate,
+    FlowLabelCreate,
     Heartbeat,
+    PayloadSignatureUpdate,
     PcapExportCreate,
     ReanalysisRequest,
     SensorConfigurationResponse,
@@ -88,8 +96,12 @@ def _page(items: list[dict[str, Any]], page: int, page_size: int) -> dict[str, A
 
 
 def _public_job(job: dict[str, Any]) -> dict[str, Any]:
-    """Never return retained packet bytes through control-plane job responses."""
-    return {key: value for key, value in job.items() if key != "flow_records"}
+    """Never return retained packets or detector snapshots in control-plane responses."""
+    return {
+        key: value
+        for key, value in job.items()
+        if key not in {"flow_records", "payload_signatures"}
+    }
 
 
 def _string_list(value: Any) -> list[str]:
@@ -721,6 +733,13 @@ def create_app(
 
     machine = StateMachine()
 
+    def payload_signature_snapshot() -> list[dict[str, Any]]:
+        return [
+            dict(signature)
+            for signature in repo.list_payload_signatures()
+            if signature.get("enabled") is True
+        ]
+
     def enqueue_worker_job(job: dict[str, Any]) -> None:
         envelope: dict[str, Any] = {"id": job["id"]}
         if isinstance(work_queue, MemoryControllerQueue):
@@ -733,6 +752,7 @@ def create_app(
         return repo.save_job_metadata(job)
 
     def enqueue_analysis(job: dict[str, Any]) -> dict[str, Any]:
+        job.setdefault("payload_signatures", payload_signature_snapshot())
         snapshot = flows.snapshot(
             list(job["sensor_ids"]),
             datetime.fromisoformat(job["start_time"]),
@@ -884,7 +904,9 @@ def create_app(
                 "INLINE_FLOWS_DISABLED",
                 "flow_records inline 입력은 테스트/호환 모드에서만 허용됩니다",
             )
-        job, created = repo.create_job(build_job(payload))
+        requested_job = build_job(payload)
+        requested_job["payload_signatures"] = payload_signature_snapshot()
+        job, created = repo.create_job(requested_job)
         if not created:
             return _public_job(job)
         if payload.flow_records:
@@ -995,6 +1017,7 @@ def create_app(
             }
         )
         job = build_job(payload, dataset_id=f"pcap:{digest}")
+        job["payload_signatures"] = payload_signature_snapshot()
         job["description"] = description
         job["source"] = {
             "filename": safe_filename,
@@ -1082,6 +1105,192 @@ def create_app(
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
         return _public_job(job)
 
+    @app.get("/api/v1/analysis-jobs/{job_id}/flows")
+    def list_analysis_flows(
+        job_id: str,
+        page: int = Query(1, ge=1),
+        page_size: int = Query(50, ge=1, le=200),
+        candidate_ip: str | None = Query(default=None, max_length=45),
+        direction: str | None = Query(
+            default=None, pattern=r"^(INBOUND|OUTBOUND|BIDIRECTIONAL|UNKNOWN)$"
+        ),
+        protocol: str | None = Query(default=None, min_length=1, max_length=32),
+        port: int | None = Query(default=None, ge=0, le=65535),
+        has_payload: bool | None = None,
+    ) -> dict[str, Any]:
+        job = repo.get_job(job_id)
+        if job is None:
+            raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
+        matched = filter_flows(
+            job,
+            labels=repo.list_flow_labels(job_id),
+            candidate_ip=candidate_ip,
+            direction=direction,
+            protocol=protocol,
+            port=port,
+            has_payload=has_payload,
+        )
+        return _page(matched, page, page_size)
+
+    @app.get("/api/v1/analysis-jobs/{job_id}/flows/{requested_flow_id}/payload-preview")
+    def get_flow_payload_preview(job_id: str, requested_flow_id: str) -> dict[str, Any]:
+        job = repo.get_job(job_id)
+        if job is None:
+            raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
+        retained_capture = repo.get_job_capture(job_id)
+        if retained_capture is None:
+            raise ApiError(
+                409,
+                "PAYLOAD_PREVIEW_UNAVAILABLE",
+                "보존된 source PCAP이 없어 Payload 미리보기를 제공할 수 없습니다",
+            )
+        try:
+            record = find_pcap_record(
+                retained_capture,
+                sensor_id=str(job["sensor_ids"][0]),
+                internal_networks=list(job["internal_networks"]),
+                max_packets=config.pcap_upload_max_packets,
+                retain_payload_sample_bytes=256,
+                predicate=lambda item: flow_id(job_id, item) == requested_flow_id,
+            )
+        except PcapParseError as exc:
+            raise ApiError(422, exc.code, str(exc)) from exc
+        if record is None:
+            raise ApiError(404, "FLOW_NOT_FOUND", "분석 작업에서 Flow를 찾을 수 없습니다")
+        sample = str(record.get("payload_sample_hex", ""))
+        if not sample:
+            raise ApiError(
+                409,
+                "PAYLOAD_PREVIEW_UNAVAILABLE",
+                "선택한 Flow에 미리볼 Payload가 없습니다",
+            )
+        sample_bytes = bytes.fromhex(sample)
+        return {
+            "flow_id": requested_flow_id,
+            "payload_hex": sample,
+            "payload_ascii": payload_ascii(sample),
+            "sample_bytes": len(sample_bytes),
+            "payload_length": record.get("payload_length"),
+            "truncated": int(record.get("payload_length", 0)) > len(sample_bytes),
+            "payload_hash": record.get("payload_hash"),
+        }
+
+    @app.get("/api/v1/analysis-jobs/{job_id}/flow-labels")
+    def list_job_flow_labels(
+        job_id: str,
+        page: int = Query(1, ge=1),
+        page_size: int = Query(50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        if repo.get_job_summary(job_id) is None:
+            raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
+        labels = repo.list_flow_labels(job_id)
+        return _page(labels, page, page_size)
+
+    @app.post("/api/v1/analysis-jobs/{job_id}/flow-labels", status_code=201)
+    def create_flow_label(job_id: str, payload: FlowLabelCreate) -> dict[str, Any]:
+        job = repo.get_job(job_id)
+        if job is None:
+            raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
+        selected = next(
+            (
+                item
+                for item in filter_flows(job, labels=repo.list_flow_labels(job_id))
+                if item["flow_id"] == payload.flow_id
+            ),
+            None,
+        )
+        if selected is None:
+            raise ApiError(404, "FLOW_NOT_FOUND", "분석 작업에서 Flow를 찾을 수 없습니다")
+        if payload.create_signature and not selected.get("payload_hash"):
+            raise ApiError(
+                422,
+                "PAYLOAD_FEATURES_UNAVAILABLE",
+                "Payload hash가 없는 Flow에서는 signature를 만들 수 없습니다",
+            )
+        if payload.create_signature:
+            latest: dict[tuple[str, str], dict[str, Any]] = {}
+            for stored_label in repo.list_flow_labels():
+                key = (
+                    str(stored_label["job_id"]),
+                    str(stored_label["flow_id"]),
+                )
+                if str(stored_label.get("created_at", "")) >= str(
+                    latest.get(key, {}).get("created_at", "")
+                ):
+                    latest[key] = stored_label
+            conflict = next(
+                (
+                    label
+                    for label in latest.values()
+                    if label.get("verdict") == "BENIGN"
+                    and label.get("flow_snapshot", {}).get("payload_hash")
+                    == selected.get("payload_hash")
+                ),
+                None,
+            )
+            if conflict is not None:
+                raise ApiError(
+                    409,
+                    "BENIGN_SIGNATURE_CONFLICT",
+                    "동일 Payload hash에 대한 최신 BENIGN 라벨이 있습니다",
+                    {
+                        "job_id": conflict["job_id"],
+                        "flow_id": conflict["flow_id"],
+                    },
+                )
+        now = datetime.now(UTC).isoformat()
+        label = repo.save_flow_label(
+            {
+                "id": str(uuid.uuid4()),
+                "job_id": job_id,
+                "flow_id": payload.flow_id,
+                "verdict": payload.verdict,
+                "confidence": payload.confidence,
+                "note": payload.note,
+                "flow_snapshot": label_snapshot(selected),
+                "created_by": "analyst",
+                "created_at": now,
+            }
+        )
+        signature = None
+        if payload.create_signature:
+            feature_fields = (
+                "payload_hash",
+                "payload_prefix_hash",
+                "payload_length",
+                "payload_entropy",
+                "payload_printable_ratio",
+                "payload_simhash",
+                "payload_feature_version",
+            )
+            signature = {
+                "id": str(uuid.uuid4()),
+                "name": payload.signature_name
+                or f"{selected.get('protocol', 'payload')} {str(selected['payload_hash'])[:12]}",
+                "description": payload.signature_description or payload.note,
+                "version": 1,
+                "enabled": True,
+                "source_job_id": job_id,
+                "source_flow_id": payload.flow_id,
+                "source_label_id": label["id"],
+                "protocol": selected.get("protocol"),
+                "direction": selected.get("direction"),
+                "service_port": selected.get("service_port"),
+                "length_tolerance_ratio": 0.15,
+                "entropy_tolerance": 0.75,
+                "simhash_max_distance": 8,
+                "created_by": "analyst",
+                "created_at": now,
+                "updated_at": now,
+                **{
+                    field: selected[field]
+                    for field in feature_fields
+                    if selected.get(field) is not None
+                },
+            }
+            signature = repo.save_payload_signature(signature)
+        return {"label": label, "signature": signature}
+
     @app.patch("/api/v1/analysis-jobs/{job_id}")
     def update_analysis_job(job_id: str, payload: AnalysisJobUpdate) -> dict[str, Any]:
         job = repo.get_job_summary(job_id)
@@ -1159,6 +1368,7 @@ def create_app(
             }
         )
         reanalysis_job = build_job(request, parent_job_id=job_id, dataset_id=source["dataset_id"])
+        reanalysis_job["payload_signatures"] = payload_signature_snapshot()
         reanalysis_job["source_type"] = source.get("source_type", "SENSOR_CAPTURE")
         if source.get("source"):
             reanalysis_job["source"] = dict(source["source"])
@@ -1263,6 +1473,43 @@ def create_app(
                     job = repo.get_job(job_id) or job
                 return _public_candidate(candidate, job, include_traffic=True)
         raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
+
+    @app.get("/api/v1/payload-signatures")
+    def list_payload_signatures(
+        page: int = Query(1, ge=1),
+        page_size: int = Query(50, ge=1, le=200),
+        enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        signatures = repo.list_payload_signatures()
+        if enabled is not None:
+            signatures = [
+                signature for signature in signatures if signature.get("enabled") is enabled
+            ]
+        signatures.sort(key=lambda item: str(item["created_at"]), reverse=True)
+        return _page(signatures, page, page_size)
+
+    @app.patch("/api/v1/payload-signatures/{signature_id}")
+    def update_payload_signature(
+        signature_id: str, payload: PayloadSignatureUpdate
+    ) -> dict[str, Any]:
+        signature = repo.get_payload_signature(signature_id)
+        if signature is None:
+            raise ApiError(
+                404,
+                "PAYLOAD_SIGNATURE_NOT_FOUND",
+                "Payload signature를 찾을 수 없습니다",
+            )
+        changed = False
+        for field in payload.model_fields_set:
+            value = getattr(payload, field)
+            if signature.get(field) != value:
+                signature[field] = value
+                changed = True
+        if not changed:
+            return signature
+        signature["version"] = int(signature.get("version", 1)) + 1
+        signature["updated_at"] = datetime.now(UTC).isoformat()
+        return repo.save_payload_signature(signature)
 
     @app.post("/api/v1/allowlist", status_code=201)
     def create_allowlist_entry(payload: AllowlistCreate) -> dict[str, Any]:

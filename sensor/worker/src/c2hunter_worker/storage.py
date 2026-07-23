@@ -33,6 +33,10 @@ class PostgresJobLoader:
                 "SELECT data FROM job_flow_records WHERE job_id=%s", (job_id,)
             )
             flow_row = cursor.fetchone()
+            cursor.execute(
+                "SELECT data FROM job_payload_signatures WHERE job_id=%s", (job_id,)
+            )
+            signature_row = cursor.fetchone()
         raw_metadata = metadata_row[0]
         metadata = (
             dict(raw_metadata)
@@ -47,6 +51,15 @@ class PostgresJobLoader:
                 list(raw_flows)
                 if isinstance(raw_flows, list)
                 else json.loads(raw_flows)
+            )
+        if signature_row is None:
+            metadata["payload_signatures"] = []
+        else:
+            raw_signatures = signature_row[0]
+            metadata["payload_signatures"] = (
+                list(raw_signatures)
+                if isinstance(raw_signatures, list)
+                else json.loads(raw_signatures)
             )
         return metadata
 

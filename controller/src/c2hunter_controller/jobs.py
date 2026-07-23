@@ -204,7 +204,10 @@ def calculate(
             record["timestamp"] = datetime.fromisoformat(record["timestamp"])
         record["packet_sizes"] = tuple(record.get("packet_sizes", ()))
         record.pop("raw_packet_hex", None)
+        record.pop("payload_sample_hex", None)
         flows.append(Flow(**record))
+    parameters = dict(job["analysis"])
+    parameters["payload_signatures"] = list(job.get("payload_signatures", ()))
     context = AnalysisContext(
         job["dataset_id"],
         datetime.fromisoformat(job["start_time"]),
@@ -212,7 +215,7 @@ def calculate(
         flows,
         tuple(job["sensor_ids"]),
         tuple(job["internal_networks"]),
-        parameters=job["analysis"],
+        parameters=parameters,
     )
     evidence = run_detectors(context)
     entries = []

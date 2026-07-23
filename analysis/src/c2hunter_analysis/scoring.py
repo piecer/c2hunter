@@ -14,6 +14,8 @@ CAPS = {
     "MULTI_SENSOR_CONTEXT": 10,
     "PROTOCOL_PAYLOAD_SIMILARITY": 10,
     "LOW_VOLUME_PERSISTENCE_RARITY": 5,
+    "SINGLE_HOST_BEACON": 35,
+    "ANALYST_PAYLOAD_SIGNATURE": 80,
 }
 
 
@@ -49,12 +51,17 @@ def score_candidates(
         hosts = sorted({host for item in items for host in item.hosts})
         sensors = sorted({sensor for item in items for sensor in item.sensors})
         adjustments: list[ScoreAdjustment] = []
-        if len(hosts) == 1:
-            adjustments.append(ScoreAdjustment("SINGLE_HOST", -20, "단일 내부 호스트 관찰"))
+        exact_analyst_match = any(
+            item.type == "ANALYST_PAYLOAD_SIGNATURE" and item.metrics.get("match_mode") == "EXACT"
+            for item in items
+        )
+        if len(hosts) == 1 and not exact_analyst_match:
+            points = -10 if any(item.type == "SINGLE_HOST_BEACON" for item in items) else -20
+            adjustments.append(ScoreAdjustment("SINGLE_HOST", points, "단일 내부 호스트 관찰"))
         sample_count = max(
             (int(item.metrics.get("sample_count", minimum_samples)) for item in items), default=0
         )
-        if sample_count < minimum_samples:
+        if sample_count < minimum_samples and not exact_analyst_match:
             adjustments.append(ScoreAdjustment("LOW_SAMPLE", -20, "분석 표본 부족"))
         if any(item.metrics.get("public_dns_ntp") for item in items):
             adjustments.append(ScoreAdjustment("PUBLIC_DNS_NTP", -30, "공용 DNS/NTP 정책 일치"))

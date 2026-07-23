@@ -12,7 +12,12 @@ const responses: Record<string, unknown> = {
   '/api/v1/analysis-jobs/job-1/candidates?page_size=200': { items: [{ id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', hosts: ['10.0.0.5'], sensors: ['sensor-a'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', contribution: 15, description: 'Periodic traffic' }] }] },
   '/api/v1/candidates': { items: [{ id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', hosts: ['10.0.0.5'], sensors: ['sensor-a'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', contribution: 15, description: 'Periodic traffic' }] }] },
   '/api/v1/candidates/candidate-1': { id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', hosts: ['10.0.0.5'], sensors: ['sensor-a'], protocols: ['TCP'], ports: [443], domains: ['c2.example'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', flow_count: 5, packet_count: 20, byte_count: 2048, traffic_buckets: [{ start: '2026-07-20T10:00:00Z', flows: 5, packets: 20, bytes: 2048 }], evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', version: '1.0.0', raw_score: 15, contribution: 15, confidence: 0.9, description: 'Periodic traffic', hosts: ['10.0.0.5'], sensors: ['sensor-a'], metrics: { sample_count: 7, period_seconds: 30 } }], adjustments: [{ kind: 'SINGLE_HOST', points: -20, explanation: 'Single internal host observed' }] },
+  '/api/v1/analysis-jobs/job-1/flows?candidate_ip=203.0.113.9&page=1&page_size=50': { items: [{ flow_id: '0123456789abcdef01234567', job_id: 'job-1', sensor_id: 'sensor-a', timestamp: '2026-07-20T10:00:00Z', source_ip: '10.0.0.5', destination_ip: '203.0.113.9', source_port: 51000, destination_port: 443, internal_ip: '10.0.0.5', external_ip: '203.0.113.9', service_port: 443, protocol: 'TCP', direction: 'OUTBOUND', packet_count: 2, total_bytes: 128, payload_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_prefix_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_length: 6, payload_entropy: 2.585, payload_printable_ratio: 1, payload_simhash: 'e627bf19152d67b3', payload_feature_version: '1', has_payload: true, current_label: null }], page: 1, page_size: 50, total: 1 },
+  '/api/v1/analysis-jobs/job-1/flows/0123456789abcdef01234567/payload-preview': { flow_id: '0123456789abcdef01234567', payload_hex: '626561636f6e', payload_ascii: 'beacon', sample_bytes: 6, payload_length: 6, truncated: false, payload_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887' },
+  '/api/v1/payload-signatures?page_size=200': { items: [{ id: 'signature-1', name: 'TCP beacon payload', description: 'Confirmed implant beacon', version: 1, enabled: true, source_job_id: 'job-1', source_flow_id: '0123456789abcdef01234567', source_label_id: 'label-1', protocol: 'TCP', direction: 'OUTBOUND', service_port: 443, payload_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_prefix_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_length: 6, payload_entropy: 2.585, payload_printable_ratio: 1, payload_simhash: 'e627bf19152d67b3', payload_feature_version: '1', length_tolerance_ratio: 0.15, entropy_tolerance: 0.75, simhash_max_distance: 8, created_by: 'analyst', created_at: '2026-07-20T10:06:00Z', updated_at: '2026-07-20T10:06:00Z' }] },
 };
+responses['/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&has_payload=true'] =
+  responses['/api/v1/analysis-jobs/job-1/flows?candidate_ip=203.0.113.9&page=1&page_size=50'];
 
 function renderAt(route: string) {
   localStorage.setItem('c2hunter-token', 'token');
@@ -51,7 +56,30 @@ describe('C2Hunter UI', () => {
     expect(await screen.findByRole('heading', { name: 'Detector settings' })).toBeInTheDocument();
     expect(screen.getByText('ddos_botnet')).toBeInTheDocument();
     expect(await screen.findByRole('table', { name: 'Analysis candidates' })).toBeInTheDocument();
+    expect(await screen.findByRole('table', { name: 'Analysis flows' })).toBeInTheDocument();
     expect(screen.getByText('analysis requested')).toBeInTheDocument();
+  });
+
+  it('lets an analyst browse flows that were never promoted to candidates', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes('/flows?')) {
+        return new Response(JSON.stringify(responses['/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&has_payload=true']), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404, headers: { 'content-type': 'application/json' } });
+    });
+    renderAt('/analyses/job-1');
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+
+    expect(await screen.findByRole('table', { name: 'Analysis flows' })).toBeInTheDocument();
+    await user.type(screen.getByLabelText('Endpoint IP'), '198.51.100.7');
+    await user.click(screen.getByRole('button', { name: 'Apply filters' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&candidate_ip=198.51.100.7&has_payload=true',
+      expect.any(Object),
+    ));
   });
 
   it('renders an error state with retry when a request fails', async () => {
@@ -85,6 +113,7 @@ describe('C2Hunter UI', () => {
     expect(body).toEqual(expect.objectContaining({
       name: 'Web analysis', sensor_ids: ['sensor-a'], mode: 'LIVE', internal_networks: ['10.0.0.0/8'],
       idempotency_key: expect.any(String), start_time: expect.any(String), end_time: expect.any(String),
+      analysis: expect.objectContaining({ minimum_candidate_score: 20, minimum_distinct_clients: 3 }),
     }));
     expect(new Date(body.end_time).getTime()).toBeGreaterThan(new Date(body.start_time).getTime());
   });
@@ -125,6 +154,60 @@ describe('C2Hunter UI', () => {
     } finally {
       responses['/api/v1/candidates/candidate-1'] = original;
     }
+  });
+
+  it('previews a candidate flow and creates an analyst-guided C2 signature', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/v1/analysis-jobs/job-1/flow-labels' && init?.method === 'POST') {
+        return new Response(JSON.stringify({
+          label: { id: 'label-new', verdict: 'C2', confidence: 'HIGH', note: 'Confirmed from malware trace', created_at: '2026-07-20T10:07:00Z' },
+          signature: { ...(responses['/api/v1/payload-signatures?page_size=200'] as { items: unknown[] }).items[0] as object },
+        }), { status: 201, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404, headers: { 'content-type': 'application/json' } });
+    });
+    renderAt('/candidates/candidate-1');
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+
+    expect(await screen.findByRole('table', { name: 'Candidate flows' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Preview payload 0123456789abcdef01234567' }));
+    expect(await screen.findByText('beacon')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Mark C2 0123456789abcdef01234567' }));
+    await user.type(screen.getByLabelText('Analyst note'), 'Confirmed from malware trace');
+    await user.click(screen.getByRole('button', { name: 'Save C2 label' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/analysis-jobs/job-1/flow-labels', expect.objectContaining({ method: 'POST' })));
+    const call = fetchMock.mock.calls.find(([url, init]) => url === '/api/v1/analysis-jobs/job-1/flow-labels' && init?.method === 'POST');
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+      flow_id: '0123456789abcdef01234567',
+      verdict: 'C2',
+      confidence: 'HIGH',
+      note: 'Confirmed from malware trace',
+      create_signature: true,
+      signature_name: 'TCP 203.0.113.9 payload',
+      signature_description: 'Confirmed from malware trace',
+    });
+  });
+
+  it('lists and disables a versioned payload signature', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/v1/payload-signatures/signature-1' && init?.method === 'PATCH') {
+        const signature = (responses['/api/v1/payload-signatures?page_size=200'] as { items: Record<string, unknown>[] }).items[0];
+        return new Response(JSON.stringify({ ...signature, enabled: false, version: 2 }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404, headers: { 'content-type': 'application/json' } });
+    });
+    renderAt('/payload-signatures');
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(await screen.findByRole('table', { name: 'Payload signatures' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Disable TCP beacon payload' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/payload-signatures/signature-1', expect.objectContaining({ method: 'PATCH' })));
+    const call = fetchMock.mock.calls.find(([url, init]) => url === '/api/v1/payload-signatures/signature-1' && init?.method === 'PATCH');
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ enabled: false });
   });
 
   it('sends the Controller cancel request body', async () => {

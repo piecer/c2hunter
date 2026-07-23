@@ -21,6 +21,8 @@ class CursorStub:
         assert parameters == ("job-1",)
         if "controller_objects" in query:
             self.row = ({"id": "job-1", "dataset_id": "dataset-1"},)
+        elif "job_payload_signatures" in query:
+            self.row = ([{"id": "signature-1", "enabled": True}],)
         else:
             self.row = ([{"source_ip": "10.0.0.1"}],)
 
@@ -58,6 +60,7 @@ def test_postgres_job_loader_hydrates_payload_by_job_reference(
         "id": "job-1",
         "dataset_id": "dataset-1",
         "flow_records": [{"source_ip": "10.0.0.1"}],
+        "payload_signatures": [{"id": "signature-1", "enabled": True}],
     }
     loader.close()
     assert connection.closed is True

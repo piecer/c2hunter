@@ -218,6 +218,7 @@ def test_sqlite_job_delete_cascades_candidates_and_exports(tmp_path: Any) -> Non
         "status": "COMPLETED",
         "mode": "PCAP_UPLOAD",
         "flow_records": [{"source_ip": "10.0.0.1"}],
+        "payload_signatures": [{"id": "signature-1", "version": 1}],
     }
     repository.create_job(job)
     repository.save_job_capture("job-1", b"source-pcap")
@@ -225,13 +226,21 @@ def test_sqlite_job_delete_cascades_candidates_and_exports(tmp_path: Any) -> Non
     repository.save_export({"id": "export-1", "job_id": "job-1"}, b"pcap")
 
     assert "flow_records" not in repository.get_job_summary("job-1")  # type: ignore[operator]
+    assert "payload_signatures" not in repository.get_job_summary("job-1")  # type: ignore[operator]
     assert "flow_records" not in repository.list_jobs()[0]
+    assert "payload_signatures" not in repository.list_jobs()[0]
     assert repository.get_job("job-1")["flow_records"] == [  # type: ignore[index]
         {"source_ip": "10.0.0.1"}
+    ]
+    assert repository.get_job("job-1")["payload_signatures"] == [  # type: ignore[index]
+        {"id": "signature-1", "version": 1}
     ]
     repository.save_job_metadata({**repository.get_job_summary("job-1"), "name": "renamed"})  # type: ignore[arg-type]
     assert repository.get_job("job-1")["flow_records"] == [  # type: ignore[index]
         {"source_ip": "10.0.0.1"}
+    ]
+    assert repository.get_job("job-1")["payload_signatures"] == [  # type: ignore[index]
+        {"id": "signature-1", "version": 1}
     ]
     assert repository.delete_job("job-1") is True
     assert repository.get_job("job-1") is None

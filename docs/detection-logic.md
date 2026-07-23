@@ -50,6 +50,31 @@ Evidence metrics: distinct hosts, connections, sensors, duration, connections/ho
 
 Evidence metrics: sample count, period, jitter/CV, autocorrelation, size similarity, matching hosts/sensors.
 
+### 3.2.1 SINGLE_HOST_BEACON (최대 35)
+
+기존 다중-host 중심 탐지의 사각지대를 보완한다. 한 내부 host만 관찰되더라도 최소 5개
+표본, interval CV ≤0.30, 평균 packet count ≤10을 만족하고 동일 Payload hash 비율이
+60% 이상이거나 packet-size CV가 0.20 이하이면 복합 beacon evidence를 만든다.
+이 evidence가 있는 단일 host 감점은 -10으로 완화한다. 따라서 낮은 점수까지 표시하는
+hunting 설정에서는 단일 감염 초기 단계도 검토할 수 있다.
+
+Evidence metrics: sample count, period/CV, payload stability, size CV, average packets, sensors.
+
+### 3.2.2 ANALYST_PAYLOAD_SIGNATURE (최대 80)
+
+분석가가 `C2`로 라벨링한 Flow에서 승인한 Payload signature를 새 분석 시점에 snapshot해
+적용한다. protocol, direction, 외부 service port를 공통 guard로 사용한다.
+
+- 전체 Payload SHA-256이 같으면 `EXACT`: contribution 80, confidence 1.0, action `alert`.
+  분석가가 확인한 동일 payload의 재관찰이므로 단일-host/표본 부족 감점을 적용하지 않는다.
+- exact가 아니어도 prefix hash 또는 64-bit SimHash, 길이, entropy 조건을 모두 만족하면
+  `STRUCTURAL`: contribution 60, confidence 0.7, action `monitor`. 단일-host 감점은 유지한다.
+
+원문 Payload는 signature에 저장하지 않는다. Evidence에는 signature ID/version, match mode,
+길이·entropy 차이, SimHash Hamming distance와 적용 threshold를 보존한다. 완료된 분석에는
+새 signature를 소급 적용하지 않고 reanalysis를 생성한다. 상세 계약과 안전 경계는
+[분석가 주도 탐지 명세](human-guided-detection.md)를 따른다.
+
 ### 3.3 SYNCHRONIZED_COMMUNICATION (최대 15)
 
 외부 IP별 접속을 configurable window(기본 2초)로 묶는다. 한 window의 distinct host 수와 sensor 수를 세고 같은 패턴이 반복되는 횟수를 계산한다. 한 번의 우연한 burst보다 반복 cluster에 높은 점수를 준다. clock tolerance를 window에 반영하되 skew warning이 있으면 confidence를 낮춘다.
@@ -90,6 +115,8 @@ Evidence metrics: command size/count, affected hosts, lag distribution, baseline
 |---|---:|
 | COMMON_DESTINATION | 20 |
 | PERIODIC_BEACON | 15 |
+| SINGLE_HOST_BEACON | 35 |
+| ANALYST_PAYLOAD_SIGNATURE | 80 |
 | SYNCHRONIZED_COMMUNICATION | 15 |
 | COMMAND_ATTACK_CORRELATION | 25 |
 | MULTI_SENSOR_CONTEXT | 10 |
@@ -104,7 +131,7 @@ Evidence metrics: command size/count, affected hosts, lag distribution, baseline
 | DNS/NTP 공용 인프라 | 최대 -30 |
 | CDN/대형 cloud 공유 IP | 최대 -20 |
 | 내부 업무 서버 | 최대 -40 |
-| 단일 내부 host | 최대 -20 |
+| 단일 내부 host | 최대 -20 (`SINGLE_HOST_BEACON`은 -10, analyst exact는 미적용) |
 | 표본 부족 | 최대 -20 |
 
 `score = clamp(0, 100, sum(capped contributions) + sum(negative adjustments))`로 계산한다. 동일 detector가 여러 evidence를 내더라도 detector별 최대치를 넘지 않는다. profile에서 threshold/weight를 바꿀 수 있지만 run에 snapshot한다.

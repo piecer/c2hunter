@@ -84,7 +84,9 @@ def test_connection_initialization_is_thread_safe(monkeypatch: Any) -> None:
     assert connection_count == 1
     schema = "\n".join(first.result().queries)
     assert "CREATE TABLE IF NOT EXISTS job_flow_records" in schema
+    assert "CREATE TABLE IF NOT EXISTS job_payload_signatures" in schema
     assert "SET data=data-'flow_records'" in schema
+    assert "SET data=data-'payload_signatures'" in schema
 
 
 def test_failed_connection_initialization_closes_connection_and_can_retry(monkeypatch: Any) -> None:
@@ -117,7 +119,12 @@ def test_job_metadata_write_excludes_immutable_flow_payload(monkeypatch: Any) ->
     monkeypatch.setattr(repository, "_put", put)
 
     result = repository.save_job_metadata(
-        {"id": "job-1", "status": "COMPLETED", "flow_records": [{"large": "payload"}]}
+        {
+            "id": "job-1",
+            "status": "COMPLETED",
+            "flow_records": [{"large": "payload"}],
+            "payload_signatures": [{"id": "signature-1"}],
+        }
     )
 
     assert result == {"id": "job-1", "status": "COMPLETED"}

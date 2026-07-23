@@ -88,6 +88,9 @@ class PostgresRepository:
                         CREATE TABLE IF NOT EXISTS job_flow_records (
                           job_id text PRIMARY KEY, data jsonb NOT NULL
                         );
+                        CREATE TABLE IF NOT EXISTS job_payload_signatures (
+                          job_id text PRIMARY KEY, data jsonb NOT NULL
+                        );
                         CREATE TABLE IF NOT EXISTS audit_events (
                           sequence bigserial PRIMARY KEY, kind text NOT NULL,
                           object_id text NOT NULL,
@@ -104,6 +107,14 @@ class PostgresRepository:
                         UPDATE controller_objects
                           SET data=data-'flow_records'
                           WHERE kind='job' AND data ? 'flow_records';
+                        INSERT INTO job_payload_signatures(job_id,data)
+                          SELECT id,data->'payload_signatures'
+                          FROM controller_objects
+                          WHERE kind='job' AND data ? 'payload_signatures'
+                          ON CONFLICT(job_id) DO NOTHING;
+                        UPDATE controller_objects
+                          SET data=data-'payload_signatures'
+                          WHERE kind='job' AND data ? 'payload_signatures';
                         """
                     )
                 connection.commit()
@@ -180,7 +191,11 @@ class PostgresRepository:
         return self._list("group")
 
     def create_job(self, job: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-        metadata = {key: value for key, value in job.items() if key != "flow_records"}
+        metadata = {
+            key: value
+            for key, value in job.items()
+            if key not in {"flow_records", "payload_signatures"}
+        }
         with self._lock, self.connection.cursor() as cursor:
             cursor.execute(
                 "INSERT INTO job_idempotency(idempotency_key,job_id) VALUES(%s,%s) "
@@ -209,12 +224,20 @@ class PostgresRepository:
                 "INSERT INTO job_flow_records(job_id,data) VALUES(%s,%s::jsonb)",
                 (job["id"], self._json(job.get("flow_records", []))),
             )
+            cursor.execute(
+                "INSERT INTO job_payload_signatures(job_id,data) VALUES(%s,%s::jsonb)",
+                (job["id"], self._json(job.get("payload_signatures", []))),
+            )
             self._audit("job", job["id"], metadata)
             self.connection.commit()
             return deepcopy(job), True
 
     def save_job(self, job: dict[str, Any]) -> dict[str, Any]:
-        metadata = {key: value for key, value in job.items() if key != "flow_records"}
+        metadata = {
+            key: value
+            for key, value in job.items()
+            if key not in {"flow_records", "payload_signatures"}
+        }
         with self._lock, self.connection.cursor() as cursor:
             cursor.execute(
                 "INSERT INTO controller_objects(kind,id,data) VALUES('job',%s,%s::jsonb) "
@@ -227,12 +250,22 @@ class PostgresRepository:
                     "ON CONFLICT(job_id) DO UPDATE SET data=excluded.data",
                     (job["id"], self._json(job["flow_records"])),
                 )
+            if "payload_signatures" in job:
+                cursor.execute(
+                    "INSERT INTO job_payload_signatures(job_id,data) VALUES(%s,%s::jsonb) "
+                    "ON CONFLICT(job_id) DO UPDATE SET data=excluded.data",
+                    (job["id"], self._json(job["payload_signatures"])),
+                )
             self._audit("job", job["id"], metadata)
             self.connection.commit()
         return deepcopy(job)
 
     def save_job_metadata(self, job: dict[str, Any]) -> dict[str, Any]:
-        metadata = {key: value for key, value in job.items() if key != "flow_records"}
+        metadata = {
+            key: value
+            for key, value in job.items()
+            if key not in {"flow_records", "payload_signatures"}
+        }
         return self._put("job", job["id"], metadata)
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
@@ -247,6 +280,18 @@ class PostgresRepository:
         else:
             value = row[0]
             job["flow_records"] = value if isinstance(value, list) else json.loads(value)
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT data FROM job_payload_signatures WHERE job_id=%s", (job_id,)
+            )
+            row = cursor.fetchone()
+        if row is None:
+            job["payload_signatures"] = []
+        else:
+            value = row[0]
+            job["payload_signatures"] = (
+                value if isinstance(value, list) else json.loads(value)
+            )
         return job
 
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None:
@@ -287,6 +332,7 @@ class PostgresRepository:
             )
             cursor.execute("DELETE FROM job_candidates WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM job_flow_records WHERE job_id=%s", (job_id,))
+            cursor.execute("DELETE FROM job_payload_signatures WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM job_idempotency WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM controller_objects WHERE kind='job' AND id=%s", (job_id,))
             self._audit("job-delete", job_id, {"id": job_id})
@@ -343,6 +389,35 @@ class PostgresRepository:
             str(job_id): data if isinstance(data, list) else json.loads(data)
             for job_id, data in rows
         }
+
+    def save_flow_label(self, label: dict[str, Any]) -> dict[str, Any]:
+        return self._put("flow_label", label["id"], label)
+
+    def list_flow_labels(self, job_id: str | None = None) -> list[dict[str, Any]]:
+        if job_id is None:
+            labels = self._list("flow_label")
+        else:
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT data FROM controller_objects "
+                    "WHERE kind='flow_label' AND data->>'job_id'=%s ORDER BY id",
+                    (job_id,),
+                )
+                rows = cursor.fetchall()
+            labels = [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
+        return sorted(labels, key=lambda item: str(item["created_at"]))
+
+    def save_payload_signature(self, signature: dict[str, Any]) -> dict[str, Any]:
+        return self._put("payload_signature", signature["id"], signature)
+
+    def get_payload_signature(self, signature_id: str) -> dict[str, Any] | None:
+        return self._get("payload_signature", signature_id)
+
+    def list_payload_signatures(self) -> list[dict[str, Any]]:
+        return sorted(
+            self._list("payload_signature"),
+            key=lambda item: str(item["created_at"]),
+        )
 
     def save_allowlist(self, entry: dict[str, Any]) -> dict[str, Any]:
         return self._put("allowlist", entry["id"], entry)
