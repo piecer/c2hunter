@@ -112,6 +112,21 @@ describe('C2Hunter UI', () => {
     expect(JSON.parse(String(reanalyzeCall?.[1]?.body))).toEqual({ idempotency_key: expect.any(String) });
   });
 
+  it('renders score adjustments safely when the Controller returns a non-string kind', async () => {
+    const original = responses['/api/v1/candidates/candidate-1'] as Record<string, unknown>;
+    responses['/api/v1/candidates/candidate-1'] = {
+      ...original,
+      adjustments: [{ kind: 7, points: -5, explanation: 'Imported adjustment' }],
+    };
+
+    try {
+      renderAt('/candidates/candidate-1');
+      expect(await screen.findByText('7 · Imported adjustment')).toBeInTheDocument();
+    } finally {
+      responses['/api/v1/candidates/candidate-1'] = original;
+    }
+  });
+
   it('sends the Controller cancel request body', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
@@ -158,7 +173,7 @@ describe('C2Hunter UI', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/analysis-jobs/job-1', expect.objectContaining({ method: 'DELETE' })));
   });
 
-  it('uploads a selected PCAP as the binary request body', async () => {
+  it('accepts a PCAP at the 500 MiB boundary and sends it as the binary request body', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.startsWith('/api/v1/pcap-analysis-jobs?') && init?.method === 'POST') return new Response(JSON.stringify({ id: 'upload-job', name: 'Offline case', status: 'COMPLETED' }), { status: 201 });
@@ -170,8 +185,10 @@ describe('C2Hunter UI', () => {
     render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/upload']}><App /></MemoryRouter></QueryClientProvider>);
     const user = userEvent.setup();
     const file = new File([new Uint8Array([0xd4, 0xc3, 0xb2, 0xa1])], 'sample.pcap', { type: 'application/vnd.tcpdump.pcap' });
+    Object.defineProperty(file, 'size', { value: 500 * 1024 * 1024 });
     await user.type(screen.getByLabelText('Analysis name'), 'Offline case');
     await user.upload(screen.getByLabelText('Capture file'), file);
+    expect(screen.getByRole('status')).toHaveTextContent('500.0 MiB');
     fireEvent.submit(screen.getByRole('button', { name: 'Upload and analyze' }).closest('form')!);
 
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => String(url).startsWith('/api/v1/pcap-analysis-jobs?') && init?.method === 'POST')).toBe(true));
@@ -181,5 +198,19 @@ describe('C2Hunter UI', () => {
     expect(url.searchParams.get('filename')).toBe('sample.pcap');
     expect(uploadCall?.[1]?.body).toBe(file);
     expect(uploadCall?.[1]?.headers).toEqual(expect.objectContaining({ 'content-type': 'application/vnd.tcpdump.pcap' }));
+  });
+
+  it('rejects a PCAP larger than 500 MiB before upload', async () => {
+    const fetchMock = vi.fn();
+    localStorage.setItem('c2hunter-token', 'token');
+    vi.stubGlobal('fetch', fetchMock);
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/upload']}><App /></MemoryRouter></QueryClientProvider>);
+    const file = new File([new Uint8Array([0xd4, 0xc3, 0xb2, 0xa1])], 'too-large.pcap', { type: 'application/vnd.tcpdump.pcap' });
+    Object.defineProperty(file, 'size', { value: 500 * 1024 * 1024 + 1 });
+
+    await userEvent.upload(screen.getByLabelText('Capture file'), file);
+
+    expect(screen.getByRole('alert')).toHaveTextContent('PCAP files must be 500 MiB or smaller.');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

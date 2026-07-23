@@ -70,7 +70,7 @@ Jobs move through `CREATED → WAITING_FOR_SENSOR → CAPTURING → UPLOADING �
 
 **Analysis history** lists sensor and uploaded-capture investigations together. An analyst can change only the display name and analyst note; source packets, time range, detector settings, evidence, and scores remain immutable. Terminal jobs (`COMPLETED`, `PARTIALLY_COMPLETED`, `FAILED`, or `CANCELLED`) can be deleted after confirmation. Deleting a job also removes its candidates and generated PCAP exports.
 
-**Upload PCAP** accepts a classic PCAP or PCAPNG file and runs it through the same flow normalization, detectors, allowlist, and scoring path. Configure internal CIDRs so packet direction can be derived; ambiguous traffic remains `UNKNOWN`. Ethernet, raw IP, Linux cooked v1/v2, and loopback link types are supported. The defaults are 100 MiB and 2,000,000 timestamped packets and can be changed with `C2HUNTER_PCAP_UPLOAD_MAX_BYTES` and `C2HUNTER_PCAP_UPLOAD_MAX_PACKETS`.
+**Upload PCAP** accepts a classic PCAP or PCAPNG file and runs it through the same flow normalization, detectors, allowlist, and scoring path. Configure internal CIDRs so packet direction can be derived; ambiguous traffic remains `UNKNOWN`. Ethernet, raw IP, Linux cooked v1/v2, and loopback link types are supported. The defaults are 500 MiB and 2,000,000 timestamped packets and can be changed with `C2HUNTER_PCAP_UPLOAD_MAX_BYTES` and `C2HUNTER_PCAP_UPLOAD_MAX_PACKETS`.
 
 The binary API is `POST /api/v1/pcap-analysis-jobs` with the file as the request body and analysis metadata as documented query parameters. It accepts `application/vnd.tcpdump.pcap`, `application/x-pcap`, `application/x-pcapng`, or `application/octet-stream`.
 
