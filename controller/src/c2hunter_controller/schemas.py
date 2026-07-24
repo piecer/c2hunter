@@ -404,3 +404,40 @@ class PcapExportCreate(BaseModel):
         if self.internal_host_ip:
             self.internal_host_ip = str(ip_address(self.internal_host_ip))
         return self
+
+
+class CandidateUpdate(BaseModel):
+    """후보 수정을 위한 스키마. 분석 결과의 메타데이터 수정."""
+
+    model_config = ConfigDict(extra="forbid")
+    score_adjustment: int | None = Field(default=None, ge=-100, le=100)
+    exclude_reason: str | None = Field(
+        default=None, min_length=1, max_length=500, description="후비 후보에서 제외된 이유"
+    )
+
+    @field_validator("score_adjustment")
+    @classmethod
+    def non_null_if_set(cls, v: int | None) -> int | None:
+        return v
+
+
+class CandidateResponse(BaseModel):
+    """후보 단일 조회 응답 스키마."""
+
+    id: str
+    job_id: str
+    candidate_ip: str
+    score: int
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    adjustments: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime | None = None
+
+
+class CandidateListResponse(BaseModel):
+    """후보 목록 조회 응답 스키마."""
+
+    items: list[CandidateResponse] = Field(default_factory=list)
+    total: int
+    page: int
+    page_size: int

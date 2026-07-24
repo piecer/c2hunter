@@ -390,6 +390,86 @@ class PostgresRepository:
             for job_id, data in rows
         }
 
+    def update_candidate(
+        self, candidate_id: str, updates: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Update a candidate by ID across all jobs."""
+        from copy import deepcopy as dp
+
+        with self._lock, self.connection.cursor() as cursor:
+            for row in cursor.execute("SELECT job_id,data FROM job_candidates"):
+                job_id = row[0]
+                data = row[1]
+                candidates_list = data if isinstance(data, list) else json.loads(data)
+
+                found_index = None
+                updated_candidate = None
+
+                for i, candidate in enumerate(candidates_list):
+                    if candidate.get("id") == candidate_id:
+                        from datetime import UTC as utc_sync, datetime as dt_datetime
+
+                        updates_copy = dp(updates)
+                        updated = dp(candidate)
+
+                        if "score_adjustment" in updates_copy:
+                            old_score = updated.get("score", 0)
+                            updated["score"] = max(0, min(100, old_score + updates_copy.pop("score_adjustment")))
+
+                        if "exclude_reason" in updates_copy:
+                            updated["excluded"] = True
+                            updated["exclude_reason"] = updates_copy.pop("exclude_reason")
+
+                        for key, value in updates_copy.items():
+                            if isinstance(value, (str, int, float, bool)):
+                                updated[key] = value
+                            else:
+                                try:
+                                    from copy import deepcopy as dp2
+                                    updated[key] = dp2(value)
+                                except Exception:
+                                    updated[key] = value
+
+                        updated["updated_at"] = dt_datetime.now(utc_sync).isoformat()
+
+                        candidates_list[i] = updated
+                        found_index = i
+                        updated_candidate = dp(updated)
+                        break
+
+                if found_index is not None and updated_candidate is not None:
+                    cursor.execute("DELETE FROM job_candidates WHERE job_id=%s", (job_id,))
+                    cursor.execute(
+                        "INSERT INTO job_candidates(job_id,data) VALUES(%s,%s::jsonb)",
+                        (job_id, self._json(candidates_list)),
+                    )
+                    self.connection.commit()
+                    return updated_candidate
+        return None
+
+    def delete_candidate(self, candidate_id: str) -> bool:
+        """Delete a candidate by ID across all jobs."""
+        from copy import deepcopy as dp
+
+        with self._lock, self.connection.cursor() as cursor:
+            for row in list(cursor.execute("SELECT job_id,data FROM job_candidates")):
+                job_id = row[0]
+                data = row[1]
+                candidates_list = data if isinstance(data, list) else json.loads(data)
+
+                original_len = len(candidates_list)
+                filtered = [c for c in candidates_list if c.get("id") != candidate_id]
+
+                if len(filtered) < original_len:
+                    cursor.execute("DELETE FROM job_candidates WHERE job_id=%s", (job_id,))
+                    cursor.execute(
+                        "INSERT INTO job_candidates(job_id,data) VALUES(%s,%s::jsonb)",
+                        (job_id, self._json(filtered)),
+                    )
+                    self.connection.commit()
+                    return True
+        return False
+
     def save_flow_label(self, label: dict[str, Any]) -> dict[str, Any]:
         return self._put("flow_label", label["id"], label)
 

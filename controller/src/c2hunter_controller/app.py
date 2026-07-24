@@ -38,6 +38,7 @@ from .schemas import (
     AnalysisJobCreate,
     AnalysisJobUpdate,
     CancelRequest,
+    CandidateUpdate,
     DevLoginRequest,
     EnrollmentClaim,
     EnrollmentClaimResponse,
@@ -1498,6 +1499,33 @@ def create_app(
                     job = repo.get_job(job_id) or job
                 return _public_candidate(candidate, job, include_traffic=True)
         raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
+
+    @app.patch("/api/v1/candidates/{candidate_id}")
+    def update_candidate(candidate_id: str, payload: CandidateUpdate) -> dict[str, Any]:
+        """Update a candidate's metadata (score adjustment or exclusion)."""
+        # Find which job contains this candidate by searching all jobs
+        for job in repo.list_jobs():
+            candidates = repo.get_candidates(str(job["id"]))
+            for candidate in candidates:
+                if candidate.get("id") == candidate_id:
+                    updates: dict[str, Any] = {}
+                    if payload.score_adjustment is not None:
+                        updates["score_adjustment"] = payload.score_adjustment
+                    if payload.exclude_reason is not None:
+                        updates["exclude_reason"] = payload.exclude_reason
+                    
+                    updated = repo.update_candidate(candidate_id, updates)
+                    if updated is not None:
+                        return _public_candidate(updated, job)
+        raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
+
+    @app.delete("/api/v1/candidates/{candidate_id}")
+    def delete_candidate(candidate_id: str) -> dict[str, Any]:
+        """Delete a candidate by ID."""
+        deleted = repo.delete_candidate(candidate_id)
+        if not deleted:
+            raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
+        return {"deleted": True, "candidate_id": candidate_id}
 
     @app.get("/api/v1/payload-signatures")
     def list_payload_signatures(
