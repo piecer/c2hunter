@@ -16,7 +16,7 @@ func TestNewProducesStableContentAddressedIDAndControllerSchema(t *testing.T) {
 	record := flow.Record{
 		Key:       flow.Key{SensorID: "sensor-a", Direction: direction.Outbound, IPVersion: 4, SourceIP: netip.MustParseAddr("10.0.0.2"), DestinationIP: netip.MustParseAddr("203.0.113.8"), SourcePort: 40000, DestinationPort: 443, Protocol: packet.TCP},
 		StartTime: time.Unix(1, 0).UTC(), EndTime: time.Unix(2, 0).UTC(), PacketCount: 2, TotalBytes: 300,
-		FirstPayloadHash: "payload", PayloadPrefixHash: "prefix", FirstPayloadLength: 12,
+		FirstPayloadHash: "payload", LastPayloadHash: "last-payload", PayloadPrefixHash: "prefix", PayloadSampleHex: "626f74", FirstPayloadLength: 12,
 		PayloadEntropy: 4.25, PayloadPrintable: 0.5, PayloadSimHash: "0123456789abcdef",
 		PayloadFeatureVersion: "1",
 		ProtocolMetadata:      metadata.Metadata{Kind: metadata.KindTLS, TLS: &metadata.TLS{ClientHelloFingerprint: "tls", SNI: "c2.example"}},
@@ -36,7 +36,7 @@ func TestNewProducesStableContentAddressedIDAndControllerSchema(t *testing.T) {
 		t.Fatalf("flows = %+v", first.Flows)
 	}
 	got := first.Flows[0]
-	if got.SensorID != "sensor-a" || got.Timestamp != record.StartTime || got.Protocol != "TCP" || got.PayloadHash != "payload" || got.TLSFingerprint != "tls" || got.Domain != "c2.example" {
+	if got.SensorID != "sensor-a" || got.Timestamp != record.StartTime || got.Protocol != "TCP" || got.PayloadHash != "payload" || got.LastPayloadHash != "last-payload" || got.PayloadSampleHex != "626f74" || got.TLSFingerprint != "tls" || got.Domain != "c2.example" {
 		t.Fatalf("flow = %+v", got)
 	}
 	if got.PayloadLength == nil || got.PayloadEntropy == nil || got.PayloadPrintableRatio == nil {

@@ -6,6 +6,7 @@ from c2hunter_analysis.detectors import (
     CommandAttackDetector,
     CommonDestinationDetector,
     MultiSensorDetector,
+    NonWellKnownPortDetector,
     PeriodicBeaconDetector,
     PersistenceRarityDetector,
     ProtocolSimilarityDetector,
@@ -82,6 +83,43 @@ def test_common_destination_requires_multiple_internal_hosts() -> None:
     )
 
 
+def test_non_well_known_port_is_bounded_and_high_volume_is_penalized() -> None:
+    low_volume = [
+        flow(index, "10.0.0.1", port=4444, packets=2, size=300)
+        for index in range(3)
+    ]
+    low_context = context(low_volume)
+    evidence = NonWellKnownPortDetector().analyze(low_context)
+
+    assert evidence[0].metrics["dominant_port"] == 4444
+    assert evidence[0].contribution == 25
+    candidate = score_candidates(
+        evidence,
+        traffic_profiles=low_context.candidate_traffic_profiles(),
+        high_volume_bytes_threshold=10_000,
+        high_volume_packet_threshold=1_000,
+    )[0]
+    assert candidate.score == 5  # port evidence 25 - single-host adjustment 20
+
+    high_volume = [
+        flow(index, "10.0.0.1", port=4444, packets=1_000, size=10_000)
+        for index in range(3)
+    ]
+    high_context = context(high_volume)
+    high_evidence = NonWellKnownPortDetector().analyze(high_context)
+    high_candidate = score_candidates(
+        high_evidence,
+        traffic_profiles=high_context.candidate_traffic_profiles(),
+        high_volume_bytes_threshold=10_000,
+        high_volume_packet_threshold=1_000,
+    )[0]
+    assert high_candidate.score == 0
+    assert any(item.kind == "HIGH_VOLUME" for item in high_candidate.adjustments)
+
+    standard = [flow(index, "10.0.0.1", port=443) for index in range(3)]
+    assert NonWellKnownPortDetector().analyze(context(standard)) == []
+
+
 def test_periodic_beacon_accepts_jitter_and_rejects_irregular_samples() -> None:
     periodic = [flow(index * 30 + (-2 if index % 2 else 2), "10.0.0.1") for index in range(8)]
     evidence = PeriodicBeaconDetector().analyze(context(periodic, periodicity_min_samples=5))
@@ -148,6 +186,12 @@ def test_analyst_payload_signature_distinguishes_exact_structural_and_context() 
     assert structural[0].confidence == 0.7
     wrong_port = replace(structural_flow, destination_port=443)
     assert detector.analyze(context([wrong_port], payload_signatures=[signature])) == []
+
+    later_exact = replace(exact_flow, payload_hash="0" * 64, last_payload_hash=source.payload_hash)
+    later = detector.analyze(context([later_exact], payload_signatures=[signature]))
+    assert later[0].metrics["match_mode"] == "EXACT"
+    assert later[0].metrics["comparisons"][0]["matched_payload_position"] == "LAST"
+
     disabled = {**signature, "enabled": False}
     assert detector.analyze(context([exact_flow], payload_signatures=[disabled])) == []
 

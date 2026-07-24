@@ -14,6 +14,9 @@ batch:
 capture:
   job_id: continuous
   packet_queue_size: 4096
+  # 0 disables payload retention. Set 1..256 only on sensors where analysts
+  # are permitted to preview bounded payload bytes in the Controller UI.
+  payload_preview_bytes: 0
 spool:
   directory: /var/lib/c2hunter-sensor/spool
   max_bytes: 1073741824

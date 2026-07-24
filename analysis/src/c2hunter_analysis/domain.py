@@ -32,6 +32,7 @@ class Flow:
     packet_sizes: tuple[int, ...] = ()
     attack_target_ip: str | None = None
     duration_seconds: float = 0.0
+    last_payload_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -244,6 +245,34 @@ class AnalysisContext:
             if self.start <= flow.timestamp <= self.end
             and (not sensors or flow.sensor_id in sensors)
         ]
+
+    def candidate_traffic_profiles(self) -> dict[str, dict[str, int]]:
+        """Aggregate all scoped traffic per external endpoint for score adjustments."""
+        profiles: dict[str, dict[str, int]] = {}
+        for flow in self.scoped_flows():
+            direction = flow.direction.upper()
+            if direction == "OUTBOUND":
+                candidate_ip = flow.destination_ip
+            elif direction == "INBOUND":
+                candidate_ip = flow.source_ip
+            else:
+                source_internal = self.is_internal(flow.source_ip)
+                destination_internal = self.is_internal(flow.destination_ip)
+                if source_internal == destination_internal:
+                    continue
+                candidate_ip = flow.destination_ip if source_internal else flow.source_ip
+            profile = profiles.setdefault(
+                candidate_ip,
+                {
+                    "flow_count": 0,
+                    "total_packets": 0,
+                    "total_bytes": 0,
+                },
+            )
+            profile["flow_count"] += 1
+            profile["total_packets"] += max(0, int(flow.packet_count))
+            profile["total_bytes"] += max(0, int(flow.total_bytes))
+        return profiles
 
 
 class Detector(Protocol):

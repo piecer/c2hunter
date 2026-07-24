@@ -80,6 +80,7 @@ capture:
   start_time: 2026-07-20T10:00:00Z
   end_time: 2026-07-20T10:05:00Z
   duration_seconds: 120
+  payload_preview_bytes: 128
   max_packets: 50
   max_bytes: 4096
   source_cidrs: [10.0.0.0/8]
@@ -95,11 +96,22 @@ spool:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Capture.JobID != "job-a" || cfg.Capture.Duration != 2*time.Minute || cfg.Capture.MaxPackets != 50 || cfg.Capture.MaxBytes != 4096 {
+	if cfg.Capture.JobID != "job-a" || cfg.Capture.Duration != 2*time.Minute || cfg.Capture.MaxPackets != 50 || cfg.Capture.MaxBytes != 4096 || cfg.Capture.PayloadPreviewBytes != 128 {
 		t.Fatalf("capture = %+v", cfg.Capture)
 	}
 	if cfg.Capture.StartTime.IsZero() || cfg.Capture.EndTime.IsZero() || cfg.Spool.Directory != "/tmp/c2hunter-spool" || cfg.Spool.MaxAge != time.Hour {
 		t.Fatalf("capture/spool boundaries = %+v %+v", cfg.Capture, cfg.Spool)
+	}
+}
+
+func TestLoadRejectsOversizedPayloadPreview(t *testing.T) {
+	_, err := Load(strings.NewReader(`
+sensor: {id: sensor-a, name: edge}
+capture_sources: [{interface: eth0, direction: OUTBOUND}]
+capture: {job_id: continuous, packet_queue_size: 4096, payload_preview_bytes: 257}
+`))
+	if err == nil || !strings.Contains(err.Error(), "payload_preview_bytes") {
+		t.Fatalf("expected payload preview validation error, got %v", err)
 	}
 }
 

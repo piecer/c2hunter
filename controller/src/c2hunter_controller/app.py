@@ -1137,34 +1137,59 @@ def create_app(
         job = repo.get_job(job_id)
         if job is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
-        retained_capture = repo.get_job_capture(job_id)
-        if retained_capture is None:
-            raise ApiError(
-                409,
-                "PAYLOAD_PREVIEW_UNAVAILABLE",
-                "보존된 source PCAP이 없어 Payload 미리보기를 제공할 수 없습니다",
-            )
-        try:
-            record = find_pcap_record(
-                retained_capture,
-                sensor_id=str(job["sensor_ids"][0]),
-                internal_networks=list(job["internal_networks"]),
-                max_packets=config.pcap_upload_max_packets,
-                retain_payload_sample_bytes=256,
-                predicate=lambda item: flow_id(job_id, item) == requested_flow_id,
-            )
-        except PcapParseError as exc:
-            raise ApiError(422, exc.code, str(exc)) from exc
+        record = next(
+            (
+                dict(item)
+                for item in job.get("flow_records", [])
+                if flow_id(job_id, dict(item)) == requested_flow_id
+            ),
+            None,
+        )
         if record is None:
             raise ApiError(404, "FLOW_NOT_FOUND", "분석 작업에서 Flow를 찾을 수 없습니다")
-        sample = str(record.get("payload_sample_hex", ""))
+
+        sample = str(record.get("payload_sample_hex") or "")
+        if not sample:
+            retained_capture = repo.get_job_capture(job_id)
+            if retained_capture is None:
+                raise ApiError(
+                    409,
+                    "PAYLOAD_PREVIEW_UNAVAILABLE",
+                    (
+                        "보존된 source PCAP 또는 Sensor payload sample이 없습니다. "
+                        "Sensor capture.payload_preview_bytes를 1~256으로 설정한 뒤 "
+                        "새 트래픽을 수집해야 합니다"
+                    ),
+                )
+            try:
+                decoded = find_pcap_record(
+                    retained_capture,
+                    sensor_id=str(job["sensor_ids"][0]),
+                    internal_networks=list(job["internal_networks"]),
+                    max_packets=config.pcap_upload_max_packets,
+                    retain_payload_sample_bytes=256,
+                    predicate=lambda item: flow_id(job_id, item) == requested_flow_id,
+                )
+            except PcapParseError as exc:
+                raise ApiError(422, exc.code, str(exc)) from exc
+            if decoded is None:
+                raise ApiError(404, "FLOW_NOT_FOUND", "분석 작업에서 Flow를 찾을 수 없습니다")
+            record = decoded
+            sample = str(record.get("payload_sample_hex") or "")
         if not sample:
             raise ApiError(
                 409,
                 "PAYLOAD_PREVIEW_UNAVAILABLE",
                 "선택한 Flow에 미리볼 Payload가 없습니다",
             )
-        sample_bytes = bytes.fromhex(sample)
+        try:
+            sample_bytes = bytes.fromhex(sample)
+        except ValueError as exc:
+            raise ApiError(
+                409,
+                "PAYLOAD_PREVIEW_CORRUPT",
+                "저장된 Payload sample 형식이 올바르지 않습니다",
+            ) from exc
         return {
             "flow_id": requested_flow_id,
             "payload_hex": sample,

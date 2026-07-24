@@ -12,6 +12,14 @@ from .payload_features import simhash_hamming_distance
 
 
 def _candidate_host(context: AnalysisContext, flow: Flow) -> tuple[str, str] | None:
+    direction = flow.direction.upper()
+    if direction == "OUTBOUND":
+        return flow.destination_ip, flow.source_ip
+    if direction == "INBOUND":
+        return flow.source_ip, flow.destination_ip
+
+    # BIDIRECTIONAL/UNKNOWN has no authoritative packet-side role. Fall back to
+    # configured CIDRs only for those ambiguous records.
     if context.is_internal(flow.source_ip) and not context.is_internal(flow.destination_ip):
         return flow.destination_ip, flow.source_ip
     if context.is_internal(flow.destination_ip) and not context.is_internal(flow.source_ip):
@@ -29,6 +37,12 @@ def _groups(context: AnalysisContext) -> dict[str, list[tuple[str, Flow]]]:
 
 
 def _service_port(context: AnalysisContext, flow: Flow) -> int | None:
+    direction = flow.direction.upper()
+    if direction == "OUTBOUND":
+        return flow.destination_port
+    if direction == "INBOUND":
+        return flow.source_port
+
     if context.is_internal(flow.source_ip) and not context.is_internal(flow.destination_ip):
         return flow.destination_port
     if context.is_internal(flow.destination_ip) and not context.is_internal(flow.source_ip):
@@ -79,10 +93,7 @@ class CommonDestinationDetector:
             hosts = {host for host, _ in rows}
             if len(hosts) < minimum:
                 continue
-            ports = Counter(
-                flow.destination_port if context.is_internal(flow.source_ip) else flow.source_port
-                for _, flow in rows
-            )
+            ports = Counter(_service_port(context, flow) for _, flow in rows)
             hashes = Counter(flow.payload_hash for _, flow in rows if flow.payload_hash)
             duration = (
                 max(flow.timestamp for _, flow in rows) - min(flow.timestamp for _, flow in rows)
@@ -140,6 +151,82 @@ class CommonDestinationDetector:
                     rows,
                     metrics,
                     "다수 내부 호스트가 같은 외부 목적지와 통신",
+                )
+            )
+        return result
+
+
+@dataclass(frozen=True)
+class NonWellKnownPortDetector:
+    """Add a bounded hunting signal when the external service port is non-standard.
+
+    The detector always derives the service-side port from the internal/external role.
+    It therefore does not accidentally score an internal client's ephemeral source port.
+    """
+
+    name: str = "non_well_known_port"
+    version: str = "1.0.0"
+
+    def analyze(self, context: AnalysisContext) -> list[Evidence]:
+        maximum = max(
+            0,
+            min(65535, int(context.parameters.get("well_known_port_max", 1023))),
+        )
+        minimum_ratio = max(
+            0.0,
+            min(1.0, float(context.parameters.get("non_well_known_port_min_ratio", 0.75))),
+        )
+        minimum_observations = max(
+            1,
+            int(context.parameters.get("non_well_known_port_min_observations", 2)),
+        )
+        excluded = {
+            int(value)
+            for value in context.parameters.get("non_well_known_port_exclusions", ())
+            if isinstance(value, int | str)
+            and str(value).isdigit()
+            and 0 <= int(value) <= 65535
+        }
+        result: list[Evidence] = []
+        for candidate, rows in _groups(context).items():
+            inspected: list[tuple[str, Flow, int]] = []
+            for host, flow in rows:
+                port = _service_port(context, flow)
+                if port is not None:
+                    inspected.append((host, flow, port))
+            suspicious = [
+                (host, flow, port)
+                for host, flow, port in inspected
+                if port > maximum and port not in excluded
+            ]
+            if len(suspicious) < minimum_observations or not inspected:
+                continue
+            ratio = len(suspicious) / len(inspected)
+            if ratio < minimum_ratio:
+                continue
+            counts = Counter(port for _, _, port in suspicious)
+            dominant_port, dominant_count = counts.most_common(1)[0]
+            selected = [(host, flow) for host, flow, _ in suspicious]
+            contribution = min(25.0, 15.0 + 10.0 * ratio)
+            result.append(
+                _base_evidence(
+                    candidate,
+                    "NON_WELL_KNOWN_PORT",
+                    self.name,
+                    contribution,
+                    selected,
+                    {
+                        "well_known_port_max": maximum,
+                        "non_well_known_ratio": round(ratio, 4),
+                        "observed_flow_count": len(inspected),
+                        "sample_count": len(suspicious),
+                        "service_ports": tuple(sorted(counts)),
+                        "dominant_port": dominant_port,
+                        "dominant_port_ratio": dominant_count / len(suspicious),
+                    },
+                    "외부 endpoint가 well-known 범위 밖의 service port를 반복 사용",
+                    confidence=0.6,
+                    warnings=("port_heuristic_only",),
                 )
             )
         return result
@@ -349,12 +436,21 @@ class AnalystPayloadSignatureDetector:
         if raw_service_port is not None and _service_port(context, flow) != int(raw_service_port):
             return None
 
-        signature_hash = signature.get("payload_hash")
-        if signature_hash and flow.payload_hash == str(signature_hash):
+        signature_hash = str(signature.get("payload_hash") or "")
+        flow_hashes = {
+            value
+            for value in (flow.payload_hash, flow.last_payload_hash)
+            if value
+        }
+        if signature_hash and signature_hash in flow_hashes:
             return (
                 "EXACT",
                 {
-                    "payload_hash": flow.payload_hash,
+                    "matched_payload_hash": signature_hash,
+                    "matched_payload_position": (
+                        "FIRST" if flow.payload_hash == signature_hash else "LAST"
+                    ),
+                    "flow_payload_hashes": tuple(sorted(flow_hashes)),
                     "service_port": _service_port(context, flow),
                 },
             )
@@ -493,11 +589,7 @@ class CommandAttackDetector:
         all_flows = context.scoped_flows()
         inbound: dict[str, list[tuple[str, Flow]]] = defaultdict(list)
         for flow in all_flows:
-            if (
-                flow.direction == "INBOUND"
-                and context.is_internal(flow.destination_ip)
-                and not context.is_internal(flow.source_ip)
-            ):
+            if flow.direction.upper() == "INBOUND":
                 inbound[flow.source_ip].append((flow.destination_ip, flow))
         result: list[Evidence] = []
         for candidate, commands in inbound.items():
@@ -612,7 +704,7 @@ class ProtocolSimilarityDetector:
             features = Counter(
                 (
                     f.protocol,
-                    f.destination_port if context.is_internal(f.source_ip) else f.source_port,
+                    _service_port(context, f),
                     f.payload_hash,
                     f.tls_fingerprint,
                     f.certificate_fingerprint,
@@ -685,6 +777,7 @@ class MultiSensorDetector:
 
 DEFAULT_DETECTORS: tuple[Detector, ...] = (
     CommonDestinationDetector(),
+    NonWellKnownPortDetector(),
     PeriodicBeaconDetector(),
     SingleHostCompositeBeaconDetector(),
     AnalystPayloadSignatureDetector(),

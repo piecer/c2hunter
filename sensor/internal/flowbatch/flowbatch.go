@@ -24,7 +24,9 @@ type FlowRecord struct {
 	PacketCount            uint64    `json:"packet_count"`
 	TotalBytes             uint64    `json:"total_bytes"`
 	PayloadHash            string    `json:"payload_hash,omitempty"`
+	LastPayloadHash        string    `json:"last_payload_hash,omitempty"`
 	PayloadPrefixHash      string    `json:"payload_prefix_hash,omitempty"`
+	PayloadSampleHex       string    `json:"payload_sample_hex,omitempty"`
 	PayloadLength          *uint32   `json:"payload_length,omitempty"`
 	PayloadEntropy         *float64  `json:"payload_entropy,omitempty"`
 	PayloadPrintableRatio  *float64  `json:"payload_printable_ratio,omitempty"`
@@ -86,7 +88,8 @@ func fromRecord(record flow.Record) FlowRecord {
 		SourcePort: record.Key.SourcePort, DestinationPort: record.Key.DestinationPort,
 		Protocol: protocolName(record.Key.Protocol), Direction: record.Key.Direction.String(),
 		PacketCount: record.PacketCount, TotalBytes: record.TotalBytes,
-		PayloadHash: record.FirstPayloadHash, PayloadPrefixHash: record.PayloadPrefixHash,
+		PayloadHash: record.FirstPayloadHash, LastPayloadHash: record.LastPayloadHash,
+		PayloadPrefixHash: record.PayloadPrefixHash, PayloadSampleHex: record.PayloadSampleHex,
 		PayloadSimHash:        record.PayloadSimHash,
 		PayloadFeatureVersion: record.PayloadFeatureVersion,
 	}

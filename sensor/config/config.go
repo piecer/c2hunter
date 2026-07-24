@@ -63,6 +63,7 @@ type CaptureConfig struct {
 	MaxPackets       uint64        `yaml:"max_packets"`
 	MaxBytes         uint64        `yaml:"max_bytes"`
 	PacketQueueSize  int           `yaml:"packet_queue_size"`
+	PayloadPreviewBytes int        `yaml:"payload_preview_bytes"`
 	BPF              string        `yaml:"bpf_filter"`
 	SourceCIDRs      []string      `yaml:"source_cidrs"`
 	DestinationCIDRs []string      `yaml:"destination_cidrs"`
@@ -180,6 +181,9 @@ func finalize(cfg *Config) error {
 	cfg.Agent.ConfigPollInterval = time.Duration(cfg.Agent.ConfigPollIntervalSeconds) * time.Second
 	if cfg.Agent.StateFile == "" || cfg.Agent.ConfigPollInterval <= 0 {
 		return errors.New("agent state file and config poll interval are required")
+	}
+	if cfg.Capture.PayloadPreviewBytes < 0 || cfg.Capture.PayloadPreviewBytes > 256 {
+		return errors.New("capture payload_preview_bytes must be between 0 and 256")
 	}
 	if cfg.Capture.JobID == "" || cfg.Capture.PacketQueueSize <= 0 {
 		return errors.New("capture job ID and packet queue size are required")

@@ -20,6 +20,7 @@ _FLOW_ID_FIELDS = (
     "total_bytes",
 )
 _SNAPSHOT_FIELDS = _FLOW_ID_FIELDS + (
+    "last_payload_hash",
     "payload_prefix_hash",
     "payload_length",
     "payload_entropy",
@@ -55,19 +56,36 @@ def decorate_flow(
     internal_networks: list[str],
     current_label: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    source_internal = _is_internal(str(record["source_ip"]), internal_networks)
-    destination_internal = _is_internal(str(record["destination_ip"]), internal_networks)
+    source_ip = str(record["source_ip"])
+    destination_ip = str(record["destination_ip"])
+    direction = str(record.get("direction", "UNKNOWN")).upper()
     external_ip = None
     internal_ip = None
     service_port = None
-    if source_internal and not destination_internal:
-        internal_ip = str(record["source_ip"])
-        external_ip = str(record["destination_ip"])
+    role_source = None
+    if direction == "OUTBOUND":
+        internal_ip = source_ip
+        external_ip = destination_ip
         service_port = record.get("destination_port")
-    elif destination_internal and not source_internal:
-        internal_ip = str(record["destination_ip"])
-        external_ip = str(record["source_ip"])
+        role_source = "DIRECTION"
+    elif direction == "INBOUND":
+        internal_ip = destination_ip
+        external_ip = source_ip
         service_port = record.get("source_port")
+        role_source = "DIRECTION"
+    else:
+        source_internal = _is_internal(source_ip, internal_networks)
+        destination_internal = _is_internal(destination_ip, internal_networks)
+        if source_internal and not destination_internal:
+            internal_ip = source_ip
+            external_ip = destination_ip
+            service_port = record.get("destination_port")
+            role_source = "CIDR_FALLBACK"
+        elif destination_internal and not source_internal:
+            internal_ip = destination_ip
+            external_ip = source_ip
+            service_port = record.get("source_port")
+            role_source = "CIDR_FALLBACK"
     result = {
         field: _json_value(record.get(field))
         for field in _SNAPSHOT_FIELDS
@@ -80,6 +98,7 @@ def decorate_flow(
             "internal_ip": internal_ip,
             "external_ip": external_ip,
             "service_port": service_port,
+            "role_source": role_source,
             "has_payload": bool(record.get("payload_hash")),
             "current_label": current_label,
         }

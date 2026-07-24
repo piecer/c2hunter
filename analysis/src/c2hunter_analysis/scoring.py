@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 
 from .domain import AllowlistEntry, Candidate, Evidence, ScoreAdjustment
@@ -16,6 +16,7 @@ CAPS = {
     "LOW_VOLUME_PERSISTENCE_RARITY": 5,
     "SINGLE_HOST_BEACON": 35,
     "ANALYST_PAYLOAD_SIGNATURE": 80,
+    "NON_WELL_KNOWN_PORT": 25,
 }
 
 
@@ -34,6 +35,10 @@ def score_candidates(
     *,
     allowlist: Sequence[AllowlistEntry] = (),
     minimum_samples: int = 1,
+    traffic_profiles: Mapping[str, Mapping[str, int | float]] | None = None,
+    high_volume_bytes_threshold: int = 50 * 1024 * 1024,
+    high_volume_packet_threshold: int = 100_000,
+    high_volume_penalty: int = 30,
     now: datetime | None = None,
 ) -> list[Candidate]:
     grouped: dict[str, list[Evidence]] = defaultdict(list)
@@ -67,6 +72,26 @@ def score_candidates(
             adjustments.append(ScoreAdjustment("PUBLIC_DNS_NTP", -30, "공용 DNS/NTP 정책 일치"))
         if any(item.metrics.get("cdn_cloud") for item in items):
             adjustments.append(ScoreAdjustment("CDN_CLOUD", -20, "CDN/cloud 정책 일치"))
+        profile = (traffic_profiles or {}).get(candidate_ip, {})
+        total_bytes = max(0, int(profile.get("total_bytes", 0) or 0))
+        total_packets = max(0, int(profile.get("total_packets", 0) or 0))
+        volume_reasons = []
+        if high_volume_bytes_threshold > 0 and total_bytes >= high_volume_bytes_threshold:
+            volume_reasons.append(
+                f"bytes {total_bytes:,} >= {high_volume_bytes_threshold:,}"
+            )
+        if high_volume_packet_threshold > 0 and total_packets >= high_volume_packet_threshold:
+            volume_reasons.append(
+                f"packets {total_packets:,} >= {high_volume_packet_threshold:,}"
+            )
+        if volume_reasons and high_volume_penalty > 0 and not exact_analyst_match:
+            adjustments.append(
+                ScoreAdjustment(
+                    "HIGH_VOLUME",
+                    -abs(int(high_volume_penalty)),
+                    "대용량 endpoint 통신: " + ", ".join(volume_reasons),
+                )
+            )
         final = max(0, min(100, round(score + sum(item.points for item in adjustments))))
         times = [time for item in items for time in (item.first_seen, item.last_seen) if time]
         candidates.append(

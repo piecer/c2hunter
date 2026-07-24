@@ -213,6 +213,13 @@ class AnalysisParameters(BaseModel):
     minimum_candidate_score: int = Field(default=0, ge=0, le=100)
     command_correlation_window_seconds: int = Field(default=10, ge=1, le=30)
     periodicity_min_samples: int = Field(default=5, ge=3, le=100000)
+    well_known_port_max: int = Field(default=1023, ge=0, le=65535)
+    non_well_known_port_min_ratio: float = Field(default=0.75, ge=0, le=1)
+    non_well_known_port_min_observations: int = Field(default=2, ge=1, le=100000)
+    non_well_known_port_exclusions: list[int] = Field(default_factory=list)
+    high_volume_bytes_threshold: int = Field(default=50 * 1024 * 1024, ge=0)
+    high_volume_packet_threshold: int = Field(default=100000, ge=0)
+    high_volume_penalty: int = Field(default=30, ge=0, le=100)
 
 
 class FlowRecord(BaseModel):
@@ -228,7 +235,11 @@ class FlowRecord(BaseModel):
     packet_count: int = Field(default=1, ge=1)
     total_bytes: int = Field(default=0, ge=0)
     payload_hash: str | None = None
+    last_payload_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     payload_prefix_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    payload_sample_hex: str | None = Field(
+        default=None, max_length=512, pattern=r"^(?:[0-9a-fA-F]{2})+$"
+    )
     payload_length: int | None = Field(default=None, ge=0)
     payload_entropy: float | None = Field(default=None, ge=0, le=8)
     payload_printable_ratio: float | None = Field(default=None, ge=0, le=1)

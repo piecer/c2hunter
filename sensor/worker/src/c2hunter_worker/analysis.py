@@ -36,6 +36,14 @@ def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
     candidates = score_candidates(
         evidence,
         minimum_samples=int(analysis.get("periodicity_min_samples", 1)),
+        traffic_profiles=context.candidate_traffic_profiles(),
+        high_volume_bytes_threshold=int(
+            analysis.get("high_volume_bytes_threshold", 50 * 1024 * 1024)
+        ),
+        high_volume_packet_threshold=int(
+            analysis.get("high_volume_packet_threshold", 100_000)
+        ),
+        high_volume_penalty=int(analysis.get("high_volume_penalty", 30)),
     )
     minimum_score = int(analysis.get("minimum_candidate_score", 0))
     return {

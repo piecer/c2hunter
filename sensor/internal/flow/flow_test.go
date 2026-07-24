@@ -39,6 +39,22 @@ func TestAggregatorBuildsKeyAndStatistics(t *testing.T) {
 	}
 }
 
+func TestAggregatorRetainsBoundedFirstPayloadPreviewWhenEnabled(t *testing.T) {
+	a := NewAggregatorWithPayloadPreview("sensor-a", "job-1", time.Minute, 4)
+	p := flowPacket(time.Unix(100, 0), "10.0.0.1", "203.0.113.1", 1000, 4444, "abcdef")
+	a.Add(p)
+	records := a.Flush()
+	if len(records) != 1 || records[0].PayloadSampleHex != "61626364" {
+		t.Fatalf("payload preview = %+v", records)
+	}
+
+	disabled := NewAggregator("sensor-a", "job-2", time.Minute)
+	disabled.Add(p)
+	if got := disabled.Flush()[0].PayloadSampleHex; got != "" {
+		t.Fatalf("payload preview should be disabled, got %q", got)
+	}
+}
+
 func TestAggregatorExpiresAtIdleTimeout(t *testing.T) {
 	a := NewAggregator("s", "j", time.Second)
 	t0 := time.Unix(10, 0)

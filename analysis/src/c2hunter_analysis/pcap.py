@@ -338,6 +338,7 @@ def _decode_packet(
     destination_port = decoded.get("destination_port")
     protocol = str(decoded["protocol"])
     features = extract_payload_features(payload)
+    payload_hash = hashlib.sha256(payload).hexdigest() if payload else None
     record: dict[str, Any] = {
         "sensor_id": sensor_id,
         "timestamp": captured.timestamp,
@@ -349,7 +350,8 @@ def _decode_packet(
         "direction": _direction(source_ip, destination_ip, networks),
         "packet_count": 1,
         "total_bytes": len(captured.data),
-        "payload_hash": hashlib.sha256(payload).hexdigest() if payload else None,
+        "payload_hash": payload_hash,
+        "last_payload_hash": payload_hash,
         "domain": _application_domain(protocol, source_port, destination_port, payload),
         "packet_sizes": (len(captured.data),),
     }

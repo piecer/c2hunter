@@ -26,6 +26,7 @@ type PipelineConfig struct {
 	SensorID, JobID              string
 	Interface, Direction         string
 	IdleTimeout                  time.Duration
+	PayloadPreviewBytes          int
 	BatchMaxItems, BatchMaxBytes int
 	PacketQueueSize              int
 	Source                       func() (capture.Reader, error)
@@ -117,7 +118,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	events := make(chan packetEvent, p.cfg.PacketQueueSize)
 	go p.readPackets(readerCtx, reader, events)
 
-	aggregator := flow.NewAggregator(p.cfg.SensorID, p.cfg.JobID, p.cfg.IdleTimeout)
+	aggregator := flow.NewAggregatorWithPayloadPreview(p.cfg.SensorID, p.cfg.JobID, p.cfg.IdleTimeout, p.cfg.PayloadPreviewBytes)
 	queue := batch.NewQueue[flow.Record](p.cfg.BatchMaxItems, p.cfg.BatchMaxBytes, recordSize)
 	started := p.cfg.Limits.StartedAt
 	var capturedPackets, capturedBytes uint64

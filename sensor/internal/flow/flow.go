@@ -1,6 +1,7 @@
 package flow
 
 import (
+	"encoding/hex"
 	"net/netip"
 	"sort"
 	"time"
@@ -33,6 +34,7 @@ type Record struct {
 	AvgPayloadLength                   float64
 	FirstPayloadHash, LastPayloadHash  string
 	PayloadPrefixHash, PayloadSimHash  string
+	PayloadSampleHex                   string
 	FirstPayloadLength                 uint32
 	PayloadEntropy, PayloadPrintable   float64
 	PayloadFeatureVersion              string
@@ -43,14 +45,24 @@ type Record struct {
 type Aggregator struct {
 	sensorID, jobID string
 	idle            time.Duration
+	payloadPreviewBytes int
 	active          map[Key]*Record
 }
 
 func NewAggregator(sensorID, jobID string, idle time.Duration) *Aggregator {
+	return NewAggregatorWithPayloadPreview(sensorID, jobID, idle, 0)
+}
+
+func NewAggregatorWithPayloadPreview(sensorID, jobID string, idle time.Duration, payloadPreviewBytes int) *Aggregator {
 	if idle <= 0 {
 		idle = 60 * time.Second
 	}
-	return &Aggregator{sensorID: sensorID, jobID: jobID, idle: idle, active: make(map[Key]*Record)}
+	if payloadPreviewBytes < 0 {
+		payloadPreviewBytes = 0
+	} else if payloadPreviewBytes > 256 {
+		payloadPreviewBytes = 256
+	}
+	return &Aggregator{sensorID: sensorID, jobID: jobID, idle: idle, payloadPreviewBytes: payloadPreviewBytes, active: make(map[Key]*Record)}
 }
 func (a *Aggregator) Add(p packet.Packet) []Record {
 	return a.AddWithMetadata(p, metadata.Metadata{})
@@ -92,6 +104,13 @@ func (a *Aggregator) AddWithMetadata(p packet.Packet, protocolMetadata metadata.
 			r.PayloadPrintable = features.PrintableRatio
 			r.PayloadSimHash = features.SimHash
 			r.PayloadFeatureVersion = features.Version
+			if a.payloadPreviewBytes > 0 {
+				sample := p.Payload
+				if len(sample) > a.payloadPreviewBytes {
+					sample = sample[:a.payloadPreviewBytes]
+				}
+				r.PayloadSampleHex = hex.EncodeToString(sample)
+			}
 		}
 		r.LastPayloadHash = features.Hash
 	}

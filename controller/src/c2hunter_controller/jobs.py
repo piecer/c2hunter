@@ -234,6 +234,14 @@ def calculate(
         evidence,
         allowlist=entries,
         minimum_samples=int(job["analysis"]["periodicity_min_samples"]),
+        traffic_profiles=context.candidate_traffic_profiles(),
+        high_volume_bytes_threshold=int(
+            parameters.get("high_volume_bytes_threshold", 50 * 1024 * 1024)
+        ),
+        high_volume_packet_threshold=int(
+            parameters.get("high_volume_packet_threshold", 100_000)
+        ),
+        high_volume_penalty=int(parameters.get("high_volume_penalty", 30)),
     )
     minimum_score = int(job["analysis"]["minimum_candidate_score"])
     retained = [candidate for candidate in scored if candidate.score >= minimum_score]
