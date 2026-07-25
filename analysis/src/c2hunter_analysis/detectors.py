@@ -737,6 +737,237 @@ class ProtocolSimilarityDetector:
         return result
 
 
+_C2_ANOMALY_DIRECTIONS: dict[str, str] = {
+    "interval_cv": "LOW",
+    "size_cv": "LOW",
+    "payload_stability": "HIGH",
+    "port_stability": "HIGH",
+    "fingerprint_stability": "HIGH",
+    "domain_diversity_ratio": "LOW",
+}
+
+
+def _candidate_feature_vector(
+    context: AnalysisContext, rows: list[tuple[str, Flow]]
+) -> dict[str, float | None]:
+    """Build auditable C2-oriented features without external ML dependencies.
+
+    Missing telemetry remains ``None`` and is excluded from the population
+    baseline. This prevents absent payload/TLS/domain metadata from being treated
+    as a meaningful zero value.
+    """
+    by_host: dict[str, list[Flow]] = defaultdict(list)
+    for host, flow in rows:
+        by_host[host].append(flow)
+
+    interval_cvs: list[float] = []
+    for flows in by_host.values():
+        if len(flows) < 4:
+            continue
+        times = sorted(flow.timestamp.timestamp() for flow in flows)
+        intervals = [right - left for left, right in zip(times, times[1:], strict=False)]
+        mean = statistics.fmean(intervals)
+        if mean > 0:
+            interval_cvs.append(statistics.pstdev(intervals) / mean)
+
+    sizes = [
+        size
+        for _, flow in rows
+        for size in flow.packet_sizes
+        if size > 0
+    ] or [flow.total_bytes for _, flow in rows if flow.total_bytes > 0]
+    mean_size = statistics.fmean(sizes) if sizes else 0.0
+
+    payload_hashes = [flow.payload_hash for _, flow in rows if flow.payload_hash]
+    ports = [port for _, flow in rows if (port := _service_port(context, flow)) is not None]
+    fingerprints = [
+        (flow.tls_fingerprint, flow.certificate_fingerprint)
+        for _, flow in rows
+        if flow.tls_fingerprint or flow.certificate_fingerprint
+    ]
+    domains = [
+        flow.domain.lower().rstrip(".")
+        for _, flow in rows
+        if flow.domain
+    ]
+
+    return {
+        "interval_cv": statistics.fmean(interval_cvs) if interval_cvs else None,
+        "size_cv": statistics.pstdev(sizes) / mean_size if sizes and mean_size else None,
+        "payload_stability": (
+            max(Counter(payload_hashes).values()) / len(payload_hashes)
+            if payload_hashes
+            else None
+        ),
+        "port_stability": max(Counter(ports).values()) / len(ports) if ports else None,
+        "fingerprint_stability": (
+            max(Counter(fingerprints).values()) / len(fingerprints)
+            if fingerprints
+            else None
+        ),
+        "domain_diversity_ratio": len(set(domains)) / len(domains) if domains else None,
+    }
+
+
+def _robust_center_scale(values: list[float]) -> tuple[float, float]:
+    """Return median and robust scale, falling back to population stdev.
+
+    Median/MAD keeps one extreme candidate from defining its own baseline. The
+    standard-deviation fallback still permits useful scoring when most candidates
+    share exactly the same value and one candidate differs.
+    """
+    center = statistics.median(values)
+    mad = statistics.median(abs(value - center) for value in values)
+    if mad > 1e-9:
+        return center, 1.4826 * mad
+    stdev = statistics.pstdev(values)
+    return center, stdev
+
+
+@dataclass(frozen=True)
+class PopulationAnomalyDetector:
+    """Optional population-relative C2 hunting signal.
+
+    The detector is disabled by default. It only counts deviations in a
+    C2-consistent direction: lower interval/size variation, higher payload/port/
+    fingerprint stability, and lower domain diversity. Generic outliers in the
+    opposite direction do not receive positive evidence.
+    """
+
+    name: str = "ml_population_anomaly"
+    version: str = "1.0.0"
+
+    def analyze(self, context: AnalysisContext) -> list[Evidence]:
+        if not bool(context.parameters.get("ml_anomaly_enabled", False)):
+            return []
+
+        minimum_population = max(
+            8, int(context.parameters.get("ml_anomaly_min_population", 30))
+        )
+        minimum_samples = max(
+            3, int(context.parameters.get("ml_anomaly_min_candidate_samples", 5))
+        )
+        z_threshold = max(
+            2.0, float(context.parameters.get("ml_anomaly_z_threshold", 3.5))
+        )
+        feature_z_floor = max(
+            0.0, float(context.parameters.get("ml_anomaly_feature_z_floor", 1.0))
+        )
+        minimum_directional_features = max(
+            1,
+            min(
+                len(_C2_ANOMALY_DIRECTIONS),
+                int(context.parameters.get("ml_anomaly_min_directional_features", 2)),
+            ),
+        )
+        contribution_cap = max(
+            0.0,
+            min(5.0, float(context.parameters.get("ml_anomaly_contribution_cap", 5.0))),
+        )
+
+        groups = {
+            candidate: rows
+            for candidate, rows in _groups(context).items()
+            if len(rows) >= minimum_samples
+        }
+        if len(groups) < minimum_population:
+            return []
+
+        vectors = {
+            candidate: _candidate_feature_vector(context, rows)
+            for candidate, rows in groups.items()
+        }
+        minimum_feature_population = max(8, minimum_population // 2)
+        baselines: dict[str, tuple[float, float, int]] = {}
+        for feature in _C2_ANOMALY_DIRECTIONS:
+            values = [
+                value
+                for vector in vectors.values()
+                if (value := vector.get(feature)) is not None and math.isfinite(value)
+            ]
+            if len(values) < minimum_feature_population:
+                continue
+            center, scale = _robust_center_scale(values)
+            if scale > 1e-9:
+                baselines[feature] = (center, scale, len(values))
+
+        if len(baselines) < minimum_directional_features:
+            return []
+
+        result: list[Evidence] = []
+        for candidate, rows in groups.items():
+            vector = vectors[candidate]
+            raw_z_scores: dict[str, float] = {}
+            directional_z_scores: dict[str, float] = {}
+            contributors: list[tuple[str, float]] = []
+            for feature, direction in _C2_ANOMALY_DIRECTIONS.items():
+                value = vector.get(feature)
+                baseline = baselines.get(feature)
+                if value is None or baseline is None:
+                    continue
+                center, scale, _population = baseline
+                raw_z = (value - center) / scale
+                directional_z = -raw_z if direction == "LOW" else raw_z
+                raw_z_scores[feature] = raw_z
+                directional_z_scores[feature] = max(0.0, directional_z)
+                if directional_z >= feature_z_floor:
+                    contributors.append((feature, directional_z))
+
+            if len(contributors) < minimum_directional_features:
+                continue
+            anomaly_score = math.sqrt(sum(z_score * z_score for _, z_score in contributors))
+            if anomaly_score < z_threshold:
+                continue
+
+            top_features = sorted(contributors, key=lambda item: item[1], reverse=True)[:3]
+            contribution = min(
+                contribution_cap,
+                max(0.0, 1.0 + 2.0 * (anomaly_score - z_threshold)),
+            )
+            metrics = {
+                "anomaly_score": round(anomaly_score, 4),
+                "z_threshold": z_threshold,
+                "feature_z_floor": feature_z_floor,
+                "population_size": len(groups),
+                "minimum_feature_population": minimum_feature_population,
+                "available_feature_count": len(raw_z_scores),
+                "directional_feature_count": len(contributors),
+                "feature_vector": {
+                    key: round(value, 4) if value is not None else None
+                    for key, value in vector.items()
+                },
+                "raw_z_scores": {key: round(value, 4) for key, value in raw_z_scores.items()},
+                "directional_z_scores": {
+                    key: round(value, 4) for key, value in directional_z_scores.items()
+                },
+                "baseline_population": {
+                    key: population for key, (_center, _scale, population) in baselines.items()
+                },
+                "top_contributing_features": [
+                    {"feature": name, "directional_z_score": round(z_score, 4)}
+                    for name, z_score in top_features
+                ],
+                "sample_count": len(rows),
+            }
+            result.append(
+                _base_evidence(
+                    candidate,
+                    "ML_POPULATION_ANOMALY",
+                    self.name,
+                    contribution,
+                    rows,
+                    metrics,
+                    "동일 분석의 외부 후보군 대비 C2형 feature 조합이 이례적",
+                    confidence=min(0.7, 0.45 + 0.05 * len(contributors)),
+                    warnings=(
+                        "unsupervised_no_ground_truth",
+                        "population_relative_signal",
+                    ),
+                )
+            )
+        return result
+
+
 @dataclass(frozen=True)
 class MultiSensorDetector:
     name: str = "multi_sensor_context"
@@ -786,10 +1017,27 @@ DEFAULT_DETECTORS: tuple[Detector, ...] = (
     PersistenceRarityDetector(),
     ProtocolSimilarityDetector(),
     MultiSensorDetector(),
+    PopulationAnomalyDetector(),
 )
 
 
 def run_detectors(
     context: AnalysisContext, detectors: Iterable[Detector] = DEFAULT_DETECTORS
 ) -> list[Evidence]:
-    return [evidence for detector in detectors for evidence in detector.analyze(context)]
+    primary: list[Evidence] = []
+    anomaly: list[Evidence] = []
+    for detector in detectors:
+        produced = detector.analyze(context)
+        if detector.name == "ml_population_anomaly":
+            anomaly.extend(produced)
+        else:
+            primary.extend(produced)
+
+    # Safe default: population anomaly enriches candidates supported by another
+    # detector. Standalone anomaly-only hunting must be enabled explicitly.
+    if anomaly and not bool(context.parameters.get("ml_anomaly_allow_standalone", False)):
+        supported_candidates = {evidence.candidate_ip for evidence in primary}
+        anomaly = [
+            evidence for evidence in anomaly if evidence.candidate_ip in supported_candidates
+        ]
+    return primary + anomaly

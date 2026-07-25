@@ -13,6 +13,8 @@ def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
     flows: list[Flow] = []
     for stored in payload.get("flow_records", []):
         record = dict(stored)
+        record.setdefault("source_port", None)
+        record.setdefault("destination_port", None)
         timestamp = record.get("timestamp")
         if isinstance(timestamp, str):
             record["timestamp"] = datetime.fromisoformat(timestamp)

@@ -220,6 +220,14 @@ class AnalysisParameters(BaseModel):
     high_volume_bytes_threshold: int = Field(default=50 * 1024 * 1024, ge=0)
     high_volume_packet_threshold: int = Field(default=100000, ge=0)
     high_volume_penalty: int = Field(default=30, ge=0, le=100)
+    ml_anomaly_enabled: bool = False
+    ml_anomaly_allow_standalone: bool = False
+    ml_anomaly_min_population: int = Field(default=30, ge=8, le=100000)
+    ml_anomaly_min_candidate_samples: int = Field(default=5, ge=3, le=100000)
+    ml_anomaly_z_threshold: float = Field(default=3.5, ge=2.0, le=20.0)
+    ml_anomaly_feature_z_floor: float = Field(default=1.0, ge=0.0, le=10.0)
+    ml_anomaly_min_directional_features: int = Field(default=2, ge=1, le=6)
+    ml_anomaly_contribution_cap: float = Field(default=5.0, ge=0.0, le=5.0)
 
 
 class FlowRecord(BaseModel):

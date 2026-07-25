@@ -107,6 +107,24 @@ Evidence metrics: command size/count, affected hosts, lag distribution, baseline
 
 `destination_ip, destination_port, protocol, payload/tls fingerprint, dns_domain, time_bucket` 키를 조합해 독립 센서 관찰을 확인한다. 중복 제거된 logical packet count와 별개로 observation 집합을 사용한다. 동일 미러 패킷 하나가 두 센서에 보인 것만으로 강한 점수를 주지 않고, 각 센서의 distinct host/event pattern 재현을 요구한다. 기본 timestamp tolerance는 ±2초다.
 
+### 3.8 ML_POPULATION_ANOMALY (기본 비활성, 최대 5)
+
+같은 분석에 포함된 외부 Candidate 모집단을 기준으로 interval CV, packet-size CV,
+payload/port/TLS fingerprint 안정성, domain diversity ratio를 비교한다. 외부 ML
+dependency나 model file 없이 median/MAD 기반 robust z-score를 계산한다.
+
+일반적인 양방향 이상치가 아니라 C2에 부합하는 방향만 양의 신호로 사용한다.
+
+- interval/packet-size CV가 모집단보다 낮음
+- payload/port/TLS fingerprint 안정성이 모집단보다 높음
+- domain diversity ratio가 모집단보다 낮음
+
+기본값은 `ml_anomaly_enabled=false`, 최소 Candidate 모집단 30, 거리 threshold 3.5,
+최소 2개 방향성 feature다. 단독 C2 판정기가 아니라 최대 5점의 보조 evidence이며,
+기본적으로 다른 detector가 이미 근거를 만든 Candidate에만 결합한다. 규칙 근거가 없는
+anomaly-only Candidate까지 생성하려면 `ml_anomaly_allow_standalone=true`를 별도로
+설정해야 하며 hunting/실험 용도로 취급한다.
+
 ## 4. 점수 모델
 
 기본 양의 contribution 상한:
@@ -122,6 +140,7 @@ Evidence metrics: command size/count, affected hosts, lag distribution, baseline
 | MULTI_SENSOR_CONTEXT | 10 |
 | PROTOCOL_PAYLOAD_SIMILARITY | 10 |
 | LOW_VOLUME_PERSISTENCE_RARITY | 5 |
+| ML_POPULATION_ANOMALY | 5 |
 
 감점/제외:
 

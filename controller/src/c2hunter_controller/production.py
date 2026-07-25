@@ -146,6 +146,7 @@ class PostgresRepository:
                 "VALUES(%s,%s,%s,%s::jsonb)",
                 (kind, object_id, datetime.now(UTC), self._json(value)),
             )
+            self.connection.commit()
 
     def _put(self, kind: str, object_id: str, value: dict[str, Any]) -> dict[str, Any]:
         with self._lock, self.connection.cursor() as cursor:
@@ -164,6 +165,7 @@ class PostgresRepository:
                 "SELECT data FROM controller_objects WHERE kind=%s AND id=%s", (kind, object_id)
             )
             row = cursor.fetchone()
+            self.connection.commit()
         if not row:
             return None
         value = row[0]
@@ -173,6 +175,7 @@ class PostgresRepository:
         with self.connection.cursor() as cursor:
             cursor.execute("SELECT data FROM controller_objects WHERE kind=%s ORDER BY id", (kind,))
             rows = cursor.fetchall()
+            self.connection.commit()
         return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
 
     def upsert_sensor(self, sensor: dict[str, Any]) -> dict[str, Any]:
@@ -275,6 +278,7 @@ class PostgresRepository:
         with self.connection.cursor() as cursor:
             cursor.execute("SELECT data FROM job_flow_records WHERE job_id=%s", (job_id,))
             row = cursor.fetchone()
+            self.connection.commit()
         if row is None:
             job["flow_records"] = []
         else:
@@ -285,6 +289,7 @@ class PostgresRepository:
                 "SELECT data FROM job_payload_signatures WHERE job_id=%s", (job_id,)
             )
             row = cursor.fetchone()
+            self.connection.commit()
         if row is None:
             job["payload_signatures"] = []
         else:
@@ -308,6 +313,7 @@ class PostgresRepository:
                 "AND data->>'status' IN ('CAPTURING','UPLOADING') ORDER BY id"
             )
             rows = cursor.fetchall()
+            self.connection.commit()
         return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
 
     def delete_job(self, job_id: str) -> bool:
@@ -377,6 +383,7 @@ class PostgresRepository:
         with self.connection.cursor() as cursor:
             cursor.execute("SELECT data FROM job_candidates WHERE job_id=%s", (job_id,))
             row = cursor.fetchone()
+            self.connection.commit()
         if not row:
             return []
         return row[0] if isinstance(row[0], list) else json.loads(row[0])
@@ -385,6 +392,7 @@ class PostgresRepository:
         with self.connection.cursor() as cursor:
             cursor.execute("SELECT job_id,data FROM job_candidates")
             rows = cursor.fetchall()
+            self.connection.commit()
         return {
             str(job_id): data if isinstance(data, list) else json.loads(data)
             for job_id, data in rows
@@ -484,6 +492,7 @@ class PostgresRepository:
                     (job_id,),
                 )
                 rows = cursor.fetchall()
+                self.connection.commit()
             labels = [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
         return sorted(labels, key=lambda item: str(item["created_at"]))
 
