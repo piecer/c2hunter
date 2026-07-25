@@ -532,7 +532,7 @@ def _application_domain(
     payload: bytes,
 ) -> str | None:
     if payload.startswith(b"sni-"):
-        return payload[:253].decode("ascii", errors="ignore").lower() or None
+        return _safe_application_text(payload)
     if 53 in {source_port, destination_port}:
         dns_payload = payload[2:] if protocol == "TCP" and len(payload) >= 2 else payload
         domain = _dns_query_name(dns_payload)
@@ -542,7 +542,7 @@ def _application_domain(
         for line in payload[:8192].split(b"\r\n"):
             if line.lower().startswith(b"host:"):
                 host = line.split(b":", 1)[1].strip().split(b":", 1)[0]
-                return host[:253].decode("ascii", errors="ignore").lower() or None
+                return _safe_application_text(host)
     return None
 
 
@@ -558,11 +558,34 @@ def _dns_query_name(payload: bytes) -> str | None:
             break
         if length & 0xC0 or length > 63 or offset + length > len(payload):
             return None
-        label = payload[offset : offset + length].decode("ascii", errors="ignore")
+        raw_label = payload[offset : offset + length]
+        if any(byte < 0x21 or byte > 0x7E for byte in raw_label):
+            return None
+        try:
+            label = raw_label.decode("ascii")
+        except UnicodeDecodeError:
+            return None
         if not label:
             return None
-        labels.append(label)
+        labels.append(label.lower())
         offset += length
         if sum(len(item) + 1 for item in labels) > 253:
             return None
-    return ".".join(labels).lower() or None
+    return ".".join(labels) or None
+
+
+def _safe_application_text(raw: bytes, max_length: int = 253) -> str | None:
+    """Decode bounded protocol text without admitting control or non-ASCII bytes."""
+    raw = raw[:max_length]
+    if not raw:
+        return None
+    if any(byte < 0x20 or byte == 0x7F or byte > 0x7E for byte in raw):
+        return None
+    try:
+        value = raw.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    value = value.strip().lower()
+    if not value or "\x00" in value:
+        return None
+    return value

@@ -125,8 +125,29 @@ class PostgresRepository:
             return connection
 
     @staticmethod
+    def _sanitize_json_value(value: Any) -> Any:
+        """Make arbitrary control-plane values safe for PostgreSQL text/jsonb."""
+        if isinstance(value, str):
+            # PostgreSQL text/jsonb cannot represent U+0000. Preserve its
+            # presence as a visible escaped marker instead of dropping data.
+            return value.replace("\x00", "\\x00")
+        if isinstance(value, dict):
+            return {
+                key: PostgresRepository._sanitize_json_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [PostgresRepository._sanitize_json_value(item) for item in value]
+        return value
+
+    @staticmethod
     def _json(value: Any) -> str:
-        return json.dumps(value, separators=(",", ":"), default=str)
+        return json.dumps(
+            PostgresRepository._sanitize_json_value(value),
+            separators=(",", ":"),
+            default=str,
+            ensure_ascii=False,
+        )
 
     def ready(self) -> bool:
         return self.database_ready() and self.blob_store.ready()
