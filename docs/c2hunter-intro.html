@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>C2Hunter — 노이즈 속에서, 신호를 찾다</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0A0D12;
+    --surface:#10151D;
+    --surface-2:#151B25;
+    --border:#232B38;
+    --border-soft:#1A212C;
+    --text:#E8EDF3;
+    --text-dim:#8996A8;
+    --text-faint:#4E586A;
+    --accent:#35D6A6;
+    --accent-soft:rgba(53,214,166,.12);
+    --accent-line:rgba(53,214,166,.35);
+    --sev-low:#5B8DEF;
+    --sev-med:#E8B34C;
+    --sev-high:#E8834C;
+    --sev-crit:#E24C4C;
+    --mono:'IBM Plex Mono', ui-monospace, monospace;
+    --sans:'IBM Plex Sans KR','IBM Plex Sans', -apple-system, sans-serif;
+  }
+
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+
+  @media (prefers-reduced-motion: reduce){
+    html{scroll-behavior:auto;}
+    *{animation-duration:0.001ms !important; animation-iteration-count:1 !important; transition-duration:0.001ms !important;}
+  }
+
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--sans);
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  ::selection{ background:var(--accent-soft); color:var(--accent); }
+
+  a{ color:inherit; }
+  a:focus-visible, button:focus-visible{
+    outline:2px solid var(--accent);
+    outline-offset:3px;
+    border-radius:2px;
+  }
+
+  .wrap{
+    max-width:1120px;
+    margin:0 auto;
+    padding:0 28px;
+  }
+
+  .eyebrow{
+    font-family:var(--mono);
+    font-size:12px;
+    letter-spacing:.18em;
+    text-transform:uppercase;
+    color:var(--accent);
+    display:flex;
+    align-items:center;
+    gap:10px;
+    margin:0 0 18px;
+  }
+  .eyebrow::before{
+    content:"";
+    width:16px; height:1px;
+    background:var(--accent-line);
+    display:inline-block;
+  }
+
+  h1,h2,h3{
+    font-family:var(--mono);
+    font-weight:600;
+    letter-spacing:-0.01em;
+    margin:0;
+  }
+
+  /* ---------- NAV ---------- */
+  nav{
+    position:sticky; top:0; z-index:50;
+    background:rgba(10,13,18,.86);
+    backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--border-soft);
+  }
+  nav .wrap{
+    display:flex; align-items:center; justify-content:space-between;
+    height:64px;
+  }
+  .brand{
+    display:flex; align-items:center; gap:10px;
+    font-family:var(--mono); font-weight:600; font-size:15px;
+    letter-spacing:.02em;
+    text-decoration:none;
+  }
+  .brand svg{ display:block; }
+  .navlinks{ display:flex; align-items:center; gap:28px; font-family:var(--mono); font-size:13px; color:var(--text-dim);}
+  .navlinks a{ text-decoration:none; }
+  .navlinks a:hover{ color:var(--text); }
+  .gh-btn{
+    display:flex; align-items:center; gap:8px;
+    padding:8px 14px;
+    border:1px solid var(--border);
+    border-radius:6px;
+    color:var(--text) !important;
+    text-decoration:none;
+    font-size:13px;
+    transition:border-color .15s, background .15s;
+  }
+  .gh-btn:hover{ border-color:var(--accent-line); background:var(--accent-soft); }
+
+  /* ---------- HERO ---------- */
+  .hero{ padding:88px 0 40px; position:relative; }
+  .hero-grid{ display:grid; gap:28px; }
+  .hero h1{
+    font-size:clamp(32px, 5vw, 54px);
+    line-height:1.15;
+    color:var(--text);
+  }
+  .hero h1 .dim{ color:var(--text-faint); }
+  .hero p.sub{
+    max-width:640px;
+    color:var(--text-dim);
+    font-size:16.5px;
+    margin:22px 0 0;
+  }
+  .hero-cta{
+    display:flex; flex-wrap:wrap; align-items:center; gap:20px;
+    margin-top:34px;
+  }
+  .btn-primary{
+    font-family:var(--mono); font-size:14px; font-weight:600;
+    background:var(--accent); color:#08120E;
+    padding:13px 22px; border-radius:6px;
+    text-decoration:none;
+    display:inline-flex; align-items:center; gap:8px;
+    transition:transform .15s, box-shadow .15s;
+  }
+  .btn-primary:hover{ transform:translateY(-1px); box-shadow:0 8px 24px -8px var(--accent-line); }
+  .hero-hint{
+    font-family:var(--mono); font-size:13px; color:var(--text-faint);
+  }
+  .hero-hint code{ color:var(--text-dim); }
+
+  .waveform-wrap{
+    margin-top:56px;
+    border:1px solid var(--border-soft);
+    border-radius:10px;
+    background:linear-gradient(180deg, var(--surface), var(--bg));
+    padding:0;
+    overflow:hidden;
+  }
+  .waveform-wrap svg{ display:block; width:100%; height:auto; }
+
+  .readout-strip{
+    display:grid;
+    grid-template-columns:repeat(4, 1fr);
+    border-top:1px solid var(--border-soft);
+  }
+  .readout-strip div{
+    padding:16px 18px;
+    border-right:1px solid var(--border-soft);
+    font-family:var(--mono);
+  }
+  .readout-strip div:last-child{ border-right:none; }
+  .readout-num{ font-size:20px; font-weight:600; color:var(--text); }
+  .readout-label{ font-size:11px; letter-spacing:.06em; color:var(--text-faint); margin-top:4px; text-transform:uppercase; }
+
+  /* ---------- SECTION SHARED ---------- */
+  section{ padding:96px 0; border-top:1px solid var(--border-soft); }
+  .section-title{
+    font-size:clamp(22px, 3vw, 30px);
+    margin-bottom:16px;
+  }
+  .section-lede{
+    color:var(--text-dim);
+    max-width:640px;
+    font-size:15.5px;
+    margin:0 0 48px;
+  }
+
+  .reveal{ opacity:0; transform:translateY(16px); transition:opacity .6s ease, transform .6s ease; }
+  .reveal.in{ opacity:1; transform:none; }
+
+  /* ---------- WHY ---------- */
+  .why-grid{ display:grid; grid-template-columns:1.1fr .9fr; gap:56px; align-items:start; }
+  .why-grid p{ color:var(--text-dim); font-size:15.5px; margin:0 0 16px; }
+  .why-grid strong{ color:var(--text); font-weight:600; }
+
+  .views{ display:flex; flex-direction:column; gap:10px; }
+  .view-row{ display:flex; align-items:center; gap:14px; }
+  .view-box{
+    flex:1; height:44px; border:1px solid var(--border);
+    border-radius:6px; position:relative; overflow:hidden;
+    background:var(--surface);
+  }
+  .view-box .fill{ position:absolute; inset:0; }
+  .view-label{ width:96px; font-family:var(--mono); font-size:11.5px; color:var(--text-faint); flex-shrink:0; }
+  .view-arrow{ text-align:center; color:var(--text-faint); font-family:var(--mono); font-size:13px; padding:4px 0; }
+  .noisy-pattern{
+    background-image: repeating-linear-gradient(90deg, var(--border) 0 2px, transparent 2px 9px);
+    opacity:.7;
+  }
+  .clear-pattern{
+    background: linear-gradient(90deg, transparent 0 10%, var(--accent-soft) 10% 14%, transparent 14% 34%, var(--accent-soft) 34% 38%, transparent 38% 58%, var(--accent-soft) 58% 62%, transparent 62% 82%, var(--accent-soft) 82% 86%, transparent 86% 100%);
+    border-color:var(--accent-line) !important;
+  }
+  .view-box.clear-outline{ border-color:var(--accent-line); }
+
+  /* ---------- ARCHITECTURE ---------- */
+  .arch-figure{
+    border:1px solid var(--border-soft);
+    border-radius:10px;
+    background:var(--surface);
+    padding:8px;
+    overflow-x:auto;
+  }
+  .arch-figure-inner{ min-width:640px; }
+  .arch-figure svg{ width:100%; height:auto; display:block; }
+  .arch-note{ margin-top:22px; color:var(--text-dim); font-size:14px; }
+  .arch-note code{ font-family:var(--mono); color:var(--text); background:var(--surface-2); padding:2px 6px; border-radius:4px; font-size:13px;}
+
+  /* ---------- LIFECYCLE ---------- */
+  .lifecycle{ display:flex; flex-wrap:wrap; align-items:center; gap:0; font-family:var(--mono); font-size:12.5px; }
+  .lc-step{
+    padding:10px 14px; border:1px solid var(--border);
+    border-radius:6px; color:var(--text-dim); background:var(--surface);
+    white-space:nowrap;
+  }
+  .lc-arrow{ color:var(--text-faint); padding:0 10px; }
+  .lc-terminal{ display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; margin-left:32px; }
+  .lc-term-item{
+    padding:8px 12px; border-radius:6px; font-size:12px; border:1px solid;
+  }
+  .lc-term-item.ok{ color:var(--accent); border-color:var(--accent-line); background:var(--accent-soft); }
+  .lc-term-item.partial{ color:var(--sev-med); border-color:rgba(232,179,76,.35); background:rgba(232,179,76,.08); }
+  .lc-term-item.fail{ color:var(--sev-crit); border-color:rgba(226,76,76,.35); background:rgba(226,76,76,.08); }
+  .lc-term-item.cancel{ color:var(--text-faint); border-color:var(--border); }
+
+  /* ---------- DETECTORS ---------- */
+  .det-grid{
+    display:grid;
+    grid-template-columns:repeat(3, 1fr);
+    gap:1px;
+    background:var(--border-soft);
+    border:1px solid var(--border-soft);
+    border-radius:10px;
+    overflow:hidden;
+  }
+  .det-card{
+    background:var(--surface);
+    padding:22px;
+    position:relative;
+    min-height:150px;
+    display:flex; flex-direction:column;
+  }
+  .det-card.new{
+    background:linear-gradient(160deg, var(--accent-soft), var(--surface) 55%);
+  }
+  .det-cap{
+    position:absolute; top:18px; right:20px;
+    font-family:var(--mono); font-size:11px; color:var(--text-faint);
+  }
+  .det-tag{
+    display:inline-flex; width:fit-content;
+    font-family:var(--mono); font-size:10px; letter-spacing:.06em;
+    color:var(--accent); border:1px solid var(--accent-line);
+    padding:2px 7px; border-radius:20px; margin-bottom:12px;
+  }
+  .det-name{ font-family:var(--mono); font-size:14.5px; font-weight:600; color:var(--text); margin-bottom:8px; }
+  .det-desc{ font-size:13.5px; color:var(--text-dim); line-height:1.55; margin-top:auto; }
+
+  /* ---------- SCORING ---------- */
+  .score-bar{ display:flex; height:52px; border-radius:8px; overflow:hidden; border:1px solid var(--border-soft); }
+  .score-seg{ flex:1; display:flex; flex-direction:column; justify-content:center; padding:0 16px; font-family:var(--mono); }
+  .score-seg .name{ font-size:12.5px; font-weight:600; }
+  .score-seg .range{ font-size:11px; opacity:.75; }
+  .seg-low{ background:rgba(91,141,239,.16); color:var(--sev-low); }
+  .seg-med{ background:rgba(232,179,76,.16); color:var(--sev-med); }
+  .seg-high{ background:rgba(232,131,76,.16); color:var(--sev-high); }
+  .seg-crit{ background:rgba(226,76,76,.16); color:var(--sev-crit); }
+  .score-note{ margin-top:22px; color:var(--text-dim); font-size:14px; max-width:680px; }
+  .score-note strong{ color:var(--text); }
+
+  /* ---------- WORKFLOW ---------- */
+  .flow-steps{ display:grid; grid-template-columns:repeat(3,1fr); gap:24px; }
+  .flow-step{ border:1px solid var(--border-soft); border-radius:10px; padding:24px; background:var(--surface); }
+  .flow-num{ font-family:var(--mono); color:var(--accent); font-size:13px; margin-bottom:14px; }
+  .flow-title{ font-family:var(--mono); font-weight:600; font-size:15px; margin-bottom:10px; }
+  .flow-desc{ color:var(--text-dim); font-size:13.5px; line-height:1.6; }
+  .flow-arrow-row{ display:flex; justify-content:center; color:var(--text-faint); font-family:var(--mono); }
+
+  /* ---------- HARDENING ---------- */
+  .hard-grid{ display:grid; grid-template-columns:repeat(2,1fr); gap:12px; }
+  .hard-item{
+    display:flex; gap:12px; align-items:flex-start;
+    border:1px solid var(--border-soft); border-radius:8px;
+    padding:16px 18px; background:var(--surface);
+    font-size:13.5px; color:var(--text-dim);
+  }
+  .hard-item .dot{ color:var(--accent); font-family:var(--mono); flex-shrink:0; margin-top:1px; }
+
+  /* ---------- LIMITATIONS ---------- */
+  .limit-box{
+    border:1px solid var(--border-soft); border-radius:10px;
+    background:var(--surface); padding:8px 0;
+  }
+  .limit-item{
+    display:flex; gap:14px;
+    padding:16px 26px;
+    border-bottom:1px solid var(--border-soft);
+    font-size:14px; color:var(--text-dim);
+  }
+  .limit-item:last-child{ border-bottom:none; }
+  .limit-item .mk{ font-family:var(--mono); color:var(--text-faint); flex-shrink:0; }
+
+  /* ---------- START / FOOTER ---------- */
+  .start-panel{
+    display:grid; grid-template-columns:1fr 1fr; gap:40px; align-items:center;
+    border:1px solid var(--border-soft); border-radius:12px;
+    padding:44px; background:radial-gradient(circle at 0% 0%, var(--accent-soft), transparent 60%), var(--surface);
+  }
+  .code-block{
+    font-family:var(--mono); font-size:13px; line-height:1.9;
+    background:#080B0F; border:1px solid var(--border-soft);
+    border-radius:8px; padding:20px 22px; color:var(--text-dim);
+    overflow-x:auto;
+  }
+  .code-block .c1{ color:var(--text-faint); }
+  .code-block .c2{ color:var(--accent); }
+
+  footer{ padding:48px 0 60px; }
+  .footer-row{ display:flex; flex-wrap:wrap; justify-content:space-between; gap:20px; align-items:center; }
+  .stack-chips{ display:flex; flex-wrap:wrap; gap:8px; }
+  .chip{
+    font-family:var(--mono); font-size:11.5px; color:var(--text-faint);
+    border:1px solid var(--border-soft); border-radius:20px; padding:5px 12px;
+  }
+  .footer-tag{ font-family:var(--mono); font-size:12.5px; color:var(--text-faint); }
+
+  @media (max-width: 860px){
+    .why-grid, .det-grid, .flow-steps, .hard-grid, .start-panel{ grid-template-columns:1fr; }
+    .readout-strip{ grid-template-columns:repeat(2,1fr); }
+    .readout-strip div:nth-child(2){ border-right:none; }
+    .lc-terminal{ margin-left:0; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="#hero">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+        <circle cx="10" cy="10" r="8.5" stroke="#35D6A6" stroke-width="1.4"/>
+        <circle cx="10" cy="10" r="2.4" fill="#35D6A6"/>
+      </svg>
+      C2HUNTER
+    </a>
+    <div class="navlinks">
+      <a href="#detectors">탐지 엔진</a>
+      <a href="#lifecycle">파이프라인</a>
+      <a href="#limitations">한계</a>
+    </div>
+    <a class="gh-btn" href="https://github.com/piecer/c2hunter" target="_blank" rel="noopener">
+      GitHub ↗
+    </a>
+  </div>
+</nav>
+
+<section class="hero" id="hero" style="border-top:none;">
+  <div class="wrap hero-grid">
+    <div>
+      <div class="eyebrow">DEFENSIVE THREAT-HUNTING PLATFORM</div>
+      <h1>노이즈 속에서,<br><span class="dim">신호를 찾다.</span></h1>
+      <p class="sub">
+        여러 대의 리눅스 센서가 각자 관측한 트래픽은 따로 보면 평범합니다.
+        하지만 겹쳐 보면, 반복되는 하나의 패턴 — DDoS 봇넷 C2 후보 — 이 드러납니다.
+        C2Hunter는 그 패턴을 찾아내고, 근거와 함께 설명하는 <strong style="color:var(--text)">방어 전용</strong> 플랫폼입니다.
+      </p>
+      <div class="hero-cta">
+        <a class="btn-primary" href="https://github.com/piecer/c2hunter" target="_blank" rel="noopener">Repository 보기 →</a>
+        <span class="hero-hint"><code>cp .env.example .env && make setup && make up</code></span>
+      </div>
+    </div>
+
+    <div class="waveform-wrap reveal" id="wf-wrap">
+      <svg viewBox="0 0 1064 200" preserveAspectRatio="none" aria-label="노이즈가 섞인 트래픽이 규칙적인 비콘 신호로 정리되는 다이어그램">
+        <line x1="0" y1="100" x2="1064" y2="100" stroke="#1A212C" stroke-width="1"/>
+        <path id="noise-path" d="M0,100 L18,88 L36,124 L54,70 L72,132 L90,96 L108,140 L126,80 L144,110 L162,60 L180,128 L198,94 L216,150 L234,86 L252,104 L270,66 L288,120 L306,98 L324,142 L342,78 L360,112 L378,64 L396,130 L414,100 L432,90 L450,116"
+          fill="none" stroke="#4E586A" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        <g id="pulse-ticks" stroke="#35D6A6" stroke-width="2.4" stroke-linecap="round">
+          <line x1="500" y1="70" x2="500" y2="130"/>
+          <line x1="570" y1="70" x2="570" y2="130"/>
+          <line x1="640" y1="70" x2="640" y2="130"/>
+          <line x1="710" y1="70" x2="710" y2="130"/>
+          <line x1="780" y1="70" x2="780" y2="130"/>
+          <line x1="850" y1="70" x2="850" y2="130"/>
+          <line x1="920" y1="70" x2="920" y2="130"/>
+          <line x1="990" y1="70" x2="990" y2="130"/>
+        </g>
+        <text x="500" y="34" font-family="IBM Plex Mono, monospace" font-size="11" fill="#35D6A6" letter-spacing="1">DETECTED — CV 0.04</text>
+        <line x1="466" y1="45" x2="466" y2="155" stroke="#232B38" stroke-width="1" stroke-dasharray="3 4"/>
+      </svg>
+      <div class="readout-strip">
+        <div><div class="readout-num">11</div><div class="readout-label">Detectors</div></div>
+        <div><div class="readout-num">0</div><div class="readout-label">TLS Decryption</div></div>
+        <div><div class="readout-num">0</div><div class="readout-label">Internet Scans</div></div>
+        <div><div class="readout-num">0</div><div class="readout-label">Direct C2 Contact</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="why">
+  <div class="wrap">
+    <div class="eyebrow reveal">문제</div>
+    <h2 class="section-title reveal">왜 단일 센서로는 부족한가</h2>
+    <div class="why-grid">
+      <div class="reveal">
+        <p>정교한 DDoS 봇넷의 C2 통신은 한 지점에서만 보면 그저 흔한 HTTPS 아웃바운드 연결처럼 보이도록 설계됩니다. 주기, 크기, 목적지 어느 것도 그 자체로는 이상하지 않습니다.</p>
+        <p>하지만 <strong>같은 시간대에 여러 대의 내부 호스트가 서로 다른 네트워크 구간에서 같은 목적지를 향해 같은 리듬으로 통신</strong>한다면 얘기가 달라집니다. C2Hunter는 이 상관관계를 드러내기 위해, 여러 리눅스 센서의 관측을 한 곳으로 모아 비교합니다.</p>
+      </div>
+      <div class="reveal">
+        <div class="views">
+          <div class="view-row"><div class="view-label">Sensor A만</div><div class="view-box"><div class="fill noisy-pattern" style="position:absolute;inset:0;"></div></div></div>
+          <div class="view-row"><div class="view-label">Sensor B만</div><div class="view-box"><div class="fill noisy-pattern" style="position:absolute;inset:0;"></div></div></div>
+          <div class="view-row"><div class="view-label">Sensor C만</div><div class="view-box"><div class="fill noisy-pattern" style="position:absolute;inset:0;"></div></div></div>
+          <div class="view-arrow">↓ 상관분석</div>
+          <div class="view-row"><div class="view-label" style="color:var(--accent)">교차검증</div><div class="view-box clear-outline"><div class="fill clear-pattern" style="position:absolute;inset:0;"></div></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="architecture">
+  <div class="wrap">
+    <div class="eyebrow reveal">아키텍처</div>
+    <h2 class="section-title reveal">제어 평면과 데이터 평면을 분리한다</h2>
+    <p class="section-lede reveal">Sensor는 항상 Controller 방향으로만 연결을 시작합니다. 흐름(flow) 저장소, 객체(PCAP) 저장소, 큐는 의도적으로 분리되어 있어, 한 계층의 장애가 전체로 번지지 않습니다.</p>
+
+    <div class="arch-figure reveal">
+      <div class="arch-figure-inner">
+      <svg viewBox="0 0 1000 320" preserveAspectRatio="xMidYMid meet">
+        <g font-family="IBM Plex Mono, monospace" font-size="13" fill="#E8EDF3">
+          <!-- input nodes -->
+          <rect x="20" y="70" width="200" height="56" rx="6" fill="#151B25" stroke="#232B38"/>
+          <text x="120" y="103" text-anchor="middle">Sensor Agents</text>
+
+          <rect x="20" y="190" width="200" height="56" rx="6" fill="#151B25" stroke="#232B38"/>
+          <text x="120" y="223" text-anchor="middle">Browser / Web UI</text>
+
+          <!-- controller -->
+          <rect x="360" y="130" width="220" height="56" rx="6" fill="#151B25" stroke="#35D6A6" stroke-width="1.4"/>
+          <text x="470" y="163" text-anchor="middle" fill="#35D6A6">Controller API</text>
+
+          <!-- stores -->
+          <rect x="740" y="20" width="220" height="50" rx="6" fill="#151B25" stroke="#232B38"/>
+          <text x="850" y="50" text-anchor="middle">PostgreSQL</text>
+
+          <rect x="740" y="90" width="220" height="50" rx="6" fill="#151B25" stroke="#232B38"/>
+          <text x="850" y="120" text-anchor="middle">ClickHouse (flows)</text>
+
+          <rect x="740" y="160" width="220" height="50" rx="6" fill="#151B25" stroke="#232B38"/>
+          <text x="850" y="190" text-anchor="middle">MinIO (PCAP)</text>
+
+          <rect x="740" y="230" width="100" height="50" rx="6" fill="#151B25" stroke="#232B38"/>
+          <text x="790" y="260" text-anchor="middle">Redis</text>
+
+          <rect x="860" y="230" width="100" height="50" rx="6" fill="#151B25" stroke="#232B38"/>
+          <text x="910" y="256" text-anchor="middle" font-size="11.5">Worker</text>
+
+          <!-- connectors -->
+          <g stroke="#3A4457" stroke-width="1.3" fill="none">
+            <path d="M220,98 L300,98 L300,158 L360,158"/>
+            <path d="M220,218 L300,218 L300,158 L360,158"/>
+            <path d="M580,150 L660,150 L660,45 L740,45"/>
+            <path d="M580,158 L660,158 L660,115 L740,115"/>
+            <path d="M580,166 L660,166 L660,185 L740,185"/>
+            <path d="M580,174 L660,174 L660,255 L740,255"/>
+            <path d="M840,255 L860,255"/>
+          </g>
+          <g font-size="10.5" fill="#566173">
+            <text x="235" y="93">outbound HTTPS</text>
+            <text x="235" y="107">(token auth)</text>
+          </g>
+        </g>
+      </svg>
+      </div>
+    </div>
+    <p class="arch-note">Sensor 설치는 전용 non-root 사용자로 동작하며, 바이너리에는 <code>CAP_NET_RAW</code> / <code>CAP_NET_ADMIN</code>만 부여됩니다. 각 인터페이스는 독립된 AF_PACKET→Flow→spool→upload 파이프라인을 가지므로, 하나의 인터페이스 장애가 다른 인터페이스를 멈추지 않습니다.</p>
+  </div>
+</section>
+
+<section id="lifecycle">
+  <div class="wrap">
+    <div class="eyebrow reveal">분석 파이프라인</div>
+    <h2 class="section-title reveal">모든 분석은 예측 가능한 상태를 가진다</h2>
+    <p class="section-lede reveal">실시간 센서 캡처든 오프라인 PCAP 업로드든, 같은 상태 기계를 통과합니다. 재분석은 항상 원본 불변 데이터셋에 대해 새로 생성됩니다.</p>
+
+    <div class="reveal">
+      <div class="lifecycle">
+        <div class="lc-step">CREATED</div><div class="lc-arrow">→</div>
+        <div class="lc-step">WAITING_FOR_SENSOR</div><div class="lc-arrow">→</div>
+        <div class="lc-step">CAPTURING</div><div class="lc-arrow">→</div>
+        <div class="lc-step">UPLOADING</div><div class="lc-arrow">→</div>
+        <div class="lc-step">INGESTING</div><div class="lc-arrow">→</div>
+        <div class="lc-step" style="border-color:var(--accent-line); color:var(--accent);">ANALYZING</div>
+      </div>
+      <div class="lc-terminal">
+        <div class="lc-term-item ok">COMPLETED</div>
+        <div class="lc-term-item partial">PARTIALLY_COMPLETED</div>
+        <div class="lc-term-item fail">FAILED</div>
+        <div class="lc-term-item cancel">CANCELLED</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="detectors">
+  <div class="wrap">
+    <div class="eyebrow reveal">탐지 엔진</div>
+    <h2 class="section-title reveal">규칙 기반 10개 + 비지도 학습 1개</h2>
+    <p class="section-lede reveal">모든 evidence는 유형별 점수 상한 안에서만 합산됩니다. 하나의 신호가 전체 점수를 좌우하지 않고, 점수는 항상 근거 목록과 함께 제공됩니다.</p>
+
+    <div class="det-grid reveal">
+      <div class="det-card">
+        <div class="det-cap">≤20</div>
+        <div class="det-name">Common Destination</div>
+        <div class="det-desc">다수의 내부 호스트가 같은 외부 목적지와 통신하는지 확인합니다. 공용 DNS/NTP, 신뢰 CDN 도메인은 자동으로 제외됩니다.</div>
+      </div>
+      <div class="det-card">
+        <div class="det-cap">≤25</div>
+        <div class="det-name">Non-Well-Known Port</div>
+        <div class="det-desc">외부 endpoint가 well-known 범위 밖의 service port를 반복적으로 사용하는 패턴을 찾습니다.</div>
+      </div>
+      <div class="det-card">
+        <div class="det-cap">≤15</div>
+        <div class="det-name">Periodic Beacon</div>
+        <div class="det-desc">허용된 jitter 범위 안에서 반복되는 주기적 통신 — 간격의 변동계수(CV)를 기준으로 판단합니다.</div>
+      </div>
+      <div class="det-card">
+        <div class="det-cap">≤35</div>
+        <div class="det-name">Single-Host Composite Beacon</div>
+        <div class="det-desc">호스트 수가 적어도, 저용량 주기 통신과 안정된 Payload·패킷 크기 패턴을 종합해 판단합니다.</div>
+      </div>
+      <div class="det-card">
+        <div class="det-cap">≤80</div>
+        <div class="det-name">Analyst Payload Signature</div>
+        <div class="det-desc">분석가가 승인한 시그니처와 SHA-256 정확 매치되거나, prefix hash·entropy·SimHash 기반 구조 특징이 일치하면 표시합니다.</div>
+      </div>
+      <div class="det-card">
+        <div class="det-cap">≤15</div>
+        <div class="det-name">Synchronized Communication</div>
+        <div class="det-desc">여러 호스트가 거의 같은 시각에 반복적으로 동기화된 통신을 하는 패턴을 찾습니다.</div>
+      </div>
+      <div class="det-card">
+        <div class="det-cap">≤25</div>
+        <div class="det-name">Command → Attack Correlation</div>
+        <div class="det-desc">작은 inbound 명령 직후, 공통 target에 대한 공격성 트래픽이 증가하는지 시계열로 상관분석합니다.</div>
+      </div>
+      <div class="det-card">
+        <div class="det-cap">≤5</div>
+        <div class="det-name">Low-Volume Persistence Rarity</div>
+        <div class="det-desc">저용량 연결이 이례적으로 장기간 안정적으로 지속되는 희소 패턴을 찾습니다.</div>
+      </div>
+      <div class="det-card">
+        <div class="det-cap">≤10</div>
+        <div class="det-name">Protocol / Payload Similarity</div>
+        <div class="det-desc">여러 호스트에 걸친 protocol·payload 통계적 특징의 유사도를 결합 지표로 계산합니다.</div>
+      </div>
+      <div class="det-card">
+        <div class="det-cap">≤10</div>
+        <div class="det-name">Multi-Sensor Context</div>
+        <div class="det-desc">복수의 독립 센서에서 같은 호스트 패턴이 재현되는지 교차 검증합니다.</div>
+      </div>
+      <div class="det-card new">
+        <div class="det-cap">≤20</div>
+        <div class="det-tag">NEW · ML</div>
+        <div class="det-name">Population Anomaly</div>
+        <div class="det-desc">외부 ML 라이브러리 없이(stdlib만 사용) 같은 분석 내 후보군 전체를 모집단으로 두고, feature 조합의 z-score를 결합해 이상치를 찾습니다. 규칙 임계값의 경계 바로 바깥에 있어 놓치던 비콘을, 모집단 대비로는 뚜렷한 이상치로 잡아냅니다.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="scoring">
+  <div class="wrap">
+    <div class="eyebrow reveal">점수 해석</div>
+    <h2 class="section-title reveal">점수는 참고 지표이지, 판결이 아닙니다</h2>
+
+    <div class="reveal">
+      <div class="score-bar">
+        <div class="score-seg seg-low"><div class="name">LOW</div><div class="range">0–39</div></div>
+        <div class="score-seg seg-med"><div class="name">MEDIUM</div><div class="range">40–59</div></div>
+        <div class="score-seg seg-high"><div class="name">HIGH</div><div class="range">60–79</div></div>
+        <div class="score-seg seg-crit"><div class="name">CRITICAL</div><div class="range">80–100</div></div>
+      </div>
+      <p class="score-note"><strong>escalation 전에</strong> evidence 상세, 내부 호스트, 독립 센서 관측 여부, clock/loss 경고, 명령-공격 타임라인, 원본 PCAP까지 함께 검토하세요. DNS/NTP/CDN·allowlist에 해당하면 후보는 자동으로 감소하거나 제외됩니다.</p>
+    </div>
+  </div>
+</section>
+
+<section id="payload-workflow">
+  <div class="wrap">
+    <div class="eyebrow reveal">분석가 주도 탐지</div>
+    <h2 class="section-title reveal">사람의 판단을 지우지 않는다</h2>
+    <p class="section-lede reveal">자동 탐지가 놓친 흐름도, 분석가가 직접 검토하고 판정을 남길 수 있습니다. 그 판정은 버전관리되는 시그니처로 이어집니다.</p>
+
+    <div class="flow-steps reveal">
+      <div class="flow-step">
+        <div class="flow-num">01</div>
+        <div class="flow-title">최대 256바이트 미리보기</div>
+        <div class="flow-desc">보존된 PCAP에서 직접, 분석가가 명시적으로 요청한 흐름만 미리보기합니다. 그 이상은 노출되지 않습니다.</div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-num">02</div>
+        <div class="flow-title">Append-only 검증</div>
+        <div class="flow-desc"><code style="font-family:var(--mono)">C2</code> 또는 <code style="font-family:var(--mono)">BENIGN</code> 판정을 기록합니다. 기존 판정은 수정되지 않고, 이력으로만 쌓입니다.</div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-num">03</div>
+        <div class="flow-title">버전관리 시그니처</div>
+        <div class="flow-desc">SHA-256 정확 매치는 고신뢰 경보로, prefix hash·length·entropy·SimHash 구조 매치는 검토 전까지 monitor-only로 표시됩니다.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="hardening">
+  <div class="wrap">
+    <div class="eyebrow reveal">센서 보안</div>
+    <h2 class="section-title reveal">센서는 최소 권한, 아웃바운드 전용</h2>
+
+    <div class="hard-grid reveal">
+      <div class="hard-item"><span class="dot">▸</span>non-root 전용 사용자로 systemd 서비스 실행</div>
+      <div class="hard-item"><span class="dot">▸</span>바이너리에는 CAP_NET_RAW / CAP_NET_ADMIN만 부여</div>
+      <div class="hard-item"><span class="dot">▸</span>모든 연결은 Sensor → Controller 방향으로만 시작</div>
+      <div class="hard-item"><span class="dot">▸</span>설치 시 단 한 번만 노출되는 one-time enrollment token</div>
+      <div class="hard-item"><span class="dot">▸</span>인터페이스별 독립 파이프라인 — 하나가 실패해도 나머지는 계속 동작</div>
+      <div class="hard-item"><span class="dot">▸</span>장애 시 DEGRADED 상태와 인터페이스별 오류 카운터를 보고</div>
+    </div>
+  </div>
+</section>
+
+<section id="limitations">
+  <div class="wrap">
+    <div class="eyebrow reveal">정직하게 밝히는 한계</div>
+    <h2 class="section-title reveal">무엇을 할 수 없는지도 압니다</h2>
+
+    <div class="limit-box reveal">
+      <div class="limit-item"><span class="mk">—</span>TLS 페이로드는 복호화하지 않으며, payload 보존은 기본적으로 비활성화되어 있습니다.</div>
+      <div class="limit-item"><span class="mk">—</span>현재 Compose 구성은 단일 호스트 개발 토폴로지이며, production HA 구성이 아닙니다.</div>
+      <div class="limit-item"><span class="mk">—</span>AF_PACKET 가용성과 패킷 드롭률은 호스트 커널·NIC·미러링 품질에 좌우됩니다.</div>
+      <div class="limit-item"><span class="mk">—</span>결정적 브라우저 fixture는 UI 동작만 검증하며, 서버 인가 로직을 검증하지 않습니다.</div>
+      <div class="limit-item"><span class="mk">—</span>PCAP 업로드 원본은 미리보기·추출을 위해 보존되므로, 민감하거나 대용량인 캡처는 보수적인 업로드 한도와 보존 정책이 필요합니다.</div>
+    </div>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrap">
+    <div class="start-panel reveal">
+      <div>
+        <div class="eyebrow">지금 시작하기</div>
+        <h2 class="section-title" style="margin-bottom:14px;">5분 안에 로컬에서 띄우기</h2>
+        <p style="color:var(--text-dim); font-size:14.5px; margin:0;">Python 3.12 · Go 1.25.12 · Node.js 22.14 기반. 의존성과 이미지는 모두 pin되어 있습니다.</p>
+      </div>
+      <div class="code-block">
+<span class="c1"># .env.example을 복사하고 change-me 값을 채우세요</span>
+cp .env.example .env
+make setup
+make up
+<span class="c1"># 헬스체크</span>
+curl <span class="c2">http://localhost:8000/api/v1/health</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="footer-row">
+      <div class="footer-tag">C2Hunter — 방어 전용입니다. 공격하지 않습니다.</div>
+      <div class="stack-chips">
+        <span class="chip">Python 3.12</span>
+        <span class="chip">Go 1.25</span>
+        <span class="chip">Node.js 22</span>
+        <span class="chip">PostgreSQL</span>
+        <span class="chip">ClickHouse</span>
+        <span class="chip">Redis</span>
+        <span class="chip">MinIO</span>
+      </div>
+      <a class="gh-btn" href="https://github.com/piecer/c2hunter" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  // scroll reveal
+  const els = document.querySelectorAll('.reveal');
+  if ('IntersectionObserver' in window){
+    const io = new IntersectionObserver((entries)=>{
+      entries.forEach(e=>{
+        if(e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target); }
+      });
+    }, { threshold: 0.12 });
+    els.forEach(el=>io.observe(el));
+  } else {
+    els.forEach(el=>el.classList.add('in'));
+  }
+
+  // hero waveform draw-in + pulse (respects reduced motion)
+  const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const noisePath = document.getElementById('noise-path');
+  const ticks = document.querySelectorAll('#pulse-ticks line');
+
+  if(noisePath && !prefersReduced){
+    const len = noisePath.getTotalLength();
+    noisePath.style.strokeDasharray = len;
+    noisePath.style.strokeDashoffset = len;
+    requestAnimationFrame(()=>{
+      noisePath.style.transition = 'stroke-dashoffset 1.4s ease-out';
+      noisePath.style.strokeDashoffset = '0';
+    });
+  }
+  if(ticks.length && !prefersReduced){
+    ticks.forEach((t,i)=>{
+      t.style.opacity = 0;
+      t.style.transition = `opacity .4s ease ${1.2 + i*0.08}s`;
+      requestAnimationFrame(()=>{ t.style.opacity = 1; });
+    });
+  }
+</script>
+</body>
+</html>
