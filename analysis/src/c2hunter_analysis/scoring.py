@@ -78,13 +78,9 @@ def score_candidates(
         total_packets = max(0, int(profile.get("total_packets", 0) or 0))
         volume_reasons = []
         if high_volume_bytes_threshold > 0 and total_bytes >= high_volume_bytes_threshold:
-            volume_reasons.append(
-                f"bytes {total_bytes:,} >= {high_volume_bytes_threshold:,}"
-            )
+            volume_reasons.append(f"bytes {total_bytes:,} >= {high_volume_bytes_threshold:,}")
         if high_volume_packet_threshold > 0 and total_packets >= high_volume_packet_threshold:
-            volume_reasons.append(
-                f"packets {total_packets:,} >= {high_volume_packet_threshold:,}"
-            )
+            volume_reasons.append(f"packets {total_packets:,} >= {high_volume_packet_threshold:,}")
         if volume_reasons and high_volume_penalty > 0 and not exact_analyst_match:
             adjustments.append(
                 ScoreAdjustment(

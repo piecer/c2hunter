@@ -133,10 +133,9 @@ class PostgresRepository:
             return value.replace("\x00", "\\x00")
         if isinstance(value, dict):
             return {
-                key: PostgresRepository._sanitize_json_value(item)
-                for key, item in value.items()
+                key: PostgresRepository._sanitize_json_value(item) for key, item in value.items()
             }
-        if isinstance(value, (list, tuple)):
+        if isinstance(value, list | tuple):
             return [PostgresRepository._sanitize_json_value(item) for item in value]
         return value
 
@@ -298,7 +297,7 @@ class PostgresRepository:
             )
             self._audit("job", job["id"], metadata)
             self.connection.commit()
-        return deepcopy(job)
+        return deepcopy(metadata)
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         job = self.get_job_summary(job_id)
@@ -314,18 +313,14 @@ class PostgresRepository:
             value = row[0]
             job["flow_records"] = value if isinstance(value, list) else json.loads(value)
         with self.connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT data FROM job_payload_signatures WHERE job_id=%s", (job_id,)
-            )
+            cursor.execute("SELECT data FROM job_payload_signatures WHERE job_id=%s", (job_id,))
             row = cursor.fetchone()
             self.connection.commit()
         if row is None:
             job["payload_signatures"] = []
         else:
             value = row[0]
-            job["payload_signatures"] = (
-                value if isinstance(value, list) else json.loads(value)
-            )
+            job["payload_signatures"] = value if isinstance(value, list) else json.loads(value)
         return job
 
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None:
@@ -427,9 +422,7 @@ class PostgresRepository:
             for job_id, data in rows
         }
 
-    def update_candidate(
-        self, candidate_id: str, updates: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    def update_candidate(self, candidate_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
         """Update a candidate by ID across all jobs."""
         from copy import deepcopy as dp
 
@@ -444,25 +437,28 @@ class PostgresRepository:
 
                 for i, candidate in enumerate(candidates_list):
                     if candidate.get("id") == candidate_id:
-                        from datetime import UTC as utc_sync, datetime as dt_datetime
+                        from datetime import UTC as utc_sync
+                        from datetime import datetime as dt_datetime
 
                         updates_copy = dp(updates)
                         updated = dp(candidate)
 
                         if "score_adjustment" in updates_copy:
                             old_score = updated.get("score", 0)
-                            updated["score"] = max(0, min(100, old_score + updates_copy.pop("score_adjustment")))
+                            adj = updates_copy.pop("score_adjustment")
+                            updated["score"] = max(0, min(100, old_score + adj))
 
                         if "exclude_reason" in updates_copy:
                             updated["excluded"] = True
                             updated["exclude_reason"] = updates_copy.pop("exclude_reason")
 
                         for key, value in updates_copy.items():
-                            if isinstance(value, (str, int, float, bool)):
+                            if isinstance(value, str | int | float | bool):
                                 updated[key] = value
                             else:
                                 try:
                                     from copy import deepcopy as dp2
+
                                     updated[key] = dp2(value)
                                 except Exception:
                                     updated[key] = value
@@ -486,7 +482,6 @@ class PostgresRepository:
 
     def delete_candidate(self, candidate_id: str) -> bool:
         """Delete a candidate by ID across all jobs."""
-        from copy import deepcopy as dp
 
         with self._lock, self.connection.cursor() as cursor:
             for row in list(cursor.execute("SELECT job_id,data FROM job_candidates")):

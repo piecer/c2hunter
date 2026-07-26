@@ -53,25 +53,25 @@ type BatchConfig struct {
 }
 
 type CaptureConfig struct {
-	JobID            string        `yaml:"job_id"`
-	StartTimeText    string        `yaml:"start_time"`
-	EndTimeText      string        `yaml:"end_time"`
-	StartTime        time.Time     `yaml:"-"`
-	EndTime          time.Time     `yaml:"-"`
-	DurationSeconds  uint64        `yaml:"duration_seconds"`
-	Duration         time.Duration `yaml:"-"`
-	MaxPackets       uint64        `yaml:"max_packets"`
-	MaxBytes         uint64        `yaml:"max_bytes"`
-	PacketQueueSize  int           `yaml:"packet_queue_size"`
-	PayloadPreviewBytes int        `yaml:"payload_preview_bytes"`
-	BPF              string        `yaml:"bpf_filter"`
-	SourceCIDRs      []string      `yaml:"source_cidrs"`
-	DestinationCIDRs []string      `yaml:"destination_cidrs"`
-	SourcePorts      []uint16      `yaml:"source_ports"`
-	DestinationPorts []uint16      `yaml:"destination_ports"`
-	Protocols        []string      `yaml:"protocols"`
-	IPVersions       []uint8       `yaml:"ip_versions"`
-	Directions       []string      `yaml:"directions"`
+	JobID               string        `yaml:"job_id"`
+	StartTimeText       string        `yaml:"start_time"`
+	EndTimeText         string        `yaml:"end_time"`
+	StartTime           time.Time     `yaml:"-"`
+	EndTime             time.Time     `yaml:"-"`
+	DurationSeconds     uint64        `yaml:"duration_seconds"`
+	Duration            time.Duration `yaml:"-"`
+	MaxPackets          uint64        `yaml:"max_packets"`
+	MaxBytes            uint64        `yaml:"max_bytes"`
+	PacketQueueSize     int           `yaml:"packet_queue_size"`
+	PayloadPreviewBytes int           `yaml:"payload_preview_bytes"`
+	BPF                 string        `yaml:"bpf_filter"`
+	SourceCIDRs         []string      `yaml:"source_cidrs"`
+	DestinationCIDRs    []string      `yaml:"destination_cidrs"`
+	SourcePorts         []uint16      `yaml:"source_ports"`
+	DestinationPorts    []uint16      `yaml:"destination_ports"`
+	Protocols           []string      `yaml:"protocols"`
+	IPVersions          []uint8       `yaml:"ip_versions"`
+	Directions          []string      `yaml:"directions"`
 }
 
 type SpoolConfig struct {

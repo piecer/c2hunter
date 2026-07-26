@@ -1480,7 +1480,7 @@ def create_app(
         sort: str = "-score",
     ) -> dict[str, Any]:
         jobs = {str(job["id"]): job for job in repo.list_jobs()}
-        items = []
+        items: list[dict[str, Any]] = []
         for job_id, candidates in repo.list_candidate_sets().items():
             job = jobs.get(job_id)
             if job is None:
@@ -1529,7 +1529,7 @@ def create_app(
                         updates["score_adjustment"] = payload.score_adjustment
                     if payload.exclude_reason is not None:
                         updates["exclude_reason"] = payload.exclude_reason
-                    
+
                     updated = repo.update_candidate(candidate_id, updates)
                     if updated is not None:
                         return _public_candidate(updated, job)
@@ -1565,6 +1565,10 @@ def create_app(
         if signature is None:
             raise ApiError(404, "SIGNATURE_NOT_FOUND", "서명을 찾을 수 없습니다")
         updated = {**signature, **payload.model_dump(exclude_unset=True)}
+        current_version = signature.get("version", 1)
+        # version이 명시적으로 전달되지 않았다면 자동으로 증가
+        if "version" not in payload.model_dump(exclude_unset=True):
+            updated["version"] = int(current_version) + 1
         saved = repo.save_payload_signature(updated)
         return saved
 

@@ -43,10 +43,10 @@ type Record struct {
 	packetSizeSum, payloadLengthSum    uint64
 }
 type Aggregator struct {
-	sensorID, jobID string
-	idle            time.Duration
+	sensorID, jobID     string
+	idle                time.Duration
 	payloadPreviewBytes int
-	active          map[Key]*Record
+	active              map[Key]*Record
 }
 
 func NewAggregator(sensorID, jobID string, idle time.Duration) *Aggregator {

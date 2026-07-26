@@ -109,7 +109,7 @@ def decorate_flow(
 def filter_flows(
     job: dict[str, Any],
     *,
-    labels: list[dict[str, Any]] = (),
+    labels: list[dict[str, Any]] | None = None,
     candidate_ip: str | None = None,
     direction: str | None = None,
     protocol: str | None = None,
@@ -117,6 +117,8 @@ def filter_flows(
     has_payload: bool | None = None,
 ) -> list[dict[str, Any]]:
     latest_labels: dict[str, dict[str, Any]] = {}
+    if labels is None:
+        labels = []
     for label in sorted(labels, key=lambda item: str(item.get("created_at", ""))):
         latest_labels[str(label["flow_id"])] = label
     result: list[dict[str, Any]] = []

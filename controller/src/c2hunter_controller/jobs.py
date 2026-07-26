@@ -10,7 +10,7 @@ from c2hunter_analysis.detectors import run_detectors
 from c2hunter_analysis.domain import AllowlistEntry, AnalysisContext, Flow
 from c2hunter_analysis.scoring import score_candidates
 
-from .schemas import AnalysisJobCreate
+from .schemas import AnalysisJobCreate, FlowRecord
 
 
 class JobState(StrEnum):
@@ -153,6 +153,11 @@ class StateMachine:
             job["completed_at"] = occurred
 
 
+def _sanitize_flow(f: FlowRecord) -> dict[str, Any]:
+    exclude = {"raw_packet_hex", "payload_sample_hex"}
+    return {k: v for k, v in f.model_dump(mode="json").items() if k not in exclude or v is not None}
+
+
 def build_job(
     payload: AnalysisJobCreate, *, parent_job_id: str | None = None, dataset_id: str | None = None
 ) -> dict[str, Any]:
@@ -174,7 +179,7 @@ def build_job(
         "capture": payload.capture.model_dump(mode="json"),
         "analysis": payload.analysis.model_dump(mode="json"),
         "internal_networks": payload.internal_networks,
-        "flow_records": [item.model_dump(mode="json") for item in payload.flow_records],
+        "flow_records": [_sanitize_flow(item) for item in payload.flow_records],
         "created_at": now,
         "updated_at": now,
         "completed_at": None,
@@ -238,9 +243,7 @@ def calculate(
         high_volume_bytes_threshold=int(
             parameters.get("high_volume_bytes_threshold", 50 * 1024 * 1024)
         ),
-        high_volume_packet_threshold=int(
-            parameters.get("high_volume_packet_threshold", 100_000)
-        ),
+        high_volume_packet_threshold=int(parameters.get("high_volume_packet_threshold", 100_000)),
         high_volume_penalty=int(parameters.get("high_volume_penalty", 30)),
     )
     minimum_score = int(job["analysis"]["minimum_candidate_score"])

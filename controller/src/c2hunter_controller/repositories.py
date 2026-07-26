@@ -116,9 +116,7 @@ class MemoryRepository:
             if "flow_records" not in stored and existing is not None:
                 stored["flow_records"] = deepcopy(existing.get("flow_records", []))
             if "payload_signatures" not in stored and existing is not None:
-                stored["payload_signatures"] = deepcopy(
-                    existing.get("payload_signatures", [])
-                )
+                stored["payload_signatures"] = deepcopy(existing.get("payload_signatures", []))
             self.jobs[job["id"]] = stored
             return deepcopy(job)
 
@@ -204,9 +202,7 @@ class MemoryRepository:
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]:
         return deepcopy(self.candidates.get(job_id, []))
 
-    def update_candidate(
-        self, candidate_id: str, updates: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    def update_candidate(self, candidate_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
         """Update a candidate and return it, or None if not found."""
         with self._lock:
             for job_id, candidates in self.candidates.items():
@@ -215,15 +211,16 @@ class MemoryRepository:
                         # Create updated candidate
                         updated = deepcopy(candidate)
                         updates_copy = deepcopy(updates)
-                        
+
                         if "score_adjustment" in updates_copy:
                             old_score = updated.get("score", 0)
-                            updated["score"] = max(0, min(100, old_score + updates_copy.pop("score_adjustment")))
-                        
+                            adj = updates_copy.pop("score_adjustment")
+                            updated["score"] = max(0, min(100, old_score + adj))
+
                         if "exclude_reason" in updates_copy:
                             updated["excluded"] = True
                             updated["exclude_reason"] = updates_copy.pop("exclude_reason")
-                        
+
                         # Apply any other direct field updates
                         for key, value in updates_copy.items():
                             if isinstance(updated.get(key), list) and isinstance(value, list):
@@ -232,11 +229,12 @@ class MemoryRepository:
                                 updated[key].update(value)
                             else:
                                 updated[key] = deepcopy(value)
-                        
+
                         # Update timestamp
                         from datetime import UTC
+
                         updated["updated_at"] = datetime.now(UTC).isoformat()
-                        
+
                         self.candidates[job_id][i] = updated
                         return deepcopy(updated)
         return None
@@ -246,9 +244,7 @@ class MemoryRepository:
         with self._lock:
             for job_id, candidates in list(self.candidates.items()):
                 original_len = len(candidates)
-                self.candidates[job_id] = [
-                    c for c in candidates if c.get("id") != candidate_id
-                ]
+                self.candidates[job_id] = [c for c in candidates if c.get("id") != candidate_id]
                 if len(self.candidates[job_id]) < original_len:
                     return True
             return False
@@ -587,9 +583,7 @@ class SQLiteRepository:
                 )
             self.connection.execute("DELETE FROM candidates WHERE job_id=?", (job_id,))
             self.connection.execute("DELETE FROM job_flow_records WHERE job_id=?", (job_id,))
-            self.connection.execute(
-                "DELETE FROM job_payload_signatures WHERE job_id=?", (job_id,)
-            )
+            self.connection.execute("DELETE FROM job_payload_signatures WHERE job_id=?", (job_id,))
             self.connection.execute("DELETE FROM job_capture_blobs WHERE job_id=?", (job_id,))
             self.connection.execute("DELETE FROM idempotency WHERE job_id=?", (job_id,))
             cursor = self.connection.execute(
@@ -632,41 +626,39 @@ class SQLiteRepository:
         rows = self.connection.execute("SELECT job_id,data FROM candidates").fetchall()
         return {str(job_id): json.loads(data) for job_id, data in rows}
 
-    def update_candidate(
-        self, candidate_id: str, updates: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    def update_candidate(self, candidate_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
         """Update a candidate by ID across all jobs."""
         with self._lock:
             # Find which job contains this candidate
             for row in self.connection.execute("SELECT job_id,data FROM candidates"):
                 job_id = row[0]
                 candidates_list = json.loads(row[1])
-                
+
                 for i, candidate in enumerate(candidates_list):
                     if candidate.get("id") == candidate_id:
                         # Found it - need to update
                         from datetime import UTC
+
                         updates_copy = deepcopy(updates)
-                        
+
                         updated = deepcopy(candidate)
-                        
+
                         if "score_adjustment" in updates_copy:
                             old_score = updated.get("score", 0)
-                            updated["score"] = max(0, min(100, old_score + updates_copy.pop("score_adjustment")))
-                        
+                            adj = updates_copy.pop("score_adjustment")
+                            updated["score"] = max(0, min(100, old_score + adj))
+
                         if "exclude_reason" in updates_copy:
                             updated["excluded"] = True
                             updated["exclude_reason"] = updates_copy.pop("exclude_reason")
-                        
+
                         for key, value in updates_copy.items():
                             updated[key] = deepcopy(value)
-                        
+
                         updated["updated_at"] = datetime.now(UTC).isoformat()
-                        
+
                         candidates_list[i] = updated
-                        self.connection.execute(
-                            "DELETE FROM candidates WHERE job_id=?", (job_id,)
-                        )
+                        self.connection.execute("DELETE FROM candidates WHERE job_id=?", (job_id,))
                         self.connection.execute(
                             "INSERT INTO candidates(job_id,data) VALUES(?,?)",
                             (job_id, self._serialize(candidates_list)),
@@ -681,14 +673,12 @@ class SQLiteRepository:
             for row in list(self.connection.execute("SELECT job_id,data FROM candidates")):
                 job_id = row[0]
                 candidates_list = json.loads(row[1])
-                
+
                 original_len = len(candidates_list)
                 candidates_list = [c for c in candidates_list if c.get("id") != candidate_id]
-                
+
                 if len(candidates_list) < original_len:
-                    self.connection.execute(
-                        "DELETE FROM candidates WHERE job_id=?", (job_id,)
-                    )
+                    self.connection.execute("DELETE FROM candidates WHERE job_id=?", (job_id,))
                     self.connection.execute(
                         "INSERT INTO candidates(job_id,data) VALUES(?,?)",
                         (job_id, self._serialize(candidates_list)),

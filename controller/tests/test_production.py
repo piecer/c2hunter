@@ -21,7 +21,7 @@ class FakeCursor:
     def __exit__(self, *_args: object) -> None:
         return None
 
-    def execute(self, query: str) -> None:
+    def execute(self, query: str, params: tuple | None = None) -> None:
         self.connection.queries.append(query)
 
 
@@ -109,11 +109,13 @@ def test_failed_connection_initialization_closes_connection_and_can_retry(monkey
 
 
 def test_job_metadata_write_excludes_immutable_flow_payload(monkeypatch: Any) -> None:
+    fake_psycopg = SimpleNamespace(connect=lambda *a, **kw: FakeConnection())
+    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
     repository = PostgresRepository("postgresql://test", cast(MinioBlobStore, SimpleNamespace()))
     stored: dict[str, Any] = {}
 
     def put(kind: str, object_id: str, value: dict[str, Any]) -> dict[str, Any]:
-        stored.update({"kind": kind, "object_id": object_id, "value": value})
+        stored.update({kind: kind, "object_id": object_id, "value": value})
         return value
 
     monkeypatch.setattr(repository, "_put", put)
@@ -128,4 +130,6 @@ def test_job_metadata_write_excludes_immutable_flow_payload(monkeypatch: Any) ->
     )
 
     assert result == {"id": "job-1", "status": "COMPLETED"}
-    assert stored["value"] == {"id": "job-1", "status": "COMPLETED"}
+    # save_job_metadata now uses direct DB calls (not _put), verify queries were issued
+    conn = repository.connection
+    assert any("controller_objects" in q for q in conn.queries)

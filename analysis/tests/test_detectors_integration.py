@@ -84,10 +84,7 @@ def test_common_destination_requires_multiple_internal_hosts() -> None:
 
 
 def test_non_well_known_port_is_bounded_and_high_volume_is_penalized() -> None:
-    low_volume = [
-        flow(index, "10.0.0.1", port=4444, packets=2, size=300)
-        for index in range(3)
-    ]
+    low_volume = [flow(index, "10.0.0.1", port=4444, packets=2, size=300) for index in range(3)]
     low_context = context(low_volume)
     evidence = NonWellKnownPortDetector().analyze(low_context)
 
@@ -102,8 +99,7 @@ def test_non_well_known_port_is_bounded_and_high_volume_is_penalized() -> None:
     assert candidate.score == 5  # port evidence 25 - single-host adjustment 20
 
     high_volume = [
-        flow(index, "10.0.0.1", port=4444, packets=1_000, size=10_000)
-        for index in range(3)
+        flow(index, "10.0.0.1", port=4444, packets=1_000, size=10_000) for index in range(3)
     ]
     high_context = context(high_volume)
     high_evidence = NonWellKnownPortDetector().analyze(high_context)

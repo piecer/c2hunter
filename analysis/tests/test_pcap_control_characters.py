@@ -8,17 +8,7 @@ from c2hunter_analysis.pcap import (
 
 
 def _dns_query(qname: bytes) -> bytes:
-    return (
-        b"\x12\x34"
-        b"\x01\x00"
-        b"\x00\x01"
-        b"\x00\x00"
-        b"\x00\x00"
-        b"\x00\x00"
-        + qname
-        + b"\x00\x01"
-        + b"\x00\x01"
-    )
+    return b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + qname + b"\x00\x01" + b"\x00\x01"
 
 
 def test_dns_query_name_accepts_normal_ascii_name() -> None:
@@ -27,12 +17,7 @@ def test_dns_query_name_accepts_normal_ascii_name() -> None:
 
 
 def test_dns_query_name_rejects_nul_and_control_bytes() -> None:
-    payload = _dns_query(
-        b"\x06pektbo"
-        b"\x06libre\x19"
-        b"\x01\x00"
-        b"\x00"
-    )
+    payload = _dns_query(b"\x06pektbo\x06libre\x19\x01\x00\x00")
     assert _dns_query_name(payload) is None
 
 

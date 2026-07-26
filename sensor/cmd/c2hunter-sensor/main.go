@@ -330,7 +330,7 @@ func buildPipelines(cfg config.Config, uploader sensorruntime.FlowUploader) ([]s
 			SensorID: cfg.Sensor.ID, JobID: cfg.Capture.JobID + ":" + source.Interface + ":" + source.Direction,
 			Interface: source.Interface, Direction: source.Direction, IdleTimeout: cfg.FlowIdleTimeout,
 			PayloadPreviewBytes: cfg.Capture.PayloadPreviewBytes,
-			BatchMaxItems: cfg.Batch.MaxItems, BatchMaxBytes: cfg.Batch.MaxBytes, PacketQueueSize: cfg.Capture.PacketQueueSize,
+			BatchMaxItems:       cfg.Batch.MaxItems, BatchMaxBytes: cfg.Batch.MaxBytes, PacketQueueSize: cfg.Capture.PacketQueueSize,
 			Source: func() (capture.Reader, error) {
 				return capture.NewLiveReader(source.Interface, capture.AFPacketOpener{}, classifier)
 			},

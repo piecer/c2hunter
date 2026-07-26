@@ -183,9 +183,7 @@ class NonWellKnownPortDetector:
         excluded = {
             int(value)
             for value in context.parameters.get("non_well_known_port_exclusions", ())
-            if isinstance(value, int | str)
-            and str(value).isdigit()
-            and 0 <= int(value) <= 65535
+            if isinstance(value, int | str) and str(value).isdigit() and 0 <= int(value) <= 65535
         }
         result: list[Evidence] = []
         for candidate, rows in _groups(context).items():
@@ -392,10 +390,13 @@ class AnalystPayloadSignatureDetector:
             rows = [(host, flow) for host, flow, *_rest in selected]
             signature = selected[0][4]
             comparisons = [value[3] for value in selected]
-            metrics: dict[str, object] = {
+            raw_version = signature.get("version", 1)
+            if not isinstance(raw_version, int | float | str):
+                raw_version = 1
+            sig_metrics: dict[str, object] = {
                 "signature_id": str(signature["id"]),
                 "signature_name": str(signature.get("name", signature["id"])),
-                "signature_version": int(signature.get("version", 1)),
+                "signature_version": int(raw_version),  # type: ignore
                 "match_mode": mode,
                 "matched_flow_count": len(selected),
                 "sample_count": len(selected),
@@ -410,7 +411,7 @@ class AnalystPayloadSignatureDetector:
                     self.name,
                     80 if mode == "EXACT" else 60,
                     rows,
-                    metrics,
+                    sig_metrics,
                     (
                         "분석가가 승인한 Payload signature와 정확히 일치"
                         if mode == "EXACT"
@@ -433,15 +434,13 @@ class AnalystPayloadSignatureDetector:
         if direction and flow.direction.upper() != direction:
             return None
         raw_service_port = signature.get("service_port")
-        if raw_service_port is not None and _service_port(context, flow) != int(raw_service_port):
+        if raw_service_port is not None and _service_port(context, flow) != int(  # type: ignore
+            raw_service_port
+        ):
             return None
 
         signature_hash = str(signature.get("payload_hash") or "")
-        flow_hashes = {
-            value
-            for value in (flow.payload_hash, flow.last_payload_hash)
-            if value
-        }
+        flow_hashes = {value for value in (flow.payload_hash, flow.last_payload_hash) if value}
         if signature_hash and signature_hash in flow_hashes:
             return (
                 "EXACT",
@@ -470,7 +469,7 @@ class AnalystPayloadSignatureDetector:
                 )
             except ValueError:
                 return None
-        max_distance = int(signature.get("simhash_max_distance", 8))
+        max_distance = int(signature.get("simhash_max_distance", 8))  # type: ignore
         strong_content = prefix_match or (
             simhash_distance is not None and simhash_distance <= max_distance
         )
@@ -486,14 +485,14 @@ class AnalystPayloadSignatureDetector:
             or flow.payload_entropy is None
         ):
             return None
-        source_length = int(raw_length)
+        source_length = int(raw_length)  # type: ignore
         length_difference = abs(flow.payload_length - source_length)
         length_tolerance = max(
             16,
-            round(source_length * float(signature.get("length_tolerance_ratio", 0.15))),
+            round(source_length * float(signature.get("length_tolerance_ratio", 0.15))),  # type: ignore
         )
-        entropy_difference = abs(flow.payload_entropy - float(raw_entropy))
-        entropy_tolerance = float(signature.get("entropy_tolerance", 0.75))
+        entropy_difference = abs(flow.payload_entropy - float(raw_entropy))  # type: ignore
+        entropy_tolerance = float(signature.get("entropy_tolerance", 0.75))  # type: ignore
         if length_difference > length_tolerance or entropy_difference > entropy_tolerance:
             return None
         comparable = (
@@ -770,12 +769,9 @@ def _candidate_feature_vector(
         if mean > 0:
             interval_cvs.append(statistics.pstdev(intervals) / mean)
 
-    sizes = [
-        size
-        for _, flow in rows
-        for size in flow.packet_sizes
-        if size > 0
-    ] or [flow.total_bytes for _, flow in rows if flow.total_bytes > 0]
+    sizes = [size for _, flow in rows for size in flow.packet_sizes if size > 0] or [
+        flow.total_bytes for _, flow in rows if flow.total_bytes > 0
+    ]
     mean_size = statistics.fmean(sizes) if sizes else 0.0
 
     payload_hashes = [flow.payload_hash for _, flow in rows if flow.payload_hash]
@@ -785,25 +781,17 @@ def _candidate_feature_vector(
         for _, flow in rows
         if flow.tls_fingerprint or flow.certificate_fingerprint
     ]
-    domains = [
-        flow.domain.lower().rstrip(".")
-        for _, flow in rows
-        if flow.domain
-    ]
+    domains = [flow.domain.lower().rstrip(".") for _, flow in rows if flow.domain]
 
     return {
         "interval_cv": statistics.fmean(interval_cvs) if interval_cvs else None,
         "size_cv": statistics.pstdev(sizes) / mean_size if sizes and mean_size else None,
         "payload_stability": (
-            max(Counter(payload_hashes).values()) / len(payload_hashes)
-            if payload_hashes
-            else None
+            max(Counter(payload_hashes).values()) / len(payload_hashes) if payload_hashes else None
         ),
         "port_stability": max(Counter(ports).values()) / len(ports) if ports else None,
         "fingerprint_stability": (
-            max(Counter(fingerprints).values()) / len(fingerprints)
-            if fingerprints
-            else None
+            max(Counter(fingerprints).values()) / len(fingerprints) if fingerprints else None
         ),
         "domain_diversity_ratio": len(set(domains)) / len(domains) if domains else None,
     }
@@ -841,18 +829,10 @@ class PopulationAnomalyDetector:
         if not bool(context.parameters.get("ml_anomaly_enabled", False)):
             return []
 
-        minimum_population = max(
-            8, int(context.parameters.get("ml_anomaly_min_population", 30))
-        )
-        minimum_samples = max(
-            3, int(context.parameters.get("ml_anomaly_min_candidate_samples", 5))
-        )
-        z_threshold = max(
-            2.0, float(context.parameters.get("ml_anomaly_z_threshold", 3.5))
-        )
-        feature_z_floor = max(
-            0.0, float(context.parameters.get("ml_anomaly_feature_z_floor", 1.0))
-        )
+        minimum_population = max(8, int(context.parameters.get("ml_anomaly_min_population", 30)))
+        minimum_samples = max(3, int(context.parameters.get("ml_anomaly_min_candidate_samples", 5)))
+        z_threshold = max(2.0, float(context.parameters.get("ml_anomaly_z_threshold", 3.5)))
+        feature_z_floor = max(0.0, float(context.parameters.get("ml_anomaly_feature_z_floor", 1.0)))
         minimum_directional_features = max(
             1,
             min(
