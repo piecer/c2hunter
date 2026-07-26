@@ -290,7 +290,15 @@ class PostgresRepository:
             for key, value in job.items()
             if key not in {"flow_records", "payload_signatures"}
         }
-        return self._put("job", job["id"], metadata)
+        with self._lock, self.connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO controller_objects(kind,id,data) VALUES('job',%s,%s::jsonb) "
+                "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                (job["id"], self._json(metadata)),
+            )
+            self._audit("job", job["id"], metadata)
+            self.connection.commit()
+        return deepcopy(job)
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         job = self.get_job_summary(job_id)
@@ -528,6 +536,18 @@ class PostgresRepository:
             self._list("payload_signature"),
             key=lambda item: str(item["created_at"]),
         )
+
+    def delete_payload_signature(self, signature_id: str) -> bool:
+        with self._lock, self.connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM controller_objects WHERE kind='payload_signature' AND id=%s",
+                (signature_id,),
+            )
+            deleted = cursor.rowcount > 0
+            if deleted:
+                self._audit("payload_signature-delete", signature_id, {"id": signature_id})
+                self.connection.commit()
+        return deleted
 
     def save_allowlist(self, entry: dict[str, Any]) -> dict[str, Any]:
         return self._put("allowlist", entry["id"], entry)

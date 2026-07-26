@@ -424,6 +424,12 @@ function PayloadSignatureRow({ signature }: { signature: PayloadSignature }) {
       client.invalidateQueries({ queryKey: ['payload-signatures'] });
     },
   });
+  const remove = useMutation({
+    mutationFn: () => api.delete(`/payload-signatures/${signature.id}`),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ['payload-signatures'] });
+    },
+  });
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -443,7 +449,7 @@ function PayloadSignatureRow({ signature }: { signature: PayloadSignature }) {
       <td>Exact SHA-256<small>{signature.payload_prefix_hash || signature.payload_simhash ? 'Structural comparison available' : 'Exact only'}</small><small className="hash-value">{signature.payload_hash?.slice(0, 20)}…</small></td>
       <td>Length ±{Math.round(signature.length_tolerance_ratio * 100)}%<small>Entropy ±{signature.entropy_tolerance} · SimHash ≤ {signature.simhash_max_distance}</small></td>
       <td><Link to={`/analyses/${signature.source_job_id}`}>Source analysis</Link><small>Flow {signature.source_flow_id}</small><small>{fmt(signature.created_at)} · {signature.created_by ?? 'analyst'}</small></td>
-      <td><div className="row-actions"><button type="button" className={signature.enabled ? 'danger' : ''} disabled={update.isPending} aria-label={`${signature.enabled ? 'Disable' : 'Enable'} ${signature.name}`} onClick={() => update.mutate({ enabled: !signature.enabled })}>{signature.enabled ? 'Disable' : 'Enable'}</button><button type="button" className="secondary" aria-label={`Edit ${signature.name}`} onClick={() => { update.reset(); setEditing(true); }}>Edit</button></div>{update.error && !editing && <p role="alert" className="error-text">{update.error.message}</p>}</td>
+      <td><div className="row-actions"><button type="button" className={signature.enabled ? 'danger' : ''} disabled={update.isPending} aria-label={`${signature.enabled ? 'Disable' : 'Enable'} ${signature.name}`} onClick={() => update.mutate({ enabled: !signature.enabled })}>{signature.enabled ? 'Disable' : 'Enable'}</button><button type="button" className="secondary" aria-label={`Edit ${signature.name}`} onClick={() => { update.reset(); setEditing(true); }}>Edit</button><button type="button" className="danger" aria-label={`Delete ${signature.name}`} disabled={remove.isPending} onClick={() => remove.mutate()}>Delete</button></div>{update.error && !editing && <p role="alert" className="error-text">{update.error.message}</p>}{remove.error && <p role="alert" className="error-text">{remove.error.message}</p>}</td>
     </tr>
     {editing && <tr className="expanded-row"><td colSpan={7}><form className="flow-review-form" onSubmit={submit}><h3>Edit payload signature</h3><div className="grid"><label>Name<input name="name" defaultValue={signature.name} maxLength={200} required /></label><label>Description<textarea name="description" defaultValue={signature.description} maxLength={2000} rows={3} /></label><label>Length tolerance ratio<input name="length_tolerance_ratio" type="number" min="0" max="1" step="0.01" defaultValue={signature.length_tolerance_ratio} required /></label><label>Entropy tolerance<input name="entropy_tolerance" type="number" min="0" max="4" step="0.01" defaultValue={signature.entropy_tolerance} required /></label><label>SimHash maximum distance<input name="simhash_max_distance" type="number" min="0" max="32" defaultValue={signature.simhash_max_distance} required /></label></div><p className="muted">Saving creates the next signature version. Existing completed analyses keep their original snapshot.</p>{update.error && <p role="alert" className="error-text">{update.error.message}</p>}<div className="actions"><button disabled={update.isPending}>{update.isPending ? 'Saving…' : 'Save signature'}</button><button type="button" className="secondary" onClick={() => setEditing(false)}>Cancel</button></div></form></td></tr>}
   </Fragment>;

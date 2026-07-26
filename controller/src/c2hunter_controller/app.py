@@ -1563,22 +1563,20 @@ def create_app(
     ) -> dict[str, Any]:
         signature = repo.get_payload_signature(signature_id)
         if signature is None:
-            raise ApiError(
-                404,
-                "PAYLOAD_SIGNATURE_NOT_FOUND",
-                "Payload signature를 찾을 수 없습니다",
-            )
-        changed = False
-        for field in payload.model_fields_set:
-            value = getattr(payload, field)
-            if signature.get(field) != value:
-                signature[field] = value
-                changed = True
-        if not changed:
-            return signature
-        signature["version"] = int(signature.get("version", 1)) + 1
-        signature["updated_at"] = datetime.now(UTC).isoformat()
-        return repo.save_payload_signature(signature)
+            raise ApiError(404, "SIGNATURE_NOT_FOUND", "서명을 찾을 수 없습니다")
+        updated = {**signature, **payload.model_dump(exclude_unset=True)}
+        saved = repo.save_payload_signature(updated)
+        return saved
+
+    @app.delete("/api/v1/payload-signatures/{signature_id}")
+    def delete_payload_signature(signature_id: str) -> dict[str, Any]:
+        signature = repo.get_payload_signature(signature_id)
+        if signature is None:
+            raise ApiError(404, "SIGNATURE_NOT_FOUND", "서명을 찾을 수 없습니다")
+        deleted = repo.delete_payload_signature(signature_id)
+        if not deleted:
+            raise ApiError(404, "SIGNATURE_NOT_FOUND", "서명을 찾을 수 없습니다")
+        return {"deleted": True, "signature_id": signature_id}
 
     @app.post("/api/v1/allowlist", status_code=201)
     def create_allowlist_entry(payload: AllowlistCreate) -> dict[str, Any]:
