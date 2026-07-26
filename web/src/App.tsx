@@ -282,6 +282,18 @@ function CandidateDetail() {
   const q = useQuery<Candidate, Error>({ queryKey: ['candidate', id], queryFn: () => api.get(`/candidates/${id}`) });
   const exportPcap = useMutation({ mutationFn: () => api.post('/pcap-exports', { job_id: q.data?.job_id, candidate_id: id }), onSuccess: () => setNotice('PCAP export requested') });
   const reanalyze = useMutation({ mutationFn: () => api.post(`/analysis-jobs/${q.data?.job_id}/reanalyze`, { idempotency_key: idempotencyKey() }), onSuccess: () => setNotice('Reanalysis created') });
+  const addToAllowlist = useMutation({ 
+    mutationFn: (body: unknown) => api.post('/allowlist', body), 
+    onSuccess: () => setNotice('Added to allowlist') 
+  });
+  const deleteCandidate = useMutation({ 
+    mutationFn: () => api.delete(`/candidates/${id}`), 
+    onSuccess: () => {
+      setNotice('Candidate deleted');
+      // Redirect to candidates list after deletion
+      setTimeout(() => window.location.href='/candidates', 1000);
+    }
+  });
   return <AsyncState query={q}>{candidate => {
     const hosts = candidateHosts(candidate);
     const sensors = candidateSensors(candidate);
@@ -298,7 +310,16 @@ function CandidateDetail() {
       <div className="grid compact"><section className="panel"><h2>Traffic over time</h2>{traffic.length ? <MiniChart values={traffic} label="Traffic over time" /> : <p className="muted">No traffic series was retained for this candidate.</p>}{buckets.length > 0 && <div className="table-wrap"><table aria-label="Candidate traffic buckets"><thead><tr><th>Bucket start</th><th>Flows</th><th>Packets</th><th>Bytes</th></tr></thead><tbody>{buckets.map(bucket => <tr key={bucket.start}><td>{fmt(bucket.start)}</td><td>{bucket.flows}</td><td>{bucket.packets}</td><td>{formatBytes(bucket.bytes)}</td></tr>)}</tbody></table></div>}</section><section className="panel"><h2>Network context</h2><dl><dt>Protocols</dt><dd>{formatValue(protocols)}</dd><dt>Service ports</dt><dd>{formatValue(ports)}</dd><dt>Domains</dt><dd>{formatValue(domains)}</dd><dt>First observed</dt><dd>{fmt(candidate.first_seen)}</dd><dt>Last observed</dt><dd>{fmt(candidate.last_seen)}</dd><dt>Internal hosts</dt><dd>{formatValue(hosts)}</dd><dt>Sensors</dt><dd>{formatValue(sensors)}</dd><dt>Related attack targets</dt><dd>{formatValue(candidate.related_attack_targets)}</dd></dl></section></div>
       <FlowReviewPanel candidate={candidate} />
       <section className="panel compact"><h2>Detection evidence</h2>{evidence.length ? evidence.map((item, index) => <article className="evidence detailed" key={`${item.detector ?? item.type}-${index}`}><div><strong>{item.type}</strong><small>{item.detector ?? 'Unknown detector'}{item.version ? ` · v${item.version}` : ''}</small></div><span>+{formatValue(item.contribution ?? item.score ?? item.raw_score ?? 0)}</span><p>{item.description ?? 'No evidence description was recorded.'}</p><dl><dt>Raw score</dt><dd>{formatValue(item.raw_score)}</dd><dt>Confidence</dt><dd>{item.confidence === undefined ? 'Not reported' : `${Math.round(item.confidence * 100)}%`}</dd><dt>Observed</dt><dd>{fmt(item.first_seen)} – {fmt(item.last_seen)}</dd><dt>Hosts</dt><dd>{formatValue(item.hosts)}</dd><dt>Sensors</dt><dd>{formatValue(item.sensors)}</dd></dl>{item.metrics && Object.keys(item.metrics).length > 0 && <div className="evidence-metrics">{Object.entries(item.metrics).map(([key, value]) => <span key={key}><b>{humanize(key)}</b>{formatValue(value)}</span>)}</div>}{strings(item.warnings).map(warning => <p className="warning" key={warning}>{warning}</p>)}</article>) : <p className="muted">No evidence details were recorded.</p>}</section>
-      <section className="panel compact"><h2>Score adjustments</h2>{adjustments.length ? <ul className="adjustments">{adjustments.map((adjustment, index) => <li key={`${adjustment.kind}-${index}`}><strong className={adjustment.points < 0 ? 'critical' : 'low'}>{adjustment.points > 0 ? '+' : ''}{adjustment.points}</strong><span>{humanize(adjustment.kind)} · {adjustment.explanation}</span></li>)}</ul> : <p className="muted">No score adjustments were applied.</p>}<div className="actions"><button disabled={!candidate.job_id || exportPcap.isPending} onClick={() => exportPcap.mutate()}>{exportPcap.isPending ? 'Requesting export…' : 'Export candidate PCAP'}</button><button className="secondary" disabled={!candidate.job_id || reanalyze.isPending} onClick={() => reanalyze.mutate()}>{reanalyze.isPending ? 'Creating reanalysis…' : 'Reanalyze'}</button></div>{(exportPcap.error || reanalyze.error) && <p role="alert" className="error-text">{exportPcap.error?.message ?? reanalyze.error?.message}</p>}{notice && <p role="status">{notice}</p>}</section>
+      <section className="panel compact"><h2>Score adjustments</h2>{adjustments.length ? <ul className="adjustments">{adjustments.map((adjustment, index) => <li key={`${adjustment.kind}-${index}`}><strong className={adjustment.points < 0 ? 'critical' : 'low'}>{adjustment.points > 0 ? '+' : ''}{adjustment.points}</strong><span>{humanize(adjustment.kind)} · {adjustment.explanation}</span></li>)}</ul> : <p className="muted">No score adjustments were applied.</p>}<div className="actions">
+        <button disabled={!candidate.job_id || exportPcap.isPending} onClick={() => exportPcap.mutate()}>{exportPcap.isPending ? 'Requesting export…' : 'Export candidate PCAP'}</button>
+        <button className="secondary" disabled={!candidate.job_id || reanalyze.isPending} onClick={() => reanalyze.mutate()}>{reanalyze.isPending ? 'Creating reanalysis…' : 'Reanalyze'}</button>
+        <button className="secondary" disabled={addToAllowlist.isPending} onClick={() => addToAllowlist.mutate({value: candidate.candidate_ip, type: 'IP', description: `Added from candidate ${candidate.id}`})}>
+          {addToAllowlist.isPending ? 'Adding to allowlist…' : 'Add to Allowlist'}
+        </button>
+        <button className="danger" disabled={deleteCandidate.isPending} onClick={() => deleteCandidate.mutate()}>
+          {deleteCandidate.isPending ? 'Deleting...' : 'Delete candidate'}
+        </button>
+      </div>{(exportPcap.error || reanalyze.error || addToAllowlist.error || deleteCandidate.error) && <p role="alert" className="error-text">{[exportPcap.error?.message, reanalyze.error?.message, addToAllowlist.error?.message, deleteCandidate.error?.message].filter(Boolean).join(', ')}</p>}{notice && <p role="status">{notice}</p>}</section>
     </>;
   }}</AsyncState>;
 }
