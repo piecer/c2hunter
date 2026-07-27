@@ -75,12 +75,18 @@ class ClickHouseFlowStore:
         username: str = "default",
         password: str = "",
         timeout: float = 5.0,
+        snapshot_max_threads: int = 4,
+        snapshot_max_memory_bytes: int = 2 * 1024 * 1024 * 1024,
+        flow_retention_days: int = 30,
     ) -> None:
         self.url = url.rstrip("/")
         self.database = database
         self.username = username
         self.password = password
         self.timeout = timeout
+        self.snapshot_max_threads = max(1, int(snapshot_max_threads))
+        self.snapshot_max_memory_bytes = max(1, int(snapshot_max_memory_bytes))
+        self.flow_retention_days = max(1, int(flow_retention_days))
         self._initialized = False
 
     def _request(self, query: str, data: bytes = b"") -> bytes:
@@ -98,7 +104,10 @@ class ClickHouseFlowStore:
             "CREATE TABLE IF NOT EXISTS flow_batch_ledger ("
             "sensor_id String, batch_id String, record_count UInt32, "
             "ingested_at DateTime64(6, 'UTC') "
-            ") ENGINE=ReplacingMergeTree(ingested_at) ORDER BY (sensor_id,batch_id)"
+            ") ENGINE=ReplacingMergeTree(ingested_at) "
+            "PARTITION BY toYYYYMM(ingested_at) "
+            "ORDER BY (sensor_id,batch_id) "
+            f"TTL toDateTime(ingested_at) + INTERVAL {self.flow_retention_days} DAY DELETE"
         )
         self._request(
             "CREATE TABLE IF NOT EXISTS flow_records ("
@@ -106,7 +115,9 @@ class ClickHouseFlowStore:
             "timestamp DateTime64(6, 'UTC'), "
             "data String, ingested_at DateTime64(6, 'UTC')"
             ") ENGINE=ReplacingMergeTree(ingested_at) "
-            "ORDER BY (sensor_id,batch_id,record_index)"
+            "PARTITION BY toYYYYMM(timestamp) "
+            "ORDER BY (sensor_id,timestamp,batch_id,record_index) "
+            f"TTL toDateTime(timestamp) + INTERVAL {self.flow_retention_days} DAY DELETE"
         )
         self._initialized = True
 
@@ -128,8 +139,9 @@ class ClickHouseFlowStore:
         escaped_sensor = _clickhouse_literal(sensor_id)
         escaped_batch = _clickhouse_literal(batch_id)
         existing = self._request(
-            "SELECT record_count FROM flow_batch_ledger FINAL "
-            f"WHERE sensor_id={escaped_sensor} AND batch_id={escaped_batch} LIMIT 1"
+            "SELECT record_count FROM flow_batch_ledger "
+            f"WHERE sensor_id={escaped_sensor} AND batch_id={escaped_batch} "
+            "ORDER BY ingested_at DESC LIMIT 1"
         ).strip()
         if existing:
             return False, int(existing)
@@ -171,13 +183,16 @@ class ClickHouseFlowStore:
 
     def snapshot(self, sensor_ids: list[str], start: datetime, end: datetime) -> FlowSnapshot:
         self._ensure_initialized()
+        if not sensor_ids:
+            return FlowSnapshot(str(uuid.uuid4()), ())
         sensors = ",".join(_clickhouse_literal(item) for item in sensor_ids)
         query = (
-            "SELECT data FROM flow_records FINAL WHERE sensor_id IN ("
+            "SELECT data FROM flow_records PREWHERE sensor_id IN ("
             f"{sensors}) AND timestamp >= "
             f"parseDateTime64BestEffort({_clickhouse_literal(start.isoformat())}) "
             f"AND timestamp <= parseDateTime64BestEffort({_clickhouse_literal(end.isoformat())}) "
-            "ORDER BY timestamp,sensor_id,batch_id,record_index FORMAT JSONEachRow"
+            f"SETTINGS max_threads={self.snapshot_max_threads}, "
+            f"max_memory_usage={self.snapshot_max_memory_bytes} FORMAT JSONEachRow"
         )
         raw = self._request(query).decode()
         records = tuple(json.loads(json.loads(line)["data"]) for line in raw.splitlines() if line)
