@@ -98,16 +98,20 @@ class CommonDestinationDetector:
             duration = (
                 max(flow.timestamp for _, flow in rows) - min(flow.timestamp for _, flow in rows)
             ).total_seconds()
-            public_dns_ntp_servers = {
+            legacy_dns_ntp_servers = {
                 str(value) for value in context.parameters.get("public_dns_ntp_servers", ())
+            }
+            trusted_dns_servers = legacy_dns_ntp_servers | {
+                str(value) for value in context.parameters.get("trusted_dns_servers", ())
+            }
+            trusted_ntp_servers = legacy_dns_ntp_servers | {
+                str(value) for value in context.parameters.get("trusted_ntp_servers", ())
             }
             service_ports = {port for port in ports if port is not None}
             public_dns_ntp = (
-                candidate in public_dns_ntp_servers
-                and len(service_ports) == 1
-                and service_ports <= {53, 123}
-                and all(flow.protocol.upper() == "UDP" for _, flow in rows)
-            )
+                (candidate in trusted_dns_servers and service_ports == {53})
+                or (candidate in trusted_ntp_servers and service_ports == {123})
+            ) and all(flow.protocol.upper() == "UDP" for _, flow in rows)
             domains = {flow.domain.lower().rstrip(".") for _, flow in rows if flow.domain}
             cdn_suffixes = {
                 str(value).lower().lstrip(".").rstrip(".")

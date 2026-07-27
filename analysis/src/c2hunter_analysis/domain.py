@@ -159,15 +159,42 @@ class AllowlistEntry:
     expires_at: datetime | None = None
     enabled: bool = True
 
+    @classmethod
+    def from_mapping(cls, stored: Mapping[str, Any]) -> AllowlistEntry:
+        expires_at = stored.get("expires_at")
+        if isinstance(expires_at, str):
+            normalized_expires_at = datetime.fromisoformat(expires_at) if expires_at else None
+        elif isinstance(expires_at, datetime):
+            normalized_expires_at = expires_at
+        else:
+            normalized_expires_at = None
+        return cls(
+            type=str(stored["type"]),
+            value=str(stored["value"]),
+            description=str(stored["description"]),
+            expires_at=normalized_expires_at,
+            enabled=bool(stored.get("enabled", True)),
+        )
+
+    def is_active(self, now: datetime) -> bool:
+        return self.enabled and (self.expires_at is None or self.expires_at > now)
+
     def matches(self, candidate_ip: str, evidence: Sequence[Evidence], now: datetime) -> bool:
-        if not self.enabled or (self.expires_at is not None and self.expires_at <= now):
+        return self.matches_metrics(candidate_ip, [item.metrics for item in evidence], now)
+
+    def matches_metrics(
+        self,
+        candidate_ip: str,
+        metrics: Sequence[Mapping[str, Any]],
+        now: datetime,
+    ) -> bool:
+        if not self.is_active(now):
             return False
         kind = self.type.upper()
         if kind == "IP":
             return ip_address(candidate_ip) == ip_address(self.value)
         if kind == "CIDR":
             return ip_address(candidate_ip) in ip_network(self.value, strict=False)
-        metrics = [item.metrics for item in evidence]
         if kind == "DOMAIN_SUFFIX":
             suffix = self.value.lower().lstrip(".")
             return any(

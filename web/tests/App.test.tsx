@@ -15,6 +15,7 @@ const responses: Record<string, unknown> = {
   '/api/v1/analysis-jobs/job-1/flows?candidate_ip=203.0.113.9&page=1&page_size=50': { items: [{ flow_id: '0123456789abcdef01234567', job_id: 'job-1', sensor_id: 'sensor-a', timestamp: '2026-07-20T10:00:00Z', source_ip: '10.0.0.5', destination_ip: '203.0.113.9', source_port: 51000, destination_port: 443, internal_ip: '10.0.0.5', external_ip: '203.0.113.9', service_port: 443, protocol: 'TCP', direction: 'OUTBOUND', packet_count: 2, total_bytes: 128, payload_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_prefix_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_length: 6, payload_entropy: 2.585, payload_printable_ratio: 1, payload_simhash: 'e627bf19152d67b3', payload_feature_version: '1', has_payload: true, current_label: null }], page: 1, page_size: 50, total: 1 },
   '/api/v1/analysis-jobs/job-1/flows/0123456789abcdef01234567/payload-preview': { flow_id: '0123456789abcdef01234567', payload_hex: '626561636f6e', payload_ascii: 'beacon', sample_bytes: 6, payload_length: 6, truncated: false, payload_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887' },
   '/api/v1/payload-signatures?page_size=200': { items: [{ id: 'signature-1', name: 'TCP beacon payload', description: 'Confirmed implant beacon', version: 1, enabled: true, source_job_id: 'job-1', source_flow_id: '0123456789abcdef01234567', source_label_id: 'label-1', protocol: 'TCP', direction: 'OUTBOUND', service_port: 443, payload_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_prefix_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_length: 6, payload_entropy: 2.585, payload_printable_ratio: 1, payload_simhash: 'e627bf19152d67b3', payload_feature_version: '1', length_tolerance_ratio: 0.15, entropy_tolerance: 0.75, simhash_max_distance: 8, created_by: 'analyst', created_at: '2026-07-20T10:06:00Z', updated_at: '2026-07-20T10:06:00Z' }] },
+  '/api/v1/allowlist': { items: [] },
 };
 responses['/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&has_payload=true'] =
   responses['/api/v1/analysis-jobs/job-1/flows?candidate_ip=203.0.113.9&page=1&page_size=50'];
@@ -211,6 +212,34 @@ describe('C2Hunter UI', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/payload-signatures/signature-1', expect.objectContaining({ method: 'PATCH' })));
     const call = fetchMock.mock.calls.find(([url, init]) => url === '/api/v1/payload-signatures/signature-1' && init?.method === 'PATCH');
     expect(JSON.parse(String(call?.[1]?.body))).toEqual({ enabled: false });
+  });
+
+  it('registers a trusted DNS policy without sending a blank expiration', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/v1/allowlist' && init?.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'allow-1' }), { status: 201, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404, headers: { 'content-type': 'application/json' } });
+    });
+    renderAt('/allowlist');
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+
+    expect(await screen.findByText(/Trusted DNS\/NTP policies reduce score only/)).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText('Type'), 'TRUSTED_DNS');
+    await user.type(screen.getByLabelText('Value'), '1.1.1.1');
+    await user.type(screen.getByLabelText('Description'), 'Corporate resolver');
+    await user.click(screen.getByRole('button', { name: 'Add entry' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/allowlist', expect.objectContaining({ method: 'POST' })));
+    const call = fetchMock.mock.calls.find(([url, init]) => url === '/api/v1/allowlist' && init?.method === 'POST');
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+      type: 'TRUSTED_DNS',
+      value: '1.1.1.1',
+      description: 'Corporate resolver',
+      enabled: true,
+    });
   });
 
   it('sends the Controller cancel request body', async () => {

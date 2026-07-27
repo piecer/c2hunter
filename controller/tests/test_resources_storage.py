@@ -75,6 +75,71 @@ def test_allowlist_crud_normalizes_and_suppresses_calculated_candidate() -> None
     assert client.delete(f"/api/v1/allowlist/{entry.json()['id']}").status_code == 204
 
 
+def test_allowlist_suppresses_existing_candidate_but_preserves_audit_record() -> None:
+    client = configured_client()
+    job = client.post("/api/v1/analysis-jobs", json=job_payload()).json()
+    endpoint = f"/api/v1/analysis-jobs/{job['id']}/candidates"
+    assert client.get(endpoint).json()["total"] == 1
+
+    entry = client.post(
+        "/api/v1/allowlist",
+        json={
+            "type": "IP",
+            "value": "203.0.113.9",
+            "description": "trusted infrastructure",
+        },
+    ).json()
+
+    assert client.get(endpoint).json()["total"] == 0
+    suppressed = client.get(endpoint, params={"include_suppressed": True}).json()
+    assert suppressed["total"] == 1
+    assert suppressed["items"][0]["excluded"] is True
+    assert suppressed["items"][0]["suppressed_by_allowlist_id"] == entry["id"]
+    assert suppressed["items"][0]["suppressed_at"]
+    assert "trusted infrastructure" in suppressed["items"][0]["exclude_reason"]
+    assert client.get(f"/api/v1/analysis-jobs/{job['id']}").json()["candidate_count"] == 0
+
+
+def test_trusted_dns_policy_only_discounts_matching_udp_dns_traffic() -> None:
+    client = configured_client()
+    response = client.post(
+        "/api/v1/allowlist",
+        json={
+            "type": "TRUSTED_DNS",
+            "value": "203.0.113.9",
+            "description": "corporate resolver",
+        },
+    )
+    assert response.status_code == 201
+
+    request = job_payload()
+    flows = request["flow_records"]
+    assert isinstance(flows, list)
+    for flow in flows:
+        assert isinstance(flow, dict)
+        flow["protocol"] = "UDP"
+        flow["destination_port"] = 53
+    job = client.post("/api/v1/analysis-jobs", json=request).json()
+    candidate = client.get(f"/api/v1/analysis-jobs/{job['id']}/candidates").json()["items"][0]
+
+    assert candidate["candidate_ip"] == "203.0.113.9"
+    assert any(item["kind"] == "PUBLIC_DNS_NTP" for item in candidate["adjustments"])
+
+    tcp_request = job_payload()
+    tcp_request["idempotency_key"] = "storage-test-tcp-dns"
+    tcp_flows = tcp_request["flow_records"]
+    assert isinstance(tcp_flows, list)
+    for flow in tcp_flows:
+        assert isinstance(flow, dict)
+        flow["protocol"] = "TCP"
+        flow["destination_port"] = 53
+    tcp_job = client.post("/api/v1/analysis-jobs", json=tcp_request).json()
+    tcp_candidate = client.get(f"/api/v1/analysis-jobs/{tcp_job['id']}/candidates").json()["items"][
+        0
+    ]
+    assert not any(item["kind"] == "PUBLIC_DNS_NTP" for item in tcp_candidate["adjustments"])
+
+
 def test_flow_review_filters_endpoints_by_ip_or_cidr() -> None:
     client = configured_client()
     job = client.post("/api/v1/analysis-jobs", json=job_payload()).json()

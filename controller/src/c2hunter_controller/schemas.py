@@ -375,7 +375,9 @@ class PayloadSignatureUpdate(BaseModel):
 
 class AllowlistCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    type: str = Field(pattern=r"^(IP|CIDR|DOMAIN_SUFFIX|TLS_FINGERPRINT|CERT_FINGERPRINT)$")
+    type: str = Field(
+        pattern=r"^(IP|CIDR|DOMAIN_SUFFIX|TLS_FINGERPRINT|CERT_FINGERPRINT|TRUSTED_DNS|TRUSTED_NTP)$"
+    )
     value: str = Field(min_length=1, max_length=500)
     description: str = Field(min_length=1, max_length=1000)
     expires_at: datetime | None = None
@@ -383,7 +385,7 @@ class AllowlistCreate(BaseModel):
 
     @model_validator(mode="after")
     def normalize(self) -> AllowlistCreate:
-        if self.type == "IP":
+        if self.type in {"IP", "TRUSTED_DNS", "TRUSTED_NTP"}:
             self.value = str(ip_address(self.value))
         elif self.type == "CIDR":
             self.value = str(ip_network(self.value, strict=False))

@@ -137,6 +137,15 @@ def test_job_references_stored_immutable_snapshot_and_is_enqueued() -> None:
         json={"batch_id": "batch-1", "records": [flow()]},
         headers=AGENT_HEADERS,
     )
+    allowlist = client.post(
+        "/api/v1/allowlist",
+        json={
+            "type": "IP",
+            "value": "203.0.113.1",
+            "description": "trusted infrastructure",
+            "enabled": True,
+        },
+    ).json()
 
     response = client.post("/api/v1/analysis-jobs", json=job_payload())
 
@@ -148,6 +157,7 @@ def test_job_references_stored_immutable_snapshot_and_is_enqueued() -> None:
     assert "payload" not in queued
     stored = repository.get_job(response.json()["id"])
     assert stored is not None
+    assert stored["allowlist"] == [allowlist]
     assert stored["dataset_id"] == response.json()["dataset_id"]
     assert len(stored["flow_records"]) == 1
     assert stored["flow_records"][0]["destination_ip"] == "203.0.113.1"

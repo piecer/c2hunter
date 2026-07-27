@@ -8,6 +8,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+from c2hunter_analysis.domain import AllowlistEntry
 from c2hunter_analysis.pcap import PcapParseError, find_pcap_record, parse_pcap
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -741,6 +742,9 @@ def create_app(
             if signature.get("enabled") is True
         ]
 
+    def allowlist_snapshot() -> list[dict[str, Any]]:
+        return [dict(entry) for entry in repo.list_allowlist()]
+
     def enqueue_worker_job(job: dict[str, Any]) -> None:
         envelope: dict[str, Any] = {"id": job["id"]}
         if isinstance(work_queue, MemoryControllerQueue):
@@ -907,6 +911,7 @@ def create_app(
             )
         requested_job = build_job(payload)
         requested_job["payload_signatures"] = payload_signature_snapshot()
+        requested_job["allowlist"] = allowlist_snapshot()
         job, created = repo.create_job(requested_job)
         if not created:
             return _public_job(job)
@@ -1035,6 +1040,7 @@ def create_app(
         )
         job = build_job(payload, dataset_id=f"pcap:{digest}")
         job["payload_signatures"] = payload_signature_snapshot()
+        job["allowlist"] = allowlist_snapshot()
         job["description"] = description
         job["source"] = {
             "filename": safe_filename,
@@ -1422,6 +1428,7 @@ def create_app(
         )
         reanalysis_job = build_job(request, parent_job_id=job_id, dataset_id=source["dataset_id"])
         reanalysis_job["payload_signatures"] = payload_signature_snapshot()
+        reanalysis_job["allowlist"] = allowlist_snapshot()
         reanalysis_job["source_type"] = source.get("source_type", "SENSOR_CAPTURE")
         if source.get("source"):
             reanalysis_job["source"] = dict(source["source"])
@@ -1449,6 +1456,7 @@ def create_app(
         page_size: int = Query(50, ge=1, le=200),
         severity: str | None = None,
         minimum_score: int = Query(0, ge=0, le=100),
+        include_suppressed: bool = False,
         sort: str = "-score",
     ) -> dict[str, Any]:
         job = repo.get_job_summary(job_id)
@@ -1458,6 +1466,7 @@ def create_app(
             _public_candidate(item, job)
             for item in repo.get_candidates(job_id)
             if item["score"] >= minimum_score
+            and (include_suppressed or not item.get("excluded", False))
         ]
         if severity:
             items = [item for item in items if item["severity"] == severity]
@@ -1488,6 +1497,7 @@ def create_app(
         page_size: int = Query(50, ge=1, le=200),
         severity: str | None = None,
         minimum_score: int = Query(0, ge=0, le=100),
+        include_suppressed: bool = False,
         sort: str = "-score",
     ) -> dict[str, Any]:
         jobs = {str(job["id"]): job for job in repo.list_jobs()}
@@ -1500,6 +1510,7 @@ def create_app(
                 _public_candidate(candidate, job)
                 for candidate in candidates
                 if candidate["score"] >= minimum_score
+                and (include_suppressed or not candidate.get("excluded", False))
             )
         if severity:
             items = [item for item in items if item["severity"] == severity]
@@ -1595,12 +1606,42 @@ def create_app(
 
     @app.post("/api/v1/allowlist", status_code=201)
     def create_allowlist_entry(payload: AllowlistCreate) -> dict[str, Any]:
+        created_at = datetime.now(UTC)
         entry = {
             "id": str(uuid.uuid4()),
             **payload.model_dump(mode="json"),
-            "created_at": datetime.now(UTC).isoformat(),
+            "created_at": created_at.isoformat(),
         }
-        return repo.save_allowlist(entry)
+        saved = repo.save_allowlist(entry)
+        policy = AllowlistEntry.from_mapping(saved)
+        for job_id, candidates in repo.list_candidate_sets().items():
+            changed = False
+            for candidate in candidates:
+                metrics = [
+                    evidence.get("metrics", {})
+                    for evidence in candidate.get("evidence", [])
+                    if isinstance(evidence, dict)
+                ]
+                if policy.matches_metrics(str(candidate["candidate_ip"]), metrics, created_at):
+                    candidate.update(
+                        {
+                            "excluded": True,
+                            "exclude_reason": f"Allowlist: {saved['description']}",
+                            "suppressed_at": created_at.isoformat(),
+                            "suppressed_by_allowlist_id": saved["id"],
+                            "updated_at": created_at.isoformat(),
+                        }
+                    )
+                    changed = True
+            if changed:
+                repo.save_candidates(job_id, candidates)
+                job = repo.get_job(job_id)
+                if job is not None:
+                    job["candidate_count"] = sum(
+                        not candidate.get("excluded", False) for candidate in candidates
+                    )
+                    repo.save_job_metadata(job)
+        return saved
 
     @app.get("/api/v1/allowlist")
     def list_allowlist(

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from c2hunter_analysis.detectors import run_detectors
-from c2hunter_analysis.domain import AnalysisContext, Flow
+from c2hunter_analysis.domain import AllowlistEntry, AnalysisContext, Flow
 from c2hunter_analysis.scoring import score_candidates
 
 
@@ -25,6 +25,18 @@ def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
 
     analysis = dict(payload.get("analysis", {}))
     analysis["payload_signatures"] = list(payload.get("payload_signatures", ()))
+    allowlist = [AllowlistEntry.from_mapping(stored) for stored in payload.get("allowlist", [])]
+    now = datetime.now(UTC)
+    analysis["trusted_dns_servers"] = [
+        entry.value
+        for entry in allowlist
+        if entry.type.upper() == "TRUSTED_DNS" and entry.is_active(now)
+    ]
+    analysis["trusted_ntp_servers"] = [
+        entry.value
+        for entry in allowlist
+        if entry.type.upper() == "TRUSTED_NTP" and entry.is_active(now)
+    ]
     context = AnalysisContext(
         dataset_id=str(payload["dataset_id"]),
         start=datetime.fromisoformat(str(payload["start_time"])),
@@ -37,6 +49,7 @@ def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
     evidence = run_detectors(context)
     candidates = score_candidates(
         evidence,
+        allowlist=allowlist,
         minimum_samples=int(analysis.get("periodicity_min_samples", 1)),
         traffic_profiles=context.candidate_traffic_profiles(),
         high_volume_bytes_threshold=int(

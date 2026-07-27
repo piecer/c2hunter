@@ -478,6 +478,35 @@ function PayloadSignatureRow({ signature }: { signature: PayloadSignature }) {
   </Fragment>;
 }
 
-function Allowlist() { const client = useQueryClient(); const q = useQuery<List<AllowEntry>, Error>({ queryKey: ['allowlist'], queryFn: () => api.get('/allowlist') }); const add = useMutation({ mutationFn: (body: unknown) => api.post('/allowlist', body), onSuccess: () => client.invalidateQueries({ queryKey: ['allowlist'] }) }); const remove = useMutation({ mutationFn: (id: string) => api.delete(`/allowlist/${id}`), onSuccess: () => client.invalidateQueries({ queryKey: ['allowlist'] }) }); const submit = (e: FormEvent<HTMLFormElement>) => { e.preventDefault(); const f = new FormData(e.currentTarget); add.mutate(Object.fromEntries(f.entries())); e.currentTarget.reset(); }; return <><header><p className="eyebrow">FALSE-POSITIVE CONTROL</p><h1>Allowlist</h1></header><form className="panel form-inline" onSubmit={submit}><label>Type<select name="type"><option>IP</option><option>CIDR</option><option>DOMAIN_SUFFIX</option><option>TLS_FINGERPRINT</option><option>CERT_FINGERPRINT</option></select></label><label>Value<input name="value" required /></label><label>Description<input name="description" /></label><label>Expires at<input name="expires_at" type="datetime-local" /></label><button>Add entry</button></form><AsyncState query={q}>{d => items(d).length ? <ul className="entries">{items(d).map(e => <li key={e.id}><code>{e.type}</code><strong>{e.value}</strong><span>{e.description}</span><button className="danger" aria-label={`Delete ${e.value}`} onClick={() => remove.mutate(e.id)}>Delete</button></li>)}</ul> : <div className="state">No allowlist entries</div>}</AsyncState></>; }
+function Allowlist() {
+  const client = useQueryClient();
+  const q = useQuery<List<AllowEntry>, Error>({ queryKey: ['allowlist'], queryFn: () => api.get('/allowlist') });
+  const add = useMutation({ mutationFn: (body: unknown) => api.post('/allowlist', body), onSuccess: () => client.invalidateQueries({ queryKey: ['allowlist'] }) });
+  const remove = useMutation({ mutationFn: (id: string) => api.delete(`/allowlist/${id}`), onSuccess: () => client.invalidateQueries({ queryKey: ['allowlist'] }) });
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const body: Record<string, FormDataEntryValue | boolean> = Object.fromEntries(new FormData(form).entries());
+    if (!body.expires_at) delete body.expires_at;
+    body.enabled = true;
+    add.mutate(body, { onSuccess: () => form.reset() });
+  };
+  return <>
+    <header><p className="eyebrow">FALSE-POSITIVE CONTROL</p><h1>Exceptions and infrastructure policies</h1></header>
+    <section className="panel compact">
+      <p><strong>IP, CIDR, domain, and fingerprint entries fully suppress matching candidates.</strong></p>
+      <p className="muted">Trusted DNS/NTP policies reduce score only when the registered IP also matches UDP/53 or UDP/123. Protocol or port alone never suppresses a candidate.</p>
+    </section>
+    <form className="panel form-inline" onSubmit={submit}>
+      <label>Type<select name="type"><option value="IP">IP — fully suppress</option><option value="CIDR">CIDR — fully suppress</option><option value="DOMAIN_SUFFIX">Domain suffix — fully suppress</option><option value="TLS_FINGERPRINT">TLS fingerprint — fully suppress</option><option value="CERT_FINGERPRINT">Certificate fingerprint — fully suppress</option><option value="TRUSTED_DNS">Trusted DNS — UDP/53 score adjustment</option><option value="TRUSTED_NTP">Trusted NTP — UDP/123 score adjustment</option></select></label>
+      <label>Value<input name="value" required /></label>
+      <label>Description<input name="description" required /></label>
+      <label>Expires at<input name="expires_at" type="datetime-local" /></label>
+      <button disabled={add.isPending}>{add.isPending ? 'Adding…' : 'Add entry'}</button>
+      {add.error && <p role="alert" className="error-text">{add.error.message}</p>}
+    </form>
+    <AsyncState query={q}>{data => items(data).length ? <ul className="entries">{items(data).map(entry => <li key={entry.id}><code>{entry.type}</code><strong>{entry.value}</strong><span>{entry.description}</span>{entry.expires_at && <small>Expires {fmt(entry.expires_at)}</small>}<button className="danger" aria-label={`Delete ${entry.value}`} onClick={() => remove.mutate(entry.id)}>Delete</button></li>)}</ul> : <div className="state">No allowlist entries</div>}</AsyncState>
+  </>;
+}
 
 export default function App() { const authenticated = Boolean(localStorage.getItem('c2hunter-token')); return <Routes><Route path="/login" element={<Login/>}/><Route path="*" element={!authenticated ? <Navigate to="/login" replace/> : <Shell><Routes><Route path="/" element={<Dashboard/>}/><Route path="/sensors" element={<Sensors/>}/><Route path="/sensors/:id" element={<SensorDetail/>}/><Route path="/external-sensors" element={<ExternalSensors/>}/><Route path="/external-sensors/enroll" element={<EnrollSensor/>}/><Route path="/analyses" element={<AnalysisHistory/>}/><Route path="/analyses/new" element={<NewAnalysis/>}/><Route path="/analyses/upload" element={<PcapUpload/>}/><Route path="/analyses/:id" element={<JobDetail/>}/><Route path="/candidates" element={<Candidates/>}/><Route path="/candidates/:id" element={<CandidateDetail/>}/><Route path="/payload-signatures" element={<PayloadSignatures/>}/><Route path="/allowlist" element={<Allowlist/>}/><Route path="*" element={<div className="state"><h1>Page not found</h1><Link to="/">Return to dashboard</Link></div>}/></Routes></Shell>}/></Routes>; }

@@ -213,6 +213,18 @@ def calculate(
         flows.append(Flow(**record))
     parameters = dict(job["analysis"])
     parameters["payload_signatures"] = list(job.get("payload_signatures", ()))
+    entries = [AllowlistEntry.from_mapping(stored) for stored in allowlist or []]
+    now = datetime.now(UTC)
+    parameters["trusted_dns_servers"] = [
+        entry.value
+        for entry in entries
+        if entry.type.upper() == "TRUSTED_DNS" and entry.is_active(now)
+    ]
+    parameters["trusted_ntp_servers"] = [
+        entry.value
+        for entry in entries
+        if entry.type.upper() == "TRUSTED_NTP" and entry.is_active(now)
+    ]
     context = AnalysisContext(
         job["dataset_id"],
         datetime.fromisoformat(job["start_time"]),
@@ -223,18 +235,6 @@ def calculate(
         parameters=parameters,
     )
     evidence = run_detectors(context)
-    entries = []
-    for stored in allowlist or []:
-        expires = stored.get("expires_at")
-        entries.append(
-            AllowlistEntry(
-                stored["type"],
-                stored["value"],
-                stored["description"],
-                datetime.fromisoformat(expires) if isinstance(expires, str) else expires,
-                bool(stored.get("enabled", True)),
-            )
-        )
     scored = score_candidates(
         evidence,
         allowlist=entries,
