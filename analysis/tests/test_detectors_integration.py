@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+import c2hunter_analysis.detectors as detectors_module
 from c2hunter_analysis.detectors import (
     AnalystPayloadSignatureDetector,
     CommandAttackDetector,
@@ -239,6 +240,34 @@ def test_persistence_similarity_and_multi_sensor_use_real_flow_features() -> Non
     assert similarity[0].metrics["dominant_feature_ratio"] == 1.0
     assert multi[0].metrics["distinct_sensors"] == 2
     assert multi[0].metrics["independent_hosts"] == 3
+
+
+def test_persistence_rarity_groups_flows_only_once(monkeypatch) -> None:
+    flows = [
+        flow(
+            index * 120,
+            f"10.0.{candidate}.{host}",
+            destination=f"203.0.113.{candidate}",
+        )
+        for candidate in range(1, 4)
+        for index in range(6)
+        for host in range(1, 4)
+    ]
+    original_groups = detectors_module._groups
+    group_calls = 0
+
+    def counted_groups(analysis_context: AnalysisContext):
+        # 후보 수와 무관하게 전체 Flow grouping은 한 번만 수행해야 한다.
+        nonlocal group_calls
+        group_calls += 1
+        return original_groups(analysis_context)
+
+    monkeypatch.setattr(detectors_module, "_groups", counted_groups)
+
+    evidence = PersistenceRarityDetector().analyze(context(flows, minimum_distinct_clients=3))
+
+    assert len(evidence) == 3
+    assert group_calls == 1
 
 
 def test_synthetic_pipeline_combines_all_detector_evidence() -> None:

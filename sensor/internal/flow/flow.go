@@ -69,9 +69,14 @@ func (a *Aggregator) Add(p packet.Packet) []Record {
 }
 
 func (a *Aggregator) AddWithMetadata(p packet.Packet, protocolMetadata metadata.Metadata) []Record {
-	expired := a.expire(p.Timestamp)
 	key := Key{a.sensorID, p.Direction, p.IPVersion, p.SourceIP, p.DestinationIP, p.SourcePort, p.DestinationPort, p.Protocol}
 	r := a.active[key]
+	var expired []Record
+	if r != nil && !p.Timestamp.Before(r.EndTime.Add(a.idle)) {
+		expired = append(expired, finalize(*r))
+		delete(a.active, key)
+		r = nil
+	}
 	if r == nil {
 		r = &Record{Key: key, CaptureJobID: a.jobID, StartTime: p.Timestamp, MinPacketSize: uint32(p.WireLength), MinPayloadLength: uint32(len(p.Payload))}
 		a.active[key] = r

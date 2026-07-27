@@ -70,6 +70,24 @@ func TestAggregatorExpiresAtIdleTimeout(t *testing.T) {
 	}
 }
 
+func TestAggregatorDefersUnrelatedExpiryToExplicitSweep(t *testing.T) {
+	a := NewAggregator("s", "j", time.Second)
+	t0 := time.Unix(10, 0)
+	a.Add(flowPacket(t0, "10.0.0.1", "8.8.8.8", 1, 2, ""))
+
+	expired := a.Add(
+		flowPacket(t0.Add(time.Second), "10.0.0.2", "1.1.1.1", 3, 4, ""),
+	)
+	if len(expired) != 0 {
+		t.Fatalf("packet hot path expired unrelated flows: %+v", expired)
+	}
+
+	expired = a.Expire(t0.Add(time.Second))
+	if len(expired) != 1 || expired[0].Key.SourceIP.String() != "10.0.0.1" {
+		t.Fatalf("explicit sweep did not expire idle flow: %+v", expired)
+	}
+}
+
 func TestAggregatorMarksReverseFlowsBidirectional(t *testing.T) {
 	a := NewAggregator("s", "j", time.Minute)
 	t0 := time.Unix(1, 0)
@@ -81,5 +99,21 @@ func TestAggregatorMarksReverseFlowsBidirectional(t *testing.T) {
 		if !r.Bidirectional {
 			t.Fatalf("not marked bidirectional: %+v", r)
 		}
+	}
+}
+
+func BenchmarkAggregatorAddWithHighCardinality(b *testing.B) {
+	a := NewAggregator("s", "j", time.Hour)
+	t0 := time.Unix(10, 0)
+	for i := 0; i < 10_000; i++ {
+		pkt := flowPacket(t0, "10.0.0.1", "198.18.0.1", 1, 2, "")
+		pkt.DestinationIP = netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)})
+		a.Add(pkt)
+	}
+	hot := flowPacket(t0, "10.0.0.1", "203.0.113.1", 1, 2, "")
+
+	b.ResetTimer()
+	for b.Loop() {
+		a.Add(hot)
 	}
 }

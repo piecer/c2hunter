@@ -659,7 +659,9 @@ class PersistenceRarityDetector:
     def analyze(self, context: AnalysisContext) -> list[Evidence]:
         minimum = int(context.parameters.get("minimum_distinct_clients", 3))
         result: list[Evidence] = []
-        for candidate, rows in _groups(context).items():
+        groups = _groups(context)
+        candidate_count = len(groups)
+        for candidate, rows in groups.items():
             duration = (
                 max(f.timestamp for _, f in rows) - min(f.timestamp for _, f in rows)
             ).total_seconds()
@@ -671,7 +673,7 @@ class PersistenceRarityDetector:
                 "duration_seconds": duration,
                 "average_packets": avg_packets,
                 "destination_stability": 1.0,
-                "rarity": 1 / max(1, len(_groups(context))),
+                "rarity": 1 / max(1, candidate_count),
                 "sample_count": len(rows),
             }
             result.append(
