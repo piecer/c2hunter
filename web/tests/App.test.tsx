@@ -73,11 +73,14 @@ describe('C2Hunter UI', () => {
     const user = userEvent.setup();
 
     expect(await screen.findByRole('table', { name: 'Analysis flows' })).toBeInTheDocument();
-    await user.type(screen.getByLabelText('Endpoint IP'), '198.51.100.7');
+    await user.type(screen.getByLabelText('Endpoint IP or CIDR'), '198.51.100.0/24');
+    await user.type(screen.getByLabelText('External service port'), '443');
+    await user.type(screen.getByLabelText('Source port'), '51000');
+    await user.type(screen.getByLabelText('Destination port'), '443');
     await user.click(screen.getByRole('button', { name: 'Apply filters' }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
-      '/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&candidate_ip=198.51.100.7&has_payload=true',
+      '/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&candidate_ip=198.51.100.0%2F24&port=443&source_port=51000&destination_port=443&has_payload=true',
       expect.any(Object),
     ));
   });

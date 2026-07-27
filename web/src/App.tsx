@@ -325,7 +325,7 @@ function CandidateDetail() {
 }
 
 function JobFlowReviewPanel({ jobId }: { jobId: string }) {
-  const defaults = { candidateIp: '', direction: '', protocol: '', port: '', payloadOnly: true };
+  const defaults = { candidateIp: '', direction: '', protocol: '', port: '', sourcePort: '', destinationPort: '', payloadOnly: true };
   const [draft, setDraft] = useState(defaults);
   const [filters, setFilters] = useState(defaults);
   const [page, setPage] = useState(1);
@@ -337,6 +337,8 @@ function JobFlowReviewPanel({ jobId }: { jobId: string }) {
       if (filters.direction) parameters.set('direction', filters.direction);
       if (filters.protocol) parameters.set('protocol', filters.protocol);
       if (filters.port) parameters.set('port', filters.port);
+      if (filters.sourcePort) parameters.set('source_port', filters.sourcePort);
+      if (filters.destinationPort) parameters.set('destination_port', filters.destinationPort);
       if (filters.payloadOnly) parameters.set('has_payload', 'true');
       return api.get(`/analysis-jobs/${jobId}/flows?${parameters.toString()}`);
     },
@@ -351,7 +353,7 @@ function JobFlowReviewPanel({ jobId }: { jobId: string }) {
     setFilters(defaults);
     setPage(1);
   };
-  return <section className="panel compact"><h2>All analysis flows</h2><p className="muted">Browse and label a flow even when no detector promoted its external IP to a candidate. Payload-bearing flows are shown by default.</p><form className="flow-filters" onSubmit={applyFilters}><label>Endpoint IP<input value={draft.candidateIp} onChange={event => setDraft({ ...draft, candidateIp: event.target.value })} placeholder="Internal or external IP" /></label><label>Direction<select value={draft.direction} onChange={event => setDraft({ ...draft, direction: event.target.value })}><option value="">Any</option>{directions.map(direction => <option key={direction}>{direction}</option>)}</select></label><label>Protocol<input value={draft.protocol} onChange={event => setDraft({ ...draft, protocol: event.target.value })} placeholder="TCP or UDP" /></label><label>External service port<input value={draft.port} onChange={event => setDraft({ ...draft, port: event.target.value })} type="number" min="0" max="65535" /></label><label className="check"><input type="checkbox" checked={draft.payloadOnly} onChange={event => setDraft({ ...draft, payloadOnly: event.target.checked })} />Payload only</label><button>Apply filters</button><button type="button" className="secondary" onClick={resetFilters}>Reset</button></form><AsyncState query={query} empty={data => items(data).length === 0}>{data => <><div className="table-wrap"><table aria-label="Analysis flows"><thead><tr><th>Observed</th><th>Direction</th><th>Endpoints</th><th>Protocol</th><th>Volume</th><th>Payload features</th><th>Current label</th><th>Review</th></tr></thead><tbody>{items(data).map(flow => <FlowReviewRow key={flow.flow_id} flow={flow} />)}</tbody></table></div><FlowPagination data={data} page={page} onPage={setPage} /></>}</AsyncState></section>;
+  return <section className="panel compact"><h2>All analysis flows</h2><p className="muted">Browse and label a flow even when no detector promoted its external IP to a candidate. Payload-bearing flows are shown by default.</p><form className="flow-filters" onSubmit={applyFilters}><label>Endpoint IP or CIDR<input value={draft.candidateIp} onChange={event => setDraft({ ...draft, candidateIp: event.target.value })} placeholder="IP or CIDR, internal or external" /></label><label>Direction<select value={draft.direction} onChange={event => setDraft({ ...draft, direction: event.target.value })}><option value="">Any</option>{directions.map(direction => <option key={direction}>{direction}</option>)}</select></label><label>Protocol<input value={draft.protocol} onChange={event => setDraft({ ...draft, protocol: event.target.value })} placeholder="TCP or UDP" /></label><label>External service port<input value={draft.port} onChange={event => setDraft({ ...draft, port: event.target.value })} type="number" min="0" max="65535" /></label><label>Source port<input value={draft.sourcePort} onChange={event => setDraft({ ...draft, sourcePort: event.target.value })} type="number" min="0" max="65535" /></label><label>Destination port<input value={draft.destinationPort} onChange={event => setDraft({ ...draft, destinationPort: event.target.value })} type="number" min="0" max="65535" /></label><label className="check"><input type="checkbox" checked={draft.payloadOnly} onChange={event => setDraft({ ...draft, payloadOnly: event.target.checked })} />Payload only</label><button>Apply filters</button><button type="button" className="secondary" onClick={resetFilters}>Reset</button></form><AsyncState query={query} empty={data => items(data).length === 0}>{data => <><div className="table-wrap"><table aria-label="Analysis flows"><thead><tr><th>Observed</th><th>Direction</th><th>Endpoints</th><th>Protocol</th><th>Volume</th><th>Payload features</th><th>Current label</th><th>Review</th></tr></thead><tbody>{items(data).map(flow => <FlowReviewRow key={flow.flow_id} flow={flow} />)}</tbody></table></div><FlowPagination data={data} page={page} onPage={setPage} /></>}</AsyncState></section>;
 }
 
 function FlowPagination({ data, page, onPage }: { data: Page<FlowRecordReview>; page: number; onPage: (page: number) => void }) {

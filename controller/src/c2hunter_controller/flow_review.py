@@ -114,8 +114,11 @@ def filter_flows(
     direction: str | None = None,
     protocol: str | None = None,
     port: int | None = None,
+    source_port: int | None = None,
+    destination_port: int | None = None,
     has_payload: bool | None = None,
 ) -> list[dict[str, Any]]:
+    endpoint_network = ip_network(candidate_ip, strict=False) if candidate_ip else None
     latest_labels: dict[str, dict[str, Any]] = {}
     if labels is None:
         labels = []
@@ -131,16 +134,20 @@ def filter_flows(
             list(job["internal_networks"]),
             latest_labels.get(identifier),
         )
-        if candidate_ip and candidate_ip not in {
-            decorated.get("source_ip"),
-            decorated.get("destination_ip"),
-        }:
+        if endpoint_network and not any(
+            ip_address(str(decorated[field])) in endpoint_network
+            for field in ("source_ip", "destination_ip")
+        ):
             continue
         if direction and str(decorated.get("direction", "")).upper() != direction.upper():
             continue
         if protocol and str(decorated.get("protocol", "")).upper() != protocol.upper():
             continue
         if port is not None and decorated.get("service_port") != port:
+            continue
+        if source_port is not None and decorated.get("source_port") != source_port:
+            continue
+        if destination_port is not None and decorated.get("destination_port") != destination_port:
             continue
         if has_payload is not None and decorated["has_payload"] is not has_payload:
             continue

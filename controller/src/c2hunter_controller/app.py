@@ -1127,26 +1127,37 @@ def create_app(
         job_id: str,
         page: int = Query(1, ge=1),
         page_size: int = Query(50, ge=1, le=200),
-        candidate_ip: str | None = Query(default=None, max_length=45),
+        candidate_ip: str | None = Query(default=None, max_length=49),
         direction: str | None = Query(
             default=None, pattern=r"^(INBOUND|OUTBOUND|BIDIRECTIONAL|UNKNOWN)$"
         ),
         protocol: str | None = Query(default=None, min_length=1, max_length=32),
         port: int | None = Query(default=None, ge=0, le=65535),
+        source_port: int | None = Query(default=None, ge=0, le=65535),
+        destination_port: int | None = Query(default=None, ge=0, le=65535),
         has_payload: bool | None = None,
     ) -> dict[str, Any]:
         job = repo.get_job(job_id)
         if job is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
-        matched = filter_flows(
-            job,
-            labels=repo.list_flow_labels(job_id),
-            candidate_ip=candidate_ip,
-            direction=direction,
-            protocol=protocol,
-            port=port,
-            has_payload=has_payload,
-        )
+        try:
+            matched = filter_flows(
+                job,
+                labels=repo.list_flow_labels(job_id),
+                candidate_ip=candidate_ip,
+                direction=direction,
+                protocol=protocol,
+                port=port,
+                source_port=source_port,
+                destination_port=destination_port,
+                has_payload=has_payload,
+            )
+        except ValueError as exc:
+            raise ApiError(
+                422,
+                "INVALID_ENDPOINT_FILTER",
+                "Endpoint IP 또는 CIDR 형식이 올바르지 않습니다",
+            ) from exc
         return _page(matched, page, page_size)
 
     @app.get("/api/v1/analysis-jobs/{job_id}/flows/{requested_flow_id}/payload-preview")

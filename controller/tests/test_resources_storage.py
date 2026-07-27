@@ -60,7 +60,12 @@ def test_allowlist_crud_normalizes_and_suppresses_calculated_candidate() -> None
     client = configured_client()
     entry = client.post(
         "/api/v1/allowlist",
-        json={"type": "CIDR", "value": "203.0.113.9/24", "description": "lab", "enabled": True},
+        json={
+            "type": "CIDR",
+            "value": "203.0.113.9/24",
+            "description": "lab",
+            "enabled": True,
+        },
     )
     assert entry.status_code == 201
     assert entry.json()["value"] == "203.0.113.0/24"
@@ -68,6 +73,35 @@ def test_allowlist_crud_normalizes_and_suppresses_calculated_candidate() -> None
     job = client.post("/api/v1/analysis-jobs", json=job_payload()).json()
     assert client.get(f"/api/v1/analysis-jobs/{job['id']}/candidates").json()["total"] == 0
     assert client.delete(f"/api/v1/allowlist/{entry.json()['id']}").status_code == 204
+
+
+def test_flow_review_filters_endpoints_by_ip_or_cidr() -> None:
+    client = configured_client()
+    job = client.post("/api/v1/analysis-jobs", json=job_payload()).json()
+    endpoint = f"/api/v1/analysis-jobs/{job['id']}/flows"
+
+    assert client.get(endpoint, params={"candidate_ip": "203.0.113.9"}).json()["total"] == 24
+    assert client.get(endpoint, params={"candidate_ip": "203.0.113.0/24"}).json()["total"] == 24
+    assert client.get(endpoint, params={"candidate_ip": "10.0.0.0/30"}).json()["total"] == 18
+    assert client.get(endpoint, params={"candidate_ip": "not-a-cidr"}).status_code == 422
+
+
+def test_flow_review_filters_external_source_and_destination_ports_independently() -> None:
+    client = configured_client()
+    job = client.post("/api/v1/analysis-jobs", json=job_payload()).json()
+    endpoint = f"/api/v1/analysis-jobs/{job['id']}/flows"
+
+    assert client.get(endpoint, params={"port": 4444}).json()["total"] == 24
+    assert client.get(endpoint, params={"source_port": 50000}).json()["total"] == 24
+    assert client.get(endpoint, params={"destination_port": 4444}).json()["total"] == 24
+    assert client.get(endpoint, params={"source_port": 4444}).json()["total"] == 0
+    assert (
+        client.get(
+            endpoint,
+            params={"port": 4444, "source_port": 50000, "destination_port": 4444},
+        ).json()["total"]
+        == 24
+    )
 
 
 def test_pcap_export_applies_all_filters_and_streams_pcap() -> None:
@@ -117,7 +151,13 @@ def test_export_validation_rejects_inverted_time_range_and_unknown_job() -> None
 
 def test_retention_defaults_and_expiration_cutoffs() -> None:
     policy = RetentionPolicy()
-    assert policy.days == {"pcap": 7, "flow": 30, "result": 180, "audit": 365, "heartbeat": 30}
+    assert policy.days == {
+        "pcap": 7,
+        "flow": 30,
+        "result": 180,
+        "audit": 365,
+        "heartbeat": 30,
+    }
     now = datetime(2026, 7, 20, tzinfo=UTC)
     assert policy.is_expired("pcap", now - timedelta(days=8), now)
     assert not policy.is_expired("result", now - timedelta(days=179), now)
