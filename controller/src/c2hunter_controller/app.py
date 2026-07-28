@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import secrets
 import threading
 import uuid
@@ -20,6 +21,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
+from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from .config import Settings
@@ -38,6 +40,7 @@ from .schemas import (
     AllowlistCreate,
     AnalysisJobCreate,
     AnalysisJobUpdate,
+    AnalysisParameters,
     CancelRequest,
     CandidateUpdate,
     DevLoginRequest,
@@ -884,7 +887,7 @@ def create_app(
             (JobState.ANALYZING, "detectors started"),
         ):
             machine.transition(job, state, reason)
-        candidates = calculate(job, repo.list_allowlist())
+        candidates = calculate(job, job.get("allowlist", []))
         repo.save_candidates(job["id"], candidates)
         job["candidate_count"] = len(candidates)
         job["flow_count"] = len(job.get("flow_records", []))
@@ -932,6 +935,7 @@ def create_app(
         minimum_candidate_score: int = Query(default=0, ge=0, le=100),
         minimum_distinct_clients: int = Query(default=3, ge=2, le=100000),
         periodicity_min_samples: int = Query(default=5, ge=3, le=100000),
+        detector_weights: str = Query(default="{}", max_length=2000),
         ml_anomaly_enabled: bool = Query(default=False),
         ml_anomaly_allow_standalone: bool = Query(default=False),
         ml_anomaly_min_population: int = Query(default=30, ge=8, le=100000),
@@ -941,6 +945,17 @@ def create_app(
         ml_anomaly_min_directional_features: int = Query(default=2, ge=1, le=6),
         ml_anomaly_contribution_cap: float = Query(default=5.0, ge=0.0, le=5.0),
     ) -> dict[str, Any]:
+        try:
+            raw_detector_weights = json.loads(detector_weights)
+            normalized_detector_weights = AnalysisParameters(
+                detector_weights=raw_detector_weights
+            ).detector_weights
+        except (json.JSONDecodeError, ValidationError) as exc:
+            raise ApiError(
+                422,
+                "INVALID_DETECTOR_WEIGHTS",
+                "탐지 가중치는 알려진 detector 이름과 0~2 사이 숫자를 가진 JSON object여야 합니다",
+            ) from exc
         media_type = request.headers.get("content-type", "").split(";", 1)[0].lower()
         supported_media_types = {
             "application/octet-stream",
@@ -1025,6 +1040,7 @@ def create_app(
                     "minimum_candidate_score": minimum_candidate_score,
                     "minimum_distinct_clients": minimum_distinct_clients,
                     "periodicity_min_samples": periodicity_min_samples,
+                    "detector_weights": normalized_detector_weights,
                     "ml_anomaly_enabled": ml_anomaly_enabled,
                     "ml_anomaly_allow_standalone": ml_anomaly_allow_standalone,
                     "ml_anomaly_min_population": ml_anomaly_min_population,
@@ -1412,6 +1428,8 @@ def create_app(
             value = getattr(payload, field)
             if value is not None:
                 parameters[field] = value
+        if payload.detector_weights is not None:
+            parameters["detector_weights"] = payload.detector_weights
         request = AnalysisJobCreate.model_validate(
             {
                 "name": f"{source['name']}-reanalyze",

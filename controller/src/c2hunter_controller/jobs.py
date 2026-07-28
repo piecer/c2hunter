@@ -245,6 +245,10 @@ def calculate(
         ),
         high_volume_packet_threshold=int(parameters.get("high_volume_packet_threshold", 100_000)),
         high_volume_penalty=int(parameters.get("high_volume_penalty", 30)),
+        detector_weights={
+            str(name): float(weight)
+            for name, weight in dict(parameters.get("detector_weights", {})).items()
+        },
     )
     minimum_score = int(job["analysis"]["minimum_candidate_score"])
     retained = [candidate for candidate in scored if candidate.score >= minimum_score]

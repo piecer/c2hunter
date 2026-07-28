@@ -228,7 +228,7 @@ class Evidence:
 @dataclass(frozen=True)
 class ScoreAdjustment:
     kind: str
-    points: int
+    points: float
     explanation: str
 
 

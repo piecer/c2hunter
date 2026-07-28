@@ -65,6 +65,109 @@ def test_scoring_caps_each_detector_and_assigns_boundaries() -> None:
     ]
 
 
+def test_scoring_applies_per_run_detector_weights_with_auditable_adjustment() -> None:
+    evidence = [
+        Evidence(
+            "203.0.113.9",
+            "COMMON_DESTINATION",
+            "common_destination",
+            "1",
+            20,
+            20,
+            "many hosts",
+            hosts=("10.0.0.1", "10.0.0.2", "10.0.0.3"),
+        ),
+        Evidence(
+            "203.0.113.9",
+            "PERIODIC_BEACON",
+            "periodic_beacon",
+            "1",
+            15,
+            15,
+            "periodic",
+            hosts=("10.0.0.1", "10.0.0.2", "10.0.0.3"),
+        ),
+    ]
+
+    default = score_candidates(evidence)[0]
+    tuned = score_candidates(
+        evidence,
+        detector_weights={"common_destination": 0.25},
+    )[0]
+
+    assert default.score == 35
+    assert tuned.score == 20
+    assert tuned.evidence == default.evidence
+    assert [(item.kind, item.points) for item in tuned.adjustments] == [
+        ("DETECTOR_WEIGHT_COMMON_DESTINATION", -15)
+    ]
+
+
+def test_scoring_weight_above_one_exceeds_base_cap_and_keeps_final_cap() -> None:
+    evidence = [
+        Evidence(
+            "203.0.113.9",
+            "COMMON_DESTINATION",
+            "common_destination",
+            "1",
+            20,
+            20,
+            "many hosts",
+            hosts=("10.0.0.1", "10.0.0.2", "10.0.0.3"),
+        ),
+        Evidence(
+            "203.0.113.9",
+            "ANALYST_PAYLOAD_SIGNATURE",
+            "analyst_payload_signature",
+            "1",
+            80,
+            80,
+            "analyst match",
+            hosts=("10.0.0.1", "10.0.0.2", "10.0.0.3"),
+            metrics={"match_mode": "EXACT"},
+        ),
+    ]
+
+    tuned = score_candidates(
+        evidence,
+        detector_weights={
+            "common_destination": 2.0,
+            "analyst_payload_signature": 2.0,
+        },
+    )[0]
+
+    assert tuned.score == 100
+    assert [(item.kind, item.points) for item in tuned.adjustments] == [
+        ("DETECTOR_WEIGHT_ANALYST_PAYLOAD_SIGNATURE", 80),
+        ("DETECTOR_WEIGHT_COMMON_DESTINATION", 20),
+    ]
+
+
+def test_scoring_preserves_fractional_detector_weight_adjustment_until_final_rounding() -> None:
+    evidence = [
+        Evidence(
+            "203.0.113.45",
+            "COMMON_DESTINATION",
+            "common_destination",
+            "1",
+            2.5,
+            2.5,
+            "fractional contribution",
+            hosts=("10.0.0.1", "10.0.0.2", "10.0.0.3"),
+        )
+    ]
+
+    tuned = score_candidates(
+        evidence,
+        detector_weights={"common_destination": 2.0},
+    )[0]
+
+    assert tuned.score == 5
+    assert [(item.kind, item.points) for item in tuned.adjustments] == [
+        ("DETECTOR_WEIGHT_COMMON_DESTINATION", 2.5)
+    ]
+
+
 def test_allowlist_suppresses_matching_ip_and_cidr() -> None:
     evidence = [Evidence("203.0.113.9", "COMMON_DESTINATION", "common", "1", 10, 10, "x")]
     entries = [AllowlistEntry("CIDR", "203.0.113.0/24", "test network")]

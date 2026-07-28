@@ -20,6 +20,22 @@ CAPS = {
     "ML_POPULATION_ANOMALY": 5,
 }
 
+DETECTOR_NAMES = (
+    "common_destination",
+    "non_well_known_port",
+    "periodic_beacon",
+    "single_host_composite_beacon",
+    "analyst_payload_signature",
+    "synchronized_communication",
+    "command_attack_correlation",
+    "persistence_rarity",
+    "protocol_similarity",
+    "multi_sensor_context",
+    "ml_population_anomaly",
+)
+DEFAULT_DETECTOR_WEIGHTS = {name: 1.0 for name in DETECTOR_NAMES}
+MAX_DETECTOR_WEIGHT = 2.0
+
 
 def severity_for(score: int) -> str:
     if score >= 80:
@@ -40,6 +56,7 @@ def score_candidates(
     high_volume_bytes_threshold: int = 50 * 1024 * 1024,
     high_volume_packet_threshold: int = 100_000,
     high_volume_penalty: int = 30,
+    detector_weights: Mapping[str, float] | None = None,
     now: datetime | None = None,
 ) -> list[Candidate]:
     grouped: dict[str, list[Evidence]] = defaultdict(list)
@@ -51,12 +68,39 @@ def score_candidates(
         if any(entry.matches(candidate_ip, items, instant) for entry in allowlist):
             continue
         by_type: dict[str, float] = defaultdict(float)
+        weighted_by_type: dict[str, float] = defaultdict(float)
+        weights_by_type: dict[str, dict[str, float]] = defaultdict(dict)
         for item in items:
-            by_type[item.type] += max(0, item.contribution)
+            contribution = max(0, item.contribution)
+            weight = max(
+                0.0,
+                min(MAX_DETECTOR_WEIGHT, float((detector_weights or {}).get(item.detector, 1.0))),
+            )
+            by_type[item.type] += contribution
+            weighted_by_type[item.type] += contribution * weight
+            weights_by_type[item.type][item.detector] = weight
         score = sum(min(CAPS.get(kind, 0), value) for kind, value in by_type.items())
         hosts = sorted({host for item in items for host in item.hosts})
         sensors = sorted({sensor for item in items for sensor in item.sensors})
         adjustments: list[ScoreAdjustment] = []
+        for kind in sorted(by_type):
+            cap = CAPS.get(kind, 0)
+            baseline = min(cap, by_type[kind])
+            weight_ratio = weighted_by_type[kind] / by_type[kind] if by_type[kind] else 1.0
+            weighted = min(cap * MAX_DETECTOR_WEIGHT, baseline * weight_ratio)
+            points = weighted - baseline
+            if not points:
+                continue
+            configured = ", ".join(
+                f"{name} x{weight:g}" for name, weight in sorted(weights_by_type[kind].items())
+            )
+            adjustments.append(
+                ScoreAdjustment(
+                    f"DETECTOR_WEIGHT_{kind}",
+                    points,
+                    f"실행별 탐지 가중치 적용: {configured}",
+                )
+            )
         exact_analyst_match = any(
             item.type == "ANALYST_PAYLOAD_SIGNATURE" and item.metrics.get("match_mode") == "EXACT"
             for item in items

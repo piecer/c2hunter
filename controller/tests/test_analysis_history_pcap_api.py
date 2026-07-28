@@ -114,6 +114,7 @@ def test_pcap_upload_runs_existing_detectors_and_appears_in_history() -> None:
             "internal_networks": "10.0.0.0/8",
             "minimum_candidate_score": 0,
             "minimum_distinct_clients": 3,
+            "detector_weights": '{"common_destination":0.25}',
         },
         content=capture,
         headers={"content-type": "application/vnd.tcpdump.pcap"},
@@ -131,6 +132,7 @@ def test_pcap_upload_runs_existing_detectors_and_appears_in_history() -> None:
     assert job["source"]["parsed_packet_count"] == 18
     assert job["flow_count"] == 18
     assert job["packet_count"] == 18
+    assert job["analysis"]["detector_weights"]["common_destination"] == 0.25
     stored = repository.get_job(job["id"])
     assert stored is not None
     assert all("raw_packet_hex" not in record for record in stored["flow_records"])
@@ -186,6 +188,15 @@ def test_pcap_upload_validates_media_format_size_and_packet_limit() -> None:
     )
     assert malformed.status_code == 422
     assert malformed.json()["error"]["code"] == "INVALID_PCAP"
+
+    invalid_weights = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={**params, "detector_weights": "not-json"},
+        content=_pcap(),
+        headers={"content-type": "application/octet-stream"},
+    )
+    assert invalid_weights.status_code == 422
+    assert invalid_weights.json()["error"]["code"] == "INVALID_DETECTOR_WEIGHTS"
 
     too_large = TestClient(
         create_app(Settings(environment="test", pcap_upload_max_bytes=16), MemoryRepository())

@@ -33,6 +33,29 @@ type PayloadPreview = { flow_id: string; payload_hex: string; payload_ascii: str
 type PayloadSignature = { id: string; name: string; description?: string; version: number; enabled: boolean; source_job_id: string; source_flow_id: string; source_label_id: string; protocol?: string; direction?: string; service_port?: number; payload_hash?: string; payload_prefix_hash?: string; payload_length?: number; payload_entropy?: number; payload_printable_ratio?: number; payload_simhash?: string; payload_feature_version?: string; length_tolerance_ratio: number; entropy_tolerance: number; simhash_max_distance: number; created_by?: string; created_at: string; updated_at?: string };
 type AllowEntry = { id: string; type: string; value: string; description?: string; expires_at?: string };
 const PCAP_UPLOAD_MAX_BYTES = 500 * 1024 * 1024;
+type DetectorWeights = Record<string, number>;
+const detectorDefinitions = [
+  ['common_destination', 'Common destination', 'Broad many-host destination signal'],
+  ['non_well_known_port', 'Non-well-known port', 'Repeated external service on a high port'],
+  ['periodic_beacon', 'Periodic beacon', 'Regular communication interval'],
+  ['single_host_composite_beacon', 'Single-host beacon', 'Stable low-volume single-host beacon'],
+  ['analyst_payload_signature', 'Analyst payload signature', 'Analyst-confirmed payload match'],
+  ['synchronized_communication', 'Synchronized communication', 'Multiple hosts communicating in sync'],
+  ['command_attack_correlation', 'Command/attack correlation', 'Command traffic correlated with attack activity'],
+  ['persistence_rarity', 'Persistence rarity', 'Persistent low-volume rare endpoint'],
+  ['protocol_similarity', 'Protocol similarity', 'Shared protocol and payload statistics'],
+  ['multi_sensor_context', 'Multi-sensor context', 'Endpoint observed by multiple sensors'],
+  ['ml_population_anomaly', 'Population anomaly', 'Population-relative anomaly signal'],
+] as const;
+const defaultDetectorWeights = Object.fromEntries(detectorDefinitions.map(([name]) => [name, 1])) as DetectorWeights;
+const serviceNoiseDetectorWeights = {
+  ...defaultDetectorWeights,
+  common_destination: 0.25,
+  synchronized_communication: 0.5,
+  protocol_similarity: 0.5,
+  multi_sensor_context: 0.5,
+  ml_population_anomaly: 0.5,
+};
 const sensorStatus = (sensor: Sensor) => sensor.status ?? sensor.derived_status ?? 'OFFLINE';
 let idempotencySequence = 0;
 const idempotencyKey = () => {
@@ -55,6 +78,10 @@ const formatValue = (value: unknown): string => {
   if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
 };
+
+function DetectorWeightFields({ weights, setWeights }: { weights: DetectorWeights; setWeights: (value: DetectorWeights) => void }) {
+  return <fieldset className="detector-weights"><legend>Detector score weights</legend><p className="muted">0 disables a detector's score contribution, 1 keeps the default, and 2 doubles it. Evidence remains visible for audit.</p><div className="actions"><button type="button" className="secondary" onClick={() => setWeights({ ...defaultDetectorWeights })}>Reset detector weights</button><button type="button" className="secondary" onClick={() => setWeights({ ...serviceNoiseDetectorWeights })}>Reduce large-service noise</button></div><div className="grid">{detectorDefinitions.map(([name, label, description]) => <label key={name}>{label}<input name={`weight_${name}`} type="number" min="0" max="2" step="0.05" value={weights[name]} onChange={event => setWeights({ ...weights, [name]: Number(event.target.value) })}/><small>{description}</small></label>)}</div></fieldset>;
+}
 
 function AsyncState<T>({ query, children, empty }: { query: ReturnType<typeof useQuery<T, Error>>; children: (data: T) => ReactNode; empty?: (data: T) => boolean }) {
   if (query.isLoading) return <div className="state" role="status" aria-live="polite"><span className="spinner"/> Loading…</div>;
@@ -193,6 +220,7 @@ function PcapUpload() {
   const navigate = useNavigate();
   const [file, setFile] = useState<File>();
   const [validationError, setValidationError] = useState('');
+  const [detectorWeights, setDetectorWeights] = useState<DetectorWeights>({ ...defaultDetectorWeights });
   const mutation = useMutation<Job, Error, { file: File; query: URLSearchParams }>({
     mutationFn: ({ file: selected, query }) => {
       const type = selected.name.toLowerCase().endsWith('.pcapng') ? 'application/x-pcapng' : 'application/vnd.tcpdump.pcap';
@@ -216,17 +244,53 @@ function PcapUpload() {
       periodicity_min_samples: String(form.get('samples')),
       ml_anomaly_enabled: String(form.get('ml_anomaly_enabled') === 'on'),
       ml_anomaly_allow_standalone: String(form.get('ml_anomaly_allow_standalone') === 'on'),
+      detector_weights: JSON.stringify(detectorWeights),
       idempotency_key: idempotencyKey(),
     });
     mutation.mutate({ file, query });
   };
-  return <><header className="header-actions"><div><p className="eyebrow">OFFLINE INVESTIGATION</p><h1>Upload PCAP</h1><p className="muted">Analyze an existing capture with the same C2 correlation and scoring pipeline used for sensor traffic.</p></div><Link to="/analyses">View analysis history</Link></header><form className="panel form" onSubmit={submit}><label>Analysis name<input name="name" required maxLength={200} /></label><label>Analyst note<textarea name="description" rows={3} maxLength={5000} placeholder="Case, ticket, or collection context" /></label><label>Capture file<input name="pcap" type="file" accept=".pcap,.pcapng,.cap,application/vnd.tcpdump.pcap,application/octet-stream" onChange={event => { const selected = event.currentTarget.files?.[0]; mutation.reset(); setValidationError(''); if (selected && selected.size > PCAP_UPLOAD_MAX_BYTES) { event.currentTarget.value = ''; setFile(undefined); setValidationError('PCAP files must be 500 MiB or smaller.'); return; } setFile(selected); }} required /></label>{file && <div className="file-summary" role="status"><strong>{file.name}</strong><span>{formatBytes(file.size)}</span></div>}<div className="grid"><label>Internal networks<input name="internal_networks" defaultValue="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" required /></label><label>Minimum score<input name="score" type="number" min="0" max="100" defaultValue="0" required /></label><label>Minimum internal hosts<input name="hosts" type="number" min="2" defaultValue="3" required /></label><label>Beacon minimum samples<input name="samples" type="number" min="3" defaultValue="5" required /></label></div><fieldset><legend>Population anomaly detector</legend><label className="check"><input type="checkbox" name="ml_anomaly_enabled"/>Enable population-relative C2 signal</label><label className="check"><input type="checkbox" name="ml_anomaly_allow_standalone"/>Allow anomaly-only hunting candidates</label><p className="muted">Disabled by default. Standalone mode is experimental; otherwise anomaly evidence only enriches candidates supported by another detector.</p></fieldset><p className="muted">Supported containers: classic PCAP and PCAPNG. Supported packet links include Ethernet, raw IP, Linux cooked capture v1/v2, and loopback. The upload limit is 500 MiB and 2,000,000 packets.</p>{(validationError || mutation.error) && <p role="alert" className="error-text">{validationError || mutation.error?.message}</p>}<button disabled={mutation.isPending}>{mutation.isPending ? 'Uploading and analyzing…' : 'Upload and analyze'}</button></form></>;
+  return <><header className="header-actions"><div><p className="eyebrow">OFFLINE INVESTIGATION</p><h1>Upload PCAP</h1><p className="muted">Analyze an existing capture with the same C2 correlation and scoring pipeline used for sensor traffic.</p></div><Link to="/analyses">View analysis history</Link></header><form className="panel form" onSubmit={submit}><label>Analysis name<input name="name" required maxLength={200} /></label><label>Analyst note<textarea name="description" rows={3} maxLength={5000} placeholder="Case, ticket, or collection context" /></label><label>Capture file<input name="pcap" type="file" accept=".pcap,.pcapng,.cap,application/vnd.tcpdump.pcap,application/octet-stream" onChange={event => { const selected = event.currentTarget.files?.[0]; mutation.reset(); setValidationError(''); if (selected && selected.size > PCAP_UPLOAD_MAX_BYTES) { event.currentTarget.value = ''; setFile(undefined); setValidationError('PCAP files must be 500 MiB or smaller.'); return; } setFile(selected); }} required /></label>{file && <div className="file-summary" role="status"><strong>{file.name}</strong><span>{formatBytes(file.size)}</span></div>}<div className="grid"><label>Internal networks<input name="internal_networks" defaultValue="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" required /></label><label>Minimum score<input name="score" type="number" min="0" max="100" defaultValue="0" required /></label><label>Minimum internal hosts<input name="hosts" type="number" min="2" defaultValue="3" required /></label><label>Beacon minimum samples<input name="samples" type="number" min="3" defaultValue="5" required /></label></div><DetectorWeightFields weights={detectorWeights} setWeights={setDetectorWeights}/><fieldset><legend>Population anomaly detector</legend><label className="check"><input type="checkbox" name="ml_anomaly_enabled"/>Enable population-relative C2 signal</label><label className="check"><input type="checkbox" name="ml_anomaly_allow_standalone"/>Allow anomaly-only hunting candidates</label><p className="muted">Disabled by default. Standalone mode is experimental; otherwise anomaly evidence only enriches candidates supported by another detector.</p></fieldset><p className="muted">Supported containers: classic PCAP and PCAPNG. Supported packet links include Ethernet, raw IP, Linux cooked capture v1/v2, and loopback. The upload limit is 500 MiB and 2,000,000 packets.</p>{(validationError || mutation.error) && <p role="alert" className="error-text">{validationError || mutation.error?.message}</p>}<button disabled={mutation.isPending}>{mutation.isPending ? 'Uploading and analyzing…' : 'Upload and analyze'}</button></form></>;
 }
 
 function NewAnalysis() {
-  const navigate = useNavigate(); const sensors = useQuery<List<Sensor>, Error>({ queryKey: ['sensors'], queryFn: () => api.get('/sensors') }); const mutation = useMutation({ mutationFn: (body: unknown) => api.post<Job>('/analysis-jobs', body), onSuccess: j => navigate(`/analyses/${j.id}`) });
-  const submit = (e: FormEvent<HTMLFormElement>) => { e.preventDefault(); const f = new FormData(e.currentTarget); const start = new Date(); const end = new Date(start.getTime() + Number(f.get('duration')) * 1000); mutation.mutate({ name: f.get('name'), idempotency_key: idempotencyKey(), sensor_ids: f.getAll('sensor_ids'), mode: f.get('mode'), start_time: start.toISOString(), end_time: end.toISOString(), internal_networks: String(f.get('internal_networks')).split(',').map(value => value.trim()).filter(Boolean), capture: { duration_seconds: Number(f.get('duration')), max_packets: Number(f.get('max_packets')), directions: f.getAll('directions'), bpf_filter: f.get('bpf'), store_pcap: f.get('store_pcap') === 'on' }, analysis: { profile: 'ddos_botnet', minimum_candidate_score: Number(f.get('score')), minimum_distinct_clients: Number(f.get('hosts')), ml_anomaly_enabled: f.get('ml_anomaly_enabled') === 'on', ml_anomaly_allow_standalone: f.get('ml_anomaly_allow_standalone') === 'on' } }); };
-  return <><header><p className="eyebrow">INVESTIGATION</p><h1>New analysis</h1></header><form className="panel form" onSubmit={submit}><label>Analysis name<input name="name" required /></label><fieldset><legend>Sensors</legend><AsyncState query={sensors}>{d => <>{items(d).map(s => <label className="check" key={s.sensor_id}><input type="checkbox" name="sensor_ids" value={s.sensor_id} aria-label={s.name}/>{s.name}</label>)}</>}</AsyncState></fieldset><div className="grid"><label>Data source<select name="mode"><option value="LIVE">Live capture</option><option value="HISTORICAL">Historical</option></select></label><label>Duration (seconds)<input name="duration" type="number" min="1" defaultValue="300" /></label><label>Internal networks<input name="internal_networks" defaultValue="10.0.0.0/8" required /></label><label>Maximum packets<input name="max_packets" type="number" min="1" defaultValue="2000000" /></label><label>BPF filter<input name="bpf" defaultValue="ip" /></label><label>Minimum score<input name="score" type="number" min="0" max="100" defaultValue="20" /></label><label>Minimum internal hosts<input name="hosts" type="number" min="2" defaultValue="3" /></label></div><fieldset><legend>Directions</legend>{['INBOUND','OUTBOUND'].map(v => <label className="check" key={v}><input type="checkbox" name="directions" value={v} defaultChecked/>{v}</label>)}</fieldset><fieldset><legend>Population anomaly detector</legend><label className="check"><input type="checkbox" name="ml_anomaly_enabled"/>Enable population-relative C2 signal</label><label className="check"><input type="checkbox" name="ml_anomaly_allow_standalone"/>Allow anomaly-only hunting candidates</label><p className="muted">Disabled by default. Standalone mode is experimental; otherwise anomaly evidence only enriches candidates supported by another detector.</p></fieldset><label className="check"><input type="checkbox" name="store_pcap" defaultChecked/>Store PCAP</label>{mutation.error && <p role="alert">{mutation.error.message}</p>}<button disabled={mutation.isPending}>{mutation.isPending ? 'Starting…' : 'Start analysis'}</button></form></>;
+  const navigate = useNavigate();
+  const [detectorWeights, setDetectorWeights] = useState<DetectorWeights>({ ...defaultDetectorWeights });
+  const sensors = useQuery<List<Sensor>, Error>({ queryKey: ['sensors'], queryFn: () => api.get('/sensors') });
+  const mutation = useMutation({ mutationFn: (body: unknown) => api.post<Job>('/analysis-jobs', body), onSuccess: job => navigate(`/analyses/${job.id}`) });
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const start = new Date();
+    const end = new Date(start.getTime() + Number(form.get('duration')) * 1000);
+    mutation.mutate({
+      name: form.get('name'),
+      idempotency_key: idempotencyKey(),
+      sensor_ids: form.getAll('sensor_ids'),
+      mode: form.get('mode'),
+      start_time: start.toISOString(),
+      end_time: end.toISOString(),
+      internal_networks: String(form.get('internal_networks')).split(',').map(value => value.trim()).filter(Boolean),
+      capture: { duration_seconds: Number(form.get('duration')), max_packets: Number(form.get('max_packets')), directions: form.getAll('directions'), bpf_filter: form.get('bpf'), store_pcap: form.get('store_pcap') === 'on' },
+      analysis: { profile: 'ddos_botnet', minimum_candidate_score: Number(form.get('score')), minimum_distinct_clients: Number(form.get('hosts')), detector_weights: detectorWeights, ml_anomaly_enabled: form.get('ml_anomaly_enabled') === 'on', ml_anomaly_allow_standalone: form.get('ml_anomaly_allow_standalone') === 'on' },
+    });
+  };
+  return <><header><p className="eyebrow">INVESTIGATION</p><h1>New analysis</h1></header><form className="panel form" onSubmit={submit}><label>Analysis name<input name="name" required /></label><fieldset><legend>Sensors</legend><AsyncState query={sensors}>{data => <>{items(data).map(sensor => <label className="check" key={sensor.sensor_id}><input type="checkbox" name="sensor_ids" value={sensor.sensor_id} aria-label={sensor.name}/>{sensor.name}</label>)}</>}</AsyncState></fieldset><div className="grid"><label>Data source<select name="mode"><option value="LIVE">Live capture</option><option value="HISTORICAL">Historical</option></select></label><label>Duration (seconds)<input name="duration" type="number" min="1" defaultValue="300" /></label><label>Internal networks<input name="internal_networks" defaultValue="10.0.0.0/8" required /></label><label>Maximum packets<input name="max_packets" type="number" min="1" defaultValue="2000000" /></label><label>BPF filter<input name="bpf" defaultValue="ip" /></label><label>Minimum score<input name="score" type="number" min="0" max="100" defaultValue="20" /></label><label>Minimum internal hosts<input name="hosts" type="number" min="2" defaultValue="3" /></label></div><fieldset><legend>Directions</legend>{['INBOUND','OUTBOUND'].map(value => <label className="check" key={value}><input type="checkbox" name="directions" value={value} defaultChecked/>{value}</label>)}</fieldset><DetectorWeightFields weights={detectorWeights} setWeights={setDetectorWeights}/><fieldset><legend>Population anomaly detector</legend><label className="check"><input type="checkbox" name="ml_anomaly_enabled"/>Enable population-relative C2 signal</label><label className="check"><input type="checkbox" name="ml_anomaly_allow_standalone"/>Allow anomaly-only hunting candidates</label><p className="muted">Disabled by default. Standalone mode is experimental; otherwise anomaly evidence only enriches candidates supported by another detector.</p></fieldset><label className="check"><input type="checkbox" name="store_pcap" defaultChecked/>Store PCAP</label>{mutation.error && <p role="alert">{mutation.error.message}</p>}<button disabled={mutation.isPending}>{mutation.isPending ? 'Starting…' : 'Start analysis'}</button></form></>;
+}
+
+function JobReanalysis({ job }: { job: Job }) {
+  const navigate = useNavigate();
+  const recorded = job.analysis?.detector_weights;
+  const initialWeights = detectorDefinitions.reduce<DetectorWeights>((result, [name]) => {
+    const value = recorded && typeof recorded === 'object' ? (recorded as Record<string, unknown>)[name] : undefined;
+    result[name] = typeof value === 'number' && value >= 0 && value <= 2 ? value : 1;
+    return result;
+  }, {});
+  const [weights, setWeights] = useState<DetectorWeights>(initialWeights);
+  const reanalyze = useMutation({
+    mutationFn: () => api.post<Job>(`/analysis-jobs/${job.id}/reanalyze`, { idempotency_key: idempotencyKey(), detector_weights: weights }),
+    onSuccess: created => navigate(`/analyses/${created.id}`),
+  });
+  return <section className="panel compact"><h2>Tune and reanalyze</h2><p className="muted">Reuse dataset {job.dataset_id} and compare candidate scores without uploading or parsing the capture again.</p><DetectorWeightFields weights={weights} setWeights={setWeights}/>{reanalyze.error && <p role="alert" className="error-text">{reanalyze.error.message}</p>}<button disabled={reanalyze.isPending} onClick={() => reanalyze.mutate()}>{reanalyze.isPending ? 'Creating reanalysis…' : 'Reanalyze with detector weights'}</button></section>;
 }
 
 function JobDetail() {
@@ -264,6 +328,7 @@ function JobDetail() {
         <article className="panel"><h2>Analysis scope</h2><dl><dt>Internal networks</dt><dd>{formatValue(j.internal_networks)}</dd><dt>Sensors</dt><dd>{formatValue(j.sensor_ids)}</dd>{Object.entries(j.capture ?? {}).map(([key, value]) => <Fragment key={key}><dt>{humanize(key)}</dt><dd>{formatValue(value)}</dd></Fragment>)}</dl></article>
         <article className="panel"><h2>Detector settings</h2>{Object.keys(j.analysis ?? {}).length ? <dl>{Object.entries(j.analysis ?? {}).map(([key, value]) => <Fragment key={key}><dt>{humanize(key)}</dt><dd>{formatValue(value)}</dd></Fragment>)}</dl> : <p className="muted">No detector parameters were recorded.</p>}</article>
       </section>
+      {j.status === 'COMPLETED' && j.dataset_id && <JobReanalysis key={j.id} job={j}/>}
       <section className="panel compact"><h2>Detected candidates</h2><AsyncState query={candidates} empty={data => items(data).length === 0}>{data => <div className="table-wrap"><table aria-label="Analysis candidates"><thead><tr><th>Candidate</th><th>Score</th><th>Hosts / sensors</th><th>Network context</th><th>Evidence</th><th>Observed</th></tr></thead><tbody>{items(data).map(candidate => { const hosts = candidateHosts(candidate); const sensors = candidateSensors(candidate); const protocols = strings(candidate.protocols); const ports = numbers(candidate.ports); const evidence = candidateEvidence(candidate); return <tr key={candidate.id}><td><Link to={`/candidates/${candidate.id}`}>{candidate.candidate_ip}</Link><small className={candidate.severity.toLowerCase()}>{candidate.severity}</small></td><td><strong>{candidate.score}</strong></td><td>{hosts.length || candidate.distinct_internal_hosts || 0} host(s)<small>{sensors.length} sensor(s)</small></td><td>{protocols.length ? protocols.join(', ') : 'Unknown protocol'}<small>{ports.length ? `Ports ${ports.join(', ')}` : 'No service port'}</small></td><td>{candidate.evidence_count ?? evidence.length}<small>{evidence.map(item => item.type).join(', ') || 'No evidence details'}</small></td><td>{fmt(candidate.first_seen)}<small>to {fmt(candidate.last_seen)}</small></td></tr>; })}</tbody></table></div>}</AsyncState></section>
       <JobFlowReviewPanel jobId={j.id} />
       <section className="panel compact"><h2>State transitions</h2>{j.transitions?.length ? <ol className="timeline">{j.transitions.map((transition, index) => <li key={`${transition.to_status}-${transition.occurred_at}-${index}`}><strong>{transition.to_status}</strong><span>{fmt(transition.occurred_at)}</span><p>{transition.reason ?? 'No transition reason recorded'}{transition.from_status ? ` · from ${transition.from_status}` : ''}</p></li>)}</ol> : <p className="muted">No state transition history was recorded.</p>}</section>
