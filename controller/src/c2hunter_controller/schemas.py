@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from enum import StrEnum
 from ipaddress import ip_address, ip_network
 from typing import Any
 
+from c2hunter_analysis.scoring import DEFAULT_DETECTOR_WEIGHTS, MAX_DETECTOR_WEIGHT
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
@@ -221,6 +223,9 @@ class AnalysisParameters(BaseModel):
     high_volume_bytes_threshold: int = Field(default=50 * 1024 * 1024, ge=0)
     high_volume_packet_threshold: int = Field(default=100000, ge=0)
     high_volume_penalty: int = Field(default=30, ge=0, le=100)
+    detector_weights: dict[str, float] = Field(
+        default_factory=lambda: dict(DEFAULT_DETECTOR_WEIGHTS)
+    )
     ml_anomaly_enabled: bool = False
     ml_anomaly_allow_standalone: bool = False
     ml_anomaly_min_population: int = Field(default=30, ge=8, le=100000)
@@ -229,6 +234,26 @@ class AnalysisParameters(BaseModel):
     ml_anomaly_feature_z_floor: float = Field(default=1.0, ge=0.0, le=10.0)
     ml_anomaly_min_directional_features: int = Field(default=2, ge=1, le=6)
     ml_anomaly_contribution_cap: float = Field(default=5.0, ge=0.0, le=5.0)
+
+    @field_validator("detector_weights", mode="before")
+    @classmethod
+    def normalize_detector_weights(cls, value: object) -> dict[str, float]:
+        if not isinstance(value, dict):
+            raise ValueError("detector_weights must be an object")
+        unknown = set(value) - set(DEFAULT_DETECTOR_WEIGHTS)
+        if unknown:
+            raise ValueError(f"unknown detector weights: {sorted(unknown)}")
+        normalized = dict(DEFAULT_DETECTOR_WEIGHTS)
+        for name, raw_weight in value.items():
+            if isinstance(raw_weight, bool) or not isinstance(raw_weight, int | float):
+                raise ValueError(f"detector weight {name} must be numeric")
+            weight = float(raw_weight)
+            if not math.isfinite(weight) or not 0 <= weight <= MAX_DETECTOR_WEIGHT:
+                raise ValueError(
+                    f"detector weight {name} must be between 0 and {MAX_DETECTOR_WEIGHT:g}"
+                )
+            normalized[str(name)] = weight
+        return normalized
 
 
 class FlowRecord(BaseModel):
@@ -333,9 +358,18 @@ class CancelRequest(BaseModel):
 
 
 class ReanalysisRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     idempotency_key: str = Field(min_length=1, max_length=200)
     minimum_candidate_score: int | None = Field(default=None, ge=0, le=100)
     minimum_distinct_clients: int | None = Field(default=None, ge=2)
+    detector_weights: dict[str, float] | None = None
+
+    @field_validator("detector_weights", mode="before")
+    @classmethod
+    def validate_detector_weights(cls, value: object) -> dict[str, float] | None:
+        if value is None:
+            return None
+        return AnalysisParameters.normalize_detector_weights(value)
 
 
 class FlowLabelCreate(BaseModel):

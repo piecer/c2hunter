@@ -67,6 +67,47 @@ def test_execute_analysis_suppresses_allowlisted_candidate() -> None:
     assert result == {"candidates": []}
 
 
+def test_execute_analysis_applies_detector_weights_from_job_snapshot() -> None:
+    flows = [
+        {
+            "sensor_id": "sensor-a",
+            "timestamp": f"2026-01-01T00:00:0{index}+00:00",
+            "source_ip": f"10.0.0.{index}",
+            "destination_ip": "203.0.113.9",
+            "source_port": 50000 + index,
+            "destination_port": 443,
+            "protocol": "TCP",
+            "direction": "OUTBOUND",
+        }
+        for index in range(1, 4)
+    ]
+    base = {
+        "dataset_id": "dataset-weights",
+        "start_time": "2026-01-01T00:00:00+00:00",
+        "end_time": "2026-01-01T01:00:00+00:00",
+        "sensor_ids": ["sensor-a"],
+        "internal_networks": ["10.0.0.0/8"],
+        "analysis": {
+            "minimum_distinct_clients": 3,
+            "periodicity_min_samples": 5,
+            "minimum_candidate_score": 1,
+        },
+        "flow_records": flows,
+    }
+
+    assert len(execute_analysis(base)["candidates"]) == 1
+    tuned = execute_analysis(
+        {
+            **base,
+            "analysis": {
+                **base["analysis"],
+                "detector_weights": {"common_destination": 0.0},
+            },
+        }
+    )
+    assert tuned == {"candidates": []}
+
+
 def test_healthcheck_accepts_live_degraded_worker_but_rejects_stopped(
     tmp_path: Path,
 ) -> None:

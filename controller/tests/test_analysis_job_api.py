@@ -12,8 +12,8 @@ from c2hunter_controller.repositories import MemoryRepository
 START = datetime(2026, 7, 20, tzinfo=UTC)
 
 
-def api() -> TestClient:
-    repository = MemoryRepository()
+def api(repository: MemoryRepository | None = None) -> TestClient:
+    repository = repository or MemoryRepository()
     app = create_app(Settings(environment="test"), repository)
     client = TestClient(app)
     token = "analysis-test-token"
@@ -122,6 +122,29 @@ def test_analysis_request_validation_rejects_time_and_missing_sensor() -> None:
     assert response.json()["error"]["code"] == "SENSOR_NOT_FOUND"
 
 
+def test_analysis_request_normalizes_and_validates_detector_weights() -> None:
+    client = api()
+    request = payload(key="weights")
+    analysis = request["analysis"]
+    assert isinstance(analysis, dict)
+    analysis["detector_weights"] = {"common_destination": 0.25}
+
+    response = client.post("/api/v1/analysis-jobs", json=request)
+
+    assert response.status_code == 201
+    weights = response.json()["analysis"]["detector_weights"]
+    assert weights["common_destination"] == 0.25
+    assert weights["analyst_payload_signature"] == 1.0
+    assert len(weights) == 11
+
+    for key, value in (("unknown_detector", 1.0), ("common_destination", 2.01)):
+        invalid = payload(key=f"invalid-{key}-{value}")
+        invalid_analysis = invalid["analysis"]
+        assert isinstance(invalid_analysis, dict)
+        invalid_analysis["detector_weights"] = {key: value}
+        assert client.post("/api/v1/analysis-jobs", json=invalid).status_code == 422
+
+
 def test_analysis_is_idempotent_and_candidates_are_calculated_from_flows() -> None:
     client = api()
     request = payload(flows=synthetic_flows())
@@ -158,6 +181,35 @@ def test_analysis_is_idempotent_and_candidates_are_calculated_from_flows() -> No
     assert len(first.json()["transitions"]) == 7
 
 
+def test_inline_analysis_uses_the_allowlist_snapshot_captured_with_the_job() -> None:
+    class ChangingAllowlistRepository(MemoryRepository):
+        allowlist_reads = 0
+
+        def list_allowlist(self) -> list[dict[str, object]]:
+            self.allowlist_reads += 1
+            if self.allowlist_reads == 1:
+                return []
+            return [
+                {
+                    "type": "IP",
+                    "value": "203.0.113.77",
+                    "description": "added after the job snapshot",
+                    "enabled": True,
+                }
+            ]
+
+    client = api(ChangingAllowlistRepository())
+
+    response = client.post(
+        "/api/v1/analysis-jobs",
+        json=payload(flows=synthetic_flows(), key="snapshot-consistency"),
+    )
+
+    assert response.status_code == 201
+    candidates = client.get(f"/api/v1/analysis-jobs/{response.json()['id']}/candidates").json()
+    assert candidates["total"] == 1
+
+
 def test_cancel_is_idempotent_and_reanalysis_reuses_dataset_not_results() -> None:
     client = api()
     waiting = client.post("/api/v1/analysis-jobs", json=payload(key="wait")).json()
@@ -174,9 +226,15 @@ def test_cancel_is_idempotent_and_reanalysis_reuses_dataset_not_results() -> Non
     ).json()
     rerun = client.post(
         f"/api/v1/analysis-jobs/{completed['id']}/reanalyze",
-        json={"idempotency_key": "rerun", "minimum_candidate_score": 70},
+        json={
+            "idempotency_key": "rerun",
+            "minimum_candidate_score": 70,
+            "detector_weights": {"common_destination": 0.25},
+        },
     )
     assert rerun.status_code == 201
     assert rerun.json()["id"] != completed["id"]
     assert rerun.json()["dataset_id"] == completed["dataset_id"]
     assert rerun.json()["parent_job_id"] == completed["id"]
+    assert rerun.json()["analysis"]["detector_weights"]["common_destination"] == 0.25
+    assert rerun.json()["analysis"]["detector_weights"]["periodic_beacon"] == 1.0

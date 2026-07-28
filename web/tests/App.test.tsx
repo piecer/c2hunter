@@ -61,6 +61,62 @@ describe('C2Hunter UI', () => {
     expect(screen.getByText('analysis requested')).toBeInTheDocument();
   });
 
+  it('reanalyzes the same dataset with tuned detector weights', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/v1/analysis-jobs/job-1') return new Response(JSON.stringify({ ...(responses[path] as Record<string, unknown>), status: 'COMPLETED' }), { status: 200 });
+      if (path === '/api/v1/analysis-jobs/job-1/reanalyze' && init?.method === 'POST') return new Response(JSON.stringify({ id: 'job-tuned', status: 'CREATED' }), { status: 201 });
+      if (path === '/api/v1/analysis-jobs/job-tuned') return new Response(JSON.stringify({ id: 'job-tuned', name: 'Tuned analysis', status: 'CREATED' }), { status: 200 });
+      return new Response(JSON.stringify(responses[path] ?? { items: [] }), { status: 200 });
+    });
+    localStorage.setItem('c2hunter-token', 'token');
+    vi.stubGlobal('fetch', fetchMock);
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/job-1']}><App /></MemoryRouter></QueryClientProvider>);
+    const user = userEvent.setup();
+
+    expect(await screen.findByRole('heading', { name: 'Tune and reanalyze' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Reduce large-service noise' }));
+    await user.click(screen.getByRole('button', { name: 'Reanalyze with detector weights' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/analysis-jobs/job-1/reanalyze', expect.objectContaining({ method: 'POST' })));
+    const call = fetchMock.mock.calls.find(([url, init]) => url === '/api/v1/analysis-jobs/job-1/reanalyze' && init?.method === 'POST');
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual(expect.objectContaining({
+      idempotency_key: expect.any(String),
+      detector_weights: expect.objectContaining({ common_destination: 0.25, analyst_payload_signature: 1 }),
+    }));
+  });
+
+  it('resets reanalysis weights when navigating between completed jobs', async () => {
+    const jobs = [
+      { id: 'job-1', name: 'First investigation', status: 'COMPLETED' },
+      { id: 'job-2', name: 'Second investigation', status: 'COMPLETED' },
+    ];
+    const secondJob = { ...jobs[1], dataset_id: 'dataset-2', analysis: { detector_weights: { common_destination: 1.75 } } };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/api/v1/analysis-jobs/job-1') {
+        return new Response(JSON.stringify({ ...jobs[0], dataset_id: 'dataset-1', parent_job_id: 'job-2', analysis: { detector_weights: { common_destination: 1 } } }), { status: 200 });
+      }
+      if (path === '/api/v1/analysis-jobs/job-2') {
+        return new Response(JSON.stringify(secondJob), { status: 200 });
+      }
+      return new Response(JSON.stringify({ items: [] }), { status: 200 });
+    });
+    localStorage.setItem('c2hunter-token', 'token');
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(['job', 'job-2'], secondJob);
+    render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/analyses/job-1']}><App /></MemoryRouter></QueryClientProvider>);
+    const user = userEvent.setup();
+
+    const firstWeight = await screen.findByLabelText(/Common destination/);
+    await user.clear(firstWeight);
+    await user.type(firstWeight, '0.25');
+    await user.click(screen.getByRole('link', { name: 'job-2' }));
+
+    expect(await screen.findByLabelText(/Common destination/)).toHaveValue(1.75);
+  });
+
   it('lets an analyst browse flows that were never promoted to candidates', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
@@ -109,6 +165,7 @@ describe('C2Hunter UI', () => {
     await screen.findByLabelText('Sensor A');
     await user.type(screen.getByLabelText('Analysis name'), 'Web analysis');
     await user.click(screen.getByLabelText('Sensor A'));
+    await user.click(screen.getByRole('button', { name: 'Reduce large-service noise' }));
     await user.click(screen.getByRole('button', { name: 'Start analysis' }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/analysis-jobs', expect.objectContaining({ method: 'POST' })));
@@ -117,7 +174,15 @@ describe('C2Hunter UI', () => {
     expect(body).toEqual(expect.objectContaining({
       name: 'Web analysis', sensor_ids: ['sensor-a'], mode: 'LIVE', internal_networks: ['10.0.0.0/8'],
       idempotency_key: expect.any(String), start_time: expect.any(String), end_time: expect.any(String),
-      analysis: expect.objectContaining({ minimum_candidate_score: 20, minimum_distinct_clients: 3 }),
+      analysis: expect.objectContaining({
+        minimum_candidate_score: 20,
+        minimum_distinct_clients: 3,
+        detector_weights: expect.objectContaining({
+          common_destination: 0.25,
+          protocol_similarity: 0.5,
+          analyst_payload_signature: 1,
+        }),
+      }),
     }));
     expect(new Date(body.end_time).getTime()).toBeGreaterThan(new Date(body.start_time).getTime());
   });
@@ -303,6 +368,7 @@ describe('C2Hunter UI', () => {
     Object.defineProperty(file, 'size', { value: 500 * 1024 * 1024 });
     await user.type(screen.getByLabelText('Analysis name'), 'Offline case');
     await user.upload(screen.getByLabelText('Capture file'), file);
+    await user.click(screen.getByRole('button', { name: 'Reduce large-service noise' }));
     expect(screen.getByRole('status')).toHaveTextContent('500.0 MiB');
     fireEvent.submit(screen.getByRole('button', { name: 'Upload and analyze' }).closest('form')!);
 
@@ -311,6 +377,11 @@ describe('C2Hunter UI', () => {
     const url = new URL(String(uploadCall?.[0]), 'http://localhost');
     expect(url.searchParams.get('name')).toBe('Offline case');
     expect(url.searchParams.get('filename')).toBe('sample.pcap');
+    expect(JSON.parse(String(url.searchParams.get('detector_weights')))).toEqual(expect.objectContaining({
+      common_destination: 0.25,
+      protocol_similarity: 0.5,
+      analyst_payload_signature: 1,
+    }));
     expect(uploadCall?.[1]?.body).toBe(file);
     expect(uploadCall?.[1]?.headers).toEqual(expect.objectContaining({ 'content-type': 'application/vnd.tcpdump.pcap' }));
   });

@@ -135,6 +135,7 @@ anomaly-only Candidate까지 생성하려면 `ml_anomaly_allow_standalone=true`�
 | PERIODIC_BEACON | 15 |
 | SINGLE_HOST_BEACON | 35 |
 | ANALYST_PAYLOAD_SIGNATURE | 80 |
+| NON_WELL_KNOWN_PORT | 25 |
 | SYNCHRONIZED_COMMUNICATION | 15 |
 | COMMAND_ATTACK_CORRELATION | 25 |
 | MULTI_SENSOR_CONTEXT | 10 |
@@ -153,7 +154,7 @@ anomaly-only Candidate까지 생성하려면 `ml_anomaly_allow_standalone=true`�
 | 단일 내부 host | 최대 -20 (`SINGLE_HOST_BEACON`은 -10, analyst exact는 미적용) |
 | 표본 부족 | 최대 -20 |
 
-`score = clamp(0, 100, sum(capped contributions) + sum(negative adjustments))`로 계산한다. 동일 detector가 여러 evidence를 내더라도 detector별 최대치를 넘지 않는다. profile에서 threshold/weight를 바꿀 수 있지만 run에 snapshot한다.
+기본값은 `score = clamp(0, 100, sum(capped contributions) + sum(adjustments))`로 계산한다. 실행별 detector weight는 type별 기본 cap을 적용한 contribution에 곱하고 최대 `2 × cap`까지 허용하므로, `0.0–1.0` 감쇠뿐 아니라 `1.0–2.0` 증폭도 유효하다. 최종 점수는 항상 100으로 clamp하며 weight와 조정 점수를 run에 snapshot한다.
 
 Severity는 `0–39 LOW`, `40–59 MEDIUM`, `60–79 HIGH`, `80–100 CRITICAL`이다. 후보 최소 점수는 반환 필터이지 원 evidence 삭제 기준이 아니다.
 

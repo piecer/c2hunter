@@ -59,6 +59,10 @@ def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
             analysis.get("high_volume_packet_threshold", 100_000)
         ),
         high_volume_penalty=int(analysis.get("high_volume_penalty", 30)),
+        detector_weights={
+            str(name): float(weight)
+            for name, weight in dict(analysis.get("detector_weights", {})).items()
+        },
     )
     minimum_score = int(analysis.get("minimum_candidate_score", 0))
     return {
