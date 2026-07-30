@@ -156,6 +156,8 @@ anomaly-only Candidate까지 생성하려면 `ml_anomaly_allow_standalone=true`�
 
 기본값은 `score = clamp(0, 100, sum(capped contributions) + sum(adjustments))`로 계산한다. 실행별 detector weight는 type별 기본 cap을 적용한 contribution에 곱하고 최대 `2 × cap`까지 허용하므로, `0.0–1.0` 감쇠뿐 아니라 `1.0–2.0` 증폭도 유효하다. 최종 점수는 항상 100으로 clamp하며 weight와 조정 점수를 run에 snapshot한다.
 
+Detector weight preset은 모든 detector의 완전한 weight map으로 저장한다. 하나의 preset만 system default일 수 있으며 새 sensor 분석이나 PCAP 업로드에서 weight를 생략하면 해당 default를 job snapshot에 복사한다. 요청이 weight를 명시하면 preset보다 우선한다. Reanalysis는 원 job의 snapshot을 기본으로 유지하고, analyst가 저장 preset을 선택하거나 weight를 수정했을 때만 override한다. 이후 preset 변경이나 삭제는 이미 생성된 job의 계산 재현성에 영향을 주지 않는다.
+
 Severity는 `0–39 LOW`, `40–59 MEDIUM`, `60–79 HIGH`, `80–100 CRITICAL`이다. 후보 최소 점수는 반환 필터이지 원 evidence 삭제 기준이 아니다.
 
 ## 5. 오탐 제어와 설명 가능성

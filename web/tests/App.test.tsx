@@ -187,6 +187,64 @@ describe('C2Hunter UI', () => {
     expect(new Date(body.end_time).getTime()).toBeGreaterThan(new Date(body.start_time).getTime());
   });
 
+  it('uses the server default when analysis starts before presets load', async () => {
+    const pendingPresets = new Promise<Response>(() => undefined);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/v1/detector-weight-presets') return pendingPresets;
+      if (path === '/api/v1/analysis-jobs' && init?.method === 'POST') {
+        return new Response(JSON.stringify({ error: { message: 'stop after request capture' } }), { status: 503 });
+      }
+      return new Response(JSON.stringify(responses[path] ?? { items: [] }), { status: 200 });
+    });
+    localStorage.setItem('c2hunter-token', 'token');
+    vi.stubGlobal('fetch', fetchMock);
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/new']}><App /></MemoryRouter></QueryClientProvider>);
+    const user = userEvent.setup();
+
+    await screen.findByLabelText('Sensor A');
+    await user.type(screen.getByLabelText('Analysis name'), 'Server default');
+    await user.click(screen.getByLabelText('Sensor A'));
+    await user.click(screen.getByRole('button', { name: 'Start analysis' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/analysis-jobs', expect.objectContaining({ method: 'POST' })));
+    const call = fetchMock.mock.calls.find(([url, init]) => url === '/api/v1/analysis-jobs' && init?.method === 'POST');
+    const body = JSON.parse(String(call?.[1]?.body));
+    expect(body.analysis).not.toHaveProperty('detector_weights');
+  });
+
+  it('loads, reuses, and saves detector weight presets as defaults', async () => {
+    const presetWeights = { common_destination: 0.25, periodic_beacon: 1.5 };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/v1/detector-weight-presets' && init?.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'preset-new', name: 'Case preset', detector_weights: presetWeights, is_default: true }), { status: 201 });
+      }
+      if (path === '/api/v1/detector-weight-presets') {
+        return new Response(JSON.stringify({ items: [{ id: 'preset-default', name: 'Quiet shared services', detector_weights: presetWeights, is_default: true }] }), { status: 200 });
+      }
+      return new Response(JSON.stringify(responses[path] ?? { items: [] }), { status: 200 });
+    });
+    localStorage.setItem('c2hunter-token', 'token');
+    vi.stubGlobal('fetch', fetchMock);
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/new']}><App /></MemoryRouter></QueryClientProvider>);
+    const user = userEvent.setup();
+
+    await waitFor(() => expect(screen.getByLabelText(/Common destination/)).toHaveValue(0.25));
+    expect(screen.getByLabelText('Saved detector weight preset')).toHaveValue('preset-default');
+    await user.type(screen.getByLabelText('New preset name'), 'Case preset');
+    await user.click(screen.getByLabelText('Save as default preset'));
+    await user.click(screen.getByRole('button', { name: 'Save current weights' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/detector-weight-presets', expect.objectContaining({ method: 'POST' })));
+    const call = fetchMock.mock.calls.find(([url, init]) => url === '/api/v1/detector-weight-presets' && init?.method === 'POST');
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual(expect.objectContaining({
+      name: 'Case preset',
+      set_as_default: true,
+      detector_weights: expect.objectContaining({ common_destination: 0.25, periodic_beacon: 1.5 }),
+    }));
+  });
+
   it('uses the candidate job id and required bodies for candidate actions', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
@@ -386,6 +444,30 @@ describe('C2Hunter UI', () => {
     expect(uploadCall?.[1]?.headers).toEqual(expect.objectContaining({ 'content-type': 'application/vnd.tcpdump.pcap' }));
   });
 
+  it('uses the server default for PCAP upload when weights are untouched', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.startsWith('/api/v1/pcap-analysis-jobs?') && init?.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'upload-job', status: 'CREATED' }), { status: 201 });
+      }
+      return new Response(JSON.stringify({ items: [] }), { status: 200 });
+    });
+    localStorage.setItem('c2hunter-token', 'token');
+    vi.stubGlobal('fetch', fetchMock);
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/upload']}><App /></MemoryRouter></QueryClientProvider>);
+    const user = userEvent.setup();
+    const file = new File([new Uint8Array([0xd4, 0xc3, 0xb2, 0xa1])], 'sample.pcap', { type: 'application/vnd.tcpdump.pcap' });
+
+    await user.type(screen.getByLabelText('Analysis name'), 'Server default PCAP');
+    await user.upload(screen.getByLabelText('Capture file'), file);
+    fireEvent.submit(screen.getByRole('button', { name: 'Upload and analyze' }).closest('form')!);
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => String(url).startsWith('/api/v1/pcap-analysis-jobs?') && init?.method === 'POST')).toBe(true));
+    const uploadCall = fetchMock.mock.calls.find(([url]) => String(url).startsWith('/api/v1/pcap-analysis-jobs?'));
+    const url = new URL(String(uploadCall?.[0]), 'http://localhost');
+    expect(url.searchParams.has('detector_weights')).toBe(false);
+  });
+
   it('rejects a PCAP larger than 500 MiB before upload', async () => {
     const fetchMock = vi.fn();
     localStorage.setItem('c2hunter-token', 'token');
@@ -397,6 +479,6 @@ describe('C2Hunter UI', () => {
     await userEvent.upload(screen.getByLabelText('Capture file'), file);
 
     expect(screen.getByRole('alert')).toHaveTextContent('PCAP files must be 500 MiB or smaller.');
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.some(([url, init]) => String(url).startsWith('/api/v1/pcap-analysis-jobs?') && init?.method === 'POST')).toBe(false);
   });
 });

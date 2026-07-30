@@ -47,6 +47,14 @@ class Repository(Protocol):
     def save_allowlist(self, entry: dict[str, Any]) -> dict[str, Any]: ...
     def list_allowlist(self) -> list[dict[str, Any]]: ...
     def delete_allowlist(self, entry_id: str) -> bool: ...
+    def save_detector_weight_preset(self, preset: dict[str, Any]) -> dict[str, Any]: ...
+    def update_detector_weight_preset(
+        self, preset_id: str, updates: dict[str, Any], *, set_as_default: bool = False
+    ) -> dict[str, Any] | None: ...
+    def get_detector_weight_preset(self, preset_id: str) -> dict[str, Any] | None: ...
+    def list_detector_weight_presets(self) -> list[dict[str, Any]]: ...
+    def delete_detector_weight_preset(self, preset_id: str) -> bool: ...
+    def set_default_detector_weight_preset(self, preset_id: str) -> dict[str, Any] | None: ...
     def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any]: ...
     def get_export(self, export_id: str) -> tuple[dict[str, Any], bytes] | None: ...
     def create_enrollment(self, enrollment: dict[str, Any]) -> dict[str, Any]: ...
@@ -74,6 +82,7 @@ class MemoryRepository:
         self.flow_labels: dict[str, dict[str, Any]] = {}
         self.payload_signatures: dict[str, dict[str, Any]] = {}
         self.allowlist: dict[str, dict[str, Any]] = {}
+        self.detector_weight_presets: dict[str, dict[str, Any]] = {}
         self.exports: dict[str, dict[str, Any]] = {}
         self.export_content: dict[str, bytes] = {}
         self.enrollments: dict[str, dict[str, Any]] = {}
@@ -371,6 +380,49 @@ class MemoryRepository:
                 return None
             sensor.update(deepcopy(fields))
             return deepcopy(sensor)
+
+    def save_detector_weight_preset(self, preset: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            if preset.get("is_default"):
+                for item in self.detector_weight_presets.values():
+                    item["is_default"] = False
+            self.detector_weight_presets[preset["id"]] = deepcopy(preset)
+            return deepcopy(preset)
+
+    def get_detector_weight_preset(self, preset_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            preset = self.detector_weight_presets.get(preset_id)
+            return deepcopy(preset) if preset is not None else None
+
+    def update_detector_weight_preset(
+        self, preset_id: str, updates: dict[str, Any], *, set_as_default: bool = False
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            preset = self.detector_weight_presets.get(preset_id)
+            if preset is None:
+                return None
+            preset.update(deepcopy(updates))
+            if set_as_default:
+                for item in self.detector_weight_presets.values():
+                    item["is_default"] = item["id"] == preset_id
+            return deepcopy(preset)
+
+    def list_detector_weight_presets(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return deepcopy(list(self.detector_weight_presets.values()))
+
+    def delete_detector_weight_preset(self, preset_id: str) -> bool:
+        with self._lock:
+            return self.detector_weight_presets.pop(preset_id, None) is not None
+
+    def set_default_detector_weight_preset(self, preset_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            selected = self.detector_weight_presets.get(preset_id)
+            if selected is None:
+                return None
+            for preset in self.detector_weight_presets.values():
+                preset["is_default"] = preset["id"] == preset_id
+            return deepcopy(selected)
 
 
 class SQLiteRepository:
@@ -813,3 +865,98 @@ class SQLiteRepository:
                 return None
             sensor.update(fields)
             return self.upsert_sensor(sensor)
+
+    def save_detector_weight_preset(self, preset: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            try:
+                if preset.get("is_default"):
+                    rows = self.connection.execute(
+                        "SELECT id,data FROM objects WHERE kind='detector_weight_preset'"
+                    ).fetchall()
+                    for object_id, raw in rows:
+                        item = json.loads(raw)
+                        item["is_default"] = False
+                        self.connection.execute(
+                            "UPDATE objects SET data=? "
+                            "WHERE kind='detector_weight_preset' AND id=?",
+                            (self._serialize(item), object_id),
+                        )
+                self.connection.execute(
+                    "INSERT INTO objects(kind,id,data) VALUES(?,?,?) "
+                    "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                    ("detector_weight_preset", preset["id"], self._serialize(preset)),
+                )
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            return deepcopy(preset)
+
+    def get_detector_weight_preset(self, preset_id: str) -> dict[str, Any] | None:
+        return self._get("detector_weight_preset", preset_id)
+
+    def update_detector_weight_preset(
+        self, preset_id: str, updates: dict[str, Any], *, set_as_default: bool = False
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            try:
+                preset = self.get_detector_weight_preset(preset_id)
+                if preset is None:
+                    return None
+                preset.update(updates)
+                if set_as_default:
+                    rows = self.connection.execute(
+                        "SELECT id,data FROM objects WHERE kind='detector_weight_preset'"
+                    ).fetchall()
+                    for object_id, raw in rows:
+                        item = json.loads(raw)
+                        item["is_default"] = object_id == preset_id
+                        if object_id == preset_id:
+                            item.update(updates)
+                            preset = item
+                        self.connection.execute(
+                            "UPDATE objects SET data=? "
+                            "WHERE kind='detector_weight_preset' AND id=?",
+                            (self._serialize(item), object_id),
+                        )
+                else:
+                    self.connection.execute(
+                        "UPDATE objects SET data=? WHERE kind='detector_weight_preset' AND id=?",
+                        (self._serialize(preset), preset_id),
+                    )
+                self.connection.commit()
+                return deepcopy(preset)
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def list_detector_weight_presets(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return self._list("detector_weight_preset")
+
+    def delete_detector_weight_preset(self, preset_id: str) -> bool:
+        with self._lock:
+            cursor = self.connection.execute(
+                "DELETE FROM objects WHERE kind='detector_weight_preset' AND id=?", (preset_id,)
+            )
+            self.connection.commit()
+            return cursor.rowcount > 0
+
+    def set_default_detector_weight_preset(self, preset_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            try:
+                selected = self.get_detector_weight_preset(preset_id)
+                if selected is None:
+                    return None
+                presets = self.list_detector_weight_presets()
+                for preset in presets:
+                    preset["is_default"] = preset["id"] == preset_id
+                    self.connection.execute(
+                        "UPDATE objects SET data=? WHERE kind='detector_weight_preset' AND id=?",
+                        (self._serialize(preset), preset["id"]),
+                    )
+                self.connection.commit()
+                return next(preset for preset in presets if preset["id"] == preset_id)
+            except Exception:
+                self.connection.rollback()
+                raise

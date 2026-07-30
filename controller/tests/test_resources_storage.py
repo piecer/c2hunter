@@ -2,6 +2,7 @@ import struct
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from c2hunter_controller.app import create_app
@@ -239,3 +240,38 @@ def test_sqlite_adapter_persists_repository_contract(tmp_path: Path) -> None:
     assert reopened.get_sensor("s1")["name"] == "durable"  # type: ignore[index]
     assert reopened.list_groups()[0]["id"] == "g1"
     reopened.close()
+
+
+@pytest.mark.parametrize("operation", ["update", "set-default"])
+def test_sqlite_preset_default_switch_rolls_back_on_serialization_failure(
+    tmp_path: Path, operation: str
+) -> None:
+    repository = SQLiteRepository(tmp_path / f"preset-{operation}.sqlite")
+    repository.save_detector_weight_preset({"id": "first", "name": "First", "is_default": True})
+    repository.save_detector_weight_preset({"id": "second", "name": "Second", "is_default": False})
+    serialize = repository._serialize
+    calls = 0
+
+    def fail_second_serialization(value: object) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("serialization failed")
+        return serialize(value)
+
+    repository._serialize = fail_second_serialization  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="serialization failed"):
+        if operation == "update":
+            repository.update_detector_weight_preset(
+                "second", {"name": "Updated"}, set_as_default=True
+            )
+        else:
+            repository.set_default_detector_weight_preset("second")
+
+    assert not repository.connection.in_transaction
+    defaults = [
+        preset["id"] for preset in repository.list_detector_weight_presets() if preset["is_default"]
+    ]
+    assert defaults == ["first"]
+    repository.close()

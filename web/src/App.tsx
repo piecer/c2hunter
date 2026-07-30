@@ -1,4 +1,4 @@
-import { Fragment, FormEvent, ReactNode, useState } from 'react';
+import { Fragment, FormEvent, ReactNode, useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { api } from './api';
@@ -34,6 +34,7 @@ type PayloadSignature = { id: string; name: string; description?: string; versio
 type AllowEntry = { id: string; type: string; value: string; description?: string; expires_at?: string };
 const PCAP_UPLOAD_MAX_BYTES = 500 * 1024 * 1024;
 type DetectorWeights = Record<string, number>;
+type DetectorWeightPreset = { id: string; name: string; description?: string; detector_weights: DetectorWeights; is_default: boolean };
 const detectorDefinitions = [
   ['common_destination', 'Common destination', 'Broad many-host destination signal'],
   ['non_well_known_port', 'Non-well-known port', 'Repeated external service on a high port'],
@@ -56,6 +57,11 @@ const serviceNoiseDetectorWeights = {
   multi_sensor_context: 0.5,
   ml_population_anomaly: 0.5,
 };
+const normalizedDetectorWeights = (weights?: DetectorWeights): DetectorWeights => detectorDefinitions.reduce<DetectorWeights>((result, [name]) => {
+  const value = weights?.[name];
+  result[name] = typeof value === 'number' && value >= 0 && value <= 2 ? value : 1;
+  return result;
+}, {});
 const sensorStatus = (sensor: Sensor) => sensor.status ?? sensor.derived_status ?? 'OFFLINE';
 let idempotencySequence = 0;
 const idempotencyKey = () => {
@@ -79,8 +85,39 @@ const formatValue = (value: unknown): string => {
   return String(value);
 };
 
-function DetectorWeightFields({ weights, setWeights }: { weights: DetectorWeights; setWeights: (value: DetectorWeights) => void }) {
-  return <fieldset className="detector-weights"><legend>Detector score weights</legend><p className="muted">0 disables a detector's score contribution, 1 keeps the default, and 2 doubles it. Evidence remains visible for audit.</p><div className="actions"><button type="button" className="secondary" onClick={() => setWeights({ ...defaultDetectorWeights })}>Reset detector weights</button><button type="button" className="secondary" onClick={() => setWeights({ ...serviceNoiseDetectorWeights })}>Reduce large-service noise</button></div><div className="grid">{detectorDefinitions.map(([name, label, description]) => <label key={name}>{label}<input name={`weight_${name}`} type="number" min="0" max="2" step="0.05" value={weights[name]} onChange={event => setWeights({ ...weights, [name]: Number(event.target.value) })}/><small>{description}</small></label>)}</div></fieldset>;
+function DetectorWeightFields({ weights, setWeights, applyDefault = true }: { weights: DetectorWeights; setWeights: (value: DetectorWeights) => void; applyDefault?: boolean }) {
+  const queryClient = useQueryClient();
+  const presets = useQuery<List<DetectorWeightPreset>, Error>({ queryKey: ['detector-weight-presets'], queryFn: () => api.get('/detector-weight-presets') });
+  const [selectedPreset, setSelectedPreset] = useState('');
+  const [presetName, setPresetName] = useState('');
+  const [saveAsDefault, setSaveAsDefault] = useState(false);
+  const [isExplicit, setIsExplicit] = useState(false);
+  const appliedDefault = useRef(false);
+  const markExplicit = () => { appliedDefault.current = true; setIsExplicit(true); };
+  const savePreset = useMutation<DetectorWeightPreset, Error, { name: string; detector_weights: DetectorWeights; set_as_default: boolean }>({
+    mutationFn: body => api.post('/detector-weight-presets', body),
+    onSuccess: preset => {
+      setPresetName(''); setSaveAsDefault(false); setSelectedPreset(preset.id);
+      queryClient.invalidateQueries({ queryKey: ['detector-weight-presets'] });
+    },
+  });
+  const setDefaultPreset = useMutation<DetectorWeightPreset, Error, string>({
+    mutationFn: presetId => api.patch(`/detector-weight-presets/${presetId}`, { set_as_default: true }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['detector-weight-presets'] }),
+  });
+  useEffect(() => {
+    if (!applyDefault || appliedDefault.current || !presets.data) return;
+    appliedDefault.current = true;
+    const preset = items(presets.data).find(item => item.is_default);
+    if (preset) { setSelectedPreset(preset.id); setWeights(normalizedDetectorWeights(preset.detector_weights)); }
+  }, [applyDefault, presets.data, setWeights]);
+  const selectPreset = (presetId: string) => {
+    markExplicit();
+    setSelectedPreset(presetId);
+    const preset = items(presets.data).find(item => item.id === presetId);
+    if (preset) setWeights(normalizedDetectorWeights(preset.detector_weights));
+  };
+  return <fieldset className="detector-weights">{isExplicit && <input type="hidden" name="detector_weights_explicit" value="true"/>}<legend>Detector score weights</legend><p className="muted">0 disables a detector's score contribution, 1 keeps the default, and 2 doubles it. Evidence remains visible for audit.</p>{presets.error && <p aria-live="polite" className="error-text">Preset loading failed: {presets.error.message}</p>}<div className="grid"><label>Saved detector weight preset<select value={selectedPreset} onChange={event => selectPreset(event.target.value)}><option value="">Custom weights</option>{items(presets.data).map(preset => <option key={preset.id} value={preset.id}>{preset.name}{preset.is_default ? ' (default)' : ''}</option>)}</select></label><label>New preset name<input value={presetName} maxLength={200} onChange={event => setPresetName(event.target.value)}/></label><label className="check"><input type="checkbox" checked={saveAsDefault} onChange={event => setSaveAsDefault(event.target.checked)}/>Save as default preset</label></div><div className="actions"><button type="button" className="secondary" onClick={() => { markExplicit(); setSelectedPreset(''); setWeights({ ...defaultDetectorWeights }); }}>Reset detector weights</button><button type="button" className="secondary" onClick={() => { markExplicit(); setSelectedPreset(''); setWeights({ ...serviceNoiseDetectorWeights }); }}>Reduce large-service noise</button><button type="button" className="secondary" disabled={!presetName.trim() || savePreset.isPending} onClick={() => savePreset.mutate({ name: presetName.trim(), detector_weights: weights, set_as_default: saveAsDefault })}>Save current weights</button><button type="button" className="secondary" disabled={!selectedPreset || setDefaultPreset.isPending} onClick={() => setDefaultPreset.mutate(selectedPreset)}>Set selected as default</button></div>{(savePreset.error || setDefaultPreset.error) && <p role="alert" className="error-text">{(savePreset.error || setDefaultPreset.error)?.message}</p>}<div className="grid">{detectorDefinitions.map(([name, label, description]) => <label key={name}>{label}<input name={`weight_${name}`} type="number" min="0" max="2" step="0.05" value={weights[name]} onChange={event => { markExplicit(); setSelectedPreset(''); setWeights({ ...weights, [name]: Number(event.target.value) }); }}/><small>{description}</small></label>)}</div></fieldset>;
 }
 
 function AsyncState<T>({ query, children, empty }: { query: ReturnType<typeof useQuery<T, Error>>; children: (data: T) => ReactNode; empty?: (data: T) => boolean }) {
@@ -244,9 +281,9 @@ function PcapUpload() {
       periodicity_min_samples: String(form.get('samples')),
       ml_anomaly_enabled: String(form.get('ml_anomaly_enabled') === 'on'),
       ml_anomaly_allow_standalone: String(form.get('ml_anomaly_allow_standalone') === 'on'),
-      detector_weights: JSON.stringify(detectorWeights),
       idempotency_key: idempotencyKey(),
     });
+    if (form.has('detector_weights_explicit')) query.set('detector_weights', JSON.stringify(detectorWeights));
     mutation.mutate({ file, query });
   };
   return <><header className="header-actions"><div><p className="eyebrow">OFFLINE INVESTIGATION</p><h1>Upload PCAP</h1><p className="muted">Analyze an existing capture with the same C2 correlation and scoring pipeline used for sensor traffic.</p></div><Link to="/analyses">View analysis history</Link></header><form className="panel form" onSubmit={submit}><label>Analysis name<input name="name" required maxLength={200} /></label><label>Analyst note<textarea name="description" rows={3} maxLength={5000} placeholder="Case, ticket, or collection context" /></label><label>Capture file<input name="pcap" type="file" accept=".pcap,.pcapng,.cap,application/vnd.tcpdump.pcap,application/octet-stream" onChange={event => { const selected = event.currentTarget.files?.[0]; mutation.reset(); setValidationError(''); if (selected && selected.size > PCAP_UPLOAD_MAX_BYTES) { event.currentTarget.value = ''; setFile(undefined); setValidationError('PCAP files must be 500 MiB or smaller.'); return; } setFile(selected); }} required /></label>{file && <div className="file-summary" role="status"><strong>{file.name}</strong><span>{formatBytes(file.size)}</span></div>}<div className="grid"><label>Internal networks<input name="internal_networks" defaultValue="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" required /></label><label>Minimum score<input name="score" type="number" min="0" max="100" defaultValue="0" required /></label><label>Minimum internal hosts<input name="hosts" type="number" min="2" defaultValue="3" required /></label><label>Beacon minimum samples<input name="samples" type="number" min="3" defaultValue="5" required /></label></div><DetectorWeightFields weights={detectorWeights} setWeights={setDetectorWeights}/><fieldset><legend>Population anomaly detector</legend><label className="check"><input type="checkbox" name="ml_anomaly_enabled"/>Enable population-relative C2 signal</label><label className="check"><input type="checkbox" name="ml_anomaly_allow_standalone"/>Allow anomaly-only hunting candidates</label><p className="muted">Disabled by default. Standalone mode is experimental; otherwise anomaly evidence only enriches candidates supported by another detector.</p></fieldset><p className="muted">Supported containers: classic PCAP and PCAPNG. Supported packet links include Ethernet, raw IP, Linux cooked capture v1/v2, and loopback. The upload limit is 500 MiB and 2,000,000 packets.</p>{(validationError || mutation.error) && <p role="alert" className="error-text">{validationError || mutation.error?.message}</p>}<button disabled={mutation.isPending}>{mutation.isPending ? 'Uploading and analyzing…' : 'Upload and analyze'}</button></form></>;
@@ -271,7 +308,7 @@ function NewAnalysis() {
       end_time: end.toISOString(),
       internal_networks: String(form.get('internal_networks')).split(',').map(value => value.trim()).filter(Boolean),
       capture: { duration_seconds: Number(form.get('duration')), max_packets: Number(form.get('max_packets')), directions: form.getAll('directions'), bpf_filter: form.get('bpf'), store_pcap: form.get('store_pcap') === 'on' },
-      analysis: { profile: 'ddos_botnet', minimum_candidate_score: Number(form.get('score')), minimum_distinct_clients: Number(form.get('hosts')), detector_weights: detectorWeights, ml_anomaly_enabled: form.get('ml_anomaly_enabled') === 'on', ml_anomaly_allow_standalone: form.get('ml_anomaly_allow_standalone') === 'on' },
+      analysis: { profile: 'ddos_botnet', minimum_candidate_score: Number(form.get('score')), minimum_distinct_clients: Number(form.get('hosts')), ...(form.has('detector_weights_explicit') ? { detector_weights: detectorWeights } : {}), ml_anomaly_enabled: form.get('ml_anomaly_enabled') === 'on', ml_anomaly_allow_standalone: form.get('ml_anomaly_allow_standalone') === 'on' },
     });
   };
   return <><header><p className="eyebrow">INVESTIGATION</p><h1>New analysis</h1></header><form className="panel form" onSubmit={submit}><label>Analysis name<input name="name" required /></label><fieldset><legend>Sensors</legend><AsyncState query={sensors}>{data => <>{items(data).map(sensor => <label className="check" key={sensor.sensor_id}><input type="checkbox" name="sensor_ids" value={sensor.sensor_id} aria-label={sensor.name}/>{sensor.name}</label>)}</>}</AsyncState></fieldset><div className="grid"><label>Data source<select name="mode"><option value="LIVE">Live capture</option><option value="HISTORICAL">Historical</option></select></label><label>Duration (seconds)<input name="duration" type="number" min="1" defaultValue="300" /></label><label>Internal networks<input name="internal_networks" defaultValue="10.0.0.0/8" required /></label><label>Maximum packets<input name="max_packets" type="number" min="1" defaultValue="2000000" /></label><label>BPF filter<input name="bpf" defaultValue="ip" /></label><label>Minimum score<input name="score" type="number" min="0" max="100" defaultValue="20" /></label><label>Minimum internal hosts<input name="hosts" type="number" min="2" defaultValue="3" /></label></div><fieldset><legend>Directions</legend>{['INBOUND','OUTBOUND'].map(value => <label className="check" key={value}><input type="checkbox" name="directions" value={value} defaultChecked/>{value}</label>)}</fieldset><DetectorWeightFields weights={detectorWeights} setWeights={setDetectorWeights}/><fieldset><legend>Population anomaly detector</legend><label className="check"><input type="checkbox" name="ml_anomaly_enabled"/>Enable population-relative C2 signal</label><label className="check"><input type="checkbox" name="ml_anomaly_allow_standalone"/>Allow anomaly-only hunting candidates</label><p className="muted">Disabled by default. Standalone mode is experimental; otherwise anomaly evidence only enriches candidates supported by another detector.</p></fieldset><label className="check"><input type="checkbox" name="store_pcap" defaultChecked/>Store PCAP</label>{mutation.error && <p role="alert">{mutation.error.message}</p>}<button disabled={mutation.isPending}>{mutation.isPending ? 'Starting…' : 'Start analysis'}</button></form></>;
@@ -290,7 +327,7 @@ function JobReanalysis({ job }: { job: Job }) {
     mutationFn: () => api.post<Job>(`/analysis-jobs/${job.id}/reanalyze`, { idempotency_key: idempotencyKey(), detector_weights: weights }),
     onSuccess: created => navigate(`/analyses/${created.id}`),
   });
-  return <section className="panel compact"><h2>Tune and reanalyze</h2><p className="muted">Reuse dataset {job.dataset_id} and compare candidate scores without uploading or parsing the capture again.</p><DetectorWeightFields weights={weights} setWeights={setWeights}/>{reanalyze.error && <p role="alert" className="error-text">{reanalyze.error.message}</p>}<button disabled={reanalyze.isPending} onClick={() => reanalyze.mutate()}>{reanalyze.isPending ? 'Creating reanalysis…' : 'Reanalyze with detector weights'}</button></section>;
+  return <section className="panel compact"><h2>Tune and reanalyze</h2><p className="muted">Reuse dataset {job.dataset_id} and compare candidate scores without uploading or parsing the capture again.</p><DetectorWeightFields weights={weights} setWeights={setWeights} applyDefault={false}/>{reanalyze.error && <p role="alert" className="error-text">{reanalyze.error.message}</p>}<button disabled={reanalyze.isPending} onClick={() => reanalyze.mutate()}>{reanalyze.isPending ? 'Creating reanalysis…' : 'Reanalyze with detector weights'}</button></section>;
 }
 
 function JobDetail() {

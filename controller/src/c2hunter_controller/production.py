@@ -57,6 +57,8 @@ class MinioBlobStore:
 class PostgresRepository:
     """PostgreSQL JSONB control-plane repository with MinIO export blobs and audit rows."""
 
+    _DETECTOR_PRESET_ADVISORY_LOCK = 112737
+
     def __init__(self, database_url: str, blob_store: MinioBlobStore) -> None:
         self.database_url = database_url
         self._connection: Any = None
@@ -234,6 +236,140 @@ class PostgresRepository:
 
     def get_sensor(self, sensor_id: str) -> dict[str, Any] | None:
         return self._get("sensor", sensor_id)
+
+    def save_detector_weight_preset(self, preset: dict[str, Any]) -> dict[str, Any]:
+        connection = self.connection
+        with self._lock:
+            try:
+                with connection.cursor() as cursor:
+                    if preset.get("is_default"):
+                        cursor.execute(
+                            "SELECT pg_advisory_xact_lock(%s)",
+                            (self._DETECTOR_PRESET_ADVISORY_LOCK,),
+                        )
+                        cursor.execute(
+                            "SELECT id,data FROM controller_objects "
+                            "WHERE kind='detector-weight-preset' FOR UPDATE"
+                        )
+                        for object_id, value in cursor.fetchall():
+                            item = value if isinstance(value, dict) else json.loads(value)
+                            item["is_default"] = False
+                            cursor.execute(
+                                "UPDATE controller_objects SET data=%s::jsonb "
+                                "WHERE kind='detector-weight-preset' AND id=%s",
+                                (self._json(item), object_id),
+                            )
+                    cursor.execute(
+                        "INSERT INTO controller_objects(kind,id,data) VALUES(%s,%s,%s::jsonb) "
+                        "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                        ("detector-weight-preset", preset["id"], self._json(preset)),
+                    )
+                self._audit("detector-weight-preset", preset["id"], preset)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return deepcopy(preset)
+
+    def get_detector_weight_preset(self, preset_id: str) -> dict[str, Any] | None:
+        return self._get("detector-weight-preset", preset_id)
+
+    def update_detector_weight_preset(
+        self, preset_id: str, updates: dict[str, Any], *, set_as_default: bool = False
+    ) -> dict[str, Any] | None:
+        connection = self.connection
+        with self._lock:
+            try:
+                with connection.cursor() as cursor:
+                    if set_as_default:
+                        cursor.execute(
+                            "SELECT pg_advisory_xact_lock(%s)",
+                            (self._DETECTOR_PRESET_ADVISORY_LOCK,),
+                        )
+                    cursor.execute(
+                        "SELECT id,data FROM controller_objects "
+                        "WHERE kind='detector-weight-preset' FOR UPDATE"
+                    )
+                    rows = cursor.fetchall()
+                    if not any(str(object_id) == preset_id for object_id, _ in rows):
+                        connection.commit()
+                        return None
+                    selected: dict[str, Any] | None = None
+                    for object_id, value in rows:
+                        preset = value if isinstance(value, dict) else json.loads(value)
+                        if str(object_id) == preset_id:
+                            preset.update(updates)
+                            selected = preset
+                        if set_as_default:
+                            preset["is_default"] = str(object_id) == preset_id
+                        cursor.execute(
+                            "UPDATE controller_objects SET data=%s::jsonb "
+                            "WHERE kind='detector-weight-preset' AND id=%s",
+                            (self._json(preset), object_id),
+                        )
+                if selected is None:
+                    raise RuntimeError("locked preset disappeared during update")
+                self._audit("detector-weight-preset", preset_id, selected)
+                connection.commit()
+                return deepcopy(selected)
+            except Exception:
+                connection.rollback()
+                raise
+
+    def list_detector_weight_presets(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return self._list("detector-weight-preset")
+
+    def delete_detector_weight_preset(self, preset_id: str) -> bool:
+        connection = self.connection
+        with self._lock:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "DELETE FROM controller_objects "
+                        "WHERE kind='detector-weight-preset' AND id=%s",
+                        (preset_id,),
+                    )
+                    deleted = cursor.rowcount > 0
+                connection.commit()
+                return deleted
+            except Exception:
+                connection.rollback()
+                raise
+
+    def set_default_detector_weight_preset(self, preset_id: str) -> dict[str, Any] | None:
+        connection = self.connection
+        with self._lock:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(%s)",
+                        (self._DETECTOR_PRESET_ADVISORY_LOCK,),
+                    )
+                    cursor.execute(
+                        "SELECT id,data FROM controller_objects "
+                        "WHERE kind='detector-weight-preset' FOR UPDATE"
+                    )
+                    rows = cursor.fetchall()
+                    if not any(str(object_id) == preset_id for object_id, _ in rows):
+                        connection.commit()
+                        return None
+                    presets: list[dict[str, Any]] = []
+                    for object_id, value in rows:
+                        preset = value if isinstance(value, dict) else json.loads(value)
+                        preset["is_default"] = str(object_id) == preset_id
+                        presets.append(preset)
+                        cursor.execute(
+                            "UPDATE controller_objects SET data=%s::jsonb "
+                            "WHERE kind='detector-weight-preset' AND id=%s",
+                            (self._json(preset), object_id),
+                        )
+                selected = next((preset for preset in presets if preset["id"] == preset_id), None)
+                connection.commit()
+                return deepcopy(selected) if selected is not None else None
+            except Exception:
+                connection.rollback()
+                raise
 
     def list_sensors(self) -> list[dict[str, Any]]:
         return self._list("sensor")

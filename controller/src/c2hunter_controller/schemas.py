@@ -384,6 +384,45 @@ class ReanalysisRequest(BaseModel):
         return AnalysisParameters.normalize_detector_weights(value)
 
 
+class DetectorWeightPresetCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=2000)
+    detector_weights: dict[str, float]
+    set_as_default: bool = False
+
+    @field_validator("detector_weights", mode="before")
+    @classmethod
+    def validate_detector_weights(cls, value: object) -> dict[str, float]:
+        return AnalysisParameters.normalize_detector_weights(value)
+
+
+class DetectorWeightPresetUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    detector_weights: dict[str, float] | None = None
+    set_as_default: bool | None = None
+
+    @field_validator("detector_weights", mode="before")
+    @classmethod
+    def validate_detector_weights(cls, value: object) -> dict[str, float] | None:
+        if value is None:
+            return None
+        return AnalysisParameters.normalize_detector_weights(value)
+
+    @model_validator(mode="after")
+    def rejects_null_resource_fields(self) -> DetectorWeightPresetUpdate:
+        resource_fields = {"name", "description", "detector_weights"}
+        if not self.model_fields_set or (
+            not self.model_fields_set & resource_fields and self.set_as_default is not True
+        ):
+            raise ValueError("at least one preset change is required")
+        if any(getattr(self, field) is None for field in self.model_fields_set & resource_fields):
+            raise ValueError("preset resource fields must not be null")
+        return self
+
+
 class FlowLabelCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     flow_id: str = Field(pattern=r"^[0-9a-f]{24}$")

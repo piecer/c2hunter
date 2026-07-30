@@ -65,6 +65,40 @@ class FailingHeartbeatConnection(FakeConnection):
         self.rolled_back = True
 
 
+class PresetCursor(FakeCursor):
+    def execute(self, query: str, params: tuple | None = None) -> None:
+        super().execute(query, params)
+        connection = cast(PresetConnection, self.connection)
+        if connection.fail_audit and "INSERT INTO audit_events" in query:
+            raise RuntimeError("preset audit failed")
+        if connection.fail_update and "UPDATE controller_objects SET data" in query:
+            raise RuntimeError("preset update failed")
+
+    def fetchall(self) -> list[tuple[str, dict[str, Any]]]:
+        return list(cast(PresetConnection, self.connection).preset_rows)
+
+
+class PresetConnection(FakeConnection):
+    def __init__(
+        self,
+        rows: list[tuple[str, dict[str, Any]]],
+        *,
+        fail_audit: bool = False,
+        fail_update: bool = False,
+    ) -> None:
+        super().__init__()
+        self.preset_rows = rows
+        self.fail_audit = fail_audit
+        self.fail_update = fail_update
+        self.rolled_back = False
+
+    def cursor(self) -> PresetCursor:
+        return PresetCursor(self)
+
+    def rollback(self) -> None:
+        self.rolled_back = True
+
+
 def test_connection_initialization_is_thread_safe(monkeypatch: Any) -> None:
     first_connect_started = threading.Event()
     second_connect_started = threading.Event()
@@ -167,5 +201,88 @@ def test_heartbeat_update_rolls_back_failed_transaction(monkeypatch: Any) -> Non
         repository.update_sensor_heartbeat(
             "sensor-a", {"last_heartbeat_at": "2026-07-30T20:00:00+00:00"}
         )
+
+    assert connection.rolled_back
+
+
+def test_missing_preset_default_update_does_not_clear_existing_default(
+    monkeypatch: Any,
+) -> None:
+    connection = PresetConnection(
+        [("current", {"id": "current", "name": "Current", "is_default": True})]
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg",
+        SimpleNamespace(connect=lambda *args, **kwargs: connection),
+    )
+    repository = PostgresRepository("postgresql://test", cast(MinioBlobStore, SimpleNamespace()))
+    _ = repository.connection
+    connection.queries.clear()
+
+    result = repository.update_detector_weight_preset("missing", {}, set_as_default=True)
+
+    assert result is None
+    assert not any("UPDATE controller_objects SET data" in query for query in connection.queries)
+
+
+def test_preset_update_rolls_back_failed_audit(monkeypatch: Any) -> None:
+    connection = PresetConnection(
+        [("current", {"id": "current", "name": "Current", "is_default": True})],
+        fail_audit=True,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg",
+        SimpleNamespace(connect=lambda *args, **kwargs: connection),
+    )
+    repository = PostgresRepository("postgresql://test", cast(MinioBlobStore, SimpleNamespace()))
+
+    with pytest.raises(RuntimeError, match="preset audit failed"):
+        repository.update_detector_weight_preset("current", {"name": "Updated"})
+
+    assert connection.rolled_back
+
+
+def test_default_preset_save_acquires_database_wide_transaction_lock(
+    monkeypatch: Any,
+) -> None:
+    connection = PresetConnection([])
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg",
+        SimpleNamespace(connect=lambda *args, **kwargs: connection),
+    )
+    repository = PostgresRepository("postgresql://test", cast(MinioBlobStore, SimpleNamespace()))
+    _ = repository.connection
+    connection.queries.clear()
+
+    repository.save_detector_weight_preset({"id": "new", "name": "New", "is_default": True})
+
+    lock_index = next(
+        index for index, query in enumerate(connection.queries) if "pg_advisory_xact_lock" in query
+    )
+    insert_index = next(
+        index
+        for index, query in enumerate(connection.queries)
+        if "INSERT INTO controller_objects" in query
+    )
+    assert lock_index < insert_index
+
+
+def test_set_default_preset_rolls_back_when_update_fails(monkeypatch: Any) -> None:
+    connection = PresetConnection(
+        [("current", {"id": "current", "name": "Current", "is_default": True})],
+        fail_update=True,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg",
+        SimpleNamespace(connect=lambda *args, **kwargs: connection),
+    )
+    repository = PostgresRepository("postgresql://test", cast(MinioBlobStore, SimpleNamespace()))
+
+    with pytest.raises(RuntimeError, match="preset update failed"):
+        repository.set_default_detector_weight_preset("current")
 
     assert connection.rolled_back

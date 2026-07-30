@@ -1,4 +1,6 @@
 import hashlib
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -238,3 +240,175 @@ def test_cancel_is_idempotent_and_reanalysis_reuses_dataset_not_results() -> Non
     assert rerun.json()["parent_job_id"] == completed["id"]
     assert rerun.json()["analysis"]["detector_weights"]["common_destination"] == 0.25
     assert rerun.json()["analysis"]["detector_weights"]["periodic_beacon"] == 1.0
+
+
+def test_detector_weight_presets_enforce_single_default_and_apply_to_new_jobs() -> None:
+    repository = MemoryRepository()
+    client = api(repository)
+    first = client.post(
+        "/api/v1/detector-weight-presets",
+        json={
+            "name": "Quiet shared services",
+            "description": "Reduce broad infrastructure signals",
+            "detector_weights": {"common_destination": 0.25},
+            "set_as_default": True,
+        },
+    )
+    assert first.status_code == 201
+    assert first.json()["is_default"] is True
+    assert first.json()["detector_weights"]["common_destination"] == 0.25
+    assert first.json()["detector_weights"]["periodic_beacon"] == 1.0
+
+    second = client.post(
+        "/api/v1/detector-weight-presets",
+        json={
+            "name": "Beacon priority",
+            "detector_weights": {"periodic_beacon": 1.5},
+            "set_as_default": True,
+        },
+    )
+    assert second.status_code == 201
+    presets = client.get("/api/v1/detector-weight-presets").json()["items"]
+    assert sum(preset["is_default"] for preset in presets) == 1
+    assert (
+        next(preset for preset in presets if preset["id"] == first.json()["id"])["is_default"]
+        is False
+    )
+
+    created = client.post("/api/v1/analysis-jobs", json=payload(key="preset-default"))
+    assert created.status_code == 201
+    assert created.json()["analysis"]["detector_weights"]["periodic_beacon"] == 1.5
+
+    explicit = payload(key="preset-explicit")
+    assert isinstance(explicit["analysis"], dict)
+    explicit["analysis"]["detector_weights"] = {"periodic_beacon": 0.5}
+    created = client.post("/api/v1/analysis-jobs", json=explicit)
+    assert created.status_code == 201
+    assert created.json()["analysis"]["detector_weights"]["periodic_beacon"] == 0.5
+
+
+def test_detector_weight_preset_update_and_delete_default() -> None:
+    client = api()
+    created = client.post(
+        "/api/v1/detector-weight-presets",
+        json={"name": "Temporary", "detector_weights": {}, "set_as_default": True},
+    ).json()
+    updated = client.patch(
+        f"/api/v1/detector-weight-presets/{created['id']}",
+        json={"name": "Reusable", "detector_weights": {"protocol_similarity": 0.4}},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "Reusable"
+    assert updated.json()["detector_weights"]["protocol_similarity"] == 0.4
+    deleted = client.delete(f"/api/v1/detector-weight-presets/{created['id']}")
+    assert deleted.status_code == 200
+    assert client.get("/api/v1/detector-weight-presets").json()["items"] == []
+
+
+def test_detector_weight_preset_update_rejects_null_resource_fields() -> None:
+    client = api()
+    created = client.post(
+        "/api/v1/detector-weight-presets",
+        json={"name": "Protected", "description": "Valid", "detector_weights": {}},
+    ).json()
+
+    for field in ("name", "description", "detector_weights"):
+        response = client.patch(
+            f"/api/v1/detector-weight-presets/{created['id']}", json={field: None}
+        )
+        assert response.status_code == 422
+
+    preset = client.get("/api/v1/detector-weight-presets").json()["items"][0]
+    assert preset["name"] == "Protected"
+    assert preset["description"] == "Valid"
+    assert preset["detector_weights"]["common_destination"] == 1.0
+
+
+def test_detector_weight_preset_rejects_blank_names_and_empty_updates() -> None:
+    client = api()
+    created = client.post(
+        "/api/v1/detector-weight-presets",
+        json={"name": "   ", "detector_weights": {}},
+    )
+    assert created.status_code == 422
+
+    preset = client.post(
+        "/api/v1/detector-weight-presets",
+        json={"name": "Valid", "detector_weights": {}},
+    ).json()
+    empty_update = client.patch(f"/api/v1/detector-weight-presets/{preset['id']}", json={})
+    assert empty_update.status_code == 422
+    assert (
+        client.patch(
+            f"/api/v1/detector-weight-presets/{preset['id']}", json={"name": "  "}
+        ).status_code
+        == 422
+    )
+
+
+def test_default_preset_creation_is_one_atomic_repository_operation() -> None:
+    class AtomicCreationRepository(MemoryRepository):
+        def set_default_detector_weight_preset(self, preset_id: str) -> dict[str, object] | None:
+            raise AssertionError(f"split default transition for {preset_id}")
+
+    repository = AtomicCreationRepository()
+    repository.save_detector_weight_preset(
+        {"id": "first", "name": "First", "detector_weights": {}, "is_default": True}
+    )
+    client = api(repository)
+
+    response = client.post(
+        "/api/v1/detector-weight-presets",
+        json={"name": "Second", "detector_weights": {}, "set_as_default": True},
+    )
+
+    assert response.status_code == 201
+    defaults = [
+        preset["name"]
+        for preset in repository.list_detector_weight_presets()
+        if preset["is_default"]
+    ]
+    assert defaults == ["Second"]
+
+
+def test_detector_weight_preset_update_and_default_switch_are_atomic() -> None:
+    class CoordinatedRepository(MemoryRepository):
+        armed = False
+        default_switched = threading.Event()
+
+        def save_detector_weight_preset(self, preset: dict[str, object]) -> dict[str, object]:
+            if self.armed and preset["id"] == "preset-first":
+                assert self.default_switched.wait(timeout=2)
+            return super().save_detector_weight_preset(preset)
+
+        def set_default_detector_weight_preset(self, preset_id: str) -> dict[str, object] | None:
+            result = super().set_default_detector_weight_preset(preset_id)
+            if self.armed and preset_id == "preset-second":
+                self.default_switched.set()
+            return result
+
+    repository = CoordinatedRepository()
+    repository.save_detector_weight_preset(
+        {"id": "preset-first", "name": "First", "detector_weights": {}, "is_default": True}
+    )
+    repository.save_detector_weight_preset(
+        {"id": "preset-second", "name": "Second", "detector_weights": {}, "is_default": False}
+    )
+    repository.armed = True
+    client = api(repository)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        rename = executor.submit(
+            client.patch,
+            "/api/v1/detector-weight-presets/preset-first",
+            json={"name": "Renamed"},
+        )
+        switch = executor.submit(
+            client.patch,
+            "/api/v1/detector-weight-presets/preset-second",
+            json={"set_as_default": True},
+        )
+    assert rename.result().status_code == 200
+    assert switch.result().status_code == 200
+    presets = client.get("/api/v1/detector-weight-presets").json()["items"]
+    assert [preset["id"] for preset in presets if preset["is_default"]] == ["preset-second"]

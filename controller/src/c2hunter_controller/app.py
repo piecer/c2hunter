@@ -43,6 +43,8 @@ from .schemas import (
     AnalysisParameters,
     CancelRequest,
     CandidateUpdate,
+    DetectorWeightPresetCreate,
+    DetectorWeightPresetUpdate,
     DevLoginRequest,
     EnrollmentClaim,
     EnrollmentClaimResponse,
@@ -755,6 +757,17 @@ def create_app(
     def allowlist_snapshot() -> list[dict[str, Any]]:
         return [dict(entry) for entry in repo.list_allowlist()]
 
+    def default_detector_weights() -> dict[str, float] | None:
+        preset = next(
+            (
+                preset
+                for preset in repo.list_detector_weight_presets()
+                if preset.get("is_default") is True
+            ),
+            None,
+        )
+        return dict(preset["detector_weights"]) if preset is not None else None
+
     def enqueue_worker_job(job: dict[str, Any]) -> None:
         envelope: dict[str, Any] = {"id": job["id"]}
         if isinstance(work_queue, MemoryControllerQueue):
@@ -904,6 +917,54 @@ def create_app(
         machine.transition(job, JobState.COMPLETED, "analysis completed")
         return repo.save_job_metadata(job)
 
+    @app.get("/api/v1/detector-weight-presets")
+    def list_detector_weight_presets() -> dict[str, Any]:
+        presets = repo.list_detector_weight_presets()
+        presets.sort(key=lambda preset: (not bool(preset.get("is_default")), preset["name"]))
+        return {"items": presets, "total": len(presets)}
+
+    @app.post("/api/v1/detector-weight-presets", status_code=201)
+    def create_detector_weight_preset(
+        payload: DetectorWeightPresetCreate,
+    ) -> dict[str, Any]:
+        now = datetime.now(UTC).isoformat()
+        data = payload.model_dump(exclude={"set_as_default"})
+        preset = repo.save_detector_weight_preset(
+            {
+                **data,
+                "id": str(uuid.uuid4()),
+                "is_default": payload.set_as_default,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        return preset
+
+    @app.patch("/api/v1/detector-weight-presets/{preset_id}")
+    def update_detector_weight_preset(
+        preset_id: str, payload: DetectorWeightPresetUpdate
+    ) -> dict[str, Any]:
+        updates = payload.model_dump(exclude_unset=True, exclude={"set_as_default"})
+        updates["updated_at"] = datetime.now(UTC).isoformat()
+        preset = repo.update_detector_weight_preset(
+            preset_id, updates, set_as_default=payload.set_as_default is True
+        )
+        if preset is None:
+            raise ApiError(
+                404,
+                "DETECTOR_WEIGHT_PRESET_NOT_FOUND",
+                "가중치 preset을 찾을 수 없습니다",
+            )
+        return preset
+
+    @app.delete("/api/v1/detector-weight-presets/{preset_id}")
+    def delete_detector_weight_preset(preset_id: str) -> dict[str, Any]:
+        if not repo.delete_detector_weight_preset(preset_id):
+            raise ApiError(
+                404, "DETECTOR_WEIGHT_PRESET_NOT_FOUND", "가중치 preset을 찾을 수 없습니다"
+            )
+        return {"deleted": True, "preset_id": preset_id}
+
     @app.post("/api/v1/analysis-jobs", status_code=201)
     def create_analysis_job(payload: AnalysisJobCreate) -> dict[str, Any]:
         missing = [
@@ -919,6 +980,10 @@ def create_app(
                 "INLINE_FLOWS_DISABLED",
                 "flow_records inline 입력은 테스트/호환 모드에서만 허용됩니다",
             )
+        if "detector_weights" not in payload.analysis.model_fields_set:
+            configured_default = default_detector_weights()
+            if configured_default is not None:
+                payload.analysis.detector_weights = configured_default
         requested_job = build_job(payload)
         requested_job["payload_signatures"] = payload_signature_snapshot()
         requested_job["allowlist"] = allowlist_snapshot()
@@ -942,7 +1007,7 @@ def create_app(
         minimum_candidate_score: int = Query(default=0, ge=0, le=100),
         minimum_distinct_clients: int = Query(default=3, ge=2, le=100000),
         periodicity_min_samples: int = Query(default=5, ge=3, le=100000),
-        detector_weights: str = Query(default="{}", max_length=2000),
+        detector_weights: str | None = Query(default=None, max_length=2000),
         ml_anomaly_enabled: bool = Query(default=False),
         ml_anomaly_allow_standalone: bool = Query(default=False),
         ml_anomaly_min_population: int = Query(default=30, ge=8, le=100000),
@@ -953,10 +1018,15 @@ def create_app(
         ml_anomaly_contribution_cap: float = Query(default=5.0, ge=0.0, le=5.0),
     ) -> dict[str, Any]:
         try:
-            raw_detector_weights = json.loads(detector_weights)
-            normalized_detector_weights = AnalysisParameters(
-                detector_weights=raw_detector_weights
-            ).detector_weights
+            if detector_weights is None:
+                normalized_detector_weights = (
+                    default_detector_weights() or AnalysisParameters().detector_weights
+                )
+            else:
+                raw_detector_weights = json.loads(detector_weights)
+                normalized_detector_weights = AnalysisParameters(
+                    detector_weights=raw_detector_weights
+                ).detector_weights
         except (json.JSONDecodeError, ValidationError) as exc:
             raise ApiError(
                 422,
