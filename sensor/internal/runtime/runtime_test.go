@@ -117,7 +117,13 @@ func TestRunnerReportsCaptureMetricsAndNeverOverstatesCaptureFailure(t *testing.
 		snapshot: CaptureSnapshot{ReceivedPackets: 12, DroppedPackets: 3, PendingBytes: 456, ActiveJobs: []string{"job-a"}, LastError: "AF_PACKET permission denied"},
 		err:      errors.New("AF_PACKET permission denied"),
 	}
-	runner, err := New(Config{Registration: registration(), Capture: captureRuntime, HeartbeatInterval: time.Millisecond, RetryInterval: time.Millisecond}, transport)
+	runner, err := New(Config{
+		Registration: registration(), Capture: captureRuntime,
+		HeartbeatInterval: time.Millisecond, RetryInterval: time.Millisecond,
+		DiscoverInterfaces: func() ([]telemetry.Interface, error) {
+			return []telemetry.Interface{{Name: "eth0"}, {Name: "eth1"}}, nil
+		},
+	}, transport)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +137,7 @@ func TestRunnerReportsCaptureMetricsAndNeverOverstatesCaptureFailure(t *testing.
 		transport.mu.Unlock()
 		if len(heartbeats) > 0 {
 			got := heartbeats[len(heartbeats)-1]
-			if got.Status != telemetry.StatusDegraded || got.ReceivedPackets != 12 || got.DroppedPackets != 3 || got.PendingBytes != 456 || len(got.ActiveJobs) != 1 {
+			if got.Status != telemetry.StatusDegraded || got.ReceivedPackets != 12 || got.DroppedPackets != 3 || got.PendingBytes != 456 || len(got.ActiveJobs) != 1 || len(got.DiscoveredInterfaces) != 2 {
 				t.Fatalf("heartbeat = %+v", got)
 			}
 			break

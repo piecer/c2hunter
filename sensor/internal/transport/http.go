@@ -15,6 +15,15 @@ import (
 	"c2hunter/sensor/internal/telemetry"
 )
 
+const maxControllerInterfaces = 128
+
+func limitControllerInterfaces[T any](interfaces []T) []T {
+	if len(interfaces) > maxControllerInterfaces {
+		return interfaces[:maxControllerInterfaces]
+	}
+	return interfaces
+}
+
 type HTTP struct {
 	baseURL  string
 	client   *http.Client
@@ -70,6 +79,7 @@ func (h *HTTP) SetIdentity(sensorID, token string) {
 func (h *HTTP) authToken() string { h.mu.RLock(); defer h.mu.RUnlock(); return h.token }
 
 func (h *HTTP) Claim(ctx context.Context, token string, request EnrollmentRequest) (DesiredConfig, error) {
+	request.DiscoveredInterfaces = limitControllerInterfaces(request.DiscoveredInterfaces)
 	var response DesiredConfig
 	err := h.doJSON(ctx, http.MethodPost, "/api/v1/sensor-enrollments/"+url.PathEscape(token)+"/claim", request, &response, "")
 	if err == nil && (response.SensorID == "" || response.AgentToken == "") {
@@ -85,8 +95,9 @@ func (h *HTTP) AgentConfig(ctx context.Context, sensorID string) (DesiredConfig,
 }
 
 func (h *HTTP) Register(ctx context.Context, registration telemetry.Registration) error {
-	interfaces := make([]map[string]any, 0, len(registration.Interfaces))
-	for _, iface := range registration.Interfaces {
+	discoveredInterfaces := limitControllerInterfaces(registration.Interfaces)
+	interfaces := make([]map[string]any, 0, len(discoveredInterfaces))
+	for _, iface := range discoveredInterfaces {
 		var macAddress any
 		if iface.MAC != "" {
 			macAddress = iface.MAC
@@ -102,16 +113,33 @@ func (h *HTTP) Register(ctx context.Context, registration telemetry.Registration
 	return h.post(ctx, "/api/v1/sensors/register", payload)
 }
 
+func nullableMACAddress(mac string) any {
+	if mac == "" {
+		return nil
+	}
+	return mac
+}
+
 func (h *HTTP) Heartbeat(ctx context.Context, heartbeat telemetry.Heartbeat) error {
 	activeJobs := heartbeat.ActiveJobs
 	if activeJobs == nil {
 		activeJobs = []string{}
+	}
+	heartbeatInterfaces := limitControllerInterfaces(heartbeat.DiscoveredInterfaces)
+	discoveredInterfaces := make([]map[string]any, 0, len(heartbeatInterfaces))
+	for _, iface := range heartbeatInterfaces {
+		discoveredInterfaces = append(discoveredInterfaces, map[string]any{
+			"name": iface.Name, "mac_address": nullableMACAddress(iface.MAC),
+		})
 	}
 	payload := map[string]any{
 		"reported_at": heartbeat.CurrentTime, "status": heartbeat.Status.String(), "cpu_percent": heartbeat.CPUPercent,
 		"memory_percent": float64(0), "disk_percent": float64(0), "active_job_ids": activeJobs,
 		"received_packets": heartbeat.ReceivedPackets, "dropped_packets": heartbeat.DroppedPackets,
 		"pending_bytes": heartbeat.PendingBytes, "last_error": nil, "interfaces": heartbeat.Interfaces,
+	}
+	if len(discoveredInterfaces) > 0 {
+		payload["discovered_interfaces"] = discoveredInterfaces
 	}
 	if heartbeat.LastError != "" {
 		payload["last_error"] = heartbeat.LastError

@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -31,8 +32,13 @@ func TestHTTPTransportUsesControllerSensorRESTContract(t *testing.T) {
 			}
 		} else {
 			activeJobs, ok := body["active_job_ids"].([]any)
-			if body["reported_at"] == nil || body["status"] != "DEGRADED" || !ok || len(activeJobs) != 0 {
+			discovered, discoveredOK := body["discovered_interfaces"].([]any)
+			if body["reported_at"] == nil || body["status"] != "DEGRADED" || !ok || len(activeJobs) != 0 || !discoveredOK || len(discovered) != 2 {
 				t.Fatalf("heartbeat body = %#v", body)
+			}
+			loopback := discovered[1].(map[string]any)
+			if loopback["name"] != "lo" || loopback["mac_address"] != nil {
+				t.Fatalf("heartbeat loopback interface = %#v", loopback)
 			}
 		}
 		w.WriteHeader(http.StatusCreated)
@@ -50,12 +56,47 @@ func TestHTTPTransportUsesControllerSensorRESTContract(t *testing.T) {
 	if err := client.Register(context.Background(), registration); err != nil {
 		t.Fatal(err)
 	}
-	heartbeat := telemetry.Heartbeat{SensorID: "sensor-a", Status: telemetry.StatusDegraded, CurrentTime: time.Now(), LastError: "capture unavailable"}
+	heartbeat := telemetry.Heartbeat{
+		SensorID: "sensor-a", Status: telemetry.StatusDegraded, CurrentTime: time.Now(), LastError: "capture unavailable",
+		DiscoveredInterfaces: []telemetry.Interface{{Name: "eth0", MAC: "00:00:00:00:00:00"}, {Name: "lo"}},
+	}
 	if err := client.Heartbeat(context.Background(), heartbeat); err != nil {
 		t.Fatal(err)
 	}
 	if len(paths) != 2 || paths[0] != "/api/v1/sensors/register" || paths[1] != "/api/v1/sensors/sensor-a/heartbeat" {
 		t.Fatalf("paths = %v", paths)
+	}
+}
+
+func TestHTTPTransportCapsHeartbeatDiscoveredInterfacesToControllerLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var body struct {
+			DiscoveredInterfaces []telemetry.Interface `json:"discovered_interfaces"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.DiscoveredInterfaces) != 128 {
+			t.Fatalf("discovered interfaces = %d, want 128", len(body.DiscoveredInterfaces))
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	client, err := NewHTTP(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	interfaces := make([]telemetry.Interface, 129)
+	for index := range interfaces {
+		interfaces[index] = telemetry.Interface{Name: fmt.Sprintf("veth%d", index)}
+	}
+	heartbeat := telemetry.Heartbeat{
+		SensorID: "sensor-a", Status: telemetry.StatusOnline, CurrentTime: time.Now(),
+		DiscoveredInterfaces: interfaces,
+	}
+	if err := client.Heartbeat(context.Background(), heartbeat); err != nil {
+		t.Fatal(err)
 	}
 }
 

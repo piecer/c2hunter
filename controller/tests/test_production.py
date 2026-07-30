@@ -43,6 +43,28 @@ class FakeConnection:
         self.closed = True
 
 
+class FailingHeartbeatCursor(FakeCursor):
+    def execute(self, query: str, params: tuple | None = None) -> None:
+        super().execute(query, params)
+        if "INSERT INTO audit_events" in query:
+            raise RuntimeError("audit failed")
+
+    def fetchone(self) -> tuple[dict[str, Any]]:
+        return ({"sensor_id": "sensor-a", "config_version": 7},)
+
+
+class FailingHeartbeatConnection(FakeConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rolled_back = False
+
+    def cursor(self) -> FailingHeartbeatCursor:
+        return FailingHeartbeatCursor(self)
+
+    def rollback(self) -> None:
+        self.rolled_back = True
+
+
 def test_connection_initialization_is_thread_safe(monkeypatch: Any) -> None:
     first_connect_started = threading.Event()
     second_connect_started = threading.Event()
@@ -133,3 +155,17 @@ def test_job_metadata_write_excludes_immutable_flow_payload(monkeypatch: Any) ->
     # save_job_metadata now uses direct DB calls (not _put), verify queries were issued
     conn = repository.connection
     assert any("controller_objects" in q for q in conn.queries)
+
+
+def test_heartbeat_update_rolls_back_failed_transaction(monkeypatch: Any) -> None:
+    connection = FailingHeartbeatConnection()
+    fake_psycopg = SimpleNamespace(connect=lambda *args, **kwargs: connection)
+    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+    repository = PostgresRepository("postgresql://test", cast(MinioBlobStore, SimpleNamespace()))
+
+    with pytest.raises(RuntimeError, match="audit failed"):
+        repository.update_sensor_heartbeat(
+            "sensor-a", {"last_heartbeat_at": "2026-07-30T20:00:00+00:00"}
+        )
+
+    assert connection.rolled_back

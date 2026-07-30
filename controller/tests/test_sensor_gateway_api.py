@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -8,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from c2hunter_controller.app import create_app
 from c2hunter_controller.config import Settings
-from c2hunter_controller.repositories import MemoryRepository
+from c2hunter_controller.repositories import MemoryRepository, SQLiteRepository
 
 
 def api_and_repo() -> tuple[TestClient, MemoryRepository]:
@@ -128,6 +129,77 @@ def test_claim_rejects_undiscovered_desired_interface_without_consuming_token() 
     replay = api.post(url, json=claim_payload())
     assert replay.status_code == 409
     assert replay.json()["error"]["code"] == "ENROLLMENT_ALREADY_CLAIMED"
+
+
+def test_heartbeat_refreshes_discovered_interfaces_for_configuration_updates() -> None:
+    api, _ = api_and_repo()
+    created = api.post("/api/v1/sensor-enrollments", json=enrollment_payload()).json()
+    claimed = api.post(
+        f"/api/v1/sensor-enrollments/{created['enrollment_token']}/claim",
+        json=claim_payload(),
+    ).json()
+    sensor_id = claimed["sensor_id"]
+    headers = {"X-Sensor-Token": claimed["agent_token"]}
+
+    heartbeat = api.post(
+        f"/api/v1/sensors/{sensor_id}/heartbeat",
+        headers=headers,
+        json={
+            "reported_at": datetime.now(UTC).isoformat(),
+            "status": "ONLINE",
+            "cpu_percent": 10,
+            "memory_percent": 20,
+            "disk_percent": 30,
+            "active_job_ids": [],
+            "received_packets": 0,
+            "dropped_packets": 0,
+            "pending_bytes": 0,
+            "last_error": None,
+            "interfaces": [],
+            "discovered_interfaces": [
+                {"name": "eth0", "mac_address": "00:00:00:00:00:01"},
+                {"name": "eth1", "mac_address": "00:00:00:00:00:02"},
+            ],
+        },
+    )
+    assert heartbeat.status_code == 200
+
+    updated = api.put(
+        f"/api/v1/sensors/{sensor_id}/configuration",
+        json={
+            "config_version": 1,
+            "capture_sources": [
+                {"interface": "eth0", "direction": "OUTBOUND", "enabled": True},
+                {"interface": "eth1", "direction": "INBOUND", "enabled": True},
+            ],
+            "internal_networks": ["10.0.0.0/24"],
+        },
+    )
+    assert updated.status_code == 200
+
+
+def test_heartbeat_partial_update_preserves_sensor_configuration(tmp_path: Any) -> None:
+    for repository in (MemoryRepository(), SQLiteRepository(tmp_path / "sensors.sqlite")):
+        repository.upsert_sensor(
+            {
+                "sensor_id": "sensor-a",
+                "config_version": 7,
+                "capture_sources": [{"interface": "eth0", "enabled": True}],
+            }
+        )
+
+        updated = repository.update_sensor_heartbeat(
+            "sensor-a",
+            {
+                "last_heartbeat_at": "2026-07-30T20:00:00+00:00",
+                "observed_interfaces": [{"name": "eth1", "mac_address": None}],
+            },
+        )
+
+        assert updated is not None
+        assert updated["config_version"] == 7
+        assert updated["capture_sources"] == [{"interface": "eth0", "enabled": True}]
+        assert updated["observed_interfaces"] == [{"name": "eth1", "mac_address": None}]
 
 
 def test_claim_generates_sensor_id_when_persisted_value_is_null() -> None:

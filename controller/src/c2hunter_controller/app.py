@@ -645,11 +645,15 @@ def create_app(
         payload: Heartbeat,
         sensor_token: str | None = Header(alias="X-Sensor-Token"),
     ) -> dict[str, Any]:
-        sensor = require_sensor_token(sensor_id, sensor_token)
+        require_sensor_token(sensor_id, sensor_token)
         now = datetime.now(UTC)
         offset = (now - payload.reported_at).total_seconds() * 1000
-        sensor.update(payload.model_dump(mode="json"))
-        sensor.update(
+        fields = payload.model_dump(mode="json", exclude={"discovered_interfaces"})
+        if payload.discovered_interfaces is not None:
+            fields["observed_interfaces"] = [
+                item.model_dump(mode="json") for item in payload.discovered_interfaces
+            ]
+        fields.update(
             {
                 "reported_status": payload.status.value,
                 "derived_status": "DEGRADED"
@@ -659,7 +663,10 @@ def create_app(
                 "last_heartbeat_at": now.isoformat(),
             }
         )
-        return repo.upsert_sensor(sensor)
+        sensor = repo.update_sensor_heartbeat(sensor_id, fields)
+        if sensor is None:
+            raise ApiError(404, "SENSOR_NOT_FOUND", "센서를 찾을 수 없습니다")
+        return sensor
 
     @app.post("/api/v1/sensors/{sensor_id}/flow-batches", status_code=202)
     def ingest_flow_batch(

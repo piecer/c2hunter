@@ -73,6 +73,7 @@ type Heartbeat struct {
 	ReceivedPackets, DroppedPackets, PendingBytes uint64
 	LastError                                     string
 	Interfaces                                    []InterfaceStatus
+	DiscoveredInterfaces                          []Interface
 }
 
 type InterfaceStatus struct {

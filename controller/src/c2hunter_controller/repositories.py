@@ -14,6 +14,9 @@ class Repository(Protocol):
 
     def ready(self) -> bool: ...
     def upsert_sensor(self, sensor: dict[str, Any]) -> dict[str, Any]: ...
+    def update_sensor_heartbeat(
+        self, sensor_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any] | None: ...
     def get_sensor(self, sensor_id: str) -> dict[str, Any] | None: ...
     def list_sensors(self) -> list[dict[str, Any]]: ...
     def create_group(self, group: dict[str, Any]) -> dict[str, Any]: ...
@@ -358,6 +361,16 @@ class MemoryRepository:
             sensor.update(deepcopy(configuration))
             sensor["config_version"] = expected_version + 1
             return deepcopy(sensor), "OK"
+
+    def update_sensor_heartbeat(
+        self, sensor_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            sensor = self.sensors.get(sensor_id)
+            if sensor is None:
+                return None
+            sensor.update(deepcopy(fields))
+            return deepcopy(sensor)
 
 
 class SQLiteRepository:
@@ -790,3 +803,13 @@ class SQLiteRepository:
             sensor.update(configuration)
             sensor["config_version"] = expected_version + 1
             return self.upsert_sensor(sensor), "OK"
+
+    def update_sensor_heartbeat(
+        self, sensor_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            sensor = self.get_sensor(sensor_id)
+            if sensor is None:
+                return None
+            sensor.update(fields)
+            return self.upsert_sensor(sensor)

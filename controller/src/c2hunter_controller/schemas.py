@@ -151,7 +151,7 @@ class SensorRegistration(BaseModel):
     agent_version: str = Field(min_length=1, max_length=64)
     os_version: str = Field(min_length=1, max_length=128)
     kernel_version: str = Field(min_length=1, max_length=128)
-    interfaces: list[SensorInterface] = Field(min_length=1)
+    interfaces: list[SensorInterface] = Field(min_length=1, max_length=128)
     capabilities: list[str]
     current_time: datetime
     available_disk_bytes: int = Field(ge=0)
@@ -182,6 +182,18 @@ class Heartbeat(BaseModel):
     pending_bytes: int = Field(ge=0)
     last_error: str | None = Field(default=None, max_length=2000)
     interfaces: list[HeartbeatInterface] = Field(default_factory=list)
+    discovered_interfaces: list[DiscoveredInterface] | None = Field(
+        default=None, min_length=1, max_length=128
+    )
+
+    @model_validator(mode="after")
+    def unique_discovered_interfaces(self) -> Heartbeat:
+        if self.discovered_interfaces is None:
+            return self
+        names = [interface.name for interface in self.discovered_interfaces]
+        if len(names) != len(set(names)):
+            raise ValueError("discovered interface names must be unique")
+        return self
 
 
 class SensorGroupCreate(BaseModel):

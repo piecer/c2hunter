@@ -140,6 +140,9 @@ func run(ctx context.Context) error {
 	runner, err := sensorruntime.New(sensorruntime.Config{
 		Registration: registration, HeartbeatInterval: cfg.HeartbeatInterval,
 		RetryInterval: retryInterval(), Capture: supervisor,
+		DiscoverInterfaces: func() ([]telemetry.Interface, error) {
+			return discoverHeartbeatInterfaces(interfacespkg.Discover)
+		},
 	}, httpTransport)
 	if err != nil {
 		return err
@@ -204,6 +207,20 @@ func claim(ctx context.Context, client *transport.HTTP, token string) (transport
 		request.DiscoveredInterfaces = append(request.DiscoveredInterfaces, transport.DiscoveredInterface{Name: item.Name, MACAddress: item.MAC})
 	}
 	return client.Claim(ctx, token, request)
+}
+
+func discoverHeartbeatInterfaces(
+	discover func() ([]interfacespkg.Info, error),
+) ([]telemetry.Interface, error) {
+	items, err := discover()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]telemetry.Interface, 0, len(items))
+	for _, item := range items {
+		result = append(result, telemetry.Interface{Name: item.Name, MAC: item.MAC})
+	}
+	return result, nil
 }
 
 func controlLoop(ctx context.Context, hup <-chan os.Signal, supervisor *sensorruntime.Supervisor, client *transport.HTTP, cfg config.Config, state agent.State) {

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"c2hunter/sensor/config"
+	interfacespkg "c2hunter/sensor/internal/interfaces"
 )
 
 func TestVersionAndDiagnosticCLI(t *testing.T) {
@@ -65,6 +66,21 @@ func TestBuildRegistrationAllowsInterfaceWithoutMACAddress(t *testing.T) {
 	}
 	if len(registration.Interfaces) != 1 || registration.Interfaces[0].MAC != "" {
 		t.Fatalf("interfaces = %+v", registration.Interfaces)
+	}
+}
+
+func TestDiscoverHeartbeatInterfacesIncludesUnconfiguredSystemInterfaces(t *testing.T) {
+	got, err := discoverHeartbeatInterfaces(func() ([]interfacespkg.Info, error) {
+		return []interfacespkg.Info{
+			{Name: "eth0", MAC: "00:01:02:03:04:05"},
+			{Name: "eth1", MAC: "00:01:02:03:04:06"},
+		}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[1].Name != "eth1" || got[1].MAC != "00:01:02:03:04:06" {
+		t.Fatalf("discovered interfaces = %+v", got)
 	}
 }
 

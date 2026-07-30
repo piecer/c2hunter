@@ -201,6 +201,37 @@ class PostgresRepository:
     def upsert_sensor(self, sensor: dict[str, Any]) -> dict[str, Any]:
         return self._put("sensor", sensor["sensor_id"], sensor)
 
+    def update_sensor_heartbeat(
+        self, sensor_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            connection = self.connection
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT data FROM controller_objects "
+                        "WHERE kind='sensor' AND id=%s FOR UPDATE",
+                        (sensor_id,),
+                    )
+                    row = cursor.fetchone()
+                    if row is None:
+                        connection.commit()
+                        return None
+                    value = row[0]
+                    sensor = value if isinstance(value, dict) else json.loads(value)
+                    sensor.update(fields)
+                    cursor.execute(
+                        "UPDATE controller_objects SET data=%s::jsonb "
+                        "WHERE kind='sensor' AND id=%s",
+                        (self._json(sensor), sensor_id),
+                    )
+                self._audit("sensor-heartbeat", sensor_id, fields)
+                connection.commit()
+                return deepcopy(sensor)
+            except Exception:
+                connection.rollback()
+                raise
+
     def get_sensor(self, sensor_id: str) -> dict[str, Any] | None:
         return self._get("sensor", sensor_id)
 

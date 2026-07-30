@@ -121,6 +121,23 @@ def test_sensor_registration_heartbeat_clock_skew_and_listing() -> None:
     assert api.get("/api/v1/sensors/s1").json()["interfaces"][0]["direction"] == "OUTBOUND"
 
 
+def test_sensor_registration_rejects_more_than_128_interfaces() -> None:
+    api = client()
+    payload = sensor_payload("s1")
+    payload["interfaces"] = [
+        {
+            "name": f"eth{index}",
+            "mac_address": f"02:00:00:00:00:{index % 256:02x}",
+            "direction": "OUTBOUND",
+        }
+        for index in range(129)
+    ]
+
+    response, _ = register(api, payload)
+
+    assert response.status_code == 422
+
+
 def test_sensor_group_creation_validates_members_and_lists() -> None:
     api = client()
     register(api, sensor_payload("s1"))

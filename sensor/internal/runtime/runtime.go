@@ -32,10 +32,11 @@ type CaptureRuntime interface {
 }
 
 type Config struct {
-	Registration      telemetry.Registration
-	HeartbeatInterval time.Duration
-	RetryInterval     time.Duration
-	Capture           CaptureRuntime
+	Registration       telemetry.Registration
+	HeartbeatInterval  time.Duration
+	RetryInterval      time.Duration
+	Capture            CaptureRuntime
+	DiscoverInterfaces func() ([]telemetry.Interface, error)
 }
 
 type Health struct {
@@ -146,6 +147,14 @@ func (r *Runner) runHeartbeats(ctx context.Context) bool {
 				ReceivedPackets: snapshot.ReceivedPackets,
 				DroppedPackets:  snapshot.DroppedPackets,
 				PendingBytes:    snapshot.PendingBytes,
+			}
+			if r.cfg.DiscoverInterfaces != nil {
+				discovered, err := r.cfg.DiscoverInterfaces()
+				if err != nil {
+					log.Printf("interface discovery failed; preserving previous controller snapshot: %v", err)
+				} else {
+					heartbeat.DiscoveredInterfaces = discovered
+				}
 			}
 			for _, item := range snapshot.Interfaces {
 				heartbeat.Interfaces = append(heartbeat.Interfaces, telemetry.InterfaceStatus{Interface: item.Interface, Direction: item.Direction, Status: item.Status, ReceivedPackets: item.ReceivedPackets, DroppedPackets: item.DroppedPackets, LastError: item.LastError})
