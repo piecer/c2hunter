@@ -30,6 +30,16 @@ At 70% disk, investigate growth; at 80%, shorten optional retention or add capac
 
 Compare `captured_packets_total`, `dropped_packets_total`, pending/spool bytes, interface counters, and job sensor loss. Validate capture privileges, ring/buffer sizing, CPU affinity, storage latency, BPF selectivity, batch size, and Controller ingestion rate. Application payloads on well-known ports are retained without invoking unrelated application decoders; for example, a non-SIP payload on UDP/5060 remains analyzable. Malformed or truncated L2-L4 frames are isolated to that packet, counted as decode errors and dropped packets, and do not degrade the sensor. Source, queue, spool, or transport failures remain health errors. Backpressure order is memory queue → file spool → smaller batches → retry → explicit deletion or capture stop. Any loss must be reported, never silently discarded.
 
+### Sensor BPF expression support
+
+Sensor capture filters are evaluated after packet decoding in userspace. The supported primitives are
+`ip`, `ip6`, `tcp`, `udp`, `icmp`, `port N`, `src port N`, and `dst port N`. Expressions support
+parentheses and the boolean operators `not`, `and`, and `or`, with precedence `not` > `and` > `or`.
+Adjacent primitives imply `and`. Global and per-interface BPF expressions are combined with `and`.
+Malformed or unsupported expressions reject the desired capture configuration instead of silently
+matching all traffic. These filters reduce retained/processed traffic but do not reduce packets entering
+the AF_PACKET socket; use upstream network controls when kernel-level capture reduction is required.
+
 ## Time synchronization
 
 Run `timedatectl status` and `chronyc tracking` (or the site's PTP tooling) on Controller and every sensor. Target ≤100 ms; >2 seconds marks a sensor DEGRADED and reduces analysis confidence. Correct NTP reachability before restarting analysis; do not hide offset warnings by editing result timestamps.

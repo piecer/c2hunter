@@ -9,6 +9,7 @@ import (
 
 	"c2hunter/sensor/config"
 	interfacespkg "c2hunter/sensor/internal/interfaces"
+	"c2hunter/sensor/internal/packet"
 )
 
 func TestVersionAndDiagnosticCLI(t *testing.T) {
@@ -81,6 +82,44 @@ func TestDiscoverHeartbeatInterfacesIncludesUnconfiguredSystemInterfaces(t *test
 	}
 	if len(got) != 2 || got[1].Name != "eth1" || got[1].MAC != "00:01:02:03:04:06" {
 		t.Fatalf("discovered interfaces = %+v", got)
+	}
+}
+
+func TestBuildFilterAppliesCompiledBooleanBPF(t *testing.T) {
+	expression := "((tcp or udp)) and (not dst port 22)"
+	matcher, err := packet.CompileBPFMatcher(expression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filter, err := buildFilter(config.Config{}, expression, matcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filter.Match(packet.Packet{Protocol: packet.TCP, DestinationPort: 443}) {
+		t.Fatal("matching TCP packet rejected")
+	}
+	if !filter.Match(packet.Packet{Protocol: packet.UDP, DestinationPort: 53}) {
+		t.Fatal("matching UDP packet rejected")
+	}
+	if filter.Match(packet.Packet{Protocol: packet.TCP, DestinationPort: 22}) {
+		t.Fatal("source BPF exclusion was not applied")
+	}
+	if filter.Match(packet.Packet{Protocol: packet.ICMP}) {
+		t.Fatal("global BPF exclusion was not applied")
+	}
+}
+
+func TestCombineBPFExpressionsPreservesEachFilterScope(t *testing.T) {
+	expression := combineBPFExpressions("tcp or udp", "dst port 53")
+	matcher, err := packet.CompileBPFMatcher(expression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matcher("eth0", packet.Packet{Protocol: packet.TCP, DestinationPort: 80}) {
+		t.Fatal("source OR expression escaped the global destination-port filter")
+	}
+	if !matcher("eth0", packet.Packet{Protocol: packet.UDP, DestinationPort: 53}) {
+		t.Fatal("packet matching both grouped expressions was rejected")
 	}
 }
 

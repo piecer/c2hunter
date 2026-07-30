@@ -334,7 +334,7 @@ func buildPipelines(cfg config.Config, uploader sensorruntime.FlowUploader) ([]s
 	var pipelines []sensorruntime.CaptureRuntime
 	for _, source := range sources {
 		source := source
-		bpfExpression := strings.TrimSpace(strings.Join(nonempty(source.BPFFilter, cfg.Capture.BPF), " and "))
+		bpfExpression := combineBPFExpressions(source.BPFFilter, cfg.Capture.BPF)
 		matcher, err := packet.CompileBPFMatcher(bpfExpression)
 		if err != nil {
 			return nil, fmt.Errorf("capture source %s BPF: %w", source.Interface, err)
@@ -484,4 +484,14 @@ func nonempty(values ...string) []string {
 		}
 	}
 	return out
+}
+
+func combineBPFExpressions(expressions ...string) string {
+	grouped := make([]string, 0, len(expressions))
+	for _, expression := range expressions {
+		if expression = strings.TrimSpace(expression); expression != "" {
+			grouped = append(grouped, "("+expression+")")
+		}
+	}
+	return strings.Join(grouped, " and ")
 }
