@@ -36,6 +36,9 @@ Payload 및 통신 문맥에서 설명 가능한 특징 프로파일을 만든�
 
 1. Job의 전체 Flow를 페이지 단위로 조회하며, detector가 Candidate로 승격하지 않은 Flow도
    분석가가 직접 검색·검토할 수 있다.
+   기본 include mode는 지정한 조건을 모두 만족하는 Flow만 반환한다. `exclude_matches=true`는
+   같은 조건을 모두 만족하는 Flow를 결과에서 제거하고 나머지를 반환한다. 조건 없는 exclusion은
+   전체 Flow를 실수로 숨기는 것을 방지하기 위해 거부한다.
 2. PCAP 원본이 보존된 경우 선택한 Flow의 Payload를 최대 256 bytes까지 명시적으로
    미리본다. 미리보기는 signature나 job metadata에 저장하지 않는다.
 3. Flow를 `C2` 또는 `BENIGN`으로 라벨링한다.

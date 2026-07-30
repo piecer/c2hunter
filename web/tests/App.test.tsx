@@ -134,10 +134,11 @@ describe('C2Hunter UI', () => {
     await user.type(screen.getByLabelText('External service port'), '443');
     await user.type(screen.getByLabelText('Source port'), '51000');
     await user.type(screen.getByLabelText('Destination port'), '443');
+    await user.click(screen.getByLabelText('Filter out matching flows'));
     await user.click(screen.getByRole('button', { name: 'Apply filters' }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
-      '/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&candidate_ip=198.51.100.0%2F24&port=443&source_port=51000&destination_port=443&has_payload=true',
+      '/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&candidate_ip=198.51.100.0%2F24&port=443&source_port=51000&destination_port=443&has_payload=true&exclude_matches=true',
       expect.any(Object),
     ));
   });

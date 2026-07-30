@@ -1235,6 +1235,7 @@ def create_app(
         source_port: int | None = Query(default=None, ge=0, le=65535),
         destination_port: int | None = Query(default=None, ge=0, le=65535),
         has_payload: bool | None = None,
+        exclude_matches: bool = False,
     ) -> dict[str, Any]:
         job = repo.get_job(job_id)
         if job is None:
@@ -1250,8 +1251,15 @@ def create_app(
                 source_port=source_port,
                 destination_port=destination_port,
                 has_payload=has_payload,
+                exclude_matches=exclude_matches,
             )
         except ValueError as exc:
+            if exclude_matches and "exclusion condition" in str(exc):
+                raise ApiError(
+                    422,
+                    "INVALID_FLOW_EXCLUSION",
+                    "제외 모드에는 하나 이상의 flow 조건이 필요합니다",
+                ) from exc
             raise ApiError(
                 422,
                 "INVALID_ENDPOINT_FILTER",

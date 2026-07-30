@@ -117,8 +117,25 @@ def filter_flows(
     source_port: int | None = None,
     destination_port: int | None = None,
     has_payload: bool | None = None,
+    exclude_matches: bool = False,
 ) -> list[dict[str, Any]]:
+    candidate_ip = candidate_ip.strip() if candidate_ip and candidate_ip.strip() else None
+    direction = direction.strip() if direction and direction.strip() else None
+    protocol = protocol.strip() if protocol and protocol.strip() else None
     endpoint_network = ip_network(candidate_ip, strict=False) if candidate_ip else None
+    if exclude_matches and all(
+        value is None
+        for value in (
+            candidate_ip,
+            direction,
+            protocol,
+            port,
+            source_port,
+            destination_port,
+            has_payload,
+        )
+    ):
+        raise ValueError("at least one exclusion condition is required")
     latest_labels: dict[str, dict[str, Any]] = {}
     if labels is None:
         labels = []
@@ -134,26 +151,50 @@ def filter_flows(
             list(job["internal_networks"]),
             latest_labels.get(identifier),
         )
-        if endpoint_network and not any(
-            ip_address(str(decorated[field])) in endpoint_network
-            for field in ("source_ip", "destination_ip")
-        ):
-            continue
-        if direction and str(decorated.get("direction", "")).upper() != direction.upper():
-            continue
-        if protocol and str(decorated.get("protocol", "")).upper() != protocol.upper():
-            continue
-        if port is not None and decorated.get("service_port") != port:
-            continue
-        if source_port is not None and decorated.get("source_port") != source_port:
-            continue
-        if destination_port is not None and decorated.get("destination_port") != destination_port:
-            continue
-        if has_payload is not None and decorated["has_payload"] is not has_payload:
+        matches = _matches_filter(
+            decorated,
+            endpoint_network=endpoint_network,
+            direction=direction,
+            protocol=protocol,
+            port=port,
+            source_port=source_port,
+            destination_port=destination_port,
+            has_payload=has_payload,
+        )
+        if (exclude_matches and matches) or (not exclude_matches and not matches):
             continue
         result.append(decorated)
     result.sort(key=lambda item: (str(item.get("timestamp", "")), item["flow_id"]))
     return result
+
+
+def _matches_filter(
+    flow: dict[str, Any],
+    *,
+    endpoint_network: Any,
+    direction: str | None,
+    protocol: str | None,
+    port: int | None,
+    source_port: int | None,
+    destination_port: int | None,
+    has_payload: bool | None,
+) -> bool:
+    if endpoint_network and not any(
+        ip_address(str(flow[field])) in endpoint_network
+        for field in ("source_ip", "destination_ip")
+    ):
+        return False
+    if direction and str(flow.get("direction", "")).upper() != direction.upper():
+        return False
+    if protocol and str(flow.get("protocol", "")).upper() != protocol.upper():
+        return False
+    if port is not None and flow.get("service_port") != port:
+        return False
+    if source_port is not None and flow.get("source_port") != source_port:
+        return False
+    if destination_port is not None and flow.get("destination_port") != destination_port:
+        return False
+    return has_payload is None or flow["has_payload"] is has_payload
 
 
 def label_snapshot(flow: dict[str, Any]) -> dict[str, Any]:
