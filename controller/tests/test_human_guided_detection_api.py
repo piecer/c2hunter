@@ -5,11 +5,13 @@ import json
 import struct
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
 from c2hunter_controller.app import create_app
 from c2hunter_controller.config import Settings
+from c2hunter_controller.detection_guidance import _condition_breakdown
 from c2hunter_controller.repositories import MemoryRepository, SQLiteRepository
 
 
@@ -154,6 +156,123 @@ def test_benign_label_blocks_conflicting_signature_creation() -> None:
     assert conflict.json()["error"]["code"] == "BENIGN_SIGNATURE_CONFLICT"
     labels = client.get(f"/api/v1/analysis-jobs/{job['id']}/flow-labels").json()
     assert labels["total"] == 1
+
+
+def test_confirmed_c2_flow_guides_detector_score_adjustments() -> None:
+    repository = MemoryRepository()
+    repository.upsert_sensor({"sensor_id": "sensor-a", "name": "Sensor A", "status": "ONLINE"})
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    sizes = [100, 180, 320, 560, 900]
+    records = [
+        {
+            "sensor_id": "sensor-a",
+            "timestamp": f"2026-07-23T00:{index * 30 // 60:02d}:{index * 30 % 60:02d}+00:00",
+            "source_ip": "10.0.0.8",
+            "destination_ip": "203.0.113.55",
+            "source_port": 50000 + index,
+            "destination_port": 443,
+            "protocol": "TCP",
+            "direction": "OUTBOUND",
+            "packet_count": 1,
+            "total_bytes": size,
+        }
+        for index, size in enumerate(sizes)
+    ]
+    created = client.post(
+        "/api/v1/analysis-jobs",
+        json={
+            "name": "missed periodic beacon",
+            "idempotency_key": str(uuid.uuid4()),
+            "sensor_ids": ["sensor-a"],
+            "mode": "HISTORICAL",
+            "start_time": "2026-07-23T00:00:00+00:00",
+            "end_time": "2026-07-23T00:05:00+00:00",
+            "capture": {},
+            "analysis": {
+                "minimum_candidate_score": 10,
+                "periodicity_min_samples": 5,
+            },
+            "internal_networks": ["10.0.0.0/8"],
+            "flow_records": records,
+        },
+    )
+    assert created.status_code == 201, created.text
+    job = created.json()
+    assert client.get(f"/api/v1/analysis-jobs/{job['id']}/candidates").json()["total"] == 0
+
+    selected = client.get(
+        f"/api/v1/analysis-jobs/{job['id']}/flows", params={"candidate_ip": "203.0.113.55"}
+    ).json()["items"][0]
+    labeled = client.post(
+        f"/api/v1/analysis-jobs/{job['id']}/flow-labels",
+        json={
+            "flow_id": selected["flow_id"],
+            "verdict": "C2",
+            "confidence": "CONFIRMED",
+            "note": "manual reverse engineering confirmed periodic C2",
+        },
+    )
+    assert labeled.status_code == 201, labeled.text
+
+    response = client.get(
+        f"/api/v1/analysis-jobs/{job['id']}/flows/{selected['flow_id']}/detection-guidance"
+    )
+    assert response.status_code == 200, response.text
+    guidance = response.json()
+    assert guidance["candidate_ip"] == "203.0.113.55"
+    assert guidance["initially_detected"] is False
+    assert guidance["current_score"] == 0
+    assert guidance["minimum_candidate_score"] == 10
+    assert guidance["score_gap"] == 10
+    assert any(
+        condition["evidence_type"] == "PERIODIC_BEACON" for condition in guidance["conditions"]
+    )
+    recommendation = next(
+        item for item in guidance["recommendations"] if item["kind"] == "DETECTOR_WEIGHT"
+    )
+    assert recommendation["detector"] == "periodic_beacon"
+    assert recommendation["current_value"] == 1.0
+    assert recommendation["recommended_value"] == 2.0
+    assert recommendation["projected_score"] == 10
+    assert guidance["recommended_reanalysis"]["detector_weights"]["periodic_beacon"] == 2.0
+
+
+def test_detection_guidance_requires_latest_c2_label() -> None:
+    repository = MemoryRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    job = _upload(client, b"normal-health-check", "203.0.113.20", "not-c2")
+    selected = client.get(f"/api/v1/analysis-jobs/{job['id']}/flows").json()["items"][0]
+
+    response = client.get(
+        f"/api/v1/analysis-jobs/{job['id']}/flows/{selected['flow_id']}/detection-guidance"
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "C2_LABEL_REQUIRED"
+
+
+def test_detection_guidance_condition_scores_respect_shared_evidence_cap() -> None:
+    evidence = [
+        SimpleNamespace(
+            type="PERIODIC_BEACON",
+            detector=detector,
+            description="periodic signal",
+            raw_score=15,
+            contribution=15,
+            metrics={},
+        )
+        for detector in ("periodic_a", "periodic_b")
+    ]
+    candidate = SimpleNamespace(evidence=evidence)
+    job = {
+        "analysis": {
+            "detector_weights": {"periodic_a": 2.0, "periodic_b": 2.0},
+        }
+    }
+
+    conditions = _condition_breakdown(candidate, job)
+
+    assert sum(item["weighted_contribution"] for item in conditions) == 30
+    assert [item["weighted_contribution"] for item in conditions] == [15, 15]
 
 
 def test_sqlite_persists_flow_labels_and_signature_versions(tmp_path: Path) -> None:

@@ -197,9 +197,9 @@ def build_job(
     }
 
 
-def calculate(
+def evaluate_candidates(
     job: dict[str, Any], allowlist: list[dict[str, Any]] | None = None
-) -> list[dict[str, Any]]:
+) -> list[Any]:
     flows = []
     for stored in job["flow_records"]:
         record = dict(stored)
@@ -250,6 +250,13 @@ def calculate(
             for name, weight in dict(parameters.get("detector_weights", {})).items()
         },
     )
+    return scored
+
+
+def calculate(
+    job: dict[str, Any], allowlist: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    scored = evaluate_candidates(job, allowlist)
     minimum_score = int(job["analysis"]["minimum_candidate_score"])
     retained = [candidate for candidate in scored if candidate.score >= minimum_score]
     traffic = summarize_candidate_traffic(

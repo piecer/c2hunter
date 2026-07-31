@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
@@ -19,6 +19,8 @@ const responses: Record<string, unknown> = {
 };
 responses['/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&has_payload=true'] =
   responses['/api/v1/analysis-jobs/job-1/flows?candidate_ip=203.0.113.9&page=1&page_size=50'];
+responses['/api/v1/candidates?page=1&page_size=50&minimum_score=0&sort=-score'] =
+  responses['/api/v1/candidates'];
 
 function renderAt(route: string) {
   localStorage.setItem('c2hunter-token', 'token');
@@ -49,12 +51,46 @@ describe('C2Hunter UI', () => {
     expect(await screen.findByRole('table', { name: 'C2 candidates' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: '203.0.113.9' })).toBeInTheDocument();
     expect(screen.getByText('Unknown')).toBeInTheDocument();
-    expect(screen.getByText('PERIODIC_BEACON')).toBeInTheDocument();
+    expect(screen.getByText('주기적 비콘')).toBeInTheDocument();
+  });
+
+  it('filters, sorts, and paginates candidates through the Controller API', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes('page=2')) {
+        return new Response(JSON.stringify({ items: [{ id: 'candidate-2', job_id: 'job-1', candidate_ip: '198.51.100.7', score: 64, severity: 'MEDIUM' }], page: 2, page_size: 50, total: 51 }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ items: responses['/api/v1/candidates'] && (responses['/api/v1/candidates'] as { items: unknown[] }).items, page: 1, page_size: 50, total: 51 }), { status: 200 });
+    });
+    localStorage.setItem('c2hunter-token', 'token');
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/candidates']}><App /></MemoryRouter></QueryClientProvider>);
+
+    expect(await screen.findByRole('link', { name: '203.0.113.9' })).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText('Severity'), 'HIGH');
+    await user.clear(screen.getByLabelText('Minimum score'));
+    await user.type(screen.getByLabelText('Minimum score'), '70');
+    await user.click(screen.getByLabelText('Include suppressed candidates'));
+    await user.selectOptions(screen.getByLabelText('Sort candidates'), 'candidate_ip');
+    await user.click(screen.getByRole('button', { name: 'Apply filters' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/candidates?page=1&page_size=50&minimum_score=70&sort=candidate_ip&severity=HIGH&include_suppressed=true', expect.anything()));
+    await user.click(screen.getByRole('button', { name: 'Next candidates' }));
+    expect(await screen.findByRole('link', { name: '198.51.100.7' })).toBeInTheDocument();
+    expect(screen.getByText('Candidates 51–51 of 51')).toBeInTheDocument();
+  });
+
+  it('marks the current navigation destination', async () => {
+    renderAt('/candidates');
+    expect(await screen.findByRole('link', { name: 'Candidates' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('link', { name: 'Dashboard' })).not.toHaveAttribute('aria-current');
   });
 
   it('shows detector settings, state history, and candidates on analysis detail', async () => {
     renderAt('/analyses/job-1');
-    expect(await screen.findByRole('heading', { name: 'Detector settings' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '탐지 설정' })).toBeInTheDocument();
+    expect(screen.getByText('최소 후보 점수')).toBeInTheDocument();
     expect(screen.getByText('ddos_botnet')).toBeInTheDocument();
     expect(await screen.findByRole('table', { name: 'Analysis candidates' })).toBeInTheDocument();
     expect(await screen.findByRole('table', { name: 'Analysis flows' })).toBeInTheDocument();
@@ -74,9 +110,9 @@ describe('C2Hunter UI', () => {
     render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/job-1']}><App /></MemoryRouter></QueryClientProvider>);
     const user = userEvent.setup();
 
-    expect(await screen.findByRole('heading', { name: 'Tune and reanalyze' })).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Reduce large-service noise' }));
-    await user.click(screen.getByRole('button', { name: 'Reanalyze with detector weights' }));
+    expect(await screen.findByRole('heading', { name: '가중치 조정 후 재분석' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '대형 서비스 노이즈 줄이기' }));
+    await user.click(screen.getByRole('button', { name: '탐지 가중치로 재분석' }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/analysis-jobs/job-1/reanalyze', expect.objectContaining({ method: 'POST' })));
     const call = fetchMock.mock.calls.find(([url, init]) => url === '/api/v1/analysis-jobs/job-1/reanalyze' && init?.method === 'POST');
@@ -109,12 +145,12 @@ describe('C2Hunter UI', () => {
     render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/analyses/job-1']}><App /></MemoryRouter></QueryClientProvider>);
     const user = userEvent.setup();
 
-    const firstWeight = await screen.findByLabelText(/Common destination/);
+    const firstWeight = await screen.findByLabelText(/공통 목적지/);
     await user.clear(firstWeight);
     await user.type(firstWeight, '0.25');
     await user.click(screen.getByRole('link', { name: 'job-2' }));
 
-    expect(await screen.findByLabelText(/Common destination/)).toHaveValue(1.75);
+    expect(await screen.findByLabelText(/공통 목적지/)).toHaveValue(1.75);
   });
 
   it('lets an analyst browse flows that were never promoted to candidates', async () => {
@@ -166,7 +202,7 @@ describe('C2Hunter UI', () => {
     await screen.findByLabelText('Sensor A');
     await user.type(screen.getByLabelText('Analysis name'), 'Web analysis');
     await user.click(screen.getByLabelText('Sensor A'));
-    await user.click(screen.getByRole('button', { name: 'Reduce large-service noise' }));
+    await user.click(screen.getByRole('button', { name: '대형 서비스 노이즈 줄이기' }));
     await user.click(screen.getByRole('button', { name: 'Start analysis' }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/analysis-jobs', expect.objectContaining({ method: 'POST' })));
@@ -231,11 +267,11 @@ describe('C2Hunter UI', () => {
     render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/new']}><App /></MemoryRouter></QueryClientProvider>);
     const user = userEvent.setup();
 
-    await waitFor(() => expect(screen.getByLabelText(/Common destination/)).toHaveValue(0.25));
-    expect(screen.getByLabelText('Saved detector weight preset')).toHaveValue('preset-default');
-    await user.type(screen.getByLabelText('New preset name'), 'Case preset');
-    await user.click(screen.getByLabelText('Save as default preset'));
-    await user.click(screen.getByRole('button', { name: 'Save current weights' }));
+    await waitFor(() => expect(screen.getByLabelText(/공통 목적지/)).toHaveValue(0.25));
+    expect(screen.getByLabelText('저장된 탐지 가중치 프리셋')).toHaveValue('preset-default');
+    await user.type(screen.getByLabelText('새 프리셋 이름'), 'Case preset');
+    await user.click(screen.getByLabelText('기본 프리셋으로 저장'));
+    await user.click(screen.getByRole('button', { name: '현재 가중치 저장' }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/detector-weight-presets', expect.objectContaining({ method: 'POST' })));
     const call = fetchMock.mock.calls.find(([url, init]) => url === '/api/v1/detector-weight-presets' && init?.method === 'POST');
@@ -259,7 +295,10 @@ describe('C2Hunter UI', () => {
     await user.click(screen.getByRole('button', { name: 'Export candidate PCAP' }));
     await user.click(screen.getByRole('button', { name: 'Reanalyze' }));
 
-    expect(screen.getByText('Sample Count')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '탐지 근거' })).toBeInTheDocument();
+    expect(screen.getByText('주기적 비콘')).toBeInTheDocument();
+    expect(screen.getByText('주기 통신 탐지기 · v1.0.0')).toBeInTheDocument();
+    expect(screen.getByText('표본 수')).toBeInTheDocument();
     expect(screen.getByRole('table', { name: 'Candidate traffic buckets' })).toBeInTheDocument();
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/analysis-jobs/job-1/reanalyze', expect.objectContaining({ method: 'POST' })));
@@ -267,6 +306,28 @@ describe('C2Hunter UI', () => {
     expect(JSON.parse(String(exportCall?.[1]?.body))).toEqual({ job_id: 'job-1', candidate_id: 'candidate-1' });
     const reanalyzeCall = fetchMock.mock.calls.find(([url]) => url === '/api/v1/analysis-jobs/job-1/reanalyze');
     expect(JSON.parse(String(reanalyzeCall?.[1]?.body))).toEqual({ idempotency_key: expect.any(String) });
+  });
+
+  it('requires confirmation before permanently deleting a candidate', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/v1/candidates/candidate-1' && init?.method === 'DELETE') return new Response(null, { status: 204 });
+      return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404 });
+    });
+    renderAt('/candidates/candidate-1');
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    await screen.findByRole('heading', { name: '203.0.113.9' });
+
+    await user.click(screen.getByRole('button', { name: 'Delete candidate' }));
+    expect(screen.getByRole('dialog', { name: 'Delete candidate permanently' })).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/v1/candidates/candidate-1', expect.objectContaining({ method: 'DELETE' }));
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog', { name: 'Delete candidate permanently' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Delete candidate' }));
+    await user.click(screen.getByRole('button', { name: 'Delete permanently' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/candidates/candidate-1', expect.objectContaining({ method: 'DELETE' })));
   });
 
   it('renders score adjustments safely when the Controller returns a non-string kind', async () => {
@@ -278,7 +339,7 @@ describe('C2Hunter UI', () => {
 
     try {
       renderAt('/candidates/candidate-1');
-      expect(await screen.findByText('7 · Imported adjustment')).toBeInTheDocument();
+      expect(await screen.findByText('점수 조정 · Imported adjustment')).toBeInTheDocument();
     } finally {
       responses['/api/v1/candidates/candidate-1'] = original;
     }
@@ -292,6 +353,25 @@ describe('C2Hunter UI', () => {
           label: { id: 'label-new', verdict: 'C2', confidence: 'HIGH', note: 'Confirmed from malware trace', created_at: '2026-07-20T10:07:00Z' },
           signature: { ...(responses['/api/v1/payload-signatures?page_size=200'] as { items: unknown[] }).items[0] as object },
         }), { status: 201, headers: { 'content-type': 'application/json' } });
+      }
+      if (path === '/api/v1/analysis-jobs/job-1/flows/0123456789abcdef01234567/detection-guidance') {
+        return new Response(JSON.stringify({
+          flow_id: '0123456789abcdef01234567',
+          candidate_ip: '203.0.113.9',
+          initially_detected: false,
+          suppressed_by_policy: false,
+          current_score: 5,
+          minimum_candidate_score: 20,
+          score_gap: 15,
+          conditions: [{ evidence_type: 'PERIODIC_BEACON', detector: 'periodic_beacon', contribution: 15, weighted_contribution: 15, description: '허용 jitter 범위 내 주기 통신', metrics: { sample_count: 5 } }],
+          adjustments: [{ kind: 'SINGLE_HOST', points: -10, explanation: '단일 호스트 관측 감점' }],
+          recommendations: [{ id: 'weight-periodic_beacon-2.00', kind: 'DETECTOR_WEIGHT', detector: 'periodic_beacon', current_value: 1, recommended_value: 2, projected_score: 20, score_gain: 15, rationale: '주기 통신 탐지기 가중치를 2로 조정하면 후보 임계점에 도달합니다.', risk: 'MEDIUM', risk_note: '같은 탐지 조건을 만족하는 정상 통신 점수도 함께 증가합니다.', reanalysis: { minimum_candidate_score: 20, detector_weights: { periodic_beacon: 2 } } }],
+          recommended_reanalysis: { minimum_candidate_score: 20, detector_weights: { periodic_beacon: 2 } },
+          warnings: ['추천값은 동일 데이터셋의 점수 변화만 계산하며 별도 데이터의 오탐률을 예측하지 않습니다.'],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (path === '/api/v1/analysis-jobs/job-1/reanalyze' && init?.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'job-guided', name: 'Guided reanalysis', status: 'COMPLETED' }), { status: 201, headers: { 'content-type': 'application/json' } });
       }
       return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404, headers: { 'content-type': 'application/json' } });
     });
@@ -316,6 +396,23 @@ describe('C2Hunter UI', () => {
       create_signature: true,
       signature_name: 'TCP 203.0.113.9 payload',
       signature_description: 'Confirmed from malware trace',
+    });
+    const guideHeading = await screen.findByRole('heading', { name: '탐지 조정 가이드' });
+    const guide = guideHeading.closest('section');
+    expect(guide).not.toBeNull();
+    expect(within(guide as HTMLElement).getByText('주기적 비콘')).toBeInTheDocument();
+    expect(within(guide as HTMLElement).getByText('현재 5점 · 후보 기준 20점 · 15점 부족')).toBeInTheDocument();
+    expect(within(guide as HTMLElement).getByText('주기 통신 탐지기 가중치를 2로 조정하면 후보 임계점에 도달합니다.')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '추천 설정으로 재분석' }));
+    const reanalysisCall = await waitFor(() => {
+      const found = fetchMock.mock.calls.find(([url, init]) => url === '/api/v1/analysis-jobs/job-1/reanalyze' && init?.method === 'POST' && String(init.body).includes('periodic_beacon'));
+      expect(found).toBeDefined();
+      return found;
+    });
+    expect(JSON.parse(String(reanalysisCall?.[1]?.body))).toEqual({
+      idempotency_key: expect.any(String),
+      minimum_candidate_score: 20,
+      detector_weights: { periodic_beacon: 2 },
     });
   });
 
@@ -427,7 +524,7 @@ describe('C2Hunter UI', () => {
     Object.defineProperty(file, 'size', { value: 500 * 1024 * 1024 });
     await user.type(screen.getByLabelText('Analysis name'), 'Offline case');
     await user.upload(screen.getByLabelText('Capture file'), file);
-    await user.click(screen.getByRole('button', { name: 'Reduce large-service noise' }));
+    await user.click(screen.getByRole('button', { name: '대형 서비스 노이즈 줄이기' }));
     expect(screen.getByRole('status')).toHaveTextContent('500.0 MiB');
     fireEvent.submit(screen.getByRole('button', { name: 'Upload and analyze' }).closest('form')!);
 

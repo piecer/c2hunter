@@ -25,6 +25,7 @@ from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from .config import Settings
+from .detection_guidance import build_detection_guidance
 from .flow_review import (
     filter_flows,
     flow_id,
@@ -1450,6 +1451,38 @@ def create_app(
             }
             signature = repo.save_payload_signature(signature)
         return {"label": label, "signature": signature}
+
+    @app.get("/api/v1/analysis-jobs/{job_id}/flows/{requested_flow_id}/detection-guidance")
+    def get_detection_guidance(job_id: str, requested_flow_id: str) -> dict[str, Any]:
+        job = repo.get_job(job_id)
+        if job is None:
+            raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
+        labels = [
+            label
+            for label in repo.list_flow_labels(job_id)
+            if str(label.get("flow_id")) == requested_flow_id
+        ]
+        latest = max(labels, key=lambda item: str(item.get("created_at", "")), default=None)
+        if latest is None or latest.get("verdict") != "C2":
+            raise ApiError(
+                409,
+                "C2_LABEL_REQUIRED",
+                "최신 수동 판정이 C2인 Flow에서만 탐지 조정 가이드를 만들 수 있습니다",
+            )
+        try:
+            return build_detection_guidance(
+                job,
+                requested_flow_id,
+                allowlist=list(job.get("allowlist", [])),
+            )
+        except LookupError as exc:
+            raise ApiError(404, "FLOW_NOT_FOUND", "분석 작업에서 Flow를 찾을 수 없습니다") from exc
+        except ValueError as exc:
+            raise ApiError(
+                422,
+                "EXTERNAL_ENDPOINT_UNAVAILABLE",
+                "내부·외부 endpoint를 구분할 수 없는 Flow입니다",
+            ) from exc
 
     @app.patch("/api/v1/analysis-jobs/{job_id}")
     def update_analysis_job(job_id: str, payload: AnalysisJobUpdate) -> dict[str, Any]:

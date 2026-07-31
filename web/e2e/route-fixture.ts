@@ -2,12 +2,11 @@ import type { Page, Route } from '@playwright/test';
 
 const sensor = { sensor_id: 'sensor-a', name: 'Sensor A', status: 'ONLINE', last_heartbeat: '2026-07-20T10:00:00Z', interfaces: [{ name: 'eth0', direction: 'INBOUND' }], version: '0.1.0', cpu_percent: 12, memory_percent: 24, disk_percent: 31, received_packets: 123456, dropped_packets: 4 };
 const candidate = { id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.10', score: 87, severity: 'CRITICAL', distinct_internal_hosts: 50, sensor_ids: ['sensor-a', 'sensor-b'], protocols: ['TCP', 'TLS'], ports: [443], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', internal_hosts: ['10.0.0.1', '10.0.0.2'], traffic_series: [2, 4, 3, 12, 8, 20], related_attack_targets: ['198.51.100.20:53/UDP'], evidence: [{ type: 'PERIODIC_BEACON', score: 14, description: '50 hosts contacted the destination at a stable 30 second interval.' }, { type: 'COMMAND_ATTACK_CORRELATION', score: 24, description: 'Outbound traffic increased after synchronized inbound messages.' }] };
-let allowlist: Array<{ id: string; type: string; value: string; description: string }> = [];
-
+const flow = { flow_id: 'e2e-flow', job_id: 'job-1', sensor_id: 'sensor-a', timestamp: '2026-07-20T10:00:00Z', source_ip: '10.0.0.5', destination_ip: '203.0.113.10', source_port: 51000, destination_port: 443, internal_ip: '10.0.0.5', external_ip: '203.0.113.10', service_port: 443, protocol: 'TCP', direction: 'OUTBOUND', packet_count: 5, total_bytes: 512, payload_hash: 'fixture-hash', payload_prefix_hash: 'fixture-prefix', payload_length: 16, has_payload: true, current_label: null };
 async function fulfill(route: Route, body: unknown, status = 200) { await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) }); }
 
 export async function installApiFixture(page: Page) {
-  allowlist = [];
+  let allowlist: Array<{ id: string; type: string; value: string; description: string }> = [];
   await page.route('**/api/v1/**', async route => {
     const request = route.request(); const path = new URL(request.url()).pathname.replace('/api/v1', ''); const method = request.method();
     if (path === '/auth/dev-login' && method === 'POST') return fulfill(route, { access_token: 'deterministic-e2e-token' });
@@ -24,6 +23,9 @@ export async function installApiFixture(page: Page) {
     if (path === '/analysis-jobs/upload-job' && method === 'GET') return fulfill(route, { id: 'upload-job', name: 'Uploaded E2E capture', status: 'COMPLETED', source_type: 'PCAP_UPLOAD', source: { filename: 'fixture.pcap', size_bytes: 4 }, packet_count: 1, flow_count: 1, candidate_count: 0 });
     if (path === '/candidates') return fulfill(route, { items: [candidate] });
     if (path === '/candidates/candidate-1') return fulfill(route, candidate);
+    if (path === '/analysis-jobs/job-1/flows' && method === 'GET') return fulfill(route, { items: [flow], page: 1, page_size: 50, total: 1 });
+    if (path === '/analysis-jobs/job-1/flow-labels' && method === 'POST') return fulfill(route, { label: { id: 'label-e2e', flow_id: flow.flow_id, verdict: 'C2', confidence: 'HIGH', created_at: '2026-07-20T10:06:00Z' }, signature: null }, 201);
+    if (path === '/analysis-jobs/job-1/flows/e2e-flow/detection-guidance' && method === 'GET') return fulfill(route, { flow_id: flow.flow_id, candidate_ip: flow.external_ip, initially_detected: false, suppressed_by_policy: false, current_score: 5, minimum_candidate_score: 20, score_gap: 15, conditions: [{ evidence_type: 'PERIODIC_BEACON', detector: 'periodic_beacon', contribution: 15, weighted_contribution: 15, description: '허용 jitter 범위 내 주기 통신', metrics: { sample_count: 5 } }], adjustments: [{ kind: 'SINGLE_HOST', points: -10, explanation: '단일 호스트 관측 감점' }], recommendations: [{ kind: 'DETECTOR_WEIGHT', detector: 'periodic_beacon', current_value: 1, recommended_value: 2, projected_score: 20, score_gain: 15, rationale: '주기 통신 가중치 조정으로 후보 기준에 도달합니다.', risk: 'MEDIUM', risk_note: '정상 주기 통신 점수도 증가합니다.' }], recommended_reanalysis: { minimum_candidate_score: 20, detector_weights: { periodic_beacon: 2 } }, warnings: ['정상 데이터셋에서 오탐 증가를 검증해야 합니다.'] });
     if (path === '/pcap-exports' && method === 'POST') return fulfill(route, { id: 'export-1', status: 'PENDING' }, 201);
     if (path.endsWith('/reanalyze') && method === 'POST') return fulfill(route, { id: 'job-2', status: 'CREATED' }, 201);
     if (path === '/allowlist' && method === 'GET') return fulfill(route, { items: allowlist });

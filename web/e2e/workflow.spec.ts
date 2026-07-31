@@ -23,14 +23,26 @@ test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', 
   await page.getByRole('link', { name: 'Candidates' }).click();
   await page.getByRole('link', { name: '203.0.113.10' }).click();
   await expect(page.getByRole('img', { name: 'Traffic over time' })).toBeVisible();
-  await expect(page.getByText('PERIODIC_BEACON')).toBeVisible();
+  await expect(page.getByRole('heading', { name: '탐지 근거' })).toBeVisible();
+  await expect(page.getByText('주기적 비콘')).toBeVisible();
+  await page.setViewportSize({ width: 420, height: 900 });
+  const evidenceCard = page.locator('.evidence.detailed').first();
+  await expect(evidenceCard).toBeVisible();
+  expect(await evidenceCard.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.getByRole('button', { name: 'Export candidate PCAP' }).click();
   await expect(page.getByText('PCAP export requested')).toBeVisible();
   await page.getByRole('button', { name: 'Reanalyze' }).click();
   await expect(page.getByText('Reanalysis created')).toBeVisible();
+  await page.getByRole('button', { name: 'Mark C2 e2e-flow' }).click();
+  await page.getByLabel('Analyst note').fill('Manually confirmed C2');
+  await page.getByRole('button', { name: 'Save C2 label' }).click();
+  await expect(page.getByRole('heading', { name: '탐지 조정 가이드' })).toBeVisible();
+  await expect(page.getByText('현재 5점 · 후보 기준 20점 · 15점 부족')).toBeVisible();
+  await expect(page.getByText('주기 통신 가중치 조정으로 후보 기준에 도달합니다.')).toBeVisible();
 
   await page.getByRole('link', { name: 'Allowlist' }).click();
   await page.getByLabel('Value').fill('203.0.113.10');
+  await page.getByLabel('Description').fill('Reviewed trusted infrastructure');
   await page.getByRole('button', { name: 'Add entry' }).click();
   await expect(page.getByText('203.0.113.10')).toBeVisible();
   await page.getByRole('button', { name: 'Delete 203.0.113.10' }).click();
