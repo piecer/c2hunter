@@ -6,6 +6,20 @@ import { describe, expect, it, vi } from 'vitest';
 import App from '../src/App';
 
 const responses: Record<string, unknown> = {
+  '/api/v1/dashboard': {
+    generated_at: '2026-07-20T10:10:00Z',
+    fleet: { total: 3, online: 2, offline: 1, degraded: 0, dropped_packets: 6 },
+    analyses: { total: 4, active: 1, completed_24h: 2, failed_24h: 1, partially_completed_24h: 1, by_status: { WAITING_FOR_SENSOR: 0, CAPTURING: 0, UPLOADING: 0, INGESTING: 0, ANALYZING: 1 } },
+    candidates: { total: 5, critical: 1, high: 1, medium: 2, low: 1, new_24h: 3 },
+    candidate_trend: [{ hour: '07:00', count: 0 }, { hour: '08:00', count: 1 }, { hour: '09:00', count: 0 }, { hour: '10:00', count: 2 }],
+    priority_candidates: [{ id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 91, severity: 'CRITICAL', last_seen: '2026-07-20T10:05:00Z', evidence_count: 2 }],
+    recent_analyses: [{ id: 'job-1', name: 'Investigation', status: 'COMPLETED', created_at: '2026-07-20T10:00:00Z', candidate_count: 2, packet_count: 100, flow_count: 50 }],
+    sensor_quality: [{ sensor_id: 'sensor-b', name: 'Sensor B', status: 'OFFLINE', received_packets: 94, dropped_packets: 6, drop_rate_percent: 6, last_heartbeat_at: '2026-07-20T09:00:00Z', last_error: 'capture stopped' }],
+    attention: [
+      { kind: 'OFFLINE_SENSOR', severity: 'HIGH', title: 'Sensor B 오프라인', detail: '마지막 heartbeat를 확인하세요.', href: '/sensors/sensor-b' },
+      { kind: 'CRITICAL_CANDIDATE', severity: 'CRITICAL', title: '203.0.113.9 조사 필요', detail: '점수 91 · CRITICAL', href: '/candidates/candidate-1' },
+    ],
+  },
   '/api/v1/analysis-jobs': { items: [{ id: 'job-1', name: 'Investigation', description: 'Initial note', status: 'COMPLETED', source_type: 'PCAP_UPLOAD', source: { filename: 'capture.pcap', size_bytes: 2048 }, created_at: '2026-07-20T10:10:00Z', start_time: '2026-07-20T10:00:00Z', end_time: '2026-07-20T10:05:00Z', packet_count: 100, flow_count: 50, candidate_count: 2 }] },
   '/api/v1/sensors': { items: [{ sensor_id: 'sensor-a', name: 'Sensor A', status: 'ONLINE', last_heartbeat: '2026-07-20T10:00:00Z', interfaces: [{ name: 'eth0', direction: 'INBOUND' }], version: '0.1.0', cpu_percent: 10, memory_percent: 20, disk_percent: 30, received_packets: 1000, dropped_packets: 2 }, { sensor_id: 'sensor-b', name: 'Sensor B', status: 'ONLINE', interfaces: [{ name: 'eth1', direction: 'OUTBOUND' }] }] },
   '/api/v1/analysis-jobs/job-1': { id: 'job-1', dataset_id: 'dataset-1', name: 'Investigation', status: 'ANALYZING', sensor_ids: ['sensor-a'], internal_networks: ['10.0.0.0/8'], capture: { max_packets: 2000, directions: ['OUTBOUND'] }, analysis: { profile: 'ddos_botnet', minimum_candidate_score: 60 }, transitions: [{ to_status: 'CREATED', occurred_at: '2026-07-20T10:00:00Z', reason: 'analysis requested' }], packet_count: 100, flow_count: 50, candidate_count: 1 },
@@ -32,11 +46,22 @@ function renderAt(route: string) {
 }
 
 describe('C2Hunter UI', () => {
-  it('shows dashboard operational metrics', async () => {
+  it('shows dashboard priorities, threat posture, and recent activity', async () => {
     renderAt('/');
     expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeInTheDocument();
-    expect(await screen.findByText('Online sensors')).toBeInTheDocument();
-    expect(screen.getAllByText('2', { selector: 'strong' })).toHaveLength(2);
+    expect(await screen.findByText('온라인 센서')).toBeInTheDocument();
+    expect(screen.getByText('High / Critical 후보')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '지금 확인할 항목' })).toBeInTheDocument();
+    const priorityHeading = screen.getByRole('heading', { name: '우선 조사 후보' });
+    expect(priorityHeading).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '최근 분석' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '후보 심각도' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '분석 파이프라인' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '센서 수집 품질' })).toBeInTheDocument();
+    expect(screen.getByText((_, element) => element?.tagName === 'SMALL' && element.textContent?.includes('드롭률 6.00%') === true)).toBeInTheDocument();
+    expect(within(priorityHeading.closest('article') as HTMLElement).getByRole('link', { name: /203\.0\.113\.9/ })).toHaveAttribute('href', '/candidates/candidate-1');
+    expect(screen.getByRole('link', { name: /Investigation/ })).toHaveAttribute('href', '/analyses/job-1');
+    expect(screen.getByText('Sensor B 오프라인')).toBeInTheDocument();
   });
 
   it('shows sensor status and direction with an accessible table', async () => {

@@ -7,6 +7,9 @@ test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', 
   await page.getByLabel('Username').fill('analyst');
   await page.getByRole('button', { name: 'Development login' }).click();
   await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '지금 확인할 항목' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '우선 조사 후보' })).toBeVisible();
+  await expect(page.getByRole('link', { name: /203\.0\.113\.10/ }).first()).toBeVisible();
 
   await page.getByRole('link', { name: 'Sensors', exact: true }).click();
   await page.getByRole('link', { name: 'Sensor A' }).click();

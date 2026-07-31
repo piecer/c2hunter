@@ -185,6 +185,253 @@ def _public_candidate(
     }
 
 
+def _utc_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def _dashboard_snapshot(
+    repo: Repository,
+    now: datetime | None = None,
+    heartbeat_timeout_seconds: int = 30,
+) -> dict[str, Any]:
+    generated_at = (now or datetime.now(UTC)).astimezone(UTC)
+    window_start = generated_at - timedelta(hours=24)
+    sensors = repo.list_sensors()
+    jobs = repo.list_jobs()
+    jobs_by_id = {str(job["id"]): job for job in jobs}
+    candidates = [
+        _public_candidate(candidate, job)
+        for job_id, candidate_set in repo.list_candidate_sets().items()
+        if (job := jobs_by_id.get(job_id)) is not None
+        for candidate in candidate_set
+        if not candidate.get("excluded", False)
+    ]
+
+    active_statuses = {
+        "WAITING_FOR_SENSOR",
+        "CAPTURING",
+        "UPLOADING",
+        "INGESTING",
+        "ANALYZING",
+    }
+    sensor_status_by_id: dict[str, str] = {}
+    for sensor in sensors:
+        status = str(sensor.get("derived_status") or sensor.get("status") or "UNKNOWN").upper()
+        last_heartbeat = _utc_datetime(sensor.get("last_heartbeat_at"))
+        if last_heartbeat is not None and generated_at - last_heartbeat > timedelta(
+            seconds=heartbeat_timeout_seconds
+        ):
+            status = "OFFLINE"
+        sensor_status_by_id[str(sensor["sensor_id"])] = status
+    sensor_statuses = list(sensor_status_by_id.values())
+
+    sensor_quality = []
+    for sensor in sensors:
+        received_packets = int(sensor.get("received_packets", 0) or 0)
+        dropped_packets = int(sensor.get("dropped_packets", 0) or 0)
+        reported_packets = received_packets + dropped_packets
+        sensor_quality.append(
+            {
+                "sensor_id": sensor["sensor_id"],
+                "name": sensor.get("name") or sensor["sensor_id"],
+                "status": sensor_status_by_id[str(sensor["sensor_id"])],
+                "received_packets": received_packets,
+                "dropped_packets": dropped_packets,
+                "drop_rate_percent": round(
+                    dropped_packets / reported_packets * 100 if reported_packets else 0.0,
+                    2,
+                ),
+                "last_heartbeat_at": sensor.get("last_heartbeat_at"),
+                "last_error": sensor.get("last_error"),
+            }
+        )
+    sensor_quality.sort(
+        key=lambda sensor: (
+            {"OFFLINE": 0, "DEGRADED": 1}.get(str(sensor["status"]), 2),
+            -float(sensor["drop_rate_percent"]),
+            str(sensor["name"]),
+        )
+    )
+    severity_counts = {
+        severity: sum(
+            str(candidate.get("severity", "LOW")).upper() == severity for candidate in candidates
+        )
+        for severity in ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+    }
+
+    hour_start = generated_at.replace(minute=0, second=0, microsecond=0)
+    trend_hours = [hour_start - timedelta(hours=offset) for offset in range(23, -1, -1)]
+    trend_counts = {hour: 0 for hour in trend_hours}
+    for candidate in candidates:
+        first_seen = _utc_datetime(candidate.get("first_seen"))
+        if first_seen is None or first_seen < trend_hours[0] or first_seen > generated_at:
+            continue
+        bucket = first_seen.replace(minute=0, second=0, microsecond=0)
+        if bucket in trend_counts:
+            trend_counts[bucket] += 1
+
+    priority_candidates = sorted(
+        (
+            candidate
+            for candidate in candidates
+            if candidate.get("severity") in {"CRITICAL", "HIGH"}
+        ),
+        key=lambda candidate: (
+            0 if candidate.get("severity") == "CRITICAL" else 1,
+            -int(candidate.get("score", 0)),
+            str(candidate.get("last_seen", "")),
+        ),
+    )[:5]
+    recent_analyses = sorted(
+        jobs,
+        key=lambda job: str(job.get("created_at", "")),
+        reverse=True,
+    )[:5]
+
+    sensor_attention: list[dict[str, Any]] = []
+    analysis_attention: list[dict[str, Any]] = []
+    candidate_attention: list[dict[str, Any]] = []
+    for sensor in sensors:
+        status = sensor_status_by_id[str(sensor["sensor_id"])]
+        if status not in {"OFFLINE", "DEGRADED"}:
+            continue
+        status_label = "오프라인" if status == "OFFLINE" else "성능 저하"
+        sensor_attention.append(
+            {
+                "kind": f"{status}_SENSOR",
+                "severity": "HIGH" if status == "OFFLINE" else "MEDIUM",
+                "title": f"{sensor.get('name') or sensor['sensor_id']} {status_label}",
+                "detail": f"마지막 heartbeat: {sensor.get('last_heartbeat_at') or '확인되지 않음'}",
+                "href": f"/sensors/{sensor['sensor_id']}",
+            }
+        )
+    for job in recent_analyses:
+        status = str(job.get("status"))
+        if status not in {"FAILED", "PARTIALLY_COMPLETED"}:
+            continue
+        partial = status == "PARTIALLY_COMPLETED"
+        status_label = "부분 완료" if partial else "분석 실패"
+        analysis_attention.append(
+            {
+                "kind": "PARTIALLY_COMPLETED_ANALYSIS" if partial else "FAILED_ANALYSIS",
+                "severity": "MEDIUM" if partial else "HIGH",
+                "title": f"{job.get('name') or job['id']} {status_label}",
+                "detail": str(job.get("error") or "분석 로그를 확인하세요"),
+                "href": f"/analyses/{job['id']}",
+            }
+        )
+    for candidate in priority_candidates:
+        if candidate.get("severity") != "CRITICAL":
+            continue
+        candidate_attention.append(
+            {
+                "kind": "CRITICAL_CANDIDATE",
+                "severity": "CRITICAL",
+                "title": f"{candidate['candidate_ip']} 조사 필요",
+                "detail": f"점수 {candidate.get('score', 0)} · CRITICAL",
+                "href": f"/candidates/{candidate['id']}",
+            }
+        )
+
+    attention = (
+        sensor_attention[:3]
+        + analysis_attention[:3]
+        + candidate_attention[:2]
+        + sensor_attention[3:]
+        + analysis_attention[3:]
+        + candidate_attention[2:]
+    )[:8]
+
+    return {
+        "generated_at": generated_at.isoformat(),
+        "fleet": {
+            "total": len(sensors),
+            "online": sensor_statuses.count("ONLINE"),
+            "offline": sensor_statuses.count("OFFLINE"),
+            "degraded": sensor_statuses.count("DEGRADED"),
+            "dropped_packets": sum(
+                int(sensor.get("dropped_packets", 0) or 0) for sensor in sensors
+            ),
+        },
+        "analyses": {
+            "total": len(jobs),
+            "active": sum(str(job.get("status")) in active_statuses for job in jobs),
+            "by_status": {
+                status: sum(job.get("status") == status for job in jobs)
+                for status in active_statuses
+            },
+            "completed_24h": sum(
+                job.get("status") == "COMPLETED"
+                and (_utc_datetime(job.get("completed_at")) or datetime.min.replace(tzinfo=UTC))
+                >= window_start
+                for job in jobs
+            ),
+            "failed_24h": sum(
+                job.get("status") == "FAILED"
+                and (_utc_datetime(job.get("completed_at")) or datetime.min.replace(tzinfo=UTC))
+                >= window_start
+                for job in jobs
+            ),
+            "partially_completed_24h": sum(
+                job.get("status") == "PARTIALLY_COMPLETED"
+                and (_utc_datetime(job.get("completed_at")) or datetime.min.replace(tzinfo=UTC))
+                >= window_start
+                for job in jobs
+            ),
+        },
+        "candidates": {
+            "total": len(candidates),
+            "critical": severity_counts["CRITICAL"],
+            "high": severity_counts["HIGH"],
+            "medium": severity_counts["MEDIUM"],
+            "low": severity_counts["LOW"],
+            "new_24h": sum(
+                (_utc_datetime(candidate.get("first_seen")) or datetime.min.replace(tzinfo=UTC))
+                >= window_start
+                for candidate in candidates
+            ),
+        },
+        "candidate_trend": [
+            {"hour": hour.isoformat(), "count": trend_counts[hour]} for hour in trend_hours
+        ],
+        "priority_candidates": [
+            {
+                "id": candidate["id"],
+                "job_id": candidate["job_id"],
+                "candidate_ip": candidate["candidate_ip"],
+                "score": candidate.get("score", 0),
+                "severity": candidate.get("severity", "LOW"),
+                "last_seen": candidate.get("last_seen"),
+                "evidence_count": candidate.get("evidence_count", 0),
+            }
+            for candidate in priority_candidates
+        ],
+        "recent_analyses": [
+            {
+                key: job.get(key)
+                for key in (
+                    "id",
+                    "name",
+                    "status",
+                    "created_at",
+                    "candidate_count",
+                    "packet_count",
+                    "flow_count",
+                )
+            }
+            for job in recent_analyses
+        ],
+        "sensor_quality": sensor_quality,
+        "attention": attention[:8],
+    }
+
+
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
@@ -686,6 +933,13 @@ def create_app(
             [record.model_dump(mode="json") for record in payload.records],
         )
         return {"batch_id": payload.batch_id, "accepted": accepted, "record_count": count}
+
+    @app.get("/api/v1/dashboard")
+    def dashboard() -> dict[str, Any]:
+        return _dashboard_snapshot(
+            repo,
+            heartbeat_timeout_seconds=config.heartbeat_timeout_seconds,
+        )
 
     @app.get("/api/v1/sensors")
     def list_sensors(
