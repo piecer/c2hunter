@@ -76,3 +76,35 @@ test('analyst can manage history and upload an offline PCAP', async ({ page }) =
   await expect(page.getByRole('heading', { name: 'Uploaded E2E capture' })).toBeVisible();
   await expect(page.getByText('PCAP upload')).toBeVisible();
 });
+
+test('analyst can combine multiple flow filters and filter-out patterns', async ({ page }) => {
+  await installApiFixture(page);
+  await page.goto('/login');
+  await page.getByLabel('Username').fill('analyst');
+  await page.getByRole('button', { name: 'Development login' }).click();
+  await page.getByRole('link', { name: 'Analysis history' }).click();
+  await page.getByRole('link', { name: 'E2E investigation' }).click();
+
+  await expect(page.getByText('No filter-out patterns configured')).toBeVisible();
+  await expect(page.getByText('Filters applied')).toBeVisible();
+  await page.getByRole('button', { name: 'Add filter', exact: true }).click();
+  await page.getByLabel('Filter 2 protocol').fill('TCP');
+  await page.getByRole('button', { name: 'Add filter out' }).click();
+  await page.getByRole('button', { name: 'Add filter out' }).click();
+  await page.getByLabel('Filter out 1 endpoint IP or CIDR').fill('203.0.113.10');
+  await page.getByLabel('Filter out 2 endpoint IP or CIDR').fill('198.51.100.20');
+
+  const filteredRequest = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname.endsWith('/analysis-jobs/job-1/flows')
+      && url.searchParams.getAll('include_filter').length === 2
+      && url.searchParams.getAll('exclude_filter').length === 2;
+  });
+  await page.getByRole('button', { name: 'Apply filters' }).click();
+  await filteredRequest;
+  await expect(page.getByText('Filters applied')).toBeVisible();
+
+  await page.setViewportSize({ width: 420, height: 900 });
+  const filterBuilder = page.locator('.flow-filter-builder');
+  expect(await filterBuilder.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+});

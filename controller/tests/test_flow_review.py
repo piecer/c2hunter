@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 from c2hunter_controller.app import create_app
@@ -59,6 +61,21 @@ def test_filter_flows_excludes_only_records_matching_all_conditions() -> None:
     ]
 
 
+def test_filter_flows_combines_multiple_include_and_exclude_groups() -> None:
+    result = filter_flows(
+        _job(),
+        include_filters=[
+            {"candidate_ip": "203.0.113.10", "destination_port": 80},
+            {"candidate_ip": "198.51.100.20", "destination_port": 443},
+        ],
+        exclude_filters=[{"candidate_ip": "198.51.100.20"}],
+    )
+
+    assert [(flow["destination_ip"], flow["destination_port"]) for flow in result] == [
+        ("203.0.113.10", 80)
+    ]
+
+
 def test_filter_flows_rejects_exclusion_without_active_conditions() -> None:
     calls = (
         lambda: filter_flows(_job(), exclude_matches=True),
@@ -97,3 +114,35 @@ def test_flow_api_exposes_exclusion_mode_and_requires_a_condition() -> None:
     )
     assert invalid.status_code == 422
     assert invalid.json()["error"]["code"] == "INVALID_FLOW_EXCLUSION"
+
+
+def test_flow_api_accepts_repeated_include_and_exclude_filters() -> None:
+    repository = MemoryRepository()
+    repository.save_job(_job())
+    client = TestClient(create_app(Settings(environment="test"), repository))
+
+    response = client.get(
+        "/api/v1/analysis-jobs/job-flow-filter/flows",
+        params=[
+            ("include_filter", json.dumps({"protocol": "TCP"})),
+            ("exclude_filter", json.dumps({"candidate_ip": "203.0.113.10"})),
+            ("exclude_filter", json.dumps({"candidate_ip": "198.51.100.20"})),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 0
+
+
+def test_flow_api_rejects_empty_structured_filter_group() -> None:
+    repository = MemoryRepository()
+    repository.save_job(_job())
+    client = TestClient(create_app(Settings(environment="test"), repository))
+
+    response = client.get(
+        "/api/v1/analysis-jobs/job-flow-filter/flows",
+        params={"exclude_filter": json.dumps({"candidate_ip": ""})},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INVALID_ENDPOINT_FILTER"

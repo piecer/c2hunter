@@ -483,37 +483,59 @@ function CandidateDetail() {
   }}</AsyncState>;
 }
 
+type FlowFilterDraft = { candidateIp: string; direction: string; protocol: string; port: string; sourcePort: string; destinationPort: string; payloadOnly: boolean };
+type FlowFilterSet = { include: FlowFilterDraft[]; exclude: FlowFilterDraft[] };
+
+const newFlowFilter = (payloadOnly = false): FlowFilterDraft => ({ candidateIp: '', direction: '', protocol: '', port: '', sourcePort: '', destinationPort: '', payloadOnly });
+const defaultFlowFilters = (): FlowFilterSet => ({ include: [newFlowFilter(true)], exclude: [] });
+
+function serializedFlowFilter(filter: FlowFilterDraft) {
+  return Object.fromEntries(Object.entries({ candidate_ip: filter.candidateIp.trim(), direction: filter.direction, protocol: filter.protocol.trim(), port: filter.port ? Number(filter.port) : undefined, source_port: filter.sourcePort ? Number(filter.sourcePort) : undefined, destination_port: filter.destinationPort ? Number(filter.destinationPort) : undefined, has_payload: filter.payloadOnly || undefined }).filter(([, value]) => value !== '' && value !== undefined));
+}
+
+function flowFilterTokens(filter: FlowFilterDraft) {
+  return [
+    filter.candidateIp.trim(),
+    filter.direction,
+    filter.protocol.trim().toUpperCase(),
+    filter.port && `Service :${filter.port}`,
+    filter.sourcePort && `Source :${filter.sourcePort}`,
+    filter.destinationPort && `Destination :${filter.destinationPort}`,
+    filter.payloadOnly && 'Has payload',
+  ].filter(Boolean) as string[];
+}
+
+function FlowFilterGroup({ kind, index, filter, onChange, onRemove }: { kind: 'Filter' | 'Filter out'; index: number; filter: FlowFilterDraft; onChange: (filter: FlowFilterDraft) => void; onRemove: () => void }) {
+  const prefix = `${kind} ${index + 1}`;
+  const tokens = flowFilterTokens(filter);
+  return <fieldset className={`flow-filter-group ${kind === 'Filter out' ? 'exclude' : 'include'}`}><legend className="sr-only">{prefix}</legend><div className="flow-filter-card-heading"><div className="flow-filter-card-title"><span>{kind === 'Filter out' ? 'EXCLUDE' : 'INCLUDE'}</span><strong>{String(index + 1).padStart(2, '0')}</strong></div><div className="flow-filter-tokens" aria-label={`${prefix} summary`}>{tokens.length ? tokens.map(token => <span key={token}>{token}</span>) : <span className="empty">No conditions yet</span>}</div><button type="button" className="flow-filter-remove" aria-label={`Remove ${prefix}`} title={`Remove ${prefix}`} onClick={onRemove}>×</button></div><div className="flow-filter-primary"><label><span>Endpoint IP / CIDR</span><input aria-label={`${prefix} endpoint IP or CIDR`} value={filter.candidateIp} onChange={event => onChange({ ...filter, candidateIp: event.target.value })} placeholder="203.0.113.10 or /24" /></label><label><span>Protocol</span><input aria-label={`${prefix} protocol`} value={filter.protocol} onChange={event => onChange({ ...filter, protocol: event.target.value })} placeholder="TCP, UDP…" /></label><label><span>Service port</span><input aria-label={`${prefix} external service port`} value={filter.port} onChange={event => onChange({ ...filter, port: event.target.value })} type="number" min="0" max="65535" placeholder="Any" /></label><label className="flow-filter-toggle"><input aria-label={`${prefix} payload only`} type="checkbox" checked={filter.payloadOnly} onChange={event => onChange({ ...filter, payloadOnly: event.target.checked })} /><span>Has payload</span></label></div><details className="flow-filter-advanced"><summary><span>Advanced conditions</span><small>Direction · Source port · Destination port</small></summary><div><label><span>Direction</span><select aria-label={`${prefix} direction`} value={filter.direction} onChange={event => onChange({ ...filter, direction: event.target.value })}><option value="">Any direction</option>{directions.map(direction => <option key={direction}>{direction}</option>)}</select></label><label><span>Source port</span><input aria-label={`${prefix} source port`} value={filter.sourcePort} onChange={event => onChange({ ...filter, sourcePort: event.target.value })} type="number" min="0" max="65535" placeholder="Any" /></label><label><span>Destination port</span><input aria-label={`${prefix} destination port`} value={filter.destinationPort} onChange={event => onChange({ ...filter, destinationPort: event.target.value })} type="number" min="0" max="65535" placeholder="Any" /></label></div></details></fieldset>;
+}
+
 function JobFlowReviewPanel({ jobId }: { jobId: string }) {
-  const defaults = { candidateIp: '', direction: '', protocol: '', port: '', sourcePort: '', destinationPort: '', payloadOnly: true, excludeMatches: false };
-  const [draft, setDraft] = useState(defaults);
-  const [filters, setFilters] = useState(defaults);
+  const [draft, setDraft] = useState<FlowFilterSet>(defaultFlowFilters);
+  const [filters, setFilters] = useState<FlowFilterSet>(defaultFlowFilters);
   const [page, setPage] = useState(1);
   const query = useQuery<Page<FlowRecordReview>, Error>({
     queryKey: ['job-flows', jobId, filters, page],
     queryFn: () => {
       const parameters = new URLSearchParams({ page: String(page), page_size: '50' });
-      if (filters.candidateIp) parameters.set('candidate_ip', filters.candidateIp);
-      if (filters.direction) parameters.set('direction', filters.direction);
-      if (filters.protocol) parameters.set('protocol', filters.protocol);
-      if (filters.port) parameters.set('port', filters.port);
-      if (filters.sourcePort) parameters.set('source_port', filters.sourcePort);
-      if (filters.destinationPort) parameters.set('destination_port', filters.destinationPort);
-      if (filters.payloadOnly) parameters.set('has_payload', 'true');
-      if (filters.excludeMatches) parameters.set('exclude_matches', 'true');
+      filters.include.map(serializedFlowFilter).filter(filter => Object.keys(filter).length).forEach(filter => parameters.append('include_filter', JSON.stringify(filter)));
+      filters.exclude.map(serializedFlowFilter).filter(filter => Object.keys(filter).length).forEach(filter => parameters.append('exclude_filter', JSON.stringify(filter)));
       return api.get(`/analysis-jobs/${jobId}/flows?${parameters.toString()}`);
     },
   });
   const applyFilters = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setPage(1);
-    setFilters({ ...draft });
+    setFilters({ include: draft.include.map(filter => ({ ...filter })), exclude: draft.exclude.map(filter => ({ ...filter })) });
   };
   const resetFilters = () => {
-    setDraft(defaults);
-    setFilters(defaults);
+    setDraft(defaultFlowFilters());
+    setFilters(defaultFlowFilters());
     setPage(1);
   };
-  return <section className="panel compact"><h2>All analysis flows</h2><p className="muted">Browse and label a flow even when no detector promoted its external IP to a candidate. Payload-bearing flows are shown by default. Exclusion mode removes flows that match every configured condition.</p><form className="flow-filters" onSubmit={applyFilters}><label>Endpoint IP or CIDR<input value={draft.candidateIp} onChange={event => setDraft({ ...draft, candidateIp: event.target.value })} placeholder="IP or CIDR, internal or external" /></label><label>Direction<select value={draft.direction} onChange={event => setDraft({ ...draft, direction: event.target.value })}><option value="">Any</option>{directions.map(direction => <option key={direction}>{direction}</option>)}</select></label><label>Protocol<input value={draft.protocol} onChange={event => setDraft({ ...draft, protocol: event.target.value })} placeholder="TCP or UDP" /></label><label>External service port<input value={draft.port} onChange={event => setDraft({ ...draft, port: event.target.value })} type="number" min="0" max="65535" /></label><label>Source port<input value={draft.sourcePort} onChange={event => setDraft({ ...draft, sourcePort: event.target.value })} type="number" min="0" max="65535" /></label><label>Destination port<input value={draft.destinationPort} onChange={event => setDraft({ ...draft, destinationPort: event.target.value })} type="number" min="0" max="65535" /></label><label className="check"><input type="checkbox" checked={draft.payloadOnly} onChange={event => setDraft({ ...draft, payloadOnly: event.target.checked })} />Payload only</label><label className="check"><input type="checkbox" checked={draft.excludeMatches} onChange={event => setDraft({ ...draft, excludeMatches: event.target.checked })} />Filter out matching flows</label><button>Apply filters</button><button type="button" className="secondary" onClick={resetFilters}>Reset</button></form><AsyncState query={query} empty={data => items(data).length === 0}>{data => <><div className="table-wrap"><table aria-label="Analysis flows"><thead><tr><th>Observed</th><th>Direction</th><th>Endpoints</th><th>Protocol</th><th>Volume</th><th>Payload features</th><th>Current label</th><th>Review</th></tr></thead><tbody>{items(data).map(flow => <FlowReviewRow key={flow.flow_id} flow={flow} />)}</tbody></table></div><FlowPagination data={data} page={page} onPage={setPage}/></>}</AsyncState></section>;
+  const filtersDirty = JSON.stringify(draft) !== JSON.stringify(filters);
+  return <section className="panel compact"><h2>All analysis flows</h2><p className="muted">Build a focused review queue, then remove known noise. Conditions inside each group are combined.</p><form className="flow-filter-builder" onSubmit={applyFilters}><section className="flow-filter-section include"><div className="flow-filter-heading"><div><span className="flow-filter-eyebrow">MATCH ANY GROUP</span><h3>Include flows</h3><p className="muted">Narrow the review queue to relevant traffic.</p></div><button type="button" className="flow-filter-add" aria-label="Add filter" onClick={() => setDraft(current => ({ ...current, include: [...current.include, newFlowFilter()] }))}><span>+</span> Add group</button></div>{draft.include.map((filter, index) => <FlowFilterGroup key={`include-${index}`} kind="Filter" index={index} filter={filter} onChange={updated => setDraft(current => ({ ...current, include: current.include.map((item, itemIndex) => itemIndex === index ? updated : item) }))} onRemove={() => setDraft(current => ({ ...current, include: current.include.filter((_, itemIndex) => itemIndex !== index) }))} />)}{draft.include.length === 0 && <div className="flow-filter-empty"><strong>No include filters</strong><span>All flows will be considered before exclusions.</span></div>}</section><section className="flow-filter-section exclude"><div className="flow-filter-heading"><div><span className="flow-filter-eyebrow">REMOVE ANY MATCH</span><h3>Filter out patterns</h3><p className="muted">Hide known noise, infrastructure, or reviewed traffic.</p></div><button type="button" className="flow-filter-add exclude" aria-label="Add filter out" onClick={() => setDraft(current => ({ ...current, exclude: [...current.exclude, newFlowFilter()] }))}><span>+</span> Add pattern</button></div>{draft.exclude.map((filter, index) => <FlowFilterGroup key={`exclude-${index}`} kind="Filter out" index={index} filter={filter} onChange={updated => setDraft(current => ({ ...current, exclude: current.exclude.map((item, itemIndex) => itemIndex === index ? updated : item) }))} onRemove={() => setDraft(current => ({ ...current, exclude: current.exclude.filter((_, itemIndex) => itemIndex !== index) }))} />)}{draft.exclude.length === 0 && <div className="flow-filter-empty exclude"><strong>No filter-out patterns configured</strong><span>Add trusted IPs, CIDRs, or protocol patterns to remove noise.</span></div>}</section><div className="flow-filter-toolbar"><div><span className={`flow-filter-state ${filtersDirty ? 'dirty' : ''}`}>{filtersDirty ? 'Unapplied changes' : 'Filters applied'}</span><small>{draft.include.length} include · {draft.exclude.length} exclude groups</small></div><div className="actions"><button type="button" className="secondary" onClick={resetFilters}>Reset</button><button disabled={!filtersDirty}>Apply filters</button></div></div></form><AsyncState query={query} empty={data => items(data).length === 0}>{data => <><div className="table-wrap"><table aria-label="Analysis flows"><thead><tr><th>Observed</th><th>Direction</th><th>Endpoints</th><th>Protocol</th><th>Volume</th><th>Payload features</th><th>Current label</th><th>Review</th></tr></thead><tbody>{items(data).map(flow => <FlowReviewRow key={flow.flow_id} flow={flow} />)}</tbody></table></div><FlowPagination data={data} page={page} onPage={setPage}/></>}</AsyncState></section>;
 }
 
 function FlowPagination({ data, page, onPage }: { data: Page<FlowRecordReview>; page: number; onPage: (page: number) => void }) {

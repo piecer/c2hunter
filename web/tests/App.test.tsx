@@ -31,7 +31,7 @@ const responses: Record<string, unknown> = {
   '/api/v1/payload-signatures?page_size=200': { items: [{ id: 'signature-1', name: 'TCP beacon payload', description: 'Confirmed implant beacon', version: 1, enabled: true, source_job_id: 'job-1', source_flow_id: '0123456789abcdef01234567', source_label_id: 'label-1', protocol: 'TCP', direction: 'OUTBOUND', service_port: 443, payload_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_prefix_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_length: 6, payload_entropy: 2.585, payload_printable_ratio: 1, payload_simhash: 'e627bf19152d67b3', payload_feature_version: '1', length_tolerance_ratio: 0.15, entropy_tolerance: 0.75, simhash_max_distance: 8, created_by: 'analyst', created_at: '2026-07-20T10:06:00Z', updated_at: '2026-07-20T10:06:00Z' }] },
   '/api/v1/allowlist': { items: [] },
 };
-responses['/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&has_payload=true'] =
+responses['/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&include_filter=%7B%22has_payload%22%3Atrue%7D'] =
   responses['/api/v1/analysis-jobs/job-1/flows?candidate_ip=203.0.113.9&page=1&page_size=50'];
 responses['/api/v1/candidates?page=1&page_size=50&minimum_score=0&sort=-score'] =
   responses['/api/v1/candidates'];
@@ -182,7 +182,7 @@ describe('C2Hunter UI', () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
       if (path.includes('/flows?')) {
-        return new Response(JSON.stringify(responses['/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&has_payload=true']), { status: 200, headers: { 'content-type': 'application/json' } });
+        return new Response(JSON.stringify(responses['/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&include_filter=%7B%22has_payload%22%3Atrue%7D']), { status: 200, headers: { 'content-type': 'application/json' } });
       }
       return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404, headers: { 'content-type': 'application/json' } });
     });
@@ -191,15 +191,19 @@ describe('C2Hunter UI', () => {
     const user = userEvent.setup();
 
     expect(await screen.findByRole('table', { name: 'Analysis flows' })).toBeInTheDocument();
-    await user.type(screen.getByLabelText('Endpoint IP or CIDR'), '198.51.100.0/24');
-    await user.type(screen.getByLabelText('External service port'), '443');
-    await user.type(screen.getByLabelText('Source port'), '51000');
-    await user.type(screen.getByLabelText('Destination port'), '443');
-    await user.click(screen.getByLabelText('Filter out matching flows'));
+    expect(screen.getByText('No filter-out patterns configured')).toBeInTheDocument();
+    expect(screen.getByText('Filters applied')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Add filter out' }));
+    expect(screen.getByText('Unapplied changes')).toBeInTheDocument();
+    expect(screen.getAllByText('Advanced conditions')).toHaveLength(2);
+    await user.type(screen.getByLabelText('Filter out 1 endpoint IP or CIDR'), '198.51.100.0/24');
+    await user.type(screen.getByLabelText('Filter out 1 external service port'), '443');
+    await user.type(screen.getByLabelText('Filter out 1 source port'), '51000');
+    await user.type(screen.getByLabelText('Filter out 1 destination port'), '443');
     await user.click(screen.getByRole('button', { name: 'Apply filters' }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
-      '/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&candidate_ip=198.51.100.0%2F24&port=443&source_port=51000&destination_port=443&has_payload=true&exclude_matches=true',
+      '/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&include_filter=%7B%22has_payload%22%3Atrue%7D&exclude_filter=%7B%22candidate_ip%22%3A%22198.51.100.0%2F24%22%2C%22port%22%3A443%2C%22source_port%22%3A51000%2C%22destination_port%22%3A443%7D',
       expect.any(Object),
     ));
   });

@@ -118,11 +118,12 @@ def filter_flows(
     destination_port: int | None = None,
     has_payload: bool | None = None,
     exclude_matches: bool = False,
+    include_filters: list[dict[str, Any]] | None = None,
+    exclude_filters: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     candidate_ip = candidate_ip.strip() if candidate_ip and candidate_ip.strip() else None
     direction = direction.strip() if direction and direction.strip() else None
     protocol = protocol.strip() if protocol and protocol.strip() else None
-    endpoint_network = ip_network(candidate_ip, strict=False) if candidate_ip else None
     if exclude_matches and all(
         value is None
         for value in (
@@ -136,6 +137,22 @@ def filter_flows(
         )
     ):
         raise ValueError("at least one exclusion condition is required")
+    legacy_filter = {
+        "candidate_ip": candidate_ip,
+        "direction": direction,
+        "protocol": protocol,
+        "port": port,
+        "source_port": source_port,
+        "destination_port": destination_port,
+        "has_payload": has_payload,
+    }
+    legacy_filter = {key: value for key, value in legacy_filter.items() if value is not None}
+    normalized_includes = [_normalize_filter(item) for item in include_filters or []]
+    normalized_excludes = [_normalize_filter(item) for item in exclude_filters or []]
+    if legacy_filter:
+        (normalized_excludes if exclude_matches else normalized_includes).append(
+            _normalize_filter(legacy_filter)
+        )
     latest_labels: dict[str, dict[str, Any]] = {}
     if labels is None:
         labels = []
@@ -151,21 +168,63 @@ def filter_flows(
             list(job["internal_networks"]),
             latest_labels.get(identifier),
         )
-        matches = _matches_filter(
-            decorated,
-            endpoint_network=endpoint_network,
-            direction=direction,
-            protocol=protocol,
-            port=port,
-            source_port=source_port,
-            destination_port=destination_port,
-            has_payload=has_payload,
+        include_match = not normalized_includes or any(
+            _matches_filter(decorated, **flow_filter) for flow_filter in normalized_includes
         )
-        if (exclude_matches and matches) or (not exclude_matches and not matches):
+        exclude_match = any(
+            _matches_filter(decorated, **flow_filter) for flow_filter in normalized_excludes
+        )
+        if not include_match or exclude_match:
             continue
         result.append(decorated)
     result.sort(key=lambda item: (str(item.get("timestamp", "")), item["flow_id"]))
     return result
+
+
+def _normalize_filter(flow_filter: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "candidate_ip",
+        "direction",
+        "protocol",
+        "port",
+        "source_port",
+        "destination_port",
+        "has_payload",
+    }
+    if not flow_filter or set(flow_filter) - allowed:
+        raise ValueError("flow filter must contain supported conditions")
+    candidate_ip = str(flow_filter.get("candidate_ip", "")).strip() or None
+    direction = str(flow_filter.get("direction", "")).strip() or None
+    protocol = str(flow_filter.get("protocol", "")).strip() or None
+    ports = {key: flow_filter.get(key) for key in ("port", "source_port", "destination_port")}
+    if direction and direction.upper() not in {
+        "INBOUND",
+        "OUTBOUND",
+        "BIDIRECTIONAL",
+        "UNKNOWN",
+    }:
+        raise ValueError("unsupported flow direction")
+    if protocol and len(protocol) > 32:
+        raise ValueError("flow protocol is too long")
+    if any(
+        value is not None
+        and (not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 65535)
+        for value in ports.values()
+    ):
+        raise ValueError("flow port must be between 0 and 65535")
+    has_payload = flow_filter.get("has_payload")
+    if has_payload is not None and not isinstance(has_payload, bool):
+        raise ValueError("has_payload must be boolean")
+    normalized = {
+        "endpoint_network": ip_network(candidate_ip, strict=False) if candidate_ip else None,
+        "direction": direction,
+        "protocol": protocol,
+        **ports,
+        "has_payload": has_payload,
+    }
+    if all(value is None for value in normalized.values()):
+        raise ValueError("flow filter must contain an active condition")
+    return normalized
 
 
 def _matches_filter(

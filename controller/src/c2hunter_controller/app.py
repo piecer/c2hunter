@@ -7,7 +7,7 @@ import secrets
 import threading
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 from c2hunter_analysis.domain import AllowlistEntry
 from c2hunter_analysis.pcap import PcapParseError, find_pcap_record, parse_pcap
@@ -1491,6 +1491,8 @@ def create_app(
         destination_port: int | None = Query(default=None, ge=0, le=65535),
         has_payload: bool | None = None,
         exclude_matches: bool = False,
+        include_filter: Annotated[list[str] | None, Query(max_length=512)] = None,
+        exclude_filter: Annotated[list[str] | None, Query(max_length=512)] = None,
     ) -> dict[str, Any]:
         job = repo.get_job(job_id)
         if job is None:
@@ -1507,8 +1509,10 @@ def create_app(
                 destination_port=destination_port,
                 has_payload=has_payload,
                 exclude_matches=exclude_matches,
+                include_filters=[json.loads(value) for value in include_filter or []],
+                exclude_filters=[json.loads(value) for value in exclude_filter or []],
             )
-        except ValueError as exc:
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
             if exclude_matches and "exclusion condition" in str(exc):
                 raise ApiError(
                     422,
