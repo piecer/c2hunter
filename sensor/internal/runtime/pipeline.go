@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"c2hunter/sensor/internal/batch"
@@ -65,6 +66,8 @@ type Pipeline struct {
 	cfg      PipelineConfig
 	mu       sync.RWMutex
 	snapshot CaptureSnapshot
+	// cachedDrop holds the latest dropped-packet count from periodic refresh.
+	cachedDrop atomic.Uint64
 }
 
 type packetEvent struct {
@@ -117,6 +120,25 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	defer cancelReader()
 	events := make(chan packetEvent, p.cfg.PacketQueueSize)
 	go p.readPackets(readerCtx, reader, events)
+
+	// Periodic socket-stats snapshot (1 s interval). This removes per-packet
+	// syscall overhead from the hot path; DroppedPackets is updated here and
+	// read atomically by both main loop and decode-error handler.
+	statsDone := make(chan struct{})
+	go func() {
+		tick := time.NewTicker(1 * time.Second)
+		defer tick.Stop()
+		defer close(statsDone)
+		for {
+			select {
+			case <-readerCtx.Done():
+				p.cachedDrop.Store(snapshotDroppedPackets(reader))
+				return
+			case <-tick.C:
+				p.cachedDrop.Store(snapshotDroppedPackets(reader))
+			}
+		}
+	}()
 
 	aggregator := flow.NewAggregatorWithPayloadPreview(p.cfg.SensorID, p.cfg.JobID, p.cfg.IdleTimeout, p.cfg.PayloadPreviewBytes)
 	queue := batch.NewQueue[flow.Record](p.cfg.BatchMaxItems, p.cfg.BatchMaxBytes, recordSize)
@@ -194,13 +216,10 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			}
 			capturedPackets++
 			capturedBytes += uint64(pkt.WireLength)
-			sourceDrops := droppedPackets(reader)
 			p.update(func(s *CaptureSnapshot) {
 				s.ReceivedPackets++
-				s.DroppedPackets = sourceDrops + s.DecodeErrors
 				if len(s.Interfaces) > 0 {
 					s.Interfaces[0].ReceivedPackets++
-					s.Interfaces[0].DroppedPackets = s.DroppedPackets
 				}
 			})
 			if p.cfg.Limits.MaxPackets > 0 && capturedPackets >= p.cfg.Limits.MaxPackets {
@@ -220,13 +239,10 @@ func (p *Pipeline) readPackets(ctx context.Context, reader capture.Reader, event
 			continue
 		}
 		if errors.Is(err, capture.ErrMalformedPacket) {
-			sourceDrops := droppedPackets(reader)
 			p.update(func(s *CaptureSnapshot) {
 				s.DecodeErrors++
-				s.DroppedPackets = sourceDrops + s.DecodeErrors
 				if len(s.Interfaces) > 0 {
 					s.Interfaces[0].DecodeErrors++
-					s.Interfaces[0].DroppedPackets = s.DroppedPackets
 				}
 			})
 			continue
@@ -244,6 +260,16 @@ func (p *Pipeline) readPackets(ctx context.Context, reader capture.Reader, event
 			return
 		}
 	}
+}
+
+// snapshotDroppedPackets queries the reader once for the current cumulative
+// dropped-packet count. It is called from a dedicated 1 s goroutine, not from
+// the per-packet hot path.
+func snapshotDroppedPackets(reader capture.Reader) uint64 {
+	if counter, ok := reader.(capture.DropCounter); ok {
+		return counter.DroppedPackets()
+	}
+	return 0
 }
 
 func droppedPackets(reader capture.Reader) uint64 {
@@ -357,6 +383,14 @@ func (p *Pipeline) refreshSpoolMetrics() {
 		s.PendingBytes = bytes
 		s.LostBatches = loss.Batches
 		s.LostBytes = loss.Bytes
+	})
+	// Update DroppedPackets from latest periodic snapshot + decode errors.
+	srcDrops := p.cachedDrop.Load()
+	p.update(func(s *CaptureSnapshot) {
+		s.DroppedPackets = srcDrops + s.DecodeErrors
+		if len(s.Interfaces) > 0 {
+			s.Interfaces[0].DroppedPackets = s.DroppedPackets
+		}
 	})
 }
 

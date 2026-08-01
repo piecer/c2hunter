@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/afpacket"
+	"golang.org/x/net/bpf"
 )
 
 type AFPacketOpener struct{ PollTimeout time.Duration }
@@ -44,4 +45,13 @@ func (s *afPacketSource) DroppedPackets() uint64 {
 		return 0
 	}
 	return uint64(stats.Drops()) + uint64(statsV3.Drops())
+}
+
+// SetBPF pushes a classic BPF program into the kernel via SO_ATTACH_FILTER.
+func (s *afPacketSource) SetBPF(filter []bpf.Instruction) error {
+	prog, err := bpf.Assemble(filter)
+	if err != nil {
+		return fmt.Errorf("assemble BPF: %w", err)
+	}
+	return s.handle.SetBPF(prog)
 }

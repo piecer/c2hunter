@@ -9,6 +9,7 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcapgo"
+	"golang.org/x/net/bpf"
 
 	"c2hunter/sensor/internal/direction"
 	"c2hunter/sensor/internal/packet"
@@ -47,6 +48,9 @@ type RawSource interface {
 	ReadPacketData() ([]byte, gopacket.CaptureInfo, error)
 	Close() error
 }
+
+// BPFSetter is implemented by raw sources that allow kernel-level BPF pushdown.
+type BPFSetter interface{ SetBPF([]bpf.Instruction) error }
 type DropCounter interface{ DroppedPackets() uint64 }
 type rawDropCounter interface{ DroppedPackets() uint64 }
 type LiveOpener interface {
@@ -68,6 +72,26 @@ func NewLiveReader(iface string, opener LiveOpener, classifier directionClassifi
 		return nil, fmt.Errorf("open AF_PACKET on %s: %w", iface, err)
 	}
 	return &LiveReader{source: source, iface: iface, classifier: classifier, decoder: newPacketDecoder()}, nil
+}
+
+// NewLiveReaderWithSource creates a LiveReader backed by an existing RawSource.
+// Useful for testing and when the caller owns the socket lifecycle.
+func NewLiveReaderWithSource(iface string, source RawSource, classifier directionClassifier) (*LiveReader, error) {
+	if source == nil {
+		return nil, fmt.Errorf("raw source is required")
+	}
+	return &LiveReader{source: source, iface: iface, classifier: classifier, decoder: newPacketDecoder()}, nil
+}
+
+// SetKernelBPF pushes a compiled classic BPF program down to the kernel via
+// SO_ATTACH_FILTER. When the underlying RawSource does not implement BPFSetter,
+// the call is a no-op (no error) so that offline / mock sources remain compatible.
+func (r *LiveReader) SetKernelBPF(filter []bpf.Instruction) error {
+	if setter, ok := r.source.(BPFSetter); ok {
+		return setter.SetBPF(filter)
+	}
+	// Graceful fallback: user-space BPF or packet.Filter still applies later.
+	return nil
 }
 func (r *LiveReader) Next(ctx context.Context) (packet.Packet, error) {
 	if err := ctx.Err(); err != nil {

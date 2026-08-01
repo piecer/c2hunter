@@ -50,7 +50,10 @@ func Open(dir string, limits Limits, now func() time.Time) (*Spool, error) {
 	data, err := os.ReadFile(filepath.Join(dir, ".loss.json"))
 	if err == nil {
 		if err := json.Unmarshal(data, &s.loss); err != nil {
-			return nil, fmt.Errorf("load loss report: %w", err)
+			// Loss report corrupted (e.g. crash during write). Quarantine and reset instead of bailing out.
+			corruptName := fmt.Sprintf(".loss.json.corrupt.%d", now().UnixNano())
+			_ = os.Rename(filepath.Join(dir, ".loss.json"), filepath.Join(dir, corruptName)) // nolint:errcheck
+			s.loss = LossReport{}
 		}
 	} else if !os.IsNotExist(err) {
 		return nil, err
@@ -141,12 +144,19 @@ func (s *Spool) load() ([]Batch, error) {
 		id := entry.Name()[:len(entry.Name())-5]
 		b, err := s.read(id)
 		if err != nil {
-			return nil, err
+			// Quarantine corrupt batch file so other batches can still be loaded.
+			s.quarantineCorrupt(id)
+			continue
 		}
 		out = append(out, b)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out, nil
+}
+func (s *Spool) quarantineCorrupt(id string) {
+	corruptName := fmt.Sprintf("%s.corrupt.%d", id, s.now().UnixNano())
+	_ = os.Rename(s.path(id), filepath.Join(s.dir, corruptName)) // nolint:errcheck
+	s.loss.Batches++
 }
 func (s *Spool) enforce() error {
 	batches, err := s.load()
@@ -206,5 +216,27 @@ func (s *Spool) persistLoss() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(s.dir, ".loss.json"), data, 0600)
+	// Atomic write: tmp file → chmod → sync → close → rename.
+	tmp, err := os.CreateTemp(s.dir, ".loss-")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, filepath.Join(s.dir, ".loss.json"))
 }
