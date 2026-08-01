@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
-from c2hunter_analysis.detectors import run_detectors
+from c2hunter_analysis.custom import (
+    DetectorRegistryCache,
+    normalize_custom_detector_directory,
+)
+from c2hunter_analysis.detectors import DEFAULT_DETECTORS, run_detectors
 from c2hunter_analysis.domain import AllowlistEntry, AnalysisContext, Flow
 from c2hunter_analysis.scoring import score_candidates
 
@@ -27,6 +32,9 @@ class JobState(StrEnum):
 
 
 TERMINAL = {JobState.COMPLETED, JobState.PARTIALLY_COMPLETED, JobState.FAILED, JobState.CANCELLED}
+
+
+_DETECTOR_REGISTRY = DetectorRegistryCache(DEFAULT_DETECTORS)
 
 
 def summarize_candidate_traffic(
@@ -234,7 +242,9 @@ def evaluate_candidates(
         tuple(job["internal_networks"]),
         parameters=parameters,
     )
-    evidence = run_detectors(context)
+    configured_directory = os.getenv("C2HUNTER_CUSTOM_DETECTORS_DIR")
+    detector_directory = normalize_custom_detector_directory(configured_directory)
+    evidence = run_detectors(context, detectors=_DETECTOR_REGISTRY.get(detector_directory))
     scored = score_candidates(
         evidence,
         allowlist=entries,

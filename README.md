@@ -11,7 +11,7 @@ Browser --> React UI ------------------------------------------------|  |-------
                                                                     +--Redis--> Analysis worker
 ```
 
-The control plane, flow store, object store, and queue are intentionally separate. Flow/packet tooling processes bounded chunks. See [architecture](docs/architecture.md), [data model](docs/data-model.md), and [detection logic](docs/detection-logic.md).
+The control plane, flow store, object store, and queue are intentionally separate. Flow/packet tooling processes bounded chunks. See [architecture](docs/architecture.md), [data model](docs/data-model.md), [detection logic](docs/detection-logic.md), and [custom detectors](docs/custom-detectors.md).
 
 ## Requirements
 

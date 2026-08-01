@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import os
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
-from c2hunter_analysis.detectors import run_detectors
+from c2hunter_analysis.custom import (
+    DetectorRegistryCache,
+    normalize_custom_detector_directory,
+)
+from c2hunter_analysis.detectors import DEFAULT_DETECTORS, run_detectors
 from c2hunter_analysis.domain import AllowlistEntry, AnalysisContext, Flow
 from c2hunter_analysis.scoring import score_candidates
+
+
+_DETECTOR_REGISTRY = DetectorRegistryCache(DEFAULT_DETECTORS)
 
 
 def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
@@ -25,7 +33,9 @@ def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
 
     analysis = dict(payload.get("analysis", {}))
     analysis["payload_signatures"] = list(payload.get("payload_signatures", ()))
-    allowlist = [AllowlistEntry.from_mapping(stored) for stored in payload.get("allowlist", [])]
+    allowlist = [
+        AllowlistEntry.from_mapping(stored) for stored in payload.get("allowlist", [])
+    ]
     now = datetime.now(UTC)
     analysis["trusted_dns_servers"] = [
         entry.value
@@ -46,7 +56,11 @@ def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
         internal_cidrs=tuple(payload.get("internal_networks", ())),
         parameters=analysis,
     )
-    evidence = run_detectors(context)
+    configured_directory = os.getenv("C2HUNTER_CUSTOM_DETECTORS_DIR")
+    detector_directory = normalize_custom_detector_directory(configured_directory)
+    evidence = run_detectors(
+        context, detectors=_DETECTOR_REGISTRY.get(detector_directory)
+    )
     candidates = score_candidates(
         evidence,
         allowlist=allowlist,

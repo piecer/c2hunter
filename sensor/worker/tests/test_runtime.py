@@ -25,6 +25,67 @@ def test_execute_analysis_runs_real_detector_pipeline() -> None:
     assert result == {"candidates": []}
 
 
+def test_execute_analysis_loads_operator_configured_custom_detectors(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    plugin_directory = tmp_path / "detectors"
+    plugin_directory.mkdir()
+    (plugin_directory / "operator_rule.py").write_text(
+        "from c2hunter_analysis.domain import Evidence\n"
+        "DETECTOR_NAME = 'operator-rule'\n"
+        "DETECTOR_VERSION = '2.0.0'\n"
+        "def analyze(context):\n"
+        "    return [Evidence('203.0.113.77', 'COMMON_DESTINATION', 'ignored', '0', "
+        "5, 5, 'operator rule match')]\n"
+    )
+    monkeypatch.setenv("C2HUNTER_CUSTOM_DETECTORS_DIR", str(plugin_directory))
+
+    result = execute_analysis(
+        {
+            "dataset_id": "dataset-custom",
+            "start_time": "2026-01-01T00:00:00+00:00",
+            "end_time": "2026-01-01T01:00:00+00:00",
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "analysis": {"periodicity_min_samples": 3, "minimum_candidate_score": 0},
+            "flow_records": [],
+        }
+    )
+
+    assert result["candidates"][0]["candidate_ip"] == "203.0.113.77"
+    finding = result["candidates"][0]["evidence"][0]
+    assert finding["detector"] == "operator-rule"
+    assert finding["version"] == "2.0.0"
+
+
+def test_execute_analysis_treats_whitespace_detector_directory_as_unset(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    (tmp_path / "cwd_rule.py").write_text(
+        "from c2hunter_analysis.domain import Evidence\n"
+        "DETECTOR_NAME = 'cwd-worker-rule'\n"
+        "def analyze(context):\n"
+        "    return [Evidence('203.0.113.78', 'COMMON_DESTINATION', 'ignored', '0', "
+        "5, 5, 'must not load')]\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("C2HUNTER_CUSTOM_DETECTORS_DIR", " \t ")
+
+    result = execute_analysis(
+        {
+            "dataset_id": "dataset-whitespace-worker",
+            "start_time": "2026-01-01T00:00:00+00:00",
+            "end_time": "2026-01-01T01:00:00+00:00",
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "analysis": {"periodicity_min_samples": 3, "minimum_candidate_score": 0},
+            "flow_records": [],
+        }
+    )
+
+    assert result == {"candidates": []}
+
+
 def test_execute_analysis_suppresses_allowlisted_candidate() -> None:
     flows = [
         {
