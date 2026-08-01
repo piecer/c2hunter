@@ -99,6 +99,33 @@ const MetricValue = ({ name, value }: { name: string; value: unknown }) =>
   typeof value === 'object' && value !== null
     ? <StructuredValue value={value} field={name}/>
     : <>{localizedMetricValue(value)}</>;
+
+const isCompactEvidenceMetric = (value: unknown) => {
+  if (value === null || typeof value !== 'object') return true;
+  return Array.isArray(value)
+    && value.length <= 3
+    && value.every(item => item === null || typeof item !== 'object');
+};
+
+function EvidenceMetric({ name, value }: { name: string; value: unknown }) {
+  return <span title={name}><b>{metricLabel(name)}</b><span className="metric-output"><MetricValue name={name} value={value}/></span></span>;
+}
+
+function EvidenceMetrics({ metrics }: { metrics: Record<string, unknown> }) {
+  const entries = Object.entries(metrics);
+  const summary = entries.filter(([, value]) => isCompactEvidenceMetric(value)).slice(0, 4);
+  const summaryKeys = new Set(summary.map(([name]) => name));
+  const details = entries.filter(([name]) => !summaryKeys.has(name));
+  return <div className="evidence-metrics">
+    {summary.map(([name, value]) => <EvidenceMetric key={name} name={name} value={value}/>) }
+    {details.length > 0 && <details className="evidence-metric-details">
+      <summary>상세 지표 {details.length}개 더 보기</summary>
+      <div className="evidence-metrics evidence-metrics-expanded">
+        {details.map(([name, value]) => <EvidenceMetric key={name} name={name} value={value}/>) }
+      </div>
+    </details>}
+  </div>;
+}
 const defaultDetectorWeights = Object.fromEntries(detectorDefinitions.map(([name]) => [name, 1])) as DetectorWeights;
 const serviceNoiseDetectorWeights = {
   ...defaultDetectorWeights,
@@ -491,7 +518,7 @@ function CandidateDetail() {
       <section className="metrics compact"><article><strong>{hosts.length || candidate.distinct_internal_hosts || 0}</strong><span>내부 호스트</span></article><article><strong>{sensors.length}</strong><span>센서</span></article><article><strong>{(candidate.flow_count ?? 0).toLocaleString()}</strong><span>흐름</span></article><article><strong>{(candidate.packet_count ?? 0).toLocaleString()}</strong><span>패킷</span></article><article><strong>{formatBytes(candidate.byte_count)}</strong><span>통신량</span></article><article><strong>{evidence.length}</strong><span>탐지 신호</span></article></section>
       <div className="grid compact"><section className="panel"><h2>Traffic over time</h2>{traffic.length ? <MiniChart values={traffic} label="Traffic over time" /> : <p className="muted">No traffic series was retained for this candidate.</p>}{buckets.length > 0 && <div className="table-wrap"><table aria-label="Candidate traffic buckets"><thead><tr><th>Bucket start</th><th>Flows</th><th>Packets</th><th>Bytes</th></tr></thead><tbody>{buckets.map(bucket => <tr key={bucket.start}><td>{fmt(bucket.start)}</td><td>{bucket.flows}</td><td>{bucket.packets}</td><td>{formatBytes(bucket.bytes)}</td></tr>)}</tbody></table></div>}</section><section className="panel"><h2>Network context</h2><dl><dt>Protocols</dt><dd>{formatValue(protocols)}</dd><dt>Service ports</dt><dd>{formatValue(ports)}</dd><dt>Domains</dt><dd>{formatValue(domains)}</dd><dt>First observed</dt><dd>{fmt(candidate.first_seen)}</dd><dt>Last observed</dt><dd>{fmt(candidate.last_seen)}</dd><dt>Internal hosts</dt><dd>{formatValue(hosts)}</dd><dt>Sensors</dt><dd>{formatValue(sensors)}</dd><dt>Related attack targets</dt><dd>{formatValue(candidate.related_attack_targets)}</dd></dl></section></div>
       <FlowReviewPanel candidate={candidate} />
-      <section className="panel compact detection-evidence"><h2>탐지 근거</h2>{evidence.length ? evidence.map((item, index) => <article className="evidence detailed" key={`${item.detector ?? item.type}-${index}`}><div className="evidence-heading"><strong title={item.type}>{evidenceLabel(item.type)}</strong><small title={item.detector}>{detectorLabel(item.detector)}{item.version ? ` · v${item.version}` : ''}</small></div><span className="evidence-score">+{formatValue(item.contribution ?? item.score ?? item.raw_score ?? 0)}</span><p>{item.description ?? '기록된 탐지 근거 설명이 없습니다.'}</p><dl><dt>원시 점수</dt><dd>{formatValue(item.raw_score)}</dd><dt>신뢰도</dt><dd>{item.confidence === undefined ? '기록 없음' : `${Math.round(item.confidence * 100)}%`}</dd><dt>관측 시각</dt><dd>{fmt(item.first_seen)} – {fmt(item.last_seen)}</dd><dt>호스트</dt><dd>{formatValue(item.hosts)}</dd><dt>센서</dt><dd>{formatValue(item.sensors)}</dd></dl>{item.metrics && Object.keys(item.metrics).length > 0 && <div className="evidence-metrics">{Object.entries(item.metrics).map(([key, value]) => <span key={key} title={key}><b>{metricLabel(key)}</b><span className="metric-output"><MetricValue name={key} value={value}/></span></span>)}</div>}{strings(item.warnings).map(warning => <p className="warning" key={warning}>{warning}</p>)}</article>) : <p className="muted">기록된 탐지 근거가 없습니다.</p>}</section>
+      <section className="panel compact detection-evidence"><h2>탐지 근거</h2>{evidence.length ? evidence.map((item, index) => <article className="evidence detailed" key={`${item.detector ?? item.type}-${index}`}><div className="evidence-heading"><strong title={item.type}>{evidenceLabel(item.type)}</strong><small title={item.detector}>{detectorLabel(item.detector)}{item.version ? ` · v${item.version}` : ''}</small></div><span className="evidence-score">+{formatValue(item.contribution ?? item.score ?? item.raw_score ?? 0)}</span><p>{item.description ?? '기록된 탐지 근거 설명이 없습니다.'}</p><dl><dt>원시 점수</dt><dd>{formatValue(item.raw_score)}</dd><dt>신뢰도</dt><dd>{item.confidence === undefined ? '기록 없음' : `${Math.round(item.confidence * 100)}%`}</dd><dt>관측 시각</dt><dd>{fmt(item.first_seen)} – {fmt(item.last_seen)}</dd><dt>호스트</dt><dd>{formatValue(item.hosts)}</dd><dt>센서</dt><dd>{formatValue(item.sensors)}</dd></dl>{item.metrics && Object.keys(item.metrics).length > 0 && <EvidenceMetrics metrics={item.metrics}/>} {strings(item.warnings).map(warning => <p className="warning" key={warning}>{warning}</p>)}</article>) : <p className="muted">기록된 탐지 근거가 없습니다.</p>}</section>
       <section className="panel compact"><h2>점수 조정</h2>{adjustments.length ? <ul className="adjustments">{adjustments.map((adjustment, index) => <li key={`${adjustment.kind}-${index}`}><strong className={adjustment.points < 0 ? 'critical' : 'low'}>{adjustment.points > 0 ? '+' : ''}{adjustment.points}</strong><span title={String(adjustment.kind)}>{adjustmentLabel(adjustment.kind)} · {adjustment.explanation}</span></li>)}</ul> : <p className="muted">적용된 점수 조정이 없습니다.</p>}<div className="actions">
         <button disabled={!candidate.job_id || exportPcap.isPending} onClick={() => exportPcap.mutate()}>{exportPcap.isPending ? 'Requesting export…' : 'Export candidate PCAP'}</button>
         <button className="secondary" disabled={!candidate.job_id || reanalyze.isPending} onClick={() => reanalyze.mutate()}>{reanalyze.isPending ? 'Creating reanalysis…' : 'Reanalyze'}</button>

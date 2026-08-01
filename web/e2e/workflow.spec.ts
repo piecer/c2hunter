@@ -28,6 +28,15 @@ test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', 
   await expect(page.getByRole('img', { name: 'Traffic over time' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '탐지 근거' })).toBeVisible();
   await expect(page.getByText('주기적 비콘')).toBeVisible();
+  const metricDisclosure = page.locator('.evidence-metric-details').first();
+  await expect(metricDisclosure).not.toHaveAttribute('open', '');
+  await expect(page.getByText('Timing Window')).not.toBeVisible();
+  await metricDisclosure.locator('summary').click();
+  await expect(metricDisclosure).toHaveAttribute('open', '');
+  await expect(page.getByText('Timing Window')).toBeVisible();
+  const nestedScalar = metricDisclosure.locator('.structured-fields dd > span').first();
+  await expect(nestedScalar).toBeVisible();
+  expect(await nestedScalar.evaluate(element => getComputedStyle(element).display)).not.toBe('grid');
   await page.setViewportSize({ width: 420, height: 900 });
   const evidenceCard = page.locator('.evidence.detailed').first();
   await expect(evidenceCard).toBeVisible();

@@ -406,7 +406,7 @@ describe('C2Hunter UI', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/candidates/candidate-1', expect.objectContaining({ method: 'DELETE' })));
   });
 
-  it('renders nested detector metrics as structured fields instead of inline JSON', async () => {
+  it('summarizes long detector metrics and reveals structured details on demand', async () => {
     const original = responses['/api/v1/candidates/candidate-1'] as Record<string, unknown>;
     responses['/api/v1/candidates/candidate-1'] = {
       ...original,
@@ -415,14 +415,29 @@ describe('C2Hunter UI', () => {
         detector: 'periodic_beacon',
         contribution: 15,
         description: 'Nested metric fixture',
-        metrics: { sample_count: 7, timing_window: { minimum_seconds: 25, maximum_seconds: 35 }, phases: ['warmup', 'steady_state'] },
+        metrics: {
+          sample_count: 7,
+          period_seconds: 30,
+          jitter_ratio: 0.12,
+          confidence_score: 0.91,
+          timing_window: { minimum_seconds: 25, maximum_seconds: 35 },
+          phases: ['warmup', 'steady_state', 'confirmation', 'retained'],
+        },
       }],
     };
 
     try {
       renderAt('/candidates/candidate-1');
       await screen.findByRole('heading', { name: '탐지 근거' });
-      expect(screen.getByText('Timing Window')).toBeInTheDocument();
+      expect(screen.getByTitle('sample_count')).toBeVisible();
+      const disclosureLabel = screen.getByText('상세 지표 2개 더 보기');
+      const disclosure = disclosureLabel.closest('details');
+      expect(disclosure).not.toHaveAttribute('open');
+      expect(screen.getByText('Timing Window')).not.toBeVisible();
+
+      await userEvent.click(disclosureLabel);
+      expect(disclosure).toHaveAttribute('open');
+      expect(screen.getByText('Timing Window')).toBeVisible();
       expect(screen.getByText('Minimum Seconds')).toBeInTheDocument();
       expect(screen.getByText('25초')).toBeInTheDocument();
       expect(screen.getByText('Warmup')).toBeInTheDocument();
