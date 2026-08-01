@@ -19,11 +19,36 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return body as T;
 }
 
+async function download(path: string, fallbackFilename: string): Promise<void> {
+  const token = localStorage.getItem('c2hunter-token');
+  const headers: Record<string, string> = { accept: 'application/vnd.tcpdump.pcap' };
+  if (token) headers.authorization = `Bearer ${token}`;
+  const response = await fetch(`/api/v1${path}`, { headers });
+  if (!response.ok) {
+    const body = await response.clone().json().catch(() => undefined);
+    const envelope = body?.error ?? body;
+    throw new ApiError(envelope?.message ?? `Request failed (${response.status})`, response.status, envelope?.code, envelope?.details);
+  }
+  const disposition = response.headers.get('content-disposition') ?? '';
+  const match = disposition.match(/filename="([A-Za-z0-9._-]+)"/);
+  const filename = match?.[1] ?? fallbackFilename;
+  const objectUrl = URL.createObjectURL(await response.blob());
+  try {
+    const anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = filename;
+    anchor.click();
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body?: unknown) => request<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) }),
   put: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PUT', body: body === undefined ? undefined : JSON.stringify(body) }),
   patch: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PATCH', body: body === undefined ? undefined : JSON.stringify(body) }),
   upload: <T>(path: string, body: Blob, contentType = 'application/octet-stream') => request<T>(path, { method: 'POST', body, headers: { 'content-type': contentType } }),
+  download,
   delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
 };

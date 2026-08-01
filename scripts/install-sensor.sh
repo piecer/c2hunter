@@ -29,7 +29,7 @@ if ! id c2hunter-sensor >/dev/null 2>&1; then
   useradd --system --gid c2hunter-sensor --home-dir /var/lib/c2hunter-sensor --shell /usr/sbin/nologin c2hunter-sensor
 fi
 install -d -m 0750 -o root -g c2hunter-sensor /etc/c2hunter-sensor
-install -d -m 0700 -o c2hunter-sensor -g c2hunter-sensor /var/lib/c2hunter-sensor/state /var/lib/c2hunter-sensor/spool
+install -d -m 0700 -o c2hunter-sensor -g c2hunter-sensor /var/lib/c2hunter-sensor/state /var/lib/c2hunter-sensor/spool /var/lib/c2hunter-sensor/pcap
 install -m 0755 -o root -g root "$BINARY" /usr/local/bin/c2hunter-sensor
 install -m 0640 -o root -g c2hunter-sensor "$SCRIPT_DIR/config.yaml" /etc/c2hunter-sensor/config.yaml
 install -m 0640 -o root -g c2hunter-sensor "$SCRIPT_DIR/environment" /etc/c2hunter-sensor/environment

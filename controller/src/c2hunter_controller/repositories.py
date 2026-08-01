@@ -57,6 +57,9 @@ class Repository(Protocol):
     def set_default_detector_weight_preset(self, preset_id: str) -> dict[str, Any] | None: ...
     def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any]: ...
     def get_export(self, export_id: str) -> tuple[dict[str, Any], bytes] | None: ...
+    def save_sensor_pcap(self, segment: dict[str, Any], content: bytes) -> dict[str, Any]: ...
+    def get_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], bytes] | None: ...
+    def list_sensor_pcaps(self) -> list[dict[str, Any]]: ...
     def create_enrollment(self, enrollment: dict[str, Any]) -> dict[str, Any]: ...
     def get_enrollment(self, enrollment_id: str) -> dict[str, Any] | None: ...
     def list_enrollments(self) -> list[dict[str, Any]]: ...
@@ -85,6 +88,8 @@ class MemoryRepository:
         self.detector_weight_presets: dict[str, dict[str, Any]] = {}
         self.exports: dict[str, dict[str, Any]] = {}
         self.export_content: dict[str, bytes] = {}
+        self.sensor_pcaps: dict[str, dict[str, Any]] = {}
+        self.sensor_pcap_content: dict[str, bytes] = {}
         self.enrollments: dict[str, dict[str, Any]] = {}
         self.sensor_credentials: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
@@ -317,6 +322,20 @@ class MemoryRepository:
             return None
         return deepcopy(self.exports[export_id]), bytes(self.export_content[export_id])
 
+    def save_sensor_pcap(self, segment: dict[str, Any], content: bytes) -> dict[str, Any]:
+        with self._lock:
+            self.sensor_pcaps[segment["id"]] = deepcopy(segment)
+            self.sensor_pcap_content[segment["id"]] = bytes(content)
+            return deepcopy(segment)
+
+    def get_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], bytes] | None:
+        if segment_id not in self.sensor_pcaps:
+            return None
+        return deepcopy(self.sensor_pcaps[segment_id]), bytes(self.sensor_pcap_content[segment_id])
+
+    def list_sensor_pcaps(self) -> list[dict[str, Any]]:
+        return deepcopy(list(self.sensor_pcaps.values()))
+
     def create_enrollment(self, enrollment: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             self.enrollments[enrollment["enrollment_id"]] = deepcopy(enrollment)
@@ -453,6 +472,9 @@ class SQLiteRepository:
             );
             CREATE TABLE IF NOT EXISTS export_blobs (
               export_id TEXT PRIMARY KEY, content BLOB NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sensor_pcap_blobs (
+              segment_id TEXT PRIMARY KEY, content BLOB NOT NULL
             );
         """)
         self._migrate_embedded_job_flows()
@@ -804,6 +826,27 @@ class SQLiteRepository:
             "SELECT content FROM export_blobs WHERE export_id=?", (export_id,)
         ).fetchone()
         return (metadata, bytes(row[0])) if metadata is not None and row else None
+
+    def save_sensor_pcap(self, segment: dict[str, Any], content: bytes) -> dict[str, Any]:
+        with self._lock:
+            self._put("sensor_pcap", segment["id"], segment)
+            self.connection.execute(
+                "INSERT INTO sensor_pcap_blobs(segment_id,content) VALUES(?,?) "
+                "ON CONFLICT(segment_id) DO UPDATE SET content=excluded.content",
+                (segment["id"], content),
+            )
+            self.connection.commit()
+            return deepcopy(segment)
+
+    def get_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], bytes] | None:
+        metadata = self._get("sensor_pcap", segment_id)
+        row = self.connection.execute(
+            "SELECT content FROM sensor_pcap_blobs WHERE segment_id=?", (segment_id,)
+        ).fetchone()
+        return (metadata, bytes(row[0])) if metadata is not None and row else None
+
+    def list_sensor_pcaps(self) -> list[dict[str, Any]]:
+        return self._list("sensor_pcap")
 
     def create_enrollment(self, enrollment: dict[str, Any]) -> dict[str, Any]:
         return self._put("enrollment", enrollment["enrollment_id"], enrollment)

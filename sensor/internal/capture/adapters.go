@@ -43,11 +43,16 @@ func (r *OfflineReader) Next(ctx context.Context) (packet.Packet, error) {
 	return r.decoder.Decode(data, info, r.iface, r.classifier)
 }
 func (*OfflineReader) Close() error { return nil }
+func (r *OfflineReader) SetRetainRawFrame(enabled bool) {
+	r.decoder.retainRawFrame = enabled
+}
 
 type RawSource interface {
 	ReadPacketData() ([]byte, gopacket.CaptureInfo, error)
 	Close() error
 }
+
+type RawFrameRetainer interface{ SetRetainRawFrame(bool) }
 
 // BPFSetter is implemented by raw sources that allow kernel-level BPF pushdown.
 type BPFSetter interface{ SetBPF([]bpf.Instruction) error }
@@ -104,6 +109,9 @@ func (r *LiveReader) Next(ctx context.Context) (packet.Packet, error) {
 	return r.decoder.Decode(data, info, r.iface, r.classifier)
 }
 func (r *LiveReader) Close() error { return r.source.Close() }
+func (r *LiveReader) SetRetainRawFrame(enabled bool) {
+	r.decoder.retainRawFrame = enabled
+}
 func (r *LiveReader) DroppedPackets() uint64 {
 	if source, ok := r.source.(rawDropCounter); ok {
 		return source.DroppedPackets()
@@ -112,17 +120,18 @@ func (r *LiveReader) DroppedPackets() uint64 {
 }
 
 type packetDecoder struct {
-	ethernet     layers.Ethernet
-	vlan         layers.Dot1Q
-	ip4          layers.IPv4
-	ip6          layers.IPv6
-	ip6Extension layers.IPv6ExtensionSkipper
-	tcp          layers.TCP
-	udp          layers.UDP
-	icmp4        layers.ICMPv4
-	icmp6        layers.ICMPv6
-	parser       *gopacket.DecodingLayerParser
-	decoded      []gopacket.LayerType
+	ethernet       layers.Ethernet
+	vlan           layers.Dot1Q
+	ip4            layers.IPv4
+	ip6            layers.IPv6
+	ip6Extension   layers.IPv6ExtensionSkipper
+	tcp            layers.TCP
+	udp            layers.UDP
+	icmp4          layers.ICMPv4
+	icmp6          layers.ICMPv6
+	parser         *gopacket.DecodingLayerParser
+	decoded        []gopacket.LayerType
+	retainRawFrame bool
 }
 
 func newPacketDecoder() *packetDecoder {
@@ -154,6 +163,9 @@ func (d *packetDecoder) Decode(data []byte, info gopacket.CaptureInfo, iface str
 		return packet.Packet{}, fmt.Errorf("%w: captured frame is truncated", ErrMalformedPacket)
 	}
 	p := packet.Packet{Timestamp: info.Timestamp, CapturedLength: info.CaptureLength, WireLength: info.Length, Interface: iface}
+	if d.retainRawFrame {
+		p.RawFrame = data
+	}
 	if decodedLayer(d.decoded, layers.LayerTypeDot1Q) {
 		// The reusable decoder contains the innermost tag after QinQ. Decode
 		// once from Ethernet payload to preserve the previous outer-VLAN

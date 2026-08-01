@@ -81,7 +81,10 @@ func New(cfg Config, transport Transport) (*Runner, error) {
 func (r *Runner) Run(ctx context.Context) error {
 	defer r.transport.Close()
 	if r.cfg.Capture != nil {
+		captureDone := make(chan struct{})
+		defer func() { <-captureDone }()
 		go func() {
+			defer close(captureDone)
 			if err := r.cfg.Capture.Run(ctx); err != nil {
 				snapshot := r.cfg.Capture.Snapshot()
 				message := snapshot.LastError
@@ -139,14 +142,15 @@ func (r *Runner) runHeartbeats(ctx context.Context) bool {
 				lastError = health.LastError
 			}
 			heartbeat := telemetry.Heartbeat{
-				SensorID:        r.cfg.Registration.SensorID,
-				Status:          telemetryStatus(status),
-				CurrentTime:     time.Now().UTC(),
-				LastError:       lastError,
-				ActiveJobs:      snapshot.ActiveJobs,
-				ReceivedPackets: snapshot.ReceivedPackets,
-				DroppedPackets:  snapshot.DroppedPackets,
-				PendingBytes:    snapshot.PendingBytes,
+				SensorID:           r.cfg.Registration.SensorID,
+				Status:             telemetryStatus(status),
+				CurrentTime:        time.Now().UTC(),
+				LastError:          lastError,
+				ActiveJobs:         snapshot.ActiveJobs,
+				ReceivedPackets:    snapshot.ReceivedPackets,
+				DroppedPackets:     snapshot.DroppedPackets,
+				PendingBytes:       snapshot.PendingBytes,
+				PCAPDroppedPackets: snapshot.PCAPDroppedPackets,
 			}
 			if r.cfg.DiscoverInterfaces != nil {
 				discovered, err := r.cfg.DiscoverInterfaces()

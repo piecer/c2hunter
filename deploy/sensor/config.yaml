@@ -5,8 +5,11 @@ sensor:
 agent:
   # Prefer C2HUNTER_ENROLLMENT_TOKEN in /etc/c2hunter-sensor/environment.
   state_file: /var/lib/c2hunter-sensor/state/agent.json
-  config_poll_interval_seconds: 30
+  config_poll_interval_seconds: 1
 capture_sources: []
+# Raw packets are persisted only while a LIVE analysis with Store PCAP enabled is active.
+# Finalized segments are linked to that analysis, uploaded through the authenticated
+# controller connection, and appear in the Web UI under Sensor PCAPs.
 internal_networks: []
 batch:
   max_items: 1000
@@ -21,3 +24,9 @@ spool:
   directory: /var/lib/c2hunter-sensor/spool
   max_bytes: 1073741824
   max_age_seconds: 86400
+pcap:
+  directory: /var/lib/c2hunter-sensor/pcap
+  max_segment_bytes: 134217728
+  max_segment_duration_seconds: 300
+  max_disk_bytes: 1073741824
+  queue_size: 4096

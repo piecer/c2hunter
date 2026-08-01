@@ -14,6 +14,17 @@ type CaptureGroup struct {
 	errors  []string
 }
 
+type backgroundCaptureRuntime interface{ backgroundRuntime() }
+type trailingBackgroundCaptureRuntime interface{ trailingBackgroundRuntime() }
+
+type captureRuntimeKind uint8
+
+const (
+	foregroundRuntime captureRuntimeKind = iota
+	backgroundRuntime
+	trailingBackgroundRuntime
+)
+
 func NewCaptureGroup(members []CaptureRuntime) (*CaptureGroup, error) {
 	if len(members) == 0 {
 		return nil, fmt.Errorf("at least one capture runtime is required")
@@ -27,15 +38,52 @@ func NewCaptureGroup(members []CaptureRuntime) (*CaptureGroup, error) {
 }
 
 func (g *CaptureGroup) Run(ctx context.Context) error {
-	results := make(chan error, len(g.members))
+	foregroundCtx, cancelForeground := context.WithCancel(ctx)
+	backgroundCtx, cancelBackground := context.WithCancel(context.Background())
+	trailingCtx, cancelTrailing := context.WithCancel(context.Background())
+	defer cancelForeground()
+	defer cancelBackground()
+	defer cancelTrailing()
+	type result struct {
+		err  error
+		kind captureRuntimeKind
+	}
+	results := make(chan result, len(g.members))
+	remaining := map[captureRuntimeKind]int{}
 	for _, member := range g.members {
-		go func(runtime CaptureRuntime) { results <- runtime.Run(ctx) }(member)
+		kind := foregroundRuntime
+		memberCtx := foregroundCtx
+		if _, trailing := member.(trailingBackgroundCaptureRuntime); trailing {
+			kind = trailingBackgroundRuntime
+			memberCtx = trailingCtx
+		} else if _, background := member.(backgroundCaptureRuntime); background {
+			kind = backgroundRuntime
+			memberCtx = backgroundCtx
+		}
+		remaining[kind]++
+		go func(runtime CaptureRuntime, runtimeCtx context.Context, runtimeKind captureRuntimeKind) {
+			results <- result{err: runtime.Run(runtimeCtx), kind: runtimeKind}
+		}(member, memberCtx, kind)
 	}
 	var failures []error
-	for range g.members {
-		if err := <-results; err != nil && !errors.Is(err, context.Canceled) {
-			failures = append(failures, err)
+	record := func(result result) {
+		remaining[result.kind]--
+		if result.err != nil && !errors.Is(result.err, context.Canceled) {
+			failures = append(failures, result.err)
+			cancelForeground()
+			cancelBackground()
 		}
+	}
+	for remaining[foregroundRuntime] > 0 {
+		record(<-results)
+	}
+	cancelBackground()
+	for remaining[backgroundRuntime] > 0 {
+		record(<-results)
+	}
+	cancelTrailing()
+	for remaining[trailingBackgroundRuntime] > 0 {
+		record(<-results)
 	}
 	g.mu.Lock()
 	g.errors = g.errors[:0]
@@ -55,6 +103,7 @@ func (g *CaptureGroup) Snapshot() CaptureSnapshot {
 		out.ReceivedPackets += snapshot.ReceivedPackets
 		out.DroppedPackets += snapshot.DroppedPackets
 		out.DecodeErrors += snapshot.DecodeErrors
+		out.PCAPDroppedPackets += snapshot.PCAPDroppedPackets
 		if snapshot.PendingBytes > out.PendingBytes {
 			out.PendingBytes = snapshot.PendingBytes
 		}

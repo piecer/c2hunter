@@ -23,6 +23,7 @@ type TCPFlags struct{ FIN, SYN, RST, PSH, ACK, URG, ECE, CWR bool }
 type Packet struct {
 	Timestamp                   time.Time
 	CapturedLength, WireLength  int
+	RawFrame                    []byte
 	Interface                   string
 	VLAN                        uint16
 	Direction                   direction.Direction

@@ -71,6 +71,7 @@ type Heartbeat struct {
 	MemoryBytes, DiskUsedBytes                    uint64
 	ActiveJobs                                    []string
 	ReceivedPackets, DroppedPackets, PendingBytes uint64
+	PCAPDroppedPackets                            uint64
 	LastError                                     string
 	Interfaces                                    []InterfaceStatus
 	DiscoveredInterfaces                          []Interface

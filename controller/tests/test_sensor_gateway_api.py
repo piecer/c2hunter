@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
@@ -74,6 +75,20 @@ def test_enrollment_returns_secret_once_and_persists_only_hash() -> None:
     assert listed["items"][0]["status"] == "PENDING"
     api.post(f"/api/v1/sensor-enrollments/{body['enrollment_token']}/claim", json={})
     assert body["enrollment_token"] not in api.get("/api/v1/metrics").text
+
+
+def test_claim_preserves_per_interface_pcap_selection() -> None:
+    api, _ = api_and_repo()
+    payload = enrollment_payload()
+    payload["capture_sources"][0]["store_pcap"] = True
+    created = api.post("/api/v1/sensor-enrollments", json=payload)
+    assert created.status_code == 201
+    claimed = api.post(
+        f"/api/v1/sensor-enrollments/{created.json()['enrollment_token']}/claim",
+        json=claim_payload(),
+    )
+    assert claimed.status_code == 201
+    assert claimed.json()["capture_sources"][0]["store_pcap"] is True
 
 
 @pytest.mark.parametrize(
@@ -264,7 +279,13 @@ def test_configuration_crud_uses_optimistic_version_and_agent_sees_update() -> N
         json={
             "config_version": 1,
             "capture_sources": [
-                {"interface": "eth0", "direction": "INBOUND", "bpf_filter": "udp", "enabled": True}
+                {
+                    "interface": "eth0",
+                    "direction": "INBOUND",
+                    "bpf_filter": "udp",
+                    "enabled": True,
+                    "store_pcap": True,
+                }
             ],
             "internal_networks": ["192.0.2.17/24"],
         },
@@ -272,15 +293,21 @@ def test_configuration_crud_uses_optimistic_version_and_agent_sees_update() -> N
     assert updated.status_code == 200
     assert updated.json()["config_version"] == 2
     assert updated.json()["internal_networks"] == ["192.0.2.0/24"]
+    assert updated.json()["capture_sources"][0]["store_pcap"] is True
 
     stale = api.put(
         f"/api/v1/sensors/{sensor_id}/configuration",
-        json={**updated.json(), "config_version": 1},
+        json={
+            "config_version": 1,
+            "capture_sources": updated.json()["capture_sources"],
+            "internal_networks": updated.json()["internal_networks"],
+        },
     )
     assert stale.status_code == 409
     assert stale.json()["error"]["code"] == "CONFIG_VERSION_CONFLICT"
     polled = api.get(f"/api/v1/sensors/{sensor_id}/agent-config", headers={"X-Sensor-Token": token})
     assert polled.json()["config_version"] == 2
+    assert polled.json()["capture_sources"][0]["store_pcap"] is True
 
 
 def test_openapi_documents_gateway_routes_and_sensor_token_header() -> None:
@@ -298,3 +325,153 @@ def test_openapi_documents_gateway_routes_and_sensor_token_header() -> None:
     assert paths["/api/v1/sensor-enrollments/{token}/claim"]["post"]["responses"]["201"]["content"][
         "application/json"
     ]["schema"]["$ref"].endswith("/EnrollmentClaimResponse")
+
+
+def test_sensor_pcap_upload_is_authenticated_idempotent_listed_and_downloadable() -> None:
+    api, _ = api_and_repo()
+    sensor_id, token = enroll_and_claim(api)
+    filename = "eth0-000001.pcap"
+    segment_id = hashlib.sha256(f"{sensor_id}\0{filename}".encode()).hexdigest()
+    capture = bytes.fromhex("d4c3b2a1020004000000000000000000ffff000001000000")
+    path = f"/api/v1/sensors/{sensor_id}/pcap-segments/{segment_id}"
+
+    assert api.put(path, params={"filename": filename}, content=capture).status_code == 401
+    invalid = api.put(
+        path,
+        params={"filename": "../capture.pcap"},
+        content=capture,
+        headers={"X-Sensor-Token": token, "content-type": "application/vnd.tcpdump.pcap"},
+    )
+    assert invalid.status_code == 422
+
+    length_mismatch = api.put(
+        path,
+        params={"filename": filename},
+        content=capture,
+        headers={
+            "X-Sensor-Token": token,
+            "content-type": "application/vnd.tcpdump.pcap",
+            "content-length": str(len(capture) + 1),
+        },
+    )
+    assert length_mismatch.status_code == 400
+
+    uploaded = api.put(
+        path,
+        params={"filename": filename},
+        content=capture,
+        headers={"X-Sensor-Token": token, "content-type": "application/vnd.tcpdump.pcap"},
+    )
+    assert uploaded.status_code == 201
+    assert uploaded.json()["segment_id"] == segment_id
+    assert uploaded.json()["sensor_id"] == sensor_id
+    assert uploaded.json()["filename"] == "eth0-000001.pcap"
+    assert uploaded.json()["size_bytes"] == len(capture)
+
+    duplicate = api.put(
+        path,
+        params={"filename": filename},
+        content=capture,
+        headers={"X-Sensor-Token": token, "content-type": "application/vnd.tcpdump.pcap"},
+    )
+    assert duplicate.status_code == 201
+    assert duplicate.json()["segment_id"] == segment_id
+    assert duplicate.json()["id"] == segment_id
+
+    listed = api.get(f"/api/v1/sensor-pcaps?sensor_id={sensor_id}")
+    assert listed.status_code == 200
+    assert listed.json()["total"] == 1
+    assert listed.json()["items"][0]["id"] == segment_id
+    assert "object_key" not in listed.json()["items"][0]
+
+    downloaded = api.get(f"/api/v1/sensor-pcaps/{segment_id}/download")
+    assert downloaded.status_code == 200
+    assert downloaded.content == capture
+    assert downloaded.headers["content-type"].startswith("application/vnd.tcpdump.pcap")
+    assert downloaded.headers["content-disposition"] == 'attachment; filename="eth0-000001.pcap"'
+    assert downloaded.headers["x-content-type-options"] == "nosniff"
+
+
+def test_sqlite_sensor_pcap_survives_repository_restart(tmp_path: Any) -> None:
+    path = tmp_path / "sensor-pcaps.sqlite"
+    metadata = {
+        "id": "segment-a",
+        "sensor_id": "sensor-a",
+        "filename": "eth0.pcap",
+        "size_bytes": 4,
+        "sha256": "digest",
+        "uploaded_at": "2026-08-01T00:00:00+00:00",
+    }
+    first = SQLiteRepository(path)
+    first.save_sensor_pcap(metadata, b"pcap")
+    first.close()
+
+    reopened = SQLiteRepository(path)
+    assert reopened.list_sensor_pcaps() == [metadata]
+    assert reopened.get_sensor_pcap("segment-a") == (metadata, b"pcap")
+    reopened.close()
+
+
+def test_sensor_configuration_exposes_active_analysis_pcap_jobs() -> None:
+    api, repo = api_and_repo()
+    sensor_id, token = enroll_and_claim(api)
+    repo.save_job(
+        {
+            "id": "job-a",
+            "mode": "LIVE",
+            "status": "CAPTURING",
+            "sensor_ids": [sensor_id],
+            "start_time": "2026-08-01T00:00:00+00:00",
+            "end_time": "2026-08-01T01:00:00+00:00",
+            "capture": {"store_pcap": True},
+        }
+    )
+    response = api.get(
+        f"/api/v1/sensors/{sensor_id}/agent-config",
+        headers={"X-Sensor-Token": token},
+    )
+    assert response.status_code == 200
+    assert response.json()["config_poll_interval_seconds"] == 1
+    assert response.json()["capture_jobs"] == [
+        {
+            "job_id": "job-a",
+            "start_time": "2026-08-01T00:00:00+00:00",
+            "end_time": "2026-08-01T01:00:00+00:00",
+            "store_pcap": True,
+        }
+    ]
+
+
+def test_sensor_pcap_upload_is_linked_to_assigned_analysis_job() -> None:
+    api, repo = api_and_repo()
+    sensor_id, token = enroll_and_claim(api)
+    repo.save_job(
+        {
+            "id": "job-a",
+            "mode": "LIVE",
+            "status": "UPLOADING",
+            "sensor_ids": [sensor_id],
+            "capture": {"store_pcap": True},
+        }
+    )
+    filename = "job-a--eth0-outbound-000001.pcap"
+    segment_id = hashlib.sha256(f"{sensor_id}\0{filename}".encode()).hexdigest()
+    capture = bytes.fromhex("d4c3b2a1020004000000000000000000ffff000001000000")
+    path = f"/api/v1/sensors/{sensor_id}/pcap-segments/{segment_id}"
+    headers = {"X-Sensor-Token": token, "content-type": "application/vnd.tcpdump.pcap"}
+    rejected = api.put(
+        path,
+        params={"filename": filename, "analysis_job_id": "other"},
+        content=capture,
+        headers=headers,
+    )
+    assert rejected.status_code == 422
+    uploaded = api.put(
+        path,
+        params={"filename": filename, "analysis_job_id": "job-a"},
+        content=capture,
+        headers=headers,
+    )
+    assert uploaded.status_code == 201
+    assert uploaded.json()["analysis_job_id"] == "job-a"
+    assert api.get("/api/v1/sensor-pcaps").json()["items"][0]["analysis_job_id"] == "job-a"

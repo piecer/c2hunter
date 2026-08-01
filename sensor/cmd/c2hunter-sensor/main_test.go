@@ -6,10 +6,12 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"c2hunter/sensor/config"
 	interfacespkg "c2hunter/sensor/internal/interfaces"
 	"c2hunter/sensor/internal/packet"
+	"c2hunter/sensor/internal/transport"
 )
 
 func TestVersionAndDiagnosticCLI(t *testing.T) {
@@ -123,6 +125,51 @@ func TestCombineBPFExpressionsPreservesEachFilterScope(t *testing.T) {
 	}
 }
 
+func TestApplyDesiredUsesAnalysisCaptureJobsInsteadOfPerInterfacePCAPSelection(t *testing.T) {
+	cfg := config.Config{}
+	applyDesired(&cfg, transport.DesiredConfig{
+		CaptureSources: []transport.DesiredCaptureSource{{Interface: "eth0", Direction: "OUTBOUND", Enabled: true, StorePCAP: true}},
+		CaptureJobs:    []transport.DesiredCaptureJob{{JobID: "job-a", StorePCAP: true}},
+	})
+	if len(cfg.CaptureSources) != 1 || cfg.CaptureSources[0].StorePCAP {
+		t.Fatalf("per-interface PCAP remained enabled: %+v", cfg.CaptureSources)
+	}
+	if len(cfg.CaptureJobs) != 1 || cfg.CaptureJobs[0].JobID != "job-a" || !cfg.CaptureJobs[0].StorePCAP {
+		t.Fatalf("capture jobs = %+v", cfg.CaptureJobs)
+	}
+}
+
+func TestPCAPFilePrefixRemovesPathSeparators(t *testing.T) {
+	if got := pcapFilePrefix("../../eth0", "INGRESS"); got != ".._.._eth0-ingress" {
+		t.Fatalf("prefix = %q", got)
+	}
+}
+
+type captureWindowSinkStub struct{ count int }
+
+func (s *captureWindowSinkStub) Enqueue(packet.Packet) bool { s.count++; return true }
+
+func TestAnalysisPCAPSinkOnlyCapturesWithinJobWindow(t *testing.T) {
+	start := time.Unix(100, 0).UTC()
+	sink := &captureWindowSinkStub{}
+	window := captureWindowPCAPSink{sink: sink, start: start, end: start.Add(time.Minute)}
+	for _, timestamp := range []time.Time{start.Add(-time.Second), start, start.Add(time.Minute), start.Add(time.Minute + time.Second)} {
+		window.Enqueue(packet.Packet{Timestamp: timestamp})
+	}
+	if sink.count != 2 {
+		t.Fatalf("captured packets = %d", sink.count)
+	}
+}
+
+func TestAnalysisJobPollingIsBoundedToOneSecond(t *testing.T) {
+	if got := jobAwarePollInterval(30 * time.Second); got != time.Second {
+		t.Fatalf("poll interval = %s", got)
+	}
+	if got := jobAwarePollInterval(500 * time.Millisecond); got != 500*time.Millisecond {
+		t.Fatalf("short poll interval = %s", got)
+	}
+}
+
 func TestServiceSandboxAllowsNetlinkInterfaceDiscovery(t *testing.T) {
 	data, err := os.ReadFile("../../../deploy/sensor/c2hunter-sensor.service")
 	if err != nil {
@@ -140,4 +187,22 @@ func TestServiceSandboxAllowsNetlinkInterfaceDiscovery(t *testing.T) {
 		t.Fatalf("AF_NETLINK missing from %q", line)
 	}
 	t.Fatal("RestrictAddressFamilies is not configured")
+}
+
+func TestInstallersCreateWritablePCAPDirectory(t *testing.T) {
+	installer, err := os.ReadFile("../../../scripts/install-sensor.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(installer)
+	if !strings.Contains(contents, "-o c2hunter-sensor -g c2hunter-sensor") || !strings.Contains(contents, "/var/lib/c2hunter-sensor/pcap") {
+		t.Fatal("canonical installer does not create a sensor-owned PCAP directory")
+	}
+	buildScript, err := os.ReadFile("../../../scripts/build-sensor-tarball.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(buildScript), `cp "$ROOT/scripts/install-sensor.sh"`) {
+		t.Fatal("sensor artifact does not package the canonical installer")
+	}
 }

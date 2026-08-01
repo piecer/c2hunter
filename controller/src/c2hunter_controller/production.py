@@ -740,6 +740,21 @@ class PostgresRepository:
             return None
         return metadata, self.blob_store.get(str(metadata["object_key"]))
 
+    def save_sensor_pcap(self, segment: dict[str, Any], content: bytes) -> dict[str, Any]:
+        key = f"sensor-pcaps/{segment['sensor_id']}/{segment['id']}.pcap"
+        self.blob_store.put(key, content)
+        stored = {**segment, "object_key": key}
+        return self._put("sensor_pcap", segment["id"], stored)
+
+    def get_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], bytes] | None:
+        metadata = self._get("sensor_pcap", segment_id)
+        if metadata is None:
+            return None
+        return metadata, self.blob_store.get(str(metadata["object_key"]))
+
+    def list_sensor_pcaps(self) -> list[dict[str, Any]]:
+        return self._list("sensor_pcap")
+
     def create_enrollment(self, enrollment: dict[str, Any]) -> dict[str, Any]:
         return self._put("enrollment", enrollment["enrollment_id"], enrollment)
 

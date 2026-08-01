@@ -101,6 +101,7 @@ describe('External sensor enrollment', () => {
     await user.type(screen.getByLabelText('Interface name 1'), 'eth9');
     await user.selectOptions(screen.getByLabelText('Direction 1'), 'BIDIRECTIONAL');
     await user.type(screen.getByLabelText('BPF filter 1'), 'tcp port 443');
+
     await user.clear(screen.getByLabelText('Internal CIDR 1'));
     await user.type(screen.getByLabelText('Internal CIDR 1'), '10.20.0.0/16');
     await user.click(screen.getByRole('button', { name: 'Create enrollment' }));
@@ -108,7 +109,7 @@ describe('External sensor enrollment', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/sensor-enrollments', expect.objectContaining({ method: 'POST' })));
     expect(bodyOf(fetchMock, '/api/v1/sensor-enrollments', 'POST')).toEqual({
       name: 'Remote office', expires_in_seconds: 1800,
-      capture_sources: [{ interface: 'eth9', direction: 'BIDIRECTIONAL', bpf_filter: 'tcp port 443', enabled: true }],
+      capture_sources: [{ interface: 'eth9', direction: 'BIDIRECTIONAL', bpf_filter: 'tcp port 443', enabled: true, store_pcap: false }],
       internal_networks: ['10.20.0.0/16'],
     });
     expect(await screen.findByText('secret-once')).toBeInTheDocument();
@@ -142,11 +143,12 @@ describe('External sensor configuration and credentials', () => {
     const user = userEvent.setup();
     await screen.findByRole('heading', { name: 'Desired configuration' });
     await user.selectOptions(screen.getByLabelText('Desired direction 1'), 'OUTBOUND');
+
     await user.click(screen.getByRole('button', { name: 'Save configuration' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/sensors/sensor-a/configuration', expect.objectContaining({ method: 'PUT' })));
     expect(bodyOf(fetchMock, '/api/v1/sensors/sensor-a/configuration', 'PUT')).toEqual({
       config_version: 7,
-      capture_sources: [{ interface: 'eth0', direction: 'OUTBOUND', bpf_filter: 'tcp', enabled: true }],
+      capture_sources: [{ interface: 'eth0', direction: 'OUTBOUND', bpf_filter: 'tcp', enabled: true, store_pcap: false }],
       internal_networks: ['10.0.0.0/8'],
     });
     expect(await screen.findByText(/changed by another operator/i)).toBeInTheDocument();

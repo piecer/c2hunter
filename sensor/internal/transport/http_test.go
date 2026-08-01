@@ -2,10 +2,14 @@ package transport
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,7 +37,7 @@ func TestHTTPTransportUsesControllerSensorRESTContract(t *testing.T) {
 		} else {
 			activeJobs, ok := body["active_job_ids"].([]any)
 			discovered, discoveredOK := body["discovered_interfaces"].([]any)
-			if body["reported_at"] == nil || body["status"] != "DEGRADED" || !ok || len(activeJobs) != 0 || !discoveredOK || len(discovered) != 2 {
+			if body["reported_at"] == nil || body["status"] != "DEGRADED" || body["pcap_dropped_packets"] != float64(7) || !ok || len(activeJobs) != 0 || !discoveredOK || len(discovered) != 2 {
 				t.Fatalf("heartbeat body = %#v", body)
 			}
 			loopback := discovered[1].(map[string]any)
@@ -58,6 +62,7 @@ func TestHTTPTransportUsesControllerSensorRESTContract(t *testing.T) {
 	}
 	heartbeat := telemetry.Heartbeat{
 		SensorID: "sensor-a", Status: telemetry.StatusDegraded, CurrentTime: time.Now(), LastError: "capture unavailable",
+		PCAPDroppedPackets:   7,
 		DiscoveredInterfaces: []telemetry.Interface{{Name: "eth0", MAC: "00:00:00:00:00:00"}, {Name: "lo"}},
 	}
 	if err := client.Heartbeat(context.Background(), heartbeat); err != nil {
@@ -106,6 +111,16 @@ func TestHTTPTransportRejectsNonHTTPControllerURL(t *testing.T) {
 	}
 }
 
+func TestHTTPTransportUsesLongerTimeoutForPCAPUploads(t *testing.T) {
+	client, err := NewHTTP("https://controller.example", &http.Client{Timeout: 10 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.pcapClient.Timeout != minimumPCAPUploadTimeout {
+		t.Fatalf("PCAP timeout = %s", client.pcapClient.Timeout)
+	}
+}
+
 func TestHTTPTransportUploadsFlowBatchAndRequiresMatchingACK(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/api/v1/sensors/sensor-a/flow-batches" {
@@ -135,5 +150,59 @@ func TestHTTPTransportUploadsFlowBatchAndRequiresMatchingACK(t *testing.T) {
 	}
 	if ack.BatchID != "batch-a" || !ack.Duplicate {
 		t.Fatalf("ACK = %+v", ack)
+	}
+}
+
+func TestHTTPTransportUploadsPCAPSegmentWithSensorAuthentication(t *testing.T) {
+	digest := sha256.Sum256([]byte("pcap"))
+	checksum := hex.EncodeToString(digest[:])
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut || request.URL.Path != "/api/v1/sensors/sensor-a/pcap-segments/segment-a" {
+			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
+		}
+		if request.URL.Query().Get("filename") != "eth0-000001.pcap" {
+			t.Fatalf("query = %s", request.URL.RawQuery)
+		}
+		if request.URL.Query().Get("analysis_job_id") != "job-a" {
+			t.Fatalf("analysis job query = %s", request.URL.RawQuery)
+		}
+		if request.Header.Get("X-Sensor-Token") != "sensor-token" {
+			t.Fatalf("token = %q", request.Header.Get("X-Sensor-Token"))
+		}
+		if request.Header.Get("Content-Type") != "application/vnd.tcpdump.pcap" || request.ContentLength != 4 {
+			t.Fatalf("headers = %#v, length = %d", request.Header, request.ContentLength)
+		}
+		body, err := io.ReadAll(request.Body)
+		if err != nil || string(body) != "pcap" {
+			t.Fatalf("body = %q, err = %v", body, err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = fmt.Fprintf(w, `{"segment_id":"segment-a","size_bytes":4,"sha256":"%s"}`, checksum)
+	}))
+	defer server.Close()
+	client, err := NewHTTP(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.SetIdentity("sensor-a", "sensor-token")
+	if err := client.UploadPCAPSegment(context.Background(), "sensor-a", "segment-a", "job-a", "eth0-000001.pcap", strings.NewReader("pcap"), 4); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHTTPTransportRejectsMismatchedPCAPAcknowledgement(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		_, _ = io.Copy(io.Discard, request.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"segment_id":"other","size_bytes":4,"sha256":"bad"}`)
+	}))
+	defer server.Close()
+	client, err := NewHTTP(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.UploadPCAPSegment(context.Background(), "sensor-a", "segment-a", "job-a", "eth0-000001.pcap", strings.NewReader("pcap"), 4); err == nil {
+		t.Fatal("mismatched ACK was accepted")
 	}
 }

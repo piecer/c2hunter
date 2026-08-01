@@ -125,6 +125,17 @@ func TestDecodePacketKeepsTransportPayloadWhenAutomaticSIPDecodeWouldFail(t *tes
 	if got.Protocol != packet.UDP || got.SourcePort != 40000 || got.DestinationPort != 5060 || string(got.Payload) != string(payload) {
 		t.Fatalf("decoded packet = %+v", got)
 	}
+	if got.RawFrame != nil {
+		t.Fatal("raw frame was retained without PCAP opt-in")
+	}
+	decoder.retainRawFrame = true
+	got, err = decoder.Decode(buf.Bytes(), info, "eth-test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got.RawFrame) != string(buf.Bytes()) {
+		t.Fatal("raw frame was not retained after PCAP opt-in")
+	}
 }
 
 func TestDecodePacketClassifiesTruncatedFramesAsRecoverable(t *testing.T) {

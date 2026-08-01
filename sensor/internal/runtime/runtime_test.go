@@ -38,7 +38,12 @@ func (s *transportStub) Heartbeat(_ context.Context, h telemetry.Heartbeat) erro
 	s.heartbeats = append(s.heartbeats, h)
 	return nil
 }
-func (s *transportStub) Close() error { s.closed = true; return nil }
+func (s *transportStub) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	return nil
+}
 
 type captureRuntimeStub struct {
 	snapshot CaptureSnapshot
@@ -48,8 +53,51 @@ type captureRuntimeStub struct {
 func (s *captureRuntimeStub) Run(context.Context) error { return s.err }
 func (s *captureRuntimeStub) Snapshot() CaptureSnapshot { return s.snapshot }
 
+type shutdownCaptureRuntime struct {
+	release chan struct{}
+	done    chan struct{}
+}
+
+func (s *shutdownCaptureRuntime) Run(ctx context.Context) error {
+	<-ctx.Done()
+	<-s.release
+	close(s.done)
+	return nil
+}
+
+func (*shutdownCaptureRuntime) Snapshot() CaptureSnapshot { return CaptureSnapshot{} }
+
 func registration() telemetry.Registration {
 	return telemetry.Registration{SensorID: "sensor-a", Name: "Sensor A", Hostname: "host", AgentVersion: "test", OS: "linux", KernelVersion: "kernel", CurrentTime: time.Now(), Interfaces: []telemetry.Interface{{Name: "eth0", MAC: "00:00:00:00:00:00", Direction: "INBOUND"}}}
+}
+
+func TestRunnerClosesTransportAfterCaptureShutdownCompletes(t *testing.T) {
+	transport := &transportStub{}
+	capture := &shutdownCaptureRuntime{release: make(chan struct{}), done: make(chan struct{})}
+	runner, err := New(Config{Registration: registration(), Capture: capture, HeartbeatInterval: time.Millisecond}, transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- runner.Run(ctx) }()
+	cancel()
+	time.Sleep(10 * time.Millisecond)
+	transport.mu.Lock()
+	closedEarly := transport.closed
+	transport.mu.Unlock()
+	if closedEarly {
+		t.Fatal("transport closed before capture shutdown completed")
+	}
+	close(capture.release)
+	if err := <-runDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-capture.done:
+	default:
+		t.Fatal("capture shutdown was not joined")
+	}
 }
 
 func TestRunnerRetriesRegistrationAndNeverReportsOnlineBeforeSuccess(t *testing.T) {

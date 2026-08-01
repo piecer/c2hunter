@@ -626,6 +626,20 @@ def create_app(
             raise ApiError(404, "SENSOR_NOT_FOUND", "센서를 찾을 수 없습니다")
         return sensor
 
+    def active_capture_jobs(sensor_id: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "job_id": str(job["id"]),
+                "start_time": job["start_time"],
+                "end_time": job["end_time"],
+                "store_pcap": True,
+            }
+            for job in repo.list_active_live_jobs()
+            if job.get("status") == JobState.CAPTURING
+            and sensor_id in job.get("sensor_ids", [])
+            and bool(job.get("capture", {}).get("store_pcap"))
+        ]
+
     @app.post(
         "/api/v1/sensor-enrollments",
         status_code=201,
@@ -758,7 +772,7 @@ def create_app(
             "capture_sources": capture_sources,
             "internal_networks": enrollment["internal_networks"],
             "heartbeat_interval_seconds": 15,
-            "config_poll_interval_seconds": 30,
+            "config_poll_interval_seconds": 1,
         }
 
     @app.get(
@@ -772,6 +786,7 @@ def create_app(
         return {
             "config_version": sensor["config_version"],
             "capture_sources": sensor["capture_sources"],
+            "capture_jobs": active_capture_jobs(sensor_id),
             "internal_networks": sensor["internal_networks"],
         }
 
@@ -817,6 +832,7 @@ def create_app(
         return {
             "config_version": updated["config_version"],
             "capture_sources": updated["capture_sources"],
+            "capture_jobs": active_capture_jobs(sensor_id),
             "internal_networks": updated["internal_networks"],
         }
 
@@ -830,9 +846,10 @@ def create_app(
             "sensor_id": sensor_id,
             "config_version": sensor["config_version"],
             "capture_sources": sensor["capture_sources"],
+            "capture_jobs": active_capture_jobs(sensor_id),
             "internal_networks": sensor["internal_networks"],
             "heartbeat_interval_seconds": 15,
-            "config_poll_interval_seconds": 30,
+            "config_poll_interval_seconds": 1,
         }
 
     @app.post("/api/v1/sensors/{sensor_id}/credentials/rotate")
@@ -933,6 +950,134 @@ def create_app(
             [record.model_dump(mode="json") for record in payload.records],
         )
         return {"batch_id": payload.batch_id, "accepted": accepted, "record_count": count}
+
+    @app.put("/api/v1/sensors/{sensor_id}/pcap-segments/{segment_id}", status_code=201)
+    async def upload_sensor_pcap(
+        sensor_id: str,
+        segment_id: str,
+        request: Request,
+        filename: str = Query(min_length=6, max_length=200),
+        analysis_job_id: str | None = Query(default=None, min_length=1, max_length=128),
+        sensor_token: str | None = Header(alias="X-Sensor-Token"),
+    ) -> dict[str, Any]:
+        sensor = require_sensor_token(sensor_id, sensor_token)
+        if analysis_job_id is not None:
+            job = repo.get_job(analysis_job_id)
+            if (
+                job is None
+                or sensor_id not in job.get("sensor_ids", [])
+                or not bool(job.get("capture", {}).get("store_pcap"))
+            ):
+                raise ApiError(
+                    422,
+                    "INVALID_PCAP_ANALYSIS_JOB",
+                    "PCAP 분석 작업이 sensor 할당과 일치하지 않습니다",
+                )
+        safe_characters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        if not filename.endswith(".pcap") or any(
+            character not in safe_characters for character in filename
+        ):
+            raise ApiError(422, "INVALID_PCAP_FILENAME", "PCAP 파일명이 유효하지 않습니다")
+        expected_id = hashlib.sha256(f"{sensor_id}\0{filename}".encode()).hexdigest()
+        if not hmac.compare_digest(segment_id, expected_id):
+            raise ApiError(
+                422,
+                "INVALID_PCAP_SEGMENT_ID",
+                "PCAP segment ID가 파일명과 일치하지 않습니다",
+            )
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type != "application/vnd.tcpdump.pcap":
+            raise ApiError(
+                415,
+                "UNSUPPORTED_PCAP_MEDIA_TYPE",
+                "classic PCAP content type이 필요합니다",
+            )
+        announced = request.headers.get("content-length")
+        announced_size: int | None = None
+        if announced is not None:
+            try:
+                announced_size = int(announced)
+            except ValueError as exc:
+                raise ApiError(
+                    400, "INVALID_CONTENT_LENGTH", "Content-Length가 유효하지 않습니다"
+                ) from exc
+            if announced_size > config.pcap_upload_max_bytes:
+                raise ApiError(413, "PCAP_TOO_LARGE", "PCAP segment가 허용 크기를 초과합니다")
+        uploaded = bytearray()
+        async for chunk in request.stream():
+            if len(uploaded) + len(chunk) > config.pcap_upload_max_bytes:
+                raise ApiError(413, "PCAP_TOO_LARGE", "PCAP segment가 허용 크기를 초과합니다")
+            uploaded.extend(chunk)
+        content = bytes(uploaded)
+        if announced_size is not None and announced_size != len(content):
+            raise ApiError(400, "CONTENT_LENGTH_MISMATCH", "Content-Length와 실제 크기가 다릅니다")
+        if len(content) < 24 or content[:4] not in {
+            b"\xd4\xc3\xb2\xa1",
+            b"\xa1\xb2\xc3\xd4",
+            b"\x4d\x3c\xb2\xa1",
+            b"\xa1\xb2\x3c\x4d",
+        }:
+            raise ApiError(422, "INVALID_PCAP", "유효한 classic PCAP header가 필요합니다")
+        digest = hashlib.sha256(content).hexdigest()
+        existing = repo.get_sensor_pcap(segment_id)
+        if existing is not None:
+            metadata, _ = existing
+            if (
+                metadata["sensor_id"] != sensor_id
+                or metadata["sha256"] != digest
+                or metadata.get("analysis_job_id") != analysis_job_id
+            ):
+                raise ApiError(
+                    409,
+                    "PCAP_SEGMENT_CONFLICT",
+                    "동일 segment ID에 다른 PCAP이 저장되어 있습니다",
+                )
+            public = {key: value for key, value in metadata.items() if key != "object_key"}
+            return {**public, "segment_id": segment_id}
+        metadata = {
+            "id": segment_id,
+            "sensor_id": sensor_id,
+            "sensor_name": sensor.get("name", sensor_id),
+            "analysis_job_id": analysis_job_id,
+            "filename": filename,
+            "size_bytes": len(content),
+            "sha256": digest,
+            "uploaded_at": datetime.now(UTC).isoformat(),
+        }
+        stored = repo.save_sensor_pcap(metadata, content)
+        public = {key: value for key, value in stored.items() if key != "object_key"}
+        return {**public, "segment_id": segment_id}
+
+    @app.get("/api/v1/sensor-pcaps")
+    def list_sensor_pcaps(
+        sensor_id: str | None = None,
+        page: int = Query(1, ge=1),
+        page_size: int = Query(50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        segments = repo.list_sensor_pcaps()
+        if sensor_id is not None:
+            segments = [segment for segment in segments if segment["sensor_id"] == sensor_id]
+        segments.sort(key=lambda segment: str(segment["uploaded_at"]), reverse=True)
+        public = [
+            {key: value for key, value in segment.items() if key != "object_key"}
+            for segment in segments
+        ]
+        return _page(public, page, page_size)
+
+    @app.get("/api/v1/sensor-pcaps/{segment_id}/download")
+    def download_sensor_pcap(segment_id: str) -> Response:
+        stored = repo.get_sensor_pcap(segment_id)
+        if stored is None:
+            raise ApiError(404, "SENSOR_PCAP_NOT_FOUND", "sensor PCAP을 찾을 수 없습니다")
+        metadata, content = stored
+        return Response(
+            content,
+            media_type="application/vnd.tcpdump.pcap",
+            headers={
+                "Content-Disposition": f'attachment; filename="{metadata["filename"]}"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     @app.get("/api/v1/dashboard")
     def dashboard() -> dict[str, Any]:

@@ -38,6 +38,7 @@ class CaptureSource(BaseModel):
     direction: CaptureDirection
     bpf_filter: str = Field(default="", max_length=2000)
     enabled: bool = True
+    store_pcap: bool = False
     validation_status: str | None = Field(default=None, pattern=r"^VALID$")
 
     @field_validator("interface")
@@ -118,7 +119,15 @@ class ValidatedCaptureSource(BaseModel):
     direction: CaptureDirection
     bpf_filter: str
     enabled: bool
+    store_pcap: bool = False
     validation_status: str = Field(pattern=r"^VALID$")
+
+
+class ActiveCaptureJob(BaseModel):
+    job_id: str
+    start_time: datetime
+    end_time: datetime
+    store_pcap: bool
 
 
 class EnrollmentClaimResponse(BaseModel):
@@ -126,6 +135,7 @@ class EnrollmentClaimResponse(BaseModel):
     agent_token: str
     config_version: int
     capture_sources: list[ValidatedCaptureSource]
+    capture_jobs: list[ActiveCaptureJob] = Field(default_factory=list)
     internal_networks: list[str]
     heartbeat_interval_seconds: int
     config_poll_interval_seconds: int
@@ -134,6 +144,7 @@ class EnrollmentClaimResponse(BaseModel):
 class SensorConfigurationResponse(BaseModel):
     config_version: int
     capture_sources: list[ValidatedCaptureSource]
+    capture_jobs: list[ActiveCaptureJob] = Field(default_factory=list)
     internal_networks: list[str]
 
 
@@ -180,6 +191,7 @@ class Heartbeat(BaseModel):
     received_packets: int = Field(ge=0)
     dropped_packets: int = Field(ge=0)
     pending_bytes: int = Field(ge=0)
+    pcap_dropped_packets: int = Field(default=0, ge=0)
     last_error: str | None = Field(default=None, max_length=2000)
     interfaces: list[HeartbeatInterface] = Field(default_factory=list)
     discovered_interfaces: list[DiscoveredInterface] | None = Field(

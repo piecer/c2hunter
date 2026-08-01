@@ -22,12 +22,14 @@ type Config struct {
 		URL     string `yaml:"url"`
 	} `yaml:"controller"`
 	CaptureSources    []CaptureSource `yaml:"capture_sources"`
+	CaptureJobs       []CaptureJob    `yaml:"-"`
 	InternalNetworks  []string        `yaml:"internal_networks"`
 	HeartbeatInterval time.Duration   `yaml:"-"`
 	FlowIdleTimeout   time.Duration   `yaml:"-"`
 	Batch             BatchConfig     `yaml:"batch"`
 	Capture           CaptureConfig   `yaml:"capture"`
 	Spool             SpoolConfig     `yaml:"spool"`
+	PCAP              PCAPConfig      `yaml:"pcap"`
 	Agent             AgentConfig     `yaml:"agent"`
 }
 
@@ -36,9 +38,17 @@ type CaptureSource struct {
 	Direction string `yaml:"direction"`
 	BPFFilter string `yaml:"bpf_filter"`
 	Enabled   *bool  `yaml:"enabled,omitempty"`
+	StorePCAP bool   `yaml:"store_pcap"`
 }
 
 func (s CaptureSource) IsEnabled() bool { return s.Enabled == nil || *s.Enabled }
+
+type CaptureJob struct {
+	JobID     string
+	StartTime time.Time
+	EndTime   time.Time
+	StorePCAP bool
+}
 
 type AgentConfig struct {
 	EnrollmentToken           string        `yaml:"enrollment_token"`
@@ -72,6 +82,7 @@ type CaptureConfig struct {
 	Protocols           []string      `yaml:"protocols"`
 	IPVersions          []uint8       `yaml:"ip_versions"`
 	Directions          []string      `yaml:"directions"`
+	StorePCAP           bool          `yaml:"store_pcap"`
 }
 
 type SpoolConfig struct {
@@ -81,6 +92,15 @@ type SpoolConfig struct {
 	MaxAge        time.Duration `yaml:"-"`
 }
 
+type PCAPConfig struct {
+	Directory                 string        `yaml:"directory"`
+	MaxSegmentBytes           int64         `yaml:"max_segment_bytes"`
+	MaxSegmentDurationSeconds uint64        `yaml:"max_segment_duration_seconds"`
+	MaxSegmentDuration        time.Duration `yaml:"-"`
+	MaxDiskBytes              int64         `yaml:"max_disk_bytes"`
+	QueueSize                 int           `yaml:"queue_size"`
+}
+
 func Load(r io.Reader) (Config, error) {
 	cfg := Config{
 		HeartbeatInterval: 10 * time.Second,
@@ -88,7 +108,8 @@ func Load(r io.Reader) (Config, error) {
 		Batch:             BatchConfig{MaxItems: 1000, MaxBytes: 1 << 20},
 		Capture:           CaptureConfig{JobID: "continuous", PacketQueueSize: 4096},
 		Spool:             SpoolConfig{Directory: "/var/lib/c2hunter/spool", MaxBytes: 1 << 30, MaxAgeSeconds: 86400},
-		Agent:             AgentConfig{StateFile: "/var/lib/c2hunter/state/agent.json", ConfigPollIntervalSeconds: 30},
+		PCAP:              PCAPConfig{Directory: "/var/lib/c2hunter/pcap", MaxSegmentBytes: 128 << 20, MaxSegmentDurationSeconds: 300, MaxDiskBytes: 1 << 30, QueueSize: 4096},
+		Agent:             AgentConfig{StateFile: "/var/lib/c2hunter/state/agent.json", ConfigPollIntervalSeconds: 1},
 	}
 	if err := yaml.NewDecoder(r).Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return Config{}, fmt.Errorf("decode config: %w", err)
@@ -178,6 +199,7 @@ func finalize(cfg *Config) error {
 	}
 	cfg.Capture.Duration = time.Duration(cfg.Capture.DurationSeconds) * time.Second
 	cfg.Spool.MaxAge = time.Duration(cfg.Spool.MaxAgeSeconds) * time.Second
+	cfg.PCAP.MaxSegmentDuration = time.Duration(cfg.PCAP.MaxSegmentDurationSeconds) * time.Second
 	cfg.Agent.ConfigPollInterval = time.Duration(cfg.Agent.ConfigPollIntervalSeconds) * time.Second
 	if cfg.Agent.StateFile == "" || cfg.Agent.ConfigPollInterval <= 0 {
 		return errors.New("agent state file and config poll interval are required")
@@ -190,6 +212,9 @@ func finalize(cfg *Config) error {
 	}
 	if cfg.Spool.Directory == "" || cfg.Spool.MaxBytes <= 0 {
 		return errors.New("spool directory and max bytes are required")
+	}
+	if cfg.PCAP.Directory == "" || cfg.PCAP.MaxSegmentBytes <= 0 || cfg.PCAP.MaxSegmentDuration <= 0 || cfg.PCAP.MaxDiskBytes <= 0 || cfg.PCAP.QueueSize <= 0 {
+		return errors.New("PCAP directory, rotation limits, disk limit and queue size are required")
 	}
 	return nil
 }

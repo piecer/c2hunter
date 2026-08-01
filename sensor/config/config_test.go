@@ -128,3 +128,27 @@ agent: {state_file: /tmp/sensor-state.json, config_poll_interval_seconds: 17}
 		t.Fatalf("agent config = %+v", cfg.Agent)
 	}
 }
+
+func TestLoadConfiguresSelectivePCAPStorageAndBoundedRotation(t *testing.T) {
+	cfg, err := Load(strings.NewReader(`
+sensor: {id: sensor-a, name: edge}
+capture_sources:
+  - {interface: eth0, direction: OUTBOUND, store_pcap: true}
+  - {interface: eth1, direction: INBOUND, store_pcap: false}
+pcap:
+  directory: /tmp/c2hunter-pcap
+  max_segment_bytes: 1048576
+  max_segment_duration_seconds: 60
+  max_disk_bytes: 4194304
+  queue_size: 128
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.CaptureSources[0].StorePCAP || cfg.CaptureSources[1].StorePCAP {
+		t.Fatalf("capture sources = %+v", cfg.CaptureSources)
+	}
+	if cfg.PCAP.Directory != "/tmp/c2hunter-pcap" || cfg.PCAP.MaxSegmentDuration != time.Minute || cfg.PCAP.QueueSize != 128 {
+		t.Fatalf("PCAP config = %+v", cfg.PCAP)
+	}
+}

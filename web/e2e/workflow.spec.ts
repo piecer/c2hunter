@@ -77,6 +77,22 @@ test('analyst can manage history and upload an offline PCAP', async ({ page }) =
   await expect(page.getByText('PCAP upload')).toBeVisible();
 });
 
+test('analyst can download an archived sensor PCAP', async ({ page }) => {
+  await installApiFixture(page);
+  await page.goto('/login');
+  await page.getByLabel('Username').fill('analyst');
+  await page.getByRole('button', { name: 'Development login' }).click();
+
+  await page.getByRole('link', { name: 'Sensor PCAPs' }).click();
+  await expect(page.getByRole('table', { name: 'Sensor PCAP archives' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'job-1' })).toHaveAttribute('href', '/analyses/job-1');
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByRole('button', { name: 'Download job-1--eth0-000001.pcap' }).click(),
+  ]);
+  expect(download.suggestedFilename()).toBe('job-1--eth0-000001.pcap');
+});
+
 test('analyst can combine multiple flow filters and filter-out patterns', async ({ page }) => {
   await installApiFixture(page);
   await page.goto('/login');

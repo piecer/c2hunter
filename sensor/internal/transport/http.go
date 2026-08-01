@@ -3,6 +3,8 @@ package transport
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,12 +12,14 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"c2hunter/sensor/internal/flowbatch"
 	"c2hunter/sensor/internal/telemetry"
 )
 
 const maxControllerInterfaces = 128
+const minimumPCAPUploadTimeout = 2 * time.Minute
 
 func limitControllerInterfaces[T any](interfaces []T) []T {
 	if len(interfaces) > maxControllerInterfaces {
@@ -25,11 +29,12 @@ func limitControllerInterfaces[T any](interfaces []T) []T {
 }
 
 type HTTP struct {
-	baseURL  string
-	client   *http.Client
-	mu       sync.RWMutex
-	sensorID string
-	token    string
+	baseURL    string
+	client     *http.Client
+	pcapClient *http.Client
+	mu         sync.RWMutex
+	sensorID   string
+	token      string
 }
 
 type DiscoveredInterface struct {
@@ -49,12 +54,20 @@ type DesiredCaptureSource struct {
 	Direction string `json:"direction"`
 	BPFFilter string `json:"bpf_filter"`
 	Enabled   bool   `json:"enabled"`
+	StorePCAP bool   `json:"store_pcap"`
+}
+type DesiredCaptureJob struct {
+	JobID     string    `json:"job_id"`
+	StartTime time.Time `json:"start_time"`
+	EndTime   time.Time `json:"end_time"`
+	StorePCAP bool      `json:"store_pcap"`
 }
 type DesiredConfig struct {
 	SensorID                  string                 `json:"sensor_id,omitempty"`
 	AgentToken                string                 `json:"agent_token,omitempty"`
 	ConfigVersion             int64                  `json:"config_version"`
 	CaptureSources            []DesiredCaptureSource `json:"capture_sources"`
+	CaptureJobs               []DesiredCaptureJob    `json:"capture_jobs"`
 	InternalNetworks          []string               `json:"internal_networks"`
 	HeartbeatIntervalSeconds  int                    `json:"heartbeat_interval_seconds"`
 	ConfigPollIntervalSeconds int                    `json:"config_poll_interval_seconds"`
@@ -68,7 +81,11 @@ func NewHTTP(baseURL string, client *http.Client) (*HTTP, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &HTTP{baseURL: parsed.String(), client: client}, nil
+	pcapClient := *client
+	if pcapClient.Timeout < minimumPCAPUploadTimeout {
+		pcapClient.Timeout = minimumPCAPUploadTimeout
+	}
+	return &HTTP{baseURL: parsed.String(), client: client, pcapClient: &pcapClient}, nil
 }
 
 func (h *HTTP) SetIdentity(sensorID, token string) {
@@ -136,7 +153,7 @@ func (h *HTTP) Heartbeat(ctx context.Context, heartbeat telemetry.Heartbeat) err
 		"reported_at": heartbeat.CurrentTime, "status": heartbeat.Status.String(), "cpu_percent": heartbeat.CPUPercent,
 		"memory_percent": float64(0), "disk_percent": float64(0), "active_job_ids": activeJobs,
 		"received_packets": heartbeat.ReceivedPackets, "dropped_packets": heartbeat.DroppedPackets,
-		"pending_bytes": heartbeat.PendingBytes, "last_error": nil, "interfaces": heartbeat.Interfaces,
+		"pending_bytes": heartbeat.PendingBytes, "pcap_dropped_packets": heartbeat.PCAPDroppedPackets, "last_error": nil, "interfaces": heartbeat.Interfaces,
 	}
 	if len(discoveredInterfaces) > 0 {
 		payload["discovered_interfaces"] = discoveredInterfaces
@@ -187,6 +204,57 @@ func (h *HTTP) UploadFlowBatch(ctx context.Context, batch flowbatch.Batch) (flow
 	return ack, nil
 }
 
+func (h *HTTP) UploadPCAPSegment(
+	ctx context.Context,
+	sensorID string,
+	segmentID string,
+	analysisJobID string,
+	filename string,
+	content io.Reader,
+	size int64,
+) error {
+	if sensorID == "" || segmentID == "" || filename == "" || content == nil || size < 0 {
+		return fmt.Errorf("valid PCAP segment upload arguments are required")
+	}
+	path := "/api/v1/sensors/" + url.PathEscape(sensorID) + "/pcap-segments/" + url.PathEscape(segmentID)
+	query := url.Values{"filename": []string{filename}}
+	if analysisJobID != "" {
+		query.Set("analysis_job_id", analysisJobID)
+	}
+	hasher := sha256.New()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, h.baseURL+path+"?"+query.Encode(), io.TeeReader(content, hasher))
+	if err != nil {
+		return fmt.Errorf("create PCAP segment request: %w", err)
+	}
+	request.ContentLength = size
+	request.Header.Set("Content-Type", "application/vnd.tcpdump.pcap")
+	if token := h.authToken(); token != "" {
+		request.Header.Set("X-Sensor-Token", token)
+	}
+	response, err := h.pcapClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("upload PCAP segment: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		message, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
+		return fmt.Errorf("controller returned %s: %s", response.Status, strings.TrimSpace(string(message)))
+	}
+	var ack struct {
+		SegmentID string `json:"segment_id"`
+		SizeBytes int64  `json:"size_bytes"`
+		SHA256    string `json:"sha256"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&ack); err != nil {
+		return fmt.Errorf("decode PCAP segment ACK: %w", err)
+	}
+	expectedChecksum := hex.EncodeToString(hasher.Sum(nil))
+	if ack.SegmentID != segmentID || ack.SizeBytes != size || !strings.EqualFold(ack.SHA256, expectedChecksum) {
+		return fmt.Errorf("PCAP segment ACK does not match uploaded segment")
+	}
+	return nil
+}
+
 func (h *HTTP) post(ctx context.Context, path string, payload any) error {
 	return h.doJSON(ctx, http.MethodPost, path, payload, nil, h.authToken())
 }
@@ -229,4 +297,8 @@ func (h *HTTP) doJSON(ctx context.Context, method, path string, input, output an
 	return nil
 }
 
-func (h *HTTP) Close() error { h.client.CloseIdleConnections(); return nil }
+func (h *HTTP) Close() error {
+	h.client.CloseIdleConnections()
+	h.pcapClient.CloseIdleConnections()
+	return nil
+}

@@ -23,6 +23,10 @@ type FlowUploader interface {
 	UploadFlowBatch(context.Context, flowbatch.Batch) (flowbatch.ACK, error)
 }
 
+type PCAPSink interface {
+	Enqueue(packet.Packet) bool
+}
+
 type PipelineConfig struct {
 	SensorID, JobID              string
 	Interface, Direction         string
@@ -35,21 +39,25 @@ type PipelineConfig struct {
 	Limits                       capture.Limits
 	Spool                        *spool.Spool
 	Uploader                     FlowUploader
+	BatchManager                 *BatchManager
+	PCAPSink                     PCAPSink
+	PCAPSinks                    []PCAPSink
 	Now                          func() time.Time
 	IdleTicks                    <-chan time.Time
 }
 
 type CaptureSnapshot struct {
-	ReceivedPackets uint64
-	DroppedPackets  uint64
-	DecodeErrors    uint64
-	PendingBytes    uint64
-	LostBatches     uint64
-	LostBytes       uint64
-	ActiveJobs      []string
-	LastError       string
-	StopReason      capture.StopReason
-	Interfaces      []InterfaceSnapshot
+	ReceivedPackets    uint64
+	DroppedPackets     uint64
+	DecodeErrors       uint64
+	PendingBytes       uint64
+	LostBatches        uint64
+	LostBytes          uint64
+	PCAPDroppedPackets uint64
+	ActiveJobs         []string
+	LastError          string
+	StopReason         capture.StopReason
+	Interfaces         []InterfaceSnapshot
 }
 
 type InterfaceSnapshot struct {
@@ -63,9 +71,11 @@ type InterfaceSnapshot struct {
 }
 
 type Pipeline struct {
-	cfg      PipelineConfig
-	mu       sync.RWMutex
-	snapshot CaptureSnapshot
+	cfg         PipelineConfig
+	manager     *BatchManager
+	ownsManager bool
+	mu          sync.RWMutex
+	snapshot    CaptureSnapshot
 	// cachedDrop holds the latest dropped-packet count from periodic refresh.
 	cachedDrop atomic.Uint64
 }
@@ -79,8 +89,8 @@ func NewPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	if cfg.SensorID == "" || cfg.JobID == "" {
 		return nil, fmt.Errorf("sensor and capture job IDs are required")
 	}
-	if cfg.Source == nil || cfg.Spool == nil || cfg.Uploader == nil {
-		return nil, fmt.Errorf("packet source, spool and uploader are required")
+	if cfg.Source == nil {
+		return nil, fmt.Errorf("packet source is required")
 	}
 	if cfg.BatchMaxItems <= 0 || cfg.BatchMaxBytes <= 0 || cfg.PacketQueueSize <= 0 {
 		return nil, fmt.Errorf("pipeline queue and batch limits must be positive")
@@ -88,10 +98,34 @@ func NewPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Pipeline{cfg: cfg}, nil
+	manager := cfg.BatchManager
+	ownsManager := false
+	if manager == nil {
+		if cfg.Spool == nil || cfg.Uploader == nil {
+			return nil, fmt.Errorf("batch manager or spool and uploader are required")
+		}
+		var err error
+		manager, err = NewBatchManager(BatchManagerConfig{
+			Store: cfg.Spool, Uploader: cfg.Uploader,
+			QueueSize: cfg.PacketQueueSize, UploadInterval: time.Second, Now: cfg.Now,
+		})
+		if err != nil {
+			return nil, err
+		}
+		ownsManager = true
+	}
+	return &Pipeline{cfg: cfg, manager: manager, ownsManager: ownsManager}, nil
 }
 
 func (p *Pipeline) Run(ctx context.Context) error {
+	if p.ownsManager {
+		managerCtx, stopManager := context.WithCancel(context.WithoutCancel(ctx))
+		p.manager.Start(managerCtx)
+		defer func() {
+			stopManager()
+			<-p.manager.Done()
+		}()
+	}
 	p.update(func(s *CaptureSnapshot) {
 		s.ActiveJobs = []string{p.cfg.JobID}
 		s.LastError = ""
@@ -105,14 +139,13 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 	})
 
-	// Replay durable work before opening AF_PACKET. This preserves restart
-	// delivery even while a capture interface is temporarily unavailable.
-	p.drain(ctx)
-
 	reader, err := p.cfg.Source()
 	if err != nil {
 		p.fail("capture open failed: " + err.Error())
 		return err
+	}
+	if retainer, ok := reader.(capture.RawFrameRetainer); ok {
+		retainer.SetRetainRawFrame(p.cfg.PCAPSink != nil || len(p.cfg.PCAPSinks) > 0)
 	}
 	defer reader.Close()
 
@@ -159,6 +192,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 
 	finish := func(reason capture.StopReason) error {
 		cancelReader()
+		<-statsDone
 		p.setStopReason(reason)
 		if err := p.addRecords(queue, aggregator.Flush()); err != nil {
 			return err
@@ -166,7 +200,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		if err := p.persist(queue.Flush()); err != nil {
 			return err
 		}
-		p.drain(ctx)
+		p.refreshSpoolMetrics()
 		return nil
 	}
 
@@ -184,7 +218,6 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			if err := p.persist(queue.Flush()); err != nil {
 				return err
 			}
-			p.drain(ctx)
 		case event := <-events:
 			if event.err != nil {
 				if errors.Is(event.err, io.EOF) {
@@ -209,6 +242,12 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			}
 			if p.cfg.Filter != nil && !p.cfg.Filter.Match(pkt) {
 				continue
+			}
+			if p.cfg.PCAPSink != nil {
+				p.cfg.PCAPSink.Enqueue(pkt)
+			}
+			for _, sink := range p.cfg.PCAPSinks {
+				sink.Enqueue(pkt)
 			}
 			protocolMetadata, _ := metadata.Parse(servicePort(pkt), pkt.Payload)
 			if err := p.addRecords(queue, aggregator.AddWithMetadata(pkt, protocolMetadata)); err != nil {
@@ -272,13 +311,6 @@ func snapshotDroppedPackets(reader capture.Reader) uint64 {
 	return 0
 }
 
-func droppedPackets(reader capture.Reader) uint64 {
-	if counter, ok := reader.(capture.DropCounter); ok {
-		return counter.DroppedPackets()
-	}
-	return 0
-}
-
 func (p *Pipeline) asynchronousStop(ctx context.Context, started time.Time) capture.StopReason {
 	if ctx.Err() != nil {
 		return capture.StopContext
@@ -321,68 +353,19 @@ func (p *Pipeline) persist(records []flow.Record) error {
 	if err != nil {
 		return err
 	}
-	err = p.cfg.Spool.Put(spool.Batch{ID: completed.BatchID, Data: data, CreatedAt: p.cfg.Now()})
-	if err != nil && !isDuplicate(err) {
-		p.fail("spool write failed: " + err.Error())
-		return err
+	if !p.manager.Enqueue(spool.Batch{ID: completed.BatchID, Data: data, CreatedAt: p.cfg.Now()}) {
+		return nil
 	}
 	p.refreshSpoolMetrics()
-	p.drain(context.Background())
 	return nil
 }
 
-func (p *Pipeline) drain(ctx context.Context) {
-	pending, err := p.cfg.Spool.Pending()
-	if err != nil {
-		p.fail("spool read failed: " + err.Error())
-		return
-	}
-	now := p.cfg.Now()
-	for _, stored := range pending {
-		if !stored.NextAttempt.IsZero() && stored.NextAttempt.After(now) {
-			continue
-		}
-		completed, err := flowbatch.Decode(stored.Data)
-		if err != nil {
-			p.fail("spooled batch decode failed: " + err.Error())
-			continue
-		}
-		ack, err := p.cfg.Uploader.UploadFlowBatch(ctx, completed)
-		if err != nil || ack.BatchID != completed.BatchID || (!ack.Accepted && !ack.Duplicate) {
-			if err == nil {
-				err = fmt.Errorf("batch %s was not acknowledged", completed.BatchID)
-			}
-			_ = p.cfg.Spool.Retry(stored.ID)
-			p.fail("flow batch upload failed: " + err.Error())
-			break
-		}
-		if err := p.cfg.Spool.ACK(stored.ID); err != nil {
-			p.fail("spool ACK failed: " + err.Error())
-			break
-		}
-		p.update(func(s *CaptureSnapshot) {
-			if len(s.ActiveJobs) > 0 {
-				s.LastError = ""
-			}
-		})
-	}
-	p.refreshSpoolMetrics()
-}
-
 func (p *Pipeline) refreshSpoolMetrics() {
-	pending, err := p.cfg.Spool.Pending()
-	if err != nil {
-		return
-	}
-	var bytes uint64
-	for _, stored := range pending {
-		bytes += uint64(len(stored.Data))
-	}
-	loss := p.cfg.Spool.Loss()
+	manager := p.manager.Snapshot()
 	p.update(func(s *CaptureSnapshot) {
-		s.PendingBytes = bytes
-		s.LostBatches = loss.Batches
-		s.LostBytes = loss.Bytes
+		s.PendingBytes = manager.PendingBytes
+		s.LostBatches = manager.LostBatches
+		s.LostBytes = manager.LostBytes
 	})
 	// Update DroppedPackets from latest periodic snapshot + decode errors.
 	srcDrops := p.cachedDrop.Load()
@@ -396,10 +379,18 @@ func (p *Pipeline) refreshSpoolMetrics() {
 
 func (p *Pipeline) Snapshot() CaptureSnapshot {
 	p.mu.RLock()
-	defer p.mu.RUnlock()
 	out := p.snapshot
 	out.ActiveJobs = append([]string(nil), out.ActiveJobs...)
 	out.Interfaces = append([]InterfaceSnapshot(nil), out.Interfaces...)
+	p.mu.RUnlock()
+	manager := p.manager.Snapshot()
+	out.PendingBytes = manager.PendingBytes
+	out.LostBatches = manager.LostBatches
+	out.LostBytes = manager.LostBytes
+	if manager.LastError != "" {
+		out.LastError = manager.LastError
+	}
+
 	return out
 }
 

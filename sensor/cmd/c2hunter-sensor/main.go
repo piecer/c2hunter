@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	goruntime "runtime"
 	"strings"
 	"syscall"
@@ -23,6 +24,7 @@ import (
 	"c2hunter/sensor/internal/direction"
 	interfacespkg "c2hunter/sensor/internal/interfaces"
 	"c2hunter/sensor/internal/packet"
+	pcapstore "c2hunter/sensor/internal/pcap"
 	sensorruntime "c2hunter/sensor/internal/runtime"
 	"c2hunter/sensor/internal/spool"
 	"c2hunter/sensor/internal/telemetry"
@@ -201,7 +203,7 @@ func claim(ctx context.Context, client *transport.HTTP, token string) (transport
 	request := transport.EnrollmentRequest{
 		Hostname: hostname, AgentVersion: version,
 		OSVersion: goruntime.GOOS, KernelVersion: kernelVersion(),
-		Capabilities: []string{"flow-capture", "multi-interface"},
+		Capabilities: []string{"flow-capture", "multi-interface", "pcap-storage", "pcap-upload"},
 	}
 	for _, item := range items {
 		request.DiscoveredInterfaces = append(request.DiscoveredInterfaces, transport.DiscoveredInterface{Name: item.Name, MACAddress: item.MAC})
@@ -224,7 +226,7 @@ func discoverHeartbeatInterfaces(
 }
 
 func controlLoop(ctx context.Context, hup <-chan os.Signal, supervisor *sensorruntime.Supervisor, client *transport.HTTP, cfg config.Config, state agent.State) {
-	interval := cfg.Agent.ConfigPollInterval
+	interval := jobAwarePollInterval(cfg.Agent.ConfigPollInterval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -241,7 +243,7 @@ func controlLoop(ctx context.Context, hup <-chan os.Signal, supervisor *sensorru
 			log.Printf("desired config poll failed: %v", err)
 			continue
 		}
-		if !force && desired.ConfigVersion <= state.ConfigVersion {
+		if !force && desired.ConfigVersion <= state.ConfigVersion && captureJobsEqual(cfg.CaptureJobs, desired.CaptureJobs) {
 			continue
 		}
 		next := cfg
@@ -250,12 +252,24 @@ func controlLoop(ctx context.Context, hup <-chan os.Signal, supervisor *sensorru
 			log.Printf("desired config version %d rejected; keeping version %d: %v", desired.ConfigVersion, state.ConfigVersion, err)
 			continue
 		}
+		nextInterval := jobAwarePollInterval(next.Agent.ConfigPollInterval)
+		if nextInterval != interval {
+			interval = nextInterval
+			ticker.Reset(interval)
+		}
 		cfg = next
 		state.ConfigVersion = desired.ConfigVersion
 		if err := agent.Save(cfg.Agent.StateFile, state); err != nil {
 			log.Printf("persist config version: %v", err)
 		}
 	}
+}
+
+func jobAwarePollInterval(configured time.Duration) time.Duration {
+	if configured > time.Second {
+		return time.Second
+	}
+	return configured
 }
 
 func localReloadLoop(ctx context.Context, hup <-chan os.Signal, supervisor *sensorruntime.Supervisor, client *transport.HTTP, cfg config.Config) {
@@ -291,6 +305,10 @@ func applyDesired(cfg *config.Config, desired transport.DesiredConfig) {
 		enabled := source.Enabled
 		cfg.CaptureSources = append(cfg.CaptureSources, config.CaptureSource{Interface: source.Interface, Direction: source.Direction, BPFFilter: source.BPFFilter, Enabled: &enabled})
 	}
+	cfg.CaptureJobs = nil
+	for _, job := range desired.CaptureJobs {
+		cfg.CaptureJobs = append(cfg.CaptureJobs, config.CaptureJob{JobID: job.JobID, StartTime: job.StartTime, EndTime: job.EndTime, StorePCAP: job.StorePCAP})
+	}
 	if desired.HeartbeatIntervalSeconds > 0 {
 		cfg.HeartbeatInterval = time.Duration(desired.HeartbeatIntervalSeconds) * time.Second
 	}
@@ -305,6 +323,26 @@ func applyPipelines(supervisor *sensorruntime.Supervisor, cfg config.Config, upl
 		return err
 	}
 	return supervisor.Apply(versionNumber, pipelines)
+}
+
+func captureJobsEqual(current []config.CaptureJob, desired []transport.DesiredCaptureJob) bool {
+	next := make([]config.CaptureJob, 0, len(desired))
+	for _, job := range desired {
+		next = append(next, config.CaptureJob{JobID: job.JobID, StartTime: job.StartTime, EndTime: job.EndTime, StorePCAP: job.StorePCAP})
+	}
+	return reflect.DeepEqual(current, next)
+}
+
+type captureWindowPCAPSink struct {
+	sink       sensorruntime.PCAPSink
+	start, end time.Time
+}
+
+func (s captureWindowPCAPSink) Enqueue(pkt packet.Packet) bool {
+	if (!s.start.IsZero() && pkt.Timestamp.Before(s.start)) || (!s.end.IsZero() && pkt.Timestamp.After(s.end)) {
+		return true
+	}
+	return s.sink.Enqueue(pkt)
 }
 
 func buildPipelines(cfg config.Config, uploader sensorruntime.FlowUploader) ([]sensorruntime.CaptureRuntime, error) {
@@ -331,7 +369,36 @@ func buildPipelines(cfg config.Config, uploader sensorruntime.FlowUploader) ([]s
 	if err != nil {
 		return nil, fmt.Errorf("open spool: %w", err)
 	}
-	var pipelines []sensorruntime.CaptureRuntime
+	manager, err := sensorruntime.NewBatchManager(sensorruntime.BatchManagerConfig{
+		Store: store, Uploader: uploader, QueueSize: cfg.Capture.PacketQueueSize,
+		UploadInterval: time.Second, Now: time.Now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build batch manager: %w", err)
+	}
+	storeAnyPCAP := false
+	for _, job := range cfg.CaptureJobs {
+		storeAnyPCAP = storeAnyPCAP || job.StorePCAP
+	}
+	pcapUploader, canUploadPCAP := uploader.(sensorruntime.PCAPSegmentUploader)
+	if storeAnyPCAP && !canUploadPCAP {
+		return nil, fmt.Errorf("PCAP segment uploader is required when PCAP storage is enabled")
+	}
+	var pcapStartup *sensorruntime.PCAPStartup
+	if storeAnyPCAP || canUploadPCAP {
+		pcapStartup = sensorruntime.NewPCAPStartup(cfg.PCAP.Directory)
+	}
+	pipelines := []sensorruntime.CaptureRuntime{manager}
+	if canUploadPCAP {
+		archive, err := sensorruntime.NewPCAPArchiveManager(sensorruntime.PCAPArchiveManagerConfig{
+			Directory: cfg.PCAP.Directory, SensorID: cfg.Sensor.ID, Uploader: pcapUploader,
+			ScanInterval: time.Second, Startup: pcapStartup,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("build PCAP archive manager: %w", err)
+		}
+		pipelines = append(pipelines, archive)
+	}
 	for _, source := range sources {
 		source := source
 		bpfExpression := combineBPFExpressions(source.BPFFilter, cfg.Capture.BPF)
@@ -343,6 +410,29 @@ func buildPipelines(cfg config.Config, uploader sensorruntime.FlowUploader) ([]s
 		if err != nil {
 			return nil, err
 		}
+		var pcapSinks []sensorruntime.PCAPSink
+		for _, job := range cfg.CaptureJobs {
+			if !job.StorePCAP {
+				continue
+			}
+			rotator, err := pcapstore.NewRotator(
+				pcapstore.FileFactory{Directory: cfg.PCAP.Directory, Prefix: pcapFilePrefix(job.JobID+"--"+source.Interface, source.Direction)},
+				pcapstore.Limits{MaxBytes: cfg.PCAP.MaxSegmentBytes, MaxDuration: cfg.PCAP.MaxSegmentDuration},
+			)
+			if err != nil {
+				return nil, fmt.Errorf("build PCAP rotator for %s: %w", source.Interface, err)
+			}
+			writer, err := sensorruntime.NewPCAPWriter(sensorruntime.PCAPWriterConfig{
+				JobID:   job.JobID,
+				Rotator: rotator, QueueSize: cfg.PCAP.QueueSize,
+				Directory: cfg.PCAP.Directory, MaxDiskBytes: cfg.PCAP.MaxDiskBytes, Startup: pcapStartup,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("build PCAP writer for %s: %w", source.Interface, err)
+			}
+			pcapSinks = append(pcapSinks, captureWindowPCAPSink{sink: writer, start: job.StartTime, end: job.EndTime})
+			pipelines = append(pipelines, writer)
+		}
 		pipeline, err := sensorruntime.NewPipeline(sensorruntime.PipelineConfig{
 			SensorID: cfg.Sensor.ID, JobID: cfg.Capture.JobID + ":" + source.Interface + ":" + source.Direction,
 			Interface: source.Interface, Direction: source.Direction, IdleTimeout: cfg.FlowIdleTimeout,
@@ -352,7 +442,7 @@ func buildPipelines(cfg config.Config, uploader sensorruntime.FlowUploader) ([]s
 				return capture.NewLiveReader(source.Interface, capture.AFPacketOpener{}, classifier)
 			},
 			Filter: filter, Limits: capture.Limits{StartTime: cfg.Capture.StartTime, EndTime: cfg.Capture.EndTime, Duration: cfg.Capture.Duration, MaxPackets: cfg.Capture.MaxPackets, MaxBytes: cfg.Capture.MaxBytes},
-			Spool: store, Uploader: uploader,
+			BatchManager: manager, PCAPSinks: pcapSinks,
 		})
 		if err != nil {
 			return nil, err
@@ -466,7 +556,7 @@ func buildRegistration(cfg config.Config, lookup func(string) (*net.Interface, e
 	if err := syscall.Statfs(filepath.Dir(cfg.Spool.Directory), &filesystem); err == nil {
 		availableDisk = filesystem.Bavail * uint64(filesystem.Bsize)
 	}
-	return telemetry.Registration{SensorID: cfg.Sensor.ID, Name: cfg.Sensor.Name, Hostname: hostname, AgentVersion: version, OS: goruntime.GOOS, KernelVersion: kernelVersion(), Interfaces: interfaces, Capabilities: []string{"AF_PACKET", "TPACKET_V3", "multi-interface", "durable-spool", "desired-config"}, CurrentTime: time.Now().UTC(), AvailableDiskBytes: availableDisk}, nil
+	return telemetry.Registration{SensorID: cfg.Sensor.ID, Name: cfg.Sensor.Name, Hostname: hostname, AgentVersion: version, OS: goruntime.GOOS, KernelVersion: kernelVersion(), Interfaces: interfaces, Capabilities: []string{"AF_PACKET", "TPACKET_V3", "multi-interface", "durable-spool", "desired-config", "pcap-storage", "pcap-upload"}, CurrentTime: time.Now().UTC(), AvailableDiskBytes: availableDisk}, nil
 }
 
 func kernelVersion() string {
@@ -484,6 +574,16 @@ func nonempty(values ...string) []string {
 		}
 	}
 	return out
+}
+
+func pcapFilePrefix(interfaceName, direction string) string {
+	value := interfaceName + "-" + strings.ToLower(direction)
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
+			return r
+		}
+		return '_'
+	}, value)
 }
 
 func combineBPFExpressions(expressions ...string) string {
