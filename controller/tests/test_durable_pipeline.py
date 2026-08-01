@@ -114,8 +114,18 @@ def test_flow_batch_is_persisted_and_batch_id_is_deduplicated() -> None:
     second = client.post("/api/v1/sensors/s1/flow-batches", json=body, headers=AGENT_HEADERS)
 
     assert first.status_code == 202
-    assert first.json() == {"batch_id": "batch-1", "accepted": True, "record_count": 1}
-    assert second.json() == {"batch_id": "batch-1", "accepted": False, "record_count": 1}
+    assert first.json() == {
+        "batch_id": "batch-1",
+        "accepted": True,
+        "duplicate": False,
+        "record_count": 1,
+    }
+    assert second.json() == {
+        "batch_id": "batch-1",
+        "accepted": False,
+        "duplicate": True,
+        "record_count": 1,
+    }
     assert store.record_count == 1
 
 

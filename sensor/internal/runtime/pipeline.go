@@ -152,7 +152,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	readerCtx, cancelReader := context.WithCancel(ctx)
 	defer cancelReader()
 	events := make(chan packetEvent, p.cfg.PacketQueueSize)
-	go p.readPackets(readerCtx, reader, events)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		p.readPackets(readerCtx, reader, events)
+	}()
 
 	// Periodic socket-stats snapshot (1 s interval). This removes per-packet
 	// syscall overhead from the hot path; DroppedPackets is updated here and
@@ -192,6 +196,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 
 	finish := func(reason capture.StopReason) error {
 		cancelReader()
+		// AF_PACKET Close unmaps its ring. Wait until Next has returned so the
+		// capture goroutine cannot access that mapping after Run returns.
+		<-readerDone
 		<-statsDone
 		p.setStopReason(reason)
 		if err := p.addRecords(queue, aggregator.Flush()); err != nil {

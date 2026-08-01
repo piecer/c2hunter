@@ -949,7 +949,12 @@ def create_app(
             payload.batch_id,
             [record.model_dump(mode="json") for record in payload.records],
         )
-        return {"batch_id": payload.batch_id, "accepted": accepted, "record_count": count}
+        return {
+            "batch_id": payload.batch_id,
+            "accepted": accepted,
+            "duplicate": not accepted,
+            "record_count": count,
+        }
 
     @app.put("/api/v1/sensors/{sensor_id}/pcap-segments/{segment_id}", status_code=201)
     async def upload_sensor_pcap(

@@ -35,6 +35,23 @@ func (s *packetSourceStub) SetRetainRawFrame(enabled bool) {
 	s.retainRawFrame = enabled
 }
 
+type blockingLifecycleSource struct {
+	entered chan struct{}
+	release chan struct{}
+	closed  chan struct{}
+}
+
+func (s *blockingLifecycleSource) Next(ctx context.Context) (packet.Packet, error) {
+	close(s.entered)
+	<-s.release
+	return packet.Packet{}, ctx.Err()
+}
+
+func (s *blockingLifecycleSource) Close() error {
+	close(s.closed)
+	return nil
+}
+
 type uploadStub struct {
 	mu      sync.Mutex
 	batches []flowbatch.Batch
@@ -231,6 +248,48 @@ func TestPipelineKeepsCapturingAcrossRecoverablePacketErrors(t *testing.T) {
 	snapshot := pipeline.Snapshot()
 	if source.calls != 4 || snapshot.LastError != "" || snapshot.DecodeErrors != 1 || snapshot.DroppedPackets != 3 || len(snapshot.Interfaces) != 1 || snapshot.Interfaces[0].Status != "ONLINE" || snapshot.Interfaces[0].DecodeErrors != 1 || snapshot.Interfaces[0].DroppedPackets != 3 {
 		t.Fatalf("calls = %d, snapshot = %+v", source.calls, pipeline.Snapshot())
+	}
+}
+
+func TestPipelineWaitsForPacketReaderBeforeClose(t *testing.T) {
+	now := time.Unix(450, 0).UTC()
+	source := &blockingLifecycleSource{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		closed:  make(chan struct{}),
+	}
+	pipeline, err := NewPipeline(PipelineConfig{
+		SensorID: "sensor-a", JobID: "job-a", BatchMaxItems: 10, BatchMaxBytes: 64 << 10, PacketQueueSize: 1,
+		Source: func() (capture.Reader, error) { return source, nil },
+		Spool:  openTestSpool(t, t.TempDir(), func() time.Time { return now }), Uploader: &uploadStub{}, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- pipeline.Run(ctx) }()
+	<-source.entered
+	cancel()
+
+	prematureClose := false
+	select {
+	case <-source.closed:
+		prematureClose = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(source.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if prematureClose {
+		t.Fatal("capture reader was closed while Next was still using it")
+	}
+	select {
+	case <-source.closed:
+	case <-time.After(time.Second):
+		t.Fatal("capture reader was not closed after Next returned")
 	}
 }
 
