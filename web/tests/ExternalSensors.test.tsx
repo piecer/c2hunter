@@ -64,14 +64,14 @@ describe('External sensor enrollment', () => {
     let finish!: (value: Response) => void;
     const pending = new Promise<Response>(resolve => { finish = resolve; });
     renderAt('/external-sensors', async () => pending);
-    expect(screen.getByRole('status')).toHaveTextContent('Loading');
+    expect(screen.getByRole('status')).toHaveTextContent('데이터를 불러오는 중입니다');
     finish(await json({ items: [] }));
     expect(await screen.findByText('No external sensor enrollments')).toBeInTheDocument();
     cleanup();
 
     renderAt('/external-sensors', async () => json({ error: { message: 'Enrollment service unavailable' } }, 503));
     expect(await screen.findByRole('alert')).toHaveTextContent('Enrollment service unavailable');
-    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '다시 시도' })).toBeInTheDocument();
   });
 
   it('adds and removes interface and CIDR rows with labelled keyboard-operable controls', async () => {

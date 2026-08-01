@@ -475,3 +475,16 @@ def test_sensor_pcap_upload_is_linked_to_assigned_analysis_job() -> None:
     assert uploaded.status_code == 201
     assert uploaded.json()["analysis_job_id"] == "job-a"
     assert api.get("/api/v1/sensor-pcaps").json()["items"][0]["analysis_job_id"] == "job-a"
+
+    other = {
+        **repo.list_sensor_pcaps()[0],
+        "id": "other-segment",
+        "analysis_job_id": "job-b",
+        "filename": "job-b--eth0-outbound-000001.pcap",
+        "uploaded_at": "2026-08-01T02:00:00+00:00",
+    }
+    repo.save_sensor_pcap(other, capture)
+    filtered = api.get("/api/v1/sensor-pcaps?analysis_job_id=job-a&page_size=1")
+    assert filtered.status_code == 200
+    assert filtered.json()["total"] == 1
+    assert filtered.json()["items"][0]["analysis_job_id"] == "job-a"

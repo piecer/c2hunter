@@ -35,13 +35,14 @@ responses['/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&include_filter=
   responses['/api/v1/analysis-jobs/job-1/flows?candidate_ip=203.0.113.9&page=1&page_size=50'];
 responses['/api/v1/candidates?page=1&page_size=50&minimum_score=0&sort=-score'] =
   responses['/api/v1/candidates'];
+responses['/api/v1/sensor-pcaps?analysis_job_id=job-1&page_size=200'] = { items: [], total: 0, page: 1, page_size: 200 };
 
-function renderAt(route: string) {
+function renderAt(route: string, handler?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
   localStorage.setItem('c2hunter-token', 'token');
-  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+  vi.stubGlobal('fetch', vi.fn(handler ?? (async (input: RequestInfo | URL) => {
     const path = String(input);
     return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404, headers: { 'content-type': 'application/json' } });
-  }));
+  })));
   return render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={[route]}><App /></MemoryRouter></QueryClientProvider>);
 }
 
@@ -120,6 +121,52 @@ describe('C2Hunter UI', () => {
     expect(await screen.findByRole('table', { name: 'Analysis candidates' })).toBeInTheDocument();
     expect(await screen.findByRole('table', { name: 'Analysis flows' })).toBeInTheDocument();
     expect(screen.getByText('analysis requested')).toBeInTheDocument();
+  });
+
+  it('presents nested capture and detection configuration without exposed raw JSON', async () => {
+    const detailed = {
+      ...(responses['/api/v1/analysis-jobs/job-1'] as Record<string, unknown>),
+      capture: {
+        max_packets: 2000,
+        directions: ['OUTBOUND', 'INBOUND'],
+        store_pcap: true,
+        limits: { max_duration_seconds: 300, idle_timeout_seconds: 30 },
+      },
+      analysis: {
+        profile: 'ddos_botnet',
+        minimum_candidate_score: 60,
+        minimum_distinct_clients: 3,
+        periodicity_min_samples: 5,
+        ml_anomaly_enabled: true,
+        detector_weights: { periodic_beacon: 1.5, common_destination: 0.25, dns_tunnel: 0 },
+        custom_policy: { mode: 'strict', tags: ['production', 'edge'] },
+      },
+    };
+    renderAt('/analyses/job-1', async (input: RequestInfo | URL) => {
+      const path = String(input);
+      return new Response(JSON.stringify(path === '/api/v1/analysis-jobs/job-1' ? detailed : responses[path] ?? { items: [] }), { status: 200 });
+    });
+
+    const detection = await screen.findByRole('region', { name: '탐지 설정 요약' });
+    expect(within(detection).getByText('최소 후보 점수')).toBeInTheDocument();
+    expect(within(detection).getByText('60점 이상')).toBeInTheDocument();
+    expect(within(detection).getByText('1.5×')).toBeInTheDocument();
+    expect(within(detection).getByText('강화')).toBeInTheDocument();
+    expect(within(detection).getByText('비활성')).toBeInTheDocument();
+    expect(within(detection).getByText('Strict')).toBeInTheDocument();
+    expect(within(detection).getByText('Production')).toBeInTheDocument();
+
+    const scope = screen.getByRole('region', { name: '분석 범위' });
+    expect(within(scope).getByText('sensor-a')).toBeInTheDocument();
+    expect(within(scope).queryByText('Sensor-A')).not.toBeInTheDocument();
+    expect(within(scope).getByText('OUTBOUND')).toBeInTheDocument();
+    expect(within(scope).getByText('INBOUND')).toBeInTheDocument();
+    expect(within(scope).getByText('PCAP 저장')).toBeInTheDocument();
+    expect(within(scope).getByText('사용')).toBeInTheDocument();
+
+    const raw = screen.getByText('원본 설정 보기').closest('details');
+    expect(raw).not.toHaveAttribute('open');
+    expect(document.body).not.toHaveTextContent('{"periodic_beacon":1.5');
   });
 
   it('reanalyzes the same dataset with tuned detector weights', async () => {
@@ -213,7 +260,7 @@ describe('C2Hunter UI', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { message: 'Storage unavailable' } }), { status: 503, headers: { 'content-type': 'application/json' } })));
     render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/']}><App /></MemoryRouter></QueryClientProvider>);
     expect(await screen.findByRole('alert')).toHaveTextContent('Storage unavailable');
-    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '다시 시도' })).toBeInTheDocument();
   });
 
   it('submits every required Controller analysis field', async () => {
@@ -357,6 +404,32 @@ describe('C2Hunter UI', () => {
     await user.click(screen.getByRole('button', { name: 'Delete candidate' }));
     await user.click(screen.getByRole('button', { name: 'Delete permanently' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/candidates/candidate-1', expect.objectContaining({ method: 'DELETE' })));
+  });
+
+  it('renders nested detector metrics as structured fields instead of inline JSON', async () => {
+    const original = responses['/api/v1/candidates/candidate-1'] as Record<string, unknown>;
+    responses['/api/v1/candidates/candidate-1'] = {
+      ...original,
+      evidence: [{
+        type: 'PERIODIC_BEACON',
+        detector: 'periodic_beacon',
+        contribution: 15,
+        description: 'Nested metric fixture',
+        metrics: { sample_count: 7, timing_window: { minimum_seconds: 25, maximum_seconds: 35 }, phases: ['warmup', 'steady_state'] },
+      }],
+    };
+
+    try {
+      renderAt('/candidates/candidate-1');
+      await screen.findByRole('heading', { name: '탐지 근거' });
+      expect(screen.getByText('Timing Window')).toBeInTheDocument();
+      expect(screen.getByText('Minimum Seconds')).toBeInTheDocument();
+      expect(screen.getByText('25초')).toBeInTheDocument();
+      expect(screen.getByText('Warmup')).toBeInTheDocument();
+      expect(document.body).not.toHaveTextContent('{"minimum_seconds":25');
+    } finally {
+      responses['/api/v1/candidates/candidate-1'] = original;
+    }
   });
 
   it('renders score adjustments safely when the Controller returns a non-string kind', async () => {

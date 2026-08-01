@@ -1051,12 +1051,17 @@ def create_app(
     @app.get("/api/v1/sensor-pcaps")
     def list_sensor_pcaps(
         sensor_id: str | None = None,
+        analysis_job_id: str | None = None,
         page: int = Query(1, ge=1),
         page_size: int = Query(50, ge=1, le=200),
     ) -> dict[str, Any]:
         segments = repo.list_sensor_pcaps()
         if sensor_id is not None:
             segments = [segment for segment in segments if segment["sensor_id"] == sensor_id]
+        if analysis_job_id is not None:
+            segments = [
+                segment for segment in segments if segment.get("analysis_job_id") == analysis_job_id
+            ]
         segments.sort(key=lambda segment: str(segment["uploaded_at"]), reverse=True)
         public = [
             {key: value for key, value in segment.items() if key != "object_key"}

@@ -93,6 +93,33 @@ test('analyst can download an archived sensor PCAP', async ({ page }) => {
   expect(download.suggestedFilename()).toBe('job-1--eth0-000001.pcap');
 });
 
+test('analysis configuration is structured and responsive', async ({ page }) => {
+  await installApiFixture(page);
+  await page.goto('/login');
+  await page.getByLabel('Username').fill('analyst');
+  await page.getByRole('button', { name: 'Development login' }).click();
+  await page.goto('/analyses/job-1');
+
+  const configuration = page.getByRole('region', { name: '분석 구성' });
+  await expect(configuration).toBeVisible();
+  await expect(page.getByRole('region', { name: '탐지 설정 요약' }).getByText('최소 후보 점수')).toBeVisible();
+  await expect(page.getByText('60점 이상')).toBeVisible();
+  await expect(page.getByText('1.5×')).toBeVisible();
+  await expect(page.getByText('강화')).toBeVisible();
+  await expect(page.getByText('비활성').first()).toBeVisible();
+  await expect(page.getByText('원본 설정 보기')).toBeVisible();
+  await expect(page.locator('.raw-config-details')).not.toHaveAttribute('open', '');
+  const [pcapDownload] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByRole('button', { name: 'Download job-1--eth0-000001.pcap' }).click(),
+  ]);
+  expect(pcapDownload.suggestedFilename()).toBe('job-1--eth0-000001.pcap');
+
+  await page.setViewportSize({ width: 420, height: 900 });
+  expect(await configuration.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(await page.locator('body').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+});
+
 test('analyst can combine multiple flow filters and filter-out patterns', async ({ page }) => {
   await installApiFixture(page);
   await page.goto('/login');
