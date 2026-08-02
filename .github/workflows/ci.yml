@@ -135,4 +135,4 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with: { scan-type: fs, scan-ref: '.', severity: 'HIGH,CRITICAL', ignore-unfixed: true, exit-code: '1' }
+        with: { scan-type: fs, scan-ref: '.', ignore-file: .trivyignore, severity: 'HIGH,CRITICAL', ignore-unfixed: true, exit-code: '1' }
