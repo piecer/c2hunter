@@ -13,6 +13,12 @@ Threats include malicious sensor enrollment, stolen credentials, forged telemetr
 - Enforce `ADMIN`, `ANALYST`, `VIEWER`, and `SENSOR` on the server and per resource. UI visibility is not authorization.
 - ADMIN manages settings/users; ANALYST creates/cancels/reanalyzes and exports; VIEWER reads; SENSOR accesses sensor endpoints only.
 - Disable `C2HUNTER_DEV_LOGIN_ENABLED` outside local development and use the organization's OIDC/MFA/session policy.
+- The Controller validates Bearer tokens and enforces the minimum role for human routes. Configure only
+  SHA-256 digests with `C2HUNTER_VIEWER_TOKEN_SHA256`, `C2HUNTER_ANALYST_TOKEN_SHA256`, and
+  `C2HUNTER_ADMIN_TOKEN_SHA256`; keep plaintext tokens in an external secret manager and rotate them.
+  Authentication is fail-closed by default in deployable environments.
+- Login, enrollment-claim, and analysis-creation limits are per-process safeguards. Use
+  ingress/distributed rate limiting for multiple replicas and production abuse resistance.
 
 ## Secret management
 

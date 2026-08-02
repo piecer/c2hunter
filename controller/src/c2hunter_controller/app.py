@@ -62,6 +62,16 @@ from .schemas import (
     SensorGroupCreate,
     SensorRegistration,
 )
+from .security import (
+    FixedWindowRateLimiter,
+    Role,
+    SecurityError,
+    SessionStore,
+    TokenAuthenticator,
+    is_enrollment_claim,
+    require_role,
+    required_role,
+)
 from .storage import ClickHouseFlowStore, FlowStore, MemoryFlowStore
 
 
@@ -507,6 +517,14 @@ def create_app(
     app.state.repository = repo
     app.state.flow_store = flows
     app.state.queue = work_queue
+    sessions = SessionStore()
+    authenticator = TokenAuthenticator(
+        sessions,
+        viewer_token_sha256=config.viewer_token_sha256,
+        analyst_token_sha256=config.analyst_token_sha256,
+        admin_token_sha256=config.admin_token_sha256,
+    )
+    rate_limiter = FixedWindowRateLimiter(config.rate_limit_window_seconds)
     registry = CollectorRegistry()
     requests = Counter(
         "c2hunter_api_requests_total",
@@ -517,6 +535,36 @@ def create_app(
     latency = Histogram(
         "c2hunter_api_request_duration_seconds", "API request latency", ["path"], registry=registry
     )
+
+    @app.middleware("http")
+    async def security(request: Request, call_next: Any) -> Response:
+        path = request.url.path
+        client_key = request.client.host if request.client is not None else "unknown"
+        try:
+            if request.method == "POST" and path == "/api/v1/auth/dev-login":
+                rate_limiter.check("dev-login", client_key, config.dev_login_rate_limit)
+            if is_enrollment_claim(request.method, path):
+                rate_limiter.check(
+                    "enrollment-claim", client_key, config.enrollment_claim_rate_limit
+                )
+            minimum_role = required_role(request.method, path)
+            if config.api_auth_required and minimum_role is not None:
+                principal = authenticator.authenticate(request.headers.get("authorization"))
+                require_role(principal, minimum_role)
+                request.state.principal = principal
+                if request.method == "POST" and path in {
+                    "/api/v1/analysis-jobs",
+                    "/api/v1/pcap-analysis-jobs",
+                }:
+                    rate_limiter.check(
+                        "analysis-job", principal.subject, config.analysis_job_rate_limit
+                    )
+        except SecurityError as exc:
+            response = _error(request, exc.status, exc.code, exc.message)
+            if exc.retry_after is not None:
+                response.headers["retry-after"] = str(exc.retry_after)
+            return response
+        return cast(Response, await call_next(request))
 
     @app.middleware("http")
     async def observability(request: Request, call_next: Any) -> Response:
@@ -585,22 +633,25 @@ def create_app(
         summary="Mint a short-lived development token",
         description=(
             "Disabled unless C2HUNTER_DEV_LOGIN_ENABLED=true. The opaque token is a local "
-            "development convenience only; this endpoint does not provide production identity, "
-            "token verification, authorization, refresh, revocation, OIDC, or MFA."
+            "development convenience with server-side expiry and ADMIN authorization. It does "
+            "not provide production identity, refresh, revocation, OIDC, or MFA."
         ),
     )
     def development_login(payload: DevLoginRequest) -> dict[str, Any]:
         if not config.dev_login_enabled:
             # Keep the disabled surface indistinguishable from an unavailable optional feature.
             raise ApiError(404, "DEV_LOGIN_DISABLED", "개발 로그인이 활성화되지 않았습니다")
+        token = secrets.token_urlsafe(32)
+        sessions.add(token, payload.username, Role.ADMIN, config.dev_token_ttl_seconds)
         return {
-            "access_token": secrets.token_urlsafe(32),
+            "access_token": token,
             "token_type": "bearer",
             "expires_in": config.dev_token_ttl_seconds,
             "username": payload.username,
+            "role": Role.ADMIN.name,
             "limitations": (
-                "Development-only opaque token; no production authentication or authorization "
-                "semantics are provided."
+                "Development-only in-memory session; no production identity, refresh, OIDC, "
+                "MFA, or cross-process session semantics are provided."
             ),
         }
 
