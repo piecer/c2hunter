@@ -112,17 +112,77 @@ Authorization: Bearer <YOUR_TOKEN>
 }
 ```
 
-### 센서 Enrollment & Registration (내부용)
+### 센서 Enrollment & Registration (외부 Sensor Agent용)
 
-다음 API는 외부 sensor agent에서 사용하며 클라이언트 코드에서는 직접 호출하지 않는다.
+다음 API는 외부 sensor agent에서 설치/등록/설정 폴링에 사용한다. ADMIN 토큰 필요.
 
 | Method | Path | Status | 설명 |
 |--------|------|--------|------|
-| `GET` | `/api/v1/sensor-enrollments` | 200 | Enrollment 목록 |
-| `GET` | `/api/v1/sensor-enrollments/{id}` | 200 | Enrollment 상세 |
+| `POST` | `/api/v1/sensor-enrollments` | 201 | One-time enrollment 토큰 생성 |
+| `GET` | `/api/v1/sensor-enrollments` | 200 | Enrollment 목록 조회 |
+| `GET` | `/api/v1/sensor-enrollments/{id}` | 200 | Enrollment 상세 조회 |
 | `DELETE` | `/api/v1/sensor-enrollments/{id}` | 204 | Enrollment 취소 |
-| `POST` | `/api/v1/sensors/register` | 201 | Sensor 등록 |
-| `POST` | `/api/v1/sensors/{sensor_id}/credentials/rotate` | 200 | Credential 교체 |
+| `POST` | `/api/v1/sensor-enrollments/{token}/claim` | 201 | Agent가 토큰 claim → 장기 credential 발급 |
+| `POST` | `/api/v1/sensors/register` | 201 | Sensor agent 등록 (claim 후) |
+| `GET` | `/api/v1/sensors/{sensor_id}/configuration` | 200 | Sensor 설정 조회 (CAPTURE 소스 + 내부 네트워크 등) |
+| `PUT` | `/api/v1/sensors/{sensor_id}/configuration` | 200 | Sensor 설정 업데이트 (버전 충돌 체크) |
+| `GET` | `/api/v1/sensors/{sensor_id}/agent-config` | 200 | Agent용 설정 폴링 응답 (`X-Sensor-Token` header 필요) |
+| `POST` | `/api/v1/sensors/{sensor_id}/credentials/rotate` | 200 | Sensor credential 교체 |
+| `POST` | `/api/v1/sensors/{sensor_id}/revoke` | 204 | Sensor 자격 증명 무효화 |
+
+#### Agent 데이터 전송 (Sensor 내장 에이전트 전용)
+
+Sensor agent가 Controller로 실시간 데이터를 업로드하는 엔드포인트이다. Bearer token이 아닌 `X-Sensor-Token` header를 통해 인증한다.
+
+| Method | Path | Status | 설명 |
+|--------|------|--------|------|
+| `POST` | `/api/v1/sensors/{sensor_id}/heartbeat` | 200/202 | Heartbeat 보고 |
+| `POST` | `/api/v1/sensors/{sensor_id}/flow-batches` | 202 | Flow batch 업로드 |
+| `PUT` | `/api/v1/sensors/{sensor_id}/pcap-segments/{segment_id}` | 201 | PCAP 세그먼트 업로드 |
+| `GET` | `/api/v1/sensor-pcaps` | 200 | 업로드된 PCAP 목록 |
+| `GET` | `/api/v1/sensor-pcaps/{segment_id}/download` | 200 | 개별 PCAP 다운로드 |
+
+#### Enrollment 토큰 생성 (예시)
+
+```bash
+# 1. 한 번용 enrollment 토큰 요청
+POST /api/v1/sensor-enrollments
+Authorization: Bearer <ADMIN_TOKEN>
+Content-Type: application/json
+
+{"name": "server-alpha"}
+
+# 응답: {"enrollment_id": "...", "token": "<ONE_TIME_TOKEN>", "controller_url": "https://c2hunter.example.com"}
+
+# 2. Agent side에서 토큰으로 long-lived credential claim
+POST /api/v1/sensor-enrollments/<TOKEN>/claim
+Content-Type: application/json
+
+{
+    "interfaces": [
+        {
+            "name": "ens2f0",
+            "direction": "INBOUND",
+            "bpf_filter": "",
+            "pcap_retention_enabled": false,
+            "active": true
+        }
+    ],
+    "internal_networks": ["10.0.0.0/8"],
+    "description": ""
+}
+
+# 응답: {"agent_token": "<LONG_LIVED_TOKEN>", ...}
+
+# 3. Agent가 token으로 register
+POST /api/v1/sensors/register
+X-Sensor-Token: <LONG_LIVED_TOKEN>
+Content-Type: application/json
+
+{"os": "Linux", "kernel": "7.0.0-28-generic", ...}
+```
+
+**참고**: Sensor agent는 HTTP `X-Sensor-Token` header를 통해 인증하며 Bearer token으로는 접근하지 않는다.
 
 ---
 
@@ -469,8 +529,9 @@ curl http://localhost:8000/openapi.json > c2hunter-openapi.json
 ## 외부 연동 예제 (Python)
 
 ```python
-import requests
+import os
 import time
+import requests
 
 BASE = "http://localhost:8000"
 TOKEN = os.environ["C2HUNTER_API_TOKEN"]
@@ -483,31 +544,82 @@ dashboard = resp.json()
 print(f"Sensors: {dashboard['fleet']['online']}/{dashboard['fleet']['total']}")
 
 
-# 2. PCPC업로드 분석 시작
+# 2. PCAP 업로드 분석 시작
 with open("./suspicious.pcap", "rb") as f:
-    files = [("file", ("analysis-job-1.pcap", f))]
-    params = {"name": "suspicious.pcap", "filename": "analysis-job-1.pcap"}
+    response = requests.post(
+        f"{BASE}/api/v1/pcap-analysis-jobs",
+        headers=headers,
+        data={"name": "suspiscious-traffic", "filename": "suspicious.pcap"},
+        files={"file": ("suspicious.pcap", f)},
+    )
 
+job = response.json()
+print(f"Job ID: {job['id']}, Status: {job['status']}")
 
-job = post({BASE}/api/v1/pcap-analysis-jobs, ...).json()
-print(f"Job ID: {job['id']}")
 
 # 3. 상태 폴링 (최대 60초)
-for _ in range(60):
-    status = requests.get(f"{BASE}/api/v1/analysis-jobs/{job['id']}", headers=headers).json()
-    if status['status'] in ('COMPLETED', 'PARTIALLY_COMPLETED', 'FAILED'):
+for attempt in range(60):
+    status_resp = requests.get(
+        f"{BASE}/api/v1/analysis-jobs/{job['id']}",
+        headers=headers
+    )
+    job_status = status_resp.json()
+    if job_status['status'] in ('COMPLETED', 'PARTIALLY_COMPLETED', 'FAILED'):
+        print(f"Analysis finished: {job_status['status']}")
         break
+    time.sleep(1)
 
-# 4. 후보 조회
-candidates = requests.get(
+
+# 4. 후보 조회 (Paginated, Critical/High 우선 정렬)
+candidates_resp = requests.get(
     f"{BASE}/api/v1/analysis-jobs/{job['id']}/candidates",
     headers=headers
-).json()
-
-
-# Critical/High 우선 정렬
-priority = sorted(
-    candidates['items'],
-    key=lambda c: {'CRITICAL': 0, 'HIGH': 1}.get(c['severity'], 2)
 )
+candidates = candidates_resp.json().get('items', [])
+
+priority = sorted(
+    candidates,
+    key=lambda c: ({"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}.get(c.get('severity', 'LOW'), 4), -c.get('score', 0))
+)
+
+for c in priority[:5]:
+    print(f"  [{c['severity']}] {c['candidate_ip']} (score: {c['score']}, evidence: {c['evidence_count']})")
+
+
+# 5. 특정 candidate 상세 조회 + 증거 확인
+if priority:
+    detail = requests.get(
+        f"{BASE}/api/v1/candidates/{priority[0]['id']}",
+        headers=headers
+    ).json()
+    print(f"\nTop threat: {detail['candidate_ip']}")
+    for ev in detail.get('evidence', []):
+        print(f"  - {ev['type']} from detector '{ev['detector']}' (contribution: {ev['contribution']})")
+
+
+# 6. PCAP export 요청 (필터 기반)
+export_resp = requests.post(
+    f"{BASE}/api/v1/pcap-exports",
+    headers={**headers, "Content-Type": "application/json"},
+    json={
+        "job_id": job['id'],
+        "candidate_ids": [priority[0]['id']],
+        "format": "pcapng"
+    }
+)
+export = export_resp.json()
+print(f"\nExport ID: {export['id']}, Status: {export['status']}")
 ```
+
+## Rate Limiting
+
+API 요청은 time window 기반 rate limit이 적용된다. 제한 초과 시 `429 Too Many Requests`를 반환하며 `Retry-After` header에서 대기 시간을 확인할 수 있다.
+
+| 엔드포인트 범주 | 기본 한도 |
+|----------------|----------|
+| Health / Metrics | Unlimited |
+| Dashboard / Read | window 내 N회 |
+| 분석 생성 (POST) | 제한적 (job 과부하 방지) |
+| PCAP Export / Download | 별도 제한 |
+
+window 크기와 한도는 `C2HUNTER_RATE_LIMIT_WINDOW_SECONDS`로 구성한다.
