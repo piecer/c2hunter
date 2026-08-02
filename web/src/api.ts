@@ -2,6 +2,12 @@ export class ApiError extends Error {
   constructor(message: string, public status: number, public code = 'HTTP_ERROR', public details?: unknown) { super(message); this.name = 'ApiError'; }
 }
 
+function invalidateAuthentication(response: Response): void {
+  if (response.status !== 401) return;
+  localStorage.removeItem('c2hunter-token');
+  window.dispatchEvent(new Event('c2hunter-auth-invalid'));
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = localStorage.getItem('c2hunter-token');
   const headers = new Headers(init.headers);
@@ -13,6 +19,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   // Response object cannot make a later request lose the structured error body.
   const body = response.status === 204 ? undefined : await response.clone().json().catch(() => undefined);
   if (!response.ok) {
+    invalidateAuthentication(response);
     const envelope = body?.error ?? body;
     throw new ApiError(envelope?.message ?? `Request failed (${response.status})`, response.status, envelope?.code, envelope?.details);
   }
@@ -25,6 +32,7 @@ async function download(path: string, fallbackFilename: string): Promise<void> {
   if (token) headers.authorization = `Bearer ${token}`;
   const response = await fetch(`/api/v1${path}`, { headers });
   if (!response.ok) {
+    invalidateAuthentication(response);
     const body = await response.clone().json().catch(() => undefined);
     const envelope = body?.error ?? body;
     throw new ApiError(envelope?.message ?? `Request failed (${response.status})`, response.status, envelope?.code, envelope?.details);

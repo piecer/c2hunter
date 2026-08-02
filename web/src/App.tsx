@@ -759,4 +759,14 @@ function Allowlist() {
   </>;
 }
 
-export default function App() { const authenticated = Boolean(localStorage.getItem('c2hunter-token')); return <Routes><Route path="/login" element={<Login/>}/><Route path="*" element={!authenticated ? <Navigate to="/login" replace/> : <Shell><Routes><Route path="/" element={<Dashboard/>}/><Route path="/sensors" element={<Sensors/>}/><Route path="/sensors/:id" element={<SensorDetail/>}/><Route path="/sensor-pcaps" element={<SensorPCAPs/>}/><Route path="/external-sensors" element={<ExternalSensors/>}/><Route path="/external-sensors/enroll" element={<EnrollSensor/>}/><Route path="/analyses" element={<AnalysisHistory/>}/><Route path="/analyses/new" element={<NewAnalysis/>}/><Route path="/analyses/upload" element={<PcapUpload/>}/><Route path="/analyses/:id" element={<JobDetail/>}/><Route path="/candidates" element={<Candidates/>}/><Route path="/candidates/:id" element={<CandidateDetail/>}/><Route path="/payload-signatures" element={<PayloadSignatures/>}/><Route path="/allowlist" element={<Allowlist/>}/><Route path="*" element={<div className="state"><h1>Page not found</h1><Link to="/">Return to dashboard</Link></div>}/></Routes></Shell>}/></Routes>; }
+export default function App() {
+  const [authenticated, setAuthenticated] = useState(
+    Boolean(localStorage.getItem('c2hunter-token')),
+  );
+  useEffect(() => {
+    const invalidate = () => setAuthenticated(false);
+    window.addEventListener('c2hunter-auth-invalid', invalidate);
+    return () => window.removeEventListener('c2hunter-auth-invalid', invalidate);
+  }, []);
+  return <Routes><Route path="/login" element={<Login/>}/><Route path="*" element={!authenticated ? <Navigate to="/login" replace/> : <Shell><Routes><Route path="/" element={<Dashboard/>}/><Route path="/sensors" element={<Sensors/>}/><Route path="/sensors/:id" element={<SensorDetail/>}/><Route path="/sensor-pcaps" element={<SensorPCAPs/>}/><Route path="/external-sensors" element={<ExternalSensors/>}/><Route path="/external-sensors/enroll" element={<EnrollSensor/>}/><Route path="/analyses" element={<AnalysisHistory/>}/><Route path="/analyses/new" element={<NewAnalysis/>}/><Route path="/analyses/upload" element={<PcapUpload/>}/><Route path="/analyses/:id" element={<JobDetail/>}/><Route path="/candidates" element={<Candidates/>}/><Route path="/candidates/:id" element={<CandidateDetail/>}/><Route path="/payload-signatures" element={<PayloadSignatures/>}/><Route path="/allowlist" element={<Allowlist/>}/><Route path="*" element={<div className="state"><h1>Page not found</h1><Link to="/">Return to dashboard</Link></div>}/></Routes></Shell>}/></Routes>;
+}
