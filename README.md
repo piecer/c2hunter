@@ -39,6 +39,8 @@ Controller now validates its short-lived token and grants it `ADMIN`, but the se
 does not provide OIDC, MFA, refresh, or multi-process sharing. Set it to `false` outside an isolated
 workstation. `make down` stops services without deleting volumes.
 
+The REST API can be used from external clients (SIEM, SOAR, scripts). See the [external API reference](docs/external-api-reference.md) for endpoints, request/response schemas, and code examples. The live OpenAPI spec is available at `http://localhost:8000/docs` (Swagger UI) or by downloading `http://localhost:8000/openapi.json`.
+
 Human API authentication is fail-closed by default. For a non-development deployment, configure one
 or more SHA-256 token digests by role and deliver the original random token to the intended client over
 a separate secret channel:
