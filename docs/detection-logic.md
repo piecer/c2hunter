@@ -150,9 +150,10 @@ anomaly-only Candidate까지 생성하려면 `ml_anomaly_allow_standalone=true`�
 | 명시적 allowlist IP/CIDR/domain/fingerprint match | 후보 제외, suppression 통계 기록 |
 | DNS/NTP 공용 인프라 | 최대 -30 |
 | CDN/대형 cloud 공유 IP | 최대 -20 |
-| 내부 업무 서버 | 최대 -40 |
+| 내부 업무 서버 | 최대 -40 (TBD, 아직 구현되지 않음) |
 | 단일 내부 host | 최대 -20 (`SINGLE_HOST_BEACON`은 -10, analyst exact는 미적용) |
 | 표본 부족 | 최대 -20 |
+| 대용량 endpoint (byte/packet threshold 초과) | 최대 -30 (`HIGH_VOLUME`) |
 
 기본값은 `score = clamp(0, 100, sum(capped contributions) + sum(adjustments))`로 계산한다. 실행별 detector weight는 type별 기본 cap을 적용한 contribution에 곱하고 최대 `2 × cap`까지 허용하므로, `0.0–1.0` 감쇠뿐 아니라 `1.0–2.0` 증폭도 유효하다. 최종 점수는 항상 100으로 clamp하며 weight와 조정 점수를 run에 snapshot한다.
 

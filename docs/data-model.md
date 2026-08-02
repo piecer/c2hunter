@@ -62,7 +62,7 @@ Job 상태 enum은 `CREATED, WAITING_FOR_SENSOR, CAPTURING, UPLOADING, INGESTING
 | `candidate_internal_hosts` | candidate FK, internal IP, first/last seen, connection/packet/byte count |
 | `candidate_sensor_observations` | candidate/sensor FK, first/last seen, flow count, clock offset/warning |
 | `attack_targets` | candidate FK, target IP/port/protocol, first/last seen, peak PPS, baseline PPS, increase ratio, affected host count |
-| `score_adjustments` | candidate FK, type(`ALLOWLIST/PUBLIC_DNS_NTP/CDN_CLOUD/INTERNAL_SERVER/SINGLE_HOST/LOW_SAMPLE`), points, rule/allowlist FK, explanation |
+| `score_adjustments` | candidate FK, type(`ALLOWLIST/PUBLIC_DNS_NTP/CDN_CLOUD/SINGLE_HOST/LOW_SAMPLE/HIGH_VOLUME/DETECTOR_WEIGHT_*`), points, rule/allowlist FK, explanation |
 
 Evidence `metrics`에는 detector 입력값을 machine-readable 형태로 보존한다. 최종 점수만 저장해 계산 근거를 잃지 않는다.
 
