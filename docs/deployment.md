@@ -19,6 +19,38 @@ curl -fsS http://localhost:8000/api/v1/ready
 
 Compose starts PostgreSQL, Redis, ClickHouse, MinIO, Controller, Worker, and Web. Sensors run on external Linux systems and connect outbound to the Controller. Service dependencies use health checks. `make down` preserves named volumes. To intentionally erase local data, first back it up, then run `docker compose --env-file .env down -v` manually.
 
+### Health check reference
+
+| Service      | Command                                                    | Interval | Timeout | Retries |
+|--------------|------------------------------------------------------------|----------|---------|---------|
+| postgres     | `pg_isready -U $POSTGRES_USER -d $POSTGRES_DB`             | 10 s     | 5 s     | 10      |
+| redis        | `redis-cli ping`                                           | 10 s     | 3 s     | 10      |
+| clickhouse   | `wget http://127.0.0.1:8123/ping`                          | 10 s     | 5 s     | 15      |
+| minio        | `curl -f http://127.0.0.1:9000/minio/health/live`          | 10 s     | 5 s     | 15      |
+| controller   | `python -m c2hunter_controller.healthcheck`                | 10 s     | 5 s     | 15      |
+| worker       | `python -m c2hunter_worker healthcheck --max-age 30`        | 15 s     | 5 s     | 5       |
+| web          | `wget -q -O- http://127.0.0.1:8080/healthz`                | 10 s     | 3 s     | 10      |
+
+### Controller environment variables (security)
+
+The Controller reads these from `.env` via pydantic settings (`config.py:5-47`).
+Values marked "SHA-256" must be 64-character lowercase hex digests — never plaintext tokens.
+
+| Variable                              | Default             | Description                                       |
+|---------------------------------------|---------------------|---------------------------------------------------|
+| `C2HUNTER_ENVIRONMENT`                | `development`       | `test` disables auth defaults; otherwise auth is on |
+| `C2HUNTER_DEV_LOGIN_ENABLED`          | `false` (config) / `true` (compose) | Enable dev-login endpoint                 |
+| `C2HUNTER_API_AUTH_REQUIRED`          | `true` (non-test)   | Fail-closed authentication toggle                   |
+| `C2HUNTER_VIEWER_TOKEN_SHA256`        | *(empty)*           | Static VIEWER bearer digest                         |
+| `C2HUNTER_ANALYST_TOKEN_SHA256`       | *(empty)*           | Static ANALYST bearer digest                        |
+| `C2HUNTER_ADMIN_TOKEN_SHA256`         | *(empty)*           | Static ADMIN bearer digest                          |
+| `C2HUNTER_RATE_LIMIT_WINDOW_SECONDS`  | `60` (1–3600)       | Rate limiter window duration in seconds             |
+| `C2HUNTER_DEV_LOGIN_RATE_LIMIT`       | `10`                | Max dev-login attempts per window per client IP     |
+| `C2HUNTER_ENROLLMENT_CLAIM_RATE_LIMIT`| `10`                | Max enrollment claims per window per client IP      |
+| `C2HUNTER_ANALYSIS_JOB_RATE_LIMIT`    | `30`                | Max analysis job creations per window per subject   |
+| `C2HUNTER_PCAP_UPLOAD_MAX_BYTES`      | `524288000` (500 MiB)| Maximum PCAP upload size                            |
+| `C2HUNTER_PCAP_UPLOAD_MAX_PACKETS`    | `2000000`           | Maximum packets per PCAP upload                     |
+
 ## Certificates
 
 Development certificates must be generated locally and ignored by Git. A minimal internal-CA workflow is:

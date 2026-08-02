@@ -24,7 +24,9 @@ Browser
 Web UI (React/TypeScript/Vite)
   │
   ▼
-Controller API (FastAPI/Pydantic)
+Controller API (FastAPI)
+  ├── Security middleware — Bearer token auth, RBAC, rate limiting (app.py:539-567)
+  ├── Observability middleware — request IDs, Prometheus metrics (app.py:569-577)
   ├── PostgreSQL: 사용자/센서/작업/후보/감사/정책
   ├── Redis: Celery broker/cache
   ├── ClickHouse: Flow/프로토콜 이벤트/관찰
@@ -36,6 +38,12 @@ Controller API (FastAPI/Pydantic)
        ├── PCAP export
        └── retention cleanup
 
+Security middleware skips auth for healthchecks, metrics, dev-login, and sensor-specific endpoints.
+Human routes enforce minimum roles (VIEWER ≤ ANALYST ≤ ADMIN). Sensor endpoints authenticate via
+X-Sensor-Token header with per-credential hash validation against PostgreSQL (app.py:665-678).
+Rate limiting applies to /auth/dev-login (per IP), enrollment claim (per IP), and analysis job creation
+(per auth subject) — all per-process fixed-window counters.
+
 Sensor A/B (Go)
   ├── AF_PACKET TPACKET_V3 capture (테스트: libpcap/offline PCAP)
   ├── direction classifier + flow aggregator + protocol metadata
@@ -45,6 +53,29 @@ Sensor A/B (Go)
 ```
 
 MVP는 논리적 컴포넌트를 유지하되 Controller API와 Sensor Gateway를 같은 Python 배포 단위에 둘 수 있다. Analysis Worker는 별도 프로세스로 실행한다. 이는 독립 확장 경계를 유지하면서 운영 복잡도를 줄이는 선택이다.
+
+### Authentication and authorization reference
+
+The security middleware chain (`controller/src/c2hunter_controller/security.py`) sits at the
+FastAPI HTTP layer — every request hits it before route dispatch:
+
+1. **Rate limit check** — dev-login, enrollment claim, analysis job creation are gated
+   by `FixedWindowRateLimiter` (per-process). Exceeded limits return 429 with `Retry-After`.
+2. **Role lookup** — `required_role()` determines the minimum role for the path/method.
+   Health/ready/metrics/dev-login/sensor routes return `None` (no auth required).
+3. **Authentication** — `TokenAuthenticator.authenticate()` validates Bearer tokens:
+   first checks in-memory sessions (dev-login), then compares SHA-256 digests with
+   `hmac.compare_digest` against configured static tokens.
+4. **Authorization** — `require_role()` raises 403 if the principal's role is below minimum.
+
+```text
+Request → RateLimiter.check() → required_role() → authenticator.authenticate()
+        → require_role() → route handler
+```
+
+Sensor authentication bypasses this chain entirely — sensor endpoints (`/sensors/register`,
+heartbeat, flow-batches, pcap-segments, agent-config) are exempt from Bearer/RBAC checks.
+They validate `X-Sensor-Token` directly in the request handler against stored credential hashes.
 
 ## 3. 컴포넌트 경계와 책임
 

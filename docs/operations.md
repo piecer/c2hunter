@@ -11,6 +11,47 @@ curl -fsS http://localhost:8000/api/v1/metrics
 
 Alert on offline/degraded sensors, queue depth, spool bytes, capture drops, clock offset, job failures, object-storage growth, DB capacity, and certificate expiry. `/health` is process liveness; `/ready` must represent dependency readiness.
 
+## Authentication and token management
+
+### Static bearer tokens
+
+The Controller validates `Authorization: Bearer <token>` headers by comparing
+SHA-256 digests (`security.py:70-99`). To rotate a token:
+
+1. Compute the new digest: `echo -n 'new-token' | sha256sum | cut -d' ' -f1`
+2. Update the corresponding `C2HUNTER_*_TOKEN_SHA256` variable in `.env`
+3. Restart the Controller container so pydantic settings reload
+
+Existing sessions minted via dev-login are stored in-process memory
+(`security.py:41-67`) and expire on restart or TTL expiry (default 900 s).
+There is no cross-process revocation — if a token is compromised, rotate the
+digest immediately and audit Controller logs for unauthorized requests.
+
+### Rate limit exceeded (HTTP 429)
+
+The Controller returns HTTP 429 with a `Retry-After` header when a fixed-window
+limit is exceeded (`security.py:103-127`). The header value is the number of
+seconds until the current window's oldest request expires. Typical scenarios:
+
+- **Dev-login flood** — client IP exceeded `C2HUNTER_DEV_LOGIN_RATE_LIMIT`
+  (default 10/min). Wait for `Retry-After`, then retry with exponential backoff.
+- **Enrollment-claim spike** — automated tools claiming multiple enrollments.
+  Review audit logs for suspicious enrollment tokens.
+- **Analysis-job burst** — a user/script creating too many jobs. Check the auth
+  subject in `/api/v1/metrics` counters and investigate if unexpected.
+
+The rate limiter runs per-controller process. In multi-replica environments,
+aggregate limits can be higher than configured expectations. Use ingress-level
+rate limiting or Redis-backed distributed counters for strict production control.
+
+To adjust limits at runtime without restart is not supported — change the env
+variable and restart the Controller. Monitor 429 response codes in Prometheus:
+
+```bash
+curl -fsS http://localhost:8000/api/v1/metrics \
+  | grep 'c2hunter_api_request_duration_seconds\|c2hunter_api_requests_total'
+```
+
 ## Disk and retention
 
 Defaults are raw PCAP 7 days, Flow 30, results 180, audit 365, and heartbeat detail 30. Set organization policy before capture. Monitor Docker volume and sensor spool filesystems with byte and inode thresholds. PCAP is opt-in; narrow BPF and shorter capture/rotation reduce risk. Cleanup must be paged and audited. An expired PCAP changes availability; it must not delete candidate evidence.
