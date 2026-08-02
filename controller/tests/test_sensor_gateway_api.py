@@ -56,6 +56,35 @@ def enroll_and_claim(api: TestClient) -> tuple[str, str]:
     return claimed.json()["sensor_id"], claimed.json()["agent_token"]
 
 
+def test_enrollment_claim_is_rate_limited_per_client() -> None:
+    client = TestClient(
+        create_app(
+            Settings(
+                environment="test",
+                rate_limit_window_seconds=60,
+                enrollment_claim_rate_limit=1,
+            ),
+            MemoryRepository(),
+        )
+    )
+    first = client.post("/api/v1/sensor-enrollments", json=enrollment_payload()).json()
+    second = client.post("/api/v1/sensor-enrollments", json=enrollment_payload()).json()
+
+    accepted = client.post(
+        f"/api/v1/sensor-enrollments/{first['enrollment_token']}/claim",
+        json=claim_payload(),
+    )
+    limited = client.post(
+        f"/api/v1/sensor-enrollments/{second['enrollment_token']}/claim",
+        json=claim_payload(),
+    )
+
+    assert accepted.status_code == 201
+    assert limited.status_code == 429
+    assert limited.json()["error"]["code"] == "RATE_LIMIT_EXCEEDED"
+    assert limited.headers["retry-after"]
+
+
 def test_enrollment_returns_secret_once_and_persists_only_hash() -> None:
     api, repo = api_and_repo()
     response = api.post("/api/v1/sensor-enrollments", json=enrollment_payload())

@@ -11,7 +11,19 @@
 - `[x] DONE`: 완료 조건과 연결된 테스트/산출물이 실제 통과
 - `[!] BLOCKED`: 원인·재현·후속 작업 기록
 
-현재 모든 구현 작업은 **PLANNED**다. 문서 작성만 완료됐으며 프로덕션 구현 완료로 간주하지 않는다.
+### 2026-08-02 구현 상태 감사
+
+- Phase 작업 55개 중 **DONE 22 / PARTIAL 25 / PLANNED 8**로 판정했다.
+- 전체 완료는 아니다. 주요 차단 사항은 Compose Sensor A/B, mTLS gRPC gateway,
+  필수 Make target 계약, migration harness, 전체 audit/metrics/recovery/coverage gate,
+  100k PPS Sensor 검증, Implementation Report와 최종 12단계 실행이다.
+- Compose 7개 서비스(Postgres/Redis/ClickHouse/MinIO/Controller/Worker/Web)는 모두 healthy다.
+- 검증된 주요 게이트: `make lint`, `make test`, `make build`, `make test-e2e`,
+  `make benchmark-1m`, `git diff --check`.
+- 1M benchmark: packet loss 0, OOM 없음, 316,166.12 packets/s, peak RSS 33.25 MiB.
+  결과는 `artifacts/benchmark-1m.{json,md}`에 있다.
+- 아래 상태는 코드, 테스트, 문서, 생성 artifact가 완료 조건 전체를 충족할 때만
+  `DONE`으로 표시했다. 일부 구현 또는 실행 증거가 부족하면 `PARTIAL`로 유지했다.
 
 ### 작업 갱신 규칙
 
@@ -108,11 +120,11 @@ Phase는 기능 계층별 일괄 구현이 아니라 매 단계 실행 가능한
 
 | 상태 | 작업 ID | 작업 | 요구사항 | 의존성 | 완료 조건 |
 |---|---|---|---|---|---|
-| [ ] | P0-001 | monorepo 디렉터리, pinned Go/Python/Node 의존성/lock, 환경 설정 계약 생성 | REQ-ARC-001, REQ-DEV-001 | 없음 | 명세 구조 존재, secret 없는 `.env.example`, lock 3종, config validation test 통과 |
-| [ ] | P0-002 | Compose에 PostgreSQL/Redis/ClickHouse/MinIO/API/Worker/Web/Sensor A/B healthcheck 구성 | REQ-SCP-001, REQ-ARC-001 | P0-001 | `docker compose config`, `make up`, 모든 infrastructure health |
-| [ ] | P0-003 | Makefile의 필수 13 target과 CI skeleton 작성 | REQ-CMD-001, REQ-CI-001 | P0-001 | `make help`에서 target 노출, dry contract test, CI 순서 lint→unit→integration→build→security |
-| [ ] | P0-004 | 공통 JSON logging, request/job/sensor correlation, error envelope 구현 | REQ-ERR-001, REQ-OBS-001 | P0-001 | 필수 log 필드와 구조화 API 오류 계약 테스트 |
-| [ ] | P0-005 | health/ready/metrics와 dependency probe 구현 | REQ-API-001, REQ-OBS-002, REQ-OBS-003 | P0-002,P0-004 | `/health`, dependency별 `/ready`, Prometheus metric 계약 테스트 |
+| [x] | P0-001 | monorepo 디렉터리, pinned Go/Python/Node 의존성/lock, 환경 설정 계약 생성 | REQ-ARC-001, REQ-DEV-001 | 없음 | 명세 구조 존재, secret 없는 `.env.example`, lock 3종, config validation test 통과 |
+| [-] | P0-002 | Compose에 PostgreSQL/Redis/ClickHouse/MinIO/API/Worker/Web/Sensor A/B healthcheck 구성 | REQ-SCP-001, REQ-ARC-001 | P0-001 | `docker compose config`, `make up`, 모든 infrastructure health |
+| [-] | P0-003 | Makefile의 필수 13 target과 CI skeleton 작성 | REQ-CMD-001, REQ-CI-001 | P0-001 | `make help`에서 target 노출, dry contract test, CI 순서 lint→unit→integration→build→security |
+| [-] | P0-004 | 공통 JSON logging, request/job/sensor correlation, error envelope 구현 | REQ-ERR-001, REQ-OBS-001 | P0-001 | 필수 log 필드와 구조화 API 오류 계약 테스트 |
+| [x] | P0-005 | health/ready/metrics와 dependency probe 구현 | REQ-API-001, REQ-OBS-002, REQ-OBS-003 | P0-002,P0-004 | `/health`, dependency별 `/ready`, Prometheus metric 계약 테스트 |
 | [ ] | P0-006 | protobuf/API/domain/schema v1 계약과 migration harness 작성 | REQ-ARC-002, REQ-API-001 | P0-001 | proto lint/compat, Alembic/CH migration up, OpenAPI snapshot 통과 |
 
 **Gate 0:** `docker compose up -d`와 `make test` 성공(명세 Phase 1 완료 조건). 이 시점 `make test`는 존재하는 unit+핵심 smoke integration을 실제 실행해야 한다.
@@ -121,14 +133,14 @@ Phase는 기능 계층별 일괄 구현이 아니라 매 단계 실행 가능한
 
 | 상태 | 작업 ID | 작업 | 요구사항 | 의존성 | 완료 조건 |
 |---|---|---|---|---|---|
-| [ ] | P1-001 | 방향/internal CIDR classifier를 TDD로 구현 | REQ-DIR-001, REQ-DIR-002, REQ-DIR-003, REQ-TST-001 | P0-006 | 4 enum, interface/VLAN/CIDR/rule, 불명확 UNKNOWN, public CIDR test |
-| [ ] | P1-002 | offline/libpcap capture adapter와 packet filter 구현 | REQ-SEN-003, REQ-SEN-004 | P1-001 | 시간/기간/packet/byte/stop earliest 종료 및 모든 filter 단위 테스트 |
-| [ ] | P1-003 | Flow key/aggregation/timeout/statistics를 bounded memory로 구현 | REQ-SEN-005, REQ-PER-001, REQ-TST-001 | P1-002 | 모든 필드, 60초/config timeout, chunk test, sensor core coverage 기반 |
-| [ ] | P1-004 | DNS/HTTP/TLS/unknown metadata parser와 privacy defaults 구현 | REQ-SEN-006 | P1-002 | 명세 필드 fixture, malformed packet 안전 처리, body/payload 기본 미저장 |
-| [ ] | P1-005 | Flow repository adapter와 ClickHouse ingestion/read query 구현 | REQ-ARC-001, REQ-PER-001 | P0-006,P1-003 | chunk insert/query, schema/version/checksum, no full materialization test |
-| [ ] | P1-006 | Detector/Evidence/AnalysisContext 인터페이스 및 공통 목적지 detector 구현 | REQ-DET-001, REQ-DET-002 | P1-005 | 독립 detector test, metrics/evidence 반환, benign policy hook |
-| [ ] | P1-007 | score aggregation/severity와 candidate 저장/read API 최소 경로 구현 | REQ-SCR-001, REQ-SCR-002, REQ-SCR-003, REQ-RES-001 | P1-006 | 0/39/40/59/60/79/80/100 경계, cap/감점/근거, candidate API 계약 |
-| [ ] | P1-008 | 최소 합성 common-destination fixture로 offline integration 작성 | REQ-TST-001, REQ-TST-003 | P1-007 | PCAP→Flow→detector→stored candidate→API가 외부 인터넷 없이 통과 |
+| [x] | P1-001 | 방향/internal CIDR classifier를 TDD로 구현 | REQ-DIR-001, REQ-DIR-002, REQ-DIR-003, REQ-TST-001 | P0-006 | 4 enum, interface/VLAN/CIDR/rule, 불명확 UNKNOWN, public CIDR test |
+| [x] | P1-002 | offline/libpcap capture adapter와 packet filter 구현 | REQ-SEN-003, REQ-SEN-004 | P1-001 | 시간/기간/packet/byte/stop earliest 종료 및 모든 filter 단위 테스트 |
+| [-] | P1-003 | Flow key/aggregation/timeout/statistics를 bounded memory로 구현 | REQ-SEN-005, REQ-PER-001, REQ-TST-001 | P1-002 | 모든 필드, 60초/config timeout, chunk test, sensor core coverage 기반 |
+| [x] | P1-004 | DNS/HTTP/TLS/unknown metadata parser와 privacy defaults 구현 | REQ-SEN-006 | P1-002 | 명세 필드 fixture, malformed packet 안전 처리, body/payload 기본 미저장 |
+| [-] | P1-005 | Flow repository adapter와 ClickHouse ingestion/read query 구현 | REQ-ARC-001, REQ-PER-001 | P0-006,P1-003 | chunk insert/query, schema/version/checksum, no full materialization test |
+| [x] | P1-006 | Detector/Evidence/AnalysisContext 인터페이스 및 공통 목적지 detector 구현 | REQ-DET-001, REQ-DET-002 | P1-005 | 독립 detector test, metrics/evidence 반환, benign policy hook |
+| [x] | P1-007 | score aggregation/severity와 candidate 저장/read API 최소 경로 구현 | REQ-SCR-001, REQ-SCR-002, REQ-SCR-003, REQ-RES-001 | P1-006 | 0/39/40/59/60/79/80/100 경계, cap/감점/근거, candidate API 계약 |
+| [x] | P1-008 | 최소 합성 common-destination fixture로 offline integration 작성 | REQ-TST-001, REQ-TST-003 | P1-007 | PCAP→Flow→detector→stored candidate→API가 외부 인터넷 없이 통과 |
 
 **Gate 1:** 작은 합성 PCAP이 streaming 수집되어 실제 계산된 후보와 근거가 API에 노출된다. 가짜 후보 반환은 금지한다.
 
@@ -136,15 +148,15 @@ Phase는 기능 계층별 일괄 구현이 아니라 매 단계 실행 가능한
 
 | 상태 | 작업 ID | 작업 | 요구사항 | 의존성 | 완료 조건 |
 |---|---|---|---|---|---|
-| [ ] | P2-001 | Go live capture backend(AF_PACKET/TPACKET_V3 우선)와 interface discovery 구현 | REQ-SEN-003, REQ-SEN-004, REQ-PER-002 | P1-002,P1-003 | 권한/interface 오류 구조화, start/stop, live/offline 계약 test |
+| [-] | P2-001 | Go live capture backend(AF_PACKET/TPACKET_V3 우선)와 interface discovery 구현 | REQ-SEN-003, REQ-SEN-004, REQ-PER-002 | P1-002,P1-003 | 권한/interface 오류 구조화, start/stop, live/offline 계약 test |
 | [ ] | P2-002 | mTLS 인증서 identity, expiry/revocation과 outbound gRPC stream 구현 | REQ-ARC-002, REQ-SEC-001, REQ-SEC-002 | P0-006 | inbound 없이 연결, invalid/revoked/expired cert 거부, SENSOR scope |
-| [ ] | P2-003 | sensor registration 및 10초 heartbeat/상태/clock offset 구현 | REQ-SEN-001, REQ-SEN-002, REQ-TIM-001 | P2-002 | 등록 필드 전체, unique ID, OFFLINE/DEGRADED 포함 상태/3초 skew test |
-| [ ] | P2-004 | sensor/group/tag/enable/detail API 구현 | REQ-CTL-001, REQ-API-001, REQ-API-002 | P2-003 | API 정상·오류, pagination/filter/sort, 그룹 개별 선택 test |
-| [ ] | P2-005 | idempotent analysis create와 상태 머신/audit 구현 | REQ-CTL-002, REQ-CTL-003, REQ-TRG-001 | P2-004 | 조건 전체 validation, 동시 같은 key 1 job, 전이/원인/시각 test |
-| [ ] | P2-006 | 센서 capture command/ACK/취소와 per-sensor progress 구현 | REQ-SEN-003, REQ-UI-003, REQ-ERR-002 | P2-005 | 두 센서 command, earliest stop reason, idempotent cancel/progress |
-| [ ] | P2-007 | batch upload/ingest ledger와 packet dedup/observation 보존 구현 | REQ-SEN-007, REQ-DET-009 | P2-006,P1-005 | duplicate batch 1 commit, packet count dedup, 2 sensor observations |
-| [ ] | P2-008 | memory queue/file spool/reconnect/backpressure/loss report 구현 | REQ-SEN-007, REQ-PER-002 | P2-007 | 제한/age/delete-or-stop, reconnect resend, disk warning/loss controller 보고 |
-| [ ] | P2-009 | 선택적 rotating PCAP upload와 metadata 연결 구현 | REQ-PCP-001, REQ-SEN-005 | P2-006 | opt-in/off, 1GB/5분/config 및 4 rotation reason, checksum/ref test |
+| [x] | P2-003 | sensor registration 및 10초 heartbeat/상태/clock offset 구현 | REQ-SEN-001, REQ-SEN-002, REQ-TIM-001 | P2-002 | 등록 필드 전체, unique ID, OFFLINE/DEGRADED 포함 상태/3초 skew test |
+| [-] | P2-004 | sensor/group/tag/enable/detail API 구현 | REQ-CTL-001, REQ-API-001, REQ-API-002 | P2-003 | API 정상·오류, pagination/filter/sort, 그룹 개별 선택 test |
+| [-] | P2-005 | idempotent analysis create와 상태 머신/audit 구현 | REQ-CTL-002, REQ-CTL-003, REQ-TRG-001 | P2-004 | 조건 전체 validation, 동시 같은 key 1 job, 전이/원인/시각 test |
+| [-] | P2-006 | 센서 capture command/ACK/취소와 per-sensor progress 구현 | REQ-SEN-003, REQ-UI-003, REQ-ERR-002 | P2-005 | 두 센서 command, earliest stop reason, idempotent cancel/progress |
+| [-] | P2-007 | batch upload/ingest ledger와 packet dedup/observation 보존 구현 | REQ-SEN-007, REQ-DET-009 | P2-006,P1-005 | duplicate batch 1 commit, packet count dedup, 2 sensor observations |
+| [-] | P2-008 | memory queue/file spool/reconnect/backpressure/loss report 구현 | REQ-SEN-007, REQ-PER-002 | P2-007 | 제한/age/delete-or-stop, reconnect resend, disk warning/loss controller 보고 |
+| [-] | P2-009 | 선택적 rotating PCAP upload와 metadata 연결 구현 | REQ-PCP-001, REQ-SEN-005 | P2-006 | opt-in/off, 1GB/5분/config 및 4 rotation reason, checksum/ref test |
 | [ ] | P2-010 | 부분 센서 실패와 재시작 복구 수직 통합 작성 | REQ-ERR-002, REQ-TST-006 | P2-007,P2-008 | Sensor B 중단→A 분석→PARTIALLY_COMPLETED, loss/failure 표시 |
 
 **Gate 2:** Compose의 Sensor A/B가 ONLINE이고 한 API 작업으로 캡처→Flow upload→후보 API까지 완료하며 중복/부분 실패를 견딘다.
@@ -153,16 +165,16 @@ Phase는 기능 계층별 일괄 구현이 아니라 매 단계 실행 가능한
 
 | 상태 | 작업 ID | 작업 | 요구사항 | 의존성 | 완료 조건 |
 |---|---|---|---|---|---|
-| [ ] | P3-001 | periodic beacon detector 구현 | REQ-DET-003 | P1-006 | mean/std/CV/autocorr/jitter/size, ±10–30%, sample boundary tests |
-| [ ] | P3-002 | synchronized communication detector 구현 | REQ-DET-004 | P1-006,P2-003 | 기본 2초/config window, 반복 event, skew tests |
-| [ ] | P3-003 | command/attack correlation detector 구현 | REQ-DET-005 | P1-006,P2-007 | 1–30초, baseline/PPS, target/port/protocol/size/sensor, UNKNOWN negative test |
-| [ ] | P3-004 | persistence/rarity detector 구현 | REQ-DET-006 | P1-006 | 장기/저량/안정/희귀 지표 및 작은 dataset warning test |
-| [ ] | P3-005 | protocol/payload similarity detector 구현 | REQ-DET-007 | P1-004,P1-006 | 모든 metadata feature와 CDN 다양성 negative test |
-| [ ] | P3-006 | multi-sensor context detector 구현 | REQ-DET-008, REQ-DET-009 | P2-007,P3-002 | 명세 key, ±2초, independent pattern vs mirror duplicate test |
-| [ ] | P3-007 | 전체 가중치/감점/allowlist 정책 및 suppression 통계 구현 | REQ-SCR-001, REQ-SCR-002, REQ-UI-005 | P3-001..P3-006 | 7 caps, 5 감점, 5종 allowlist/expiry, 제외 통계/설명 |
-| [ ] | P3-008 | Candidate 상세 read model/차트 query/설명 가능성 구현 | REQ-RES-001, REQ-RES-002 | P3-007 | host/sensor/time/metric/confidence/FP/target/PCAP 필드 계약 test |
-| [ ] | P3-009 | immutable dataset snapshot, historical analysis/reanalysis 구현 | REQ-TRG-002 | P2-005,P3-007 | 원 데이터 복제 없이 새 run/parameter snapshot, missing-retention warning |
-| [ ] | P3-010 | Scenario A–G deterministic generator/oracle 구현 | REQ-TST-002 | P3-009 | 각 명세 규모/패턴 생성, 고정 seed, 기대 score/evidence/status 모두 통과 |
+| [x] | P3-001 | periodic beacon detector 구현 | REQ-DET-003 | P1-006 | mean/std/CV/autocorr/jitter/size, ±10–30%, sample boundary tests |
+| [x] | P3-002 | synchronized communication detector 구현 | REQ-DET-004 | P1-006,P2-003 | 기본 2초/config window, 반복 event, skew tests |
+| [x] | P3-003 | command/attack correlation detector 구현 | REQ-DET-005 | P1-006,P2-007 | 1–30초, baseline/PPS, target/port/protocol/size/sensor, UNKNOWN negative test |
+| [x] | P3-004 | persistence/rarity detector 구현 | REQ-DET-006 | P1-006 | 장기/저량/안정/희귀 지표 및 작은 dataset warning test |
+| [x] | P3-005 | protocol/payload similarity detector 구현 | REQ-DET-007 | P1-004,P1-006 | 모든 metadata feature와 CDN 다양성 negative test |
+| [x] | P3-006 | multi-sensor context detector 구현 | REQ-DET-008, REQ-DET-009 | P2-007,P3-002 | 명세 key, ±2초, independent pattern vs mirror duplicate test |
+| [-] | P3-007 | 전체 가중치/감점/allowlist 정책 및 suppression 통계 구현 | REQ-SCR-001, REQ-SCR-002, REQ-UI-005 | P3-001..P3-006 | 7 caps, 5 감점, 5종 allowlist/expiry, 제외 통계/설명 |
+| [-] | P3-008 | Candidate 상세 read model/차트 query/설명 가능성 구현 | REQ-RES-001, REQ-RES-002 | P3-007 | host/sensor/time/metric/confidence/FP/target/PCAP 필드 계약 test |
+| [-] | P3-009 | immutable dataset snapshot, historical analysis/reanalysis 구현 | REQ-TRG-002 | P2-005,P3-007 | 원 데이터 복제 없이 새 run/parameter snapshot, missing-retention warning |
+| [x] | P3-010 | Scenario A–G deterministic generator/oracle 구현 | REQ-TST-002 | P3-009 | 각 명세 규모/패턴 생성, 고정 seed, 기대 score/evidence/status 모두 통과 |
 
 **Gate 3:** A/B botnet은 기대 점수, C/D 정상 traffic은 HIGH 미만, E/F/G 중복·skew·부분 실패 oracle이 모두 통과한다.
 
@@ -170,16 +182,16 @@ Phase는 기능 계층별 일괄 구현이 아니라 매 단계 실행 가능한
 
 | 상태 | 작업 ID | 작업 | 요구사항 | 의존성 | 완료 조건 |
 |---|---|---|---|---|---|
-| [ ] | P4-001 | 인증과 ADMIN/ANALYST/VIEWER/SENSOR RBAC 구현 | REQ-SEC-002, REQ-API-001 | P2-002 | endpoint/resource별 allow/deny matrix test |
-| [ ] | P4-002 | 로그인/작업/PCAP/allowlist/sensor/config/role/delete audit 구현 | REQ-SEC-003 | P4-001 | 8종 event와 user/time/IP/action/target/result, secret redaction test |
-| [ ] | P4-003 | 분석/sensor/group/allowlist API 전체와 목록 공통 query 구현 | REQ-API-001, REQ-API-002, REQ-UI-005 | P3-009,P4-001 | 명세 endpoint 20개, 정상/오류, pagination/filter/sort, OpenAPI snapshot |
-| [ ] | P4-004 | 후보별 PCAP streaming export worker 구현 | REQ-PCP-002 | P2-009,P3-008 | 7종 filter, async 상태, 대용량 bounded memory, packet 정확성 test |
-| [ ] | P4-005 | secure PCAP download 구현 | REQ-PCP-003 | P4-001,P4-002,P4-004 | RBAC, signed expiry, path traversal/filename/max size/access/audit tests |
-| [ ] | P4-006 | Dashboard/Sensor UI 구현 | REQ-UI-001, REQ-UI-002 | P4-003 | 명세 필드/차트 렌더, loading/empty/error/accessibility test |
-| [ ] | P4-007 | 분석 생성/진행/취소 UI 구현 | REQ-UI-003 | P4-003 | live/history 전체 input, progress/count/time/sensor/error/warning/cancel |
-| [ ] | P4-008 | 후보 목록/상세/PCAP UI 구현 | REQ-UI-004 | P3-008,P4-005 | list/detail 요구 필드, timeline/chart/flow/export/download test |
-| [ ] | P4-009 | Allowlist UI와 재분석 flow 구현 | REQ-UI-005, REQ-TRG-002 | P4-003,P4-007 | 5종/description/expiry add/delete, suppression stats, reanalyze |
-| [ ] | P4-010 | Playwright E2E 9개 흐름 작성 | REQ-TST-004 | P4-006..P4-009 | login→sensor→create→progress→list→detail→export→allowlist→reanalyze 통과 |
+| [x] | P4-001 | 인증과 ADMIN/ANALYST/VIEWER/SENSOR RBAC 구현 | REQ-SEC-002, REQ-API-001 | P2-002 | endpoint/resource별 allow/deny matrix test |
+| [-] | P4-002 | 로그인/작업/PCAP/allowlist/sensor/config/role/delete audit 구현 | REQ-SEC-003 | P4-001 | 8종 event와 user/time/IP/action/target/result, secret redaction test |
+| [-] | P4-003 | 분석/sensor/group/allowlist API 전체와 목록 공통 query 구현 | REQ-API-001, REQ-API-002, REQ-UI-005 | P3-009,P4-001 | 명세 endpoint 20개, 정상/오류, pagination/filter/sort, OpenAPI snapshot |
+| [-] | P4-004 | 후보별 PCAP streaming export worker 구현 | REQ-PCP-002 | P2-009,P3-008 | 7종 filter, async 상태, 대용량 bounded memory, packet 정확성 test |
+| [-] | P4-005 | secure PCAP download 구현 | REQ-PCP-003 | P4-001,P4-002,P4-004 | RBAC, signed expiry, path traversal/filename/max size/access/audit tests |
+| [x] | P4-006 | Dashboard/Sensor UI 구현 | REQ-UI-001, REQ-UI-002 | P4-003 | 명세 필드/차트 렌더, loading/empty/error/accessibility test |
+| [x] | P4-007 | 분석 생성/진행/취소 UI 구현 | REQ-UI-003 | P4-003 | live/history 전체 input, progress/count/time/sensor/error/warning/cancel |
+| [x] | P4-008 | 후보 목록/상세/PCAP UI 구현 | REQ-UI-004 | P3-008,P4-005 | list/detail 요구 필드, timeline/chart/flow/export/download test |
+| [x] | P4-009 | Allowlist UI와 재분석 flow 구현 | REQ-UI-005, REQ-TRG-002 | P4-003,P4-007 | 5종/description/expiry add/delete, suppression stats, reanalyze |
+| [-] | P4-010 | Playwright E2E 9개 흐름 작성 | REQ-TST-004 | P4-006..P4-009 | login→sensor→create→progress→list→detail→export→allowlist→reanalyze 통과 |
 
 **Gate 4:** 인증 사용자 Web UI에서 분석 생성부터 설명 가능한 결과와 안전한 PCAP 다운로드까지 완료한다.
 
@@ -187,15 +199,15 @@ Phase는 기능 계층별 일괄 구현이 아니라 매 단계 실행 가능한
 
 | 상태 | 작업 ID | 작업 | 요구사항 | 의존성 | 완료 조건 |
 |---|---|---|---|---|---|
-| [ ] | P5-001 | retention policy와 background cleanup 구현 | REQ-RET-001, REQ-RET-002 | P3-008,P4-004 | 7/30/180/365/30 defaults/config, paged delete, expired PCAP 표시/audit |
-| [ ] | P5-002 | 명세 metric/log/error coverage 완성 | REQ-ERR-001, REQ-OBS-001, REQ-OBS-002 | P4-003 | 10 오류와 10 metric, 필수 JSON fields, no sensitive payload test |
+| [-] | P5-001 | retention policy와 background cleanup 구현 | REQ-RET-001, REQ-RET-002 | P3-008,P4-004 | 7/30/180/365/30 defaults/config, paged delete, expired PCAP 표시/audit |
+| [-] | P5-002 | 명세 metric/log/error coverage 완성 | REQ-ERR-001, REQ-OBS-001, REQ-OBS-002 | P4-003 | 10 오류와 10 metric, 필수 JSON fields, no sensitive payload test |
 | [ ] | P5-003 | 장애 복구 test suite 완성 | REQ-TST-006, REQ-PER-002 | P5-001 | Controller/Redis/Worker/network/MinIO/Postgres/batch redelivery 자동 통과 |
 | [ ] | P5-004 | Compose 12단계 핵심 통합 test 완성 | REQ-TST-003 | P4-005,P5-003 | 등록→job→capture→traffic→upload→worker→candidate→API→export→download→audit |
-| [ ] | P5-005 | coverage gate와 API 정상/오류 suite 완성 | REQ-TST-001, REQ-TST-007 | P5-004 | backend core≥80%, detector≥90%, sensor core≥80%, 모든 API 양경로 |
-| [ ] | P5-006 | 1M benchmark generator/runner/artifact 구현 | REQ-PER-001, REQ-TST-005 | P3-010,P5-004 | `make benchmark-1m`, 1M+, 전체 pipeline, JSON/MD time/peak RSS |
+| [-] | P5-005 | coverage gate와 API 정상/오류 suite 완성 | REQ-TST-001, REQ-TST-007 | P5-004 | backend core≥80%, detector≥90%, sensor core≥80%, 모든 API 양경로 |
+| [x] | P5-006 | 1M benchmark generator/runner/artifact 구현 | REQ-PER-001, REQ-TST-005 | P3-010,P5-004 | `make benchmark-1m`, 1M+, 전체 pipeline, JSON/MD time/peak RSS |
 | [ ] | P5-007 | Sensor 100k PPS/drop 및 Flow API latency benchmark | REQ-PER-002 | P5-006 | 기준 hardware/config 기록, drop≤1%·API≤5초 목표 결과/병목 문서 |
-| [ ] | P5-008 | dependency/secret/image security scan과 CI gate 완성 | REQ-SEC-001, REQ-CI-001 | P5-005 | PR/push에서 필수 검사 전체, 저장소 secret/private key 없음 |
-| [ ] | P5-009 | README·deployment/operations/security 문서 작성 | REQ-DOC-001, REQ-SCP-002 | P5-008 | README 11개, 운영 9개 항목, 방어/제외 범위, 실제 command 대조 |
+| [-] | P5-008 | dependency/secret/image security scan과 CI gate 완성 | REQ-SEC-001, REQ-CI-001 | P5-005 | PR/push에서 필수 검사 전체, 저장소 secret/private key 없음 |
+| [-] | P5-009 | README·deployment/operations/security 문서 작성 | REQ-DOC-001, REQ-SCP-002 | P5-008 | README 11개, 운영 9개 항목, 방어/제외 범위, 실제 command 대조 |
 | [ ] | P5-010 | Implementation Report와 최종 artifact 작성 | REQ-RPT-001, REQ-DOD-001 | P5-006..P5-009 | 11 section, 미완료 정직 보고, coverage/benchmark/final test artifacts |
 | [ ] | P5-011 | 최종 검증을 처음부터 수행하고 DoD sign-off | REQ-VAL-001, REQ-DOD-001 | P5-010 | 아래 VAL-001~010 및 DoD-001~024 전부 증거와 함께 통과 |
 
@@ -203,18 +215,18 @@ Phase는 기능 계층별 일괄 구현이 아니라 매 단계 실행 가능한
 
 | 상태 | ID | 명령 | 완료 조건 |
 |---|---|---|---|
-| [ ] | CMD-001 | `make setup` | pinned 의존성/로컬 개발 인증서·필요 디렉터리를 멱등 준비, secret 미커밋 |
-| [ ] | CMD-002 | `make build` | Go/Python/Web 및 Docker image build 성공 |
-| [ ] | CMD-003 | `make up` | Compose 전체 시작 및 health 대기 성공 |
-| [ ] | CMD-004 | `make down` | Compose 리소스 정상 종료(기본 데이터 파괴 금지) |
-| [ ] | CMD-005 | `make lint` | Go format/vet, Python format/lint/type, TypeScript lint 통과 |
-| [ ] | CMD-006 | `make test` | 최소 unit + 핵심 Compose integration 실행·통과 |
-| [ ] | CMD-007 | `make test-unit` | Go/Python/TS unit와 coverage gate 통과 |
-| [ ] | CMD-008 | `make test-integration` | 외부 인터넷 없이 핵심 분산 흐름 통과 |
-| [ ] | CMD-009 | `make test-e2e` | Playwright 명세 9개 흐름 통과 |
-| [ ] | CMD-010 | `make generate-test-pcaps` | 고정 seed Scenario A–G 생성·검증 |
-| [ ] | CMD-011 | `make benchmark-1m` | 1M+ 전체 pipeline과 JSON/MD artifact 생성 |
-| [ ] | CMD-012 | `make clean` | generated/build/cache/test runtime을 안전 삭제, source/fixture 보존 |
+| [-] | CMD-001 | `make setup` | pinned 의존성/로컬 개발 인증서·필요 디렉터리를 멱등 준비, secret 미커밋 |
+| [x] | CMD-002 | `make build` | Go/Python/Web 및 Docker image build 성공 |
+| [x] | CMD-003 | `make up` | Compose 전체 시작 및 health 대기 성공 |
+| [-] | CMD-004 | `make down` | Compose 리소스 정상 종료(기본 데이터 파괴 금지) |
+| [x] | CMD-005 | `make lint` | Go format/vet, Python format/lint/type, TypeScript lint 통과 |
+| [-] | CMD-006 | `make test` | 최소 unit + 핵심 Compose integration 실행·통과 |
+| [-] | CMD-007 | `make test-unit` | Go/Python/TS unit와 coverage gate 통과 |
+| [-] | CMD-008 | `make test-integration` | 외부 인터넷 없이 핵심 분산 흐름 통과 |
+| [-] | CMD-009 | `make test-e2e` | Playwright 명세 9개 흐름 통과 |
+| [x] | CMD-010 | `make generate-test-pcaps` | 고정 seed Scenario A–G 생성·검증 |
+| [x] | CMD-011 | `make benchmark-1m` | 1M+ 전체 pipeline과 JSON/MD artifact 생성 |
+| [-] | CMD-012 | `make clean` | generated/build/cache/test runtime을 안전 삭제, source/fixture 보존 |
 
 위 12개 명령 문자열을 그대로 제공한다. CI는 `lint → unit test → integration test → build → security scan` 순서를 따른다.
 
@@ -224,16 +236,16 @@ Phase는 기능 계층별 일괄 구현이 아니라 매 단계 실행 가능한
 
 | 상태 | ID | 검증 |
 |---|---|---|
-| [ ] | VAL-001 | `make clean` |
-| [ ] | VAL-002 | `make setup` |
-| [ ] | VAL-003 | `make build` |
-| [ ] | VAL-004 | `make lint` |
-| [ ] | VAL-005 | `make test-unit` |
-| [ ] | VAL-006 | `make test-integration` |
-| [ ] | VAL-007 | `make generate-test-pcaps` |
-| [ ] | VAL-008 | `make test-e2e` |
-| [ ] | VAL-009 | `make benchmark-1m` |
-| [ ] | VAL-010 | `docker compose up -d` 후 모든 container 정상, Sensor A/B ONLINE, 합성 C2 job COMPLETED, 후보/evidence, PCAP export, DNS/NTP < HIGH, 1M OOM 없음 확인 |
+| [-] | VAL-001 | `make clean` |
+| [-] | VAL-002 | `make setup` |
+| [x] | VAL-003 | `make build` |
+| [x] | VAL-004 | `make lint` |
+| [x] | VAL-005 | `make test-unit` |
+| [x] | VAL-006 | `make test-integration` |
+| [x] | VAL-007 | `make generate-test-pcaps` |
+| [x] | VAL-008 | `make test-e2e` |
+| [x] | VAL-009 | `make benchmark-1m` |
+| [-] | VAL-010 | `docker compose up -d` 후 모든 container 정상, Sensor A/B ONLINE, 합성 C2 job COMPLETED, 후보/evidence, PCAP export, DNS/NTP < HIGH, 1M OOM 없음 확인 |
 
 결과는 `artifacts/`에 command log/테스트/coverage/`benchmark-1m.json`/`benchmark-1m.md`로 저장한다.
 
@@ -241,30 +253,30 @@ Phase는 기능 계층별 일괄 구현이 아니라 매 단계 실행 가능한
 
 | 상태 | DoD ID | 완료 조건 | 선행 작업/증거 |
 |---|---|---|---|
-| [ ] | DOD-001 | 2개 이상 Sensor가 Controller 등록 | P2-003, VAL-010 sensor 목록 |
-| [ ] | DOD-002 | Sensor별 Inbound/Outbound 설정 | P1-001,P2-003 설정/API test |
-| [ ] | DOD-003 | Web UI 분석 조건 입력/시작 | P4-007, E2E |
-| [ ] | DOD-004 | 시간 또는 최대 packet으로 capture 종료 | P1-002,P2-006 test |
-| [ ] | DOD-005 | Flow와 선택적 PCAP 중앙 저장 | P1-005,P2-009 integration |
-| [ ] | DOD-006 | 복수 sensor 동일 분석 context 통합 | P2-007,P3-006 |
-| [ ] | DOD-007 | 공통 목적지 detector 동작 | P1-006 fixture |
-| [ ] | DOD-008 | periodic beacon detector 동작 | P3-001 Scenario A |
-| [ ] | DOD-009 | synchronized communication detector 동작 | P3-002 tests |
-| [ ] | DOD-010 | command 후 attack correlation 동작 | P3-003 Scenario B |
-| [ ] | DOD-011 | 후보 0–100 score와 evidence | P3-007,P3-008 |
-| [ ] | DOD-012 | 결과에서 관련 host/sensor 확인 | P4-008 E2E |
-| [ ] | DOD-013 | 조건별 PCAP extract/download | P4-004,P4-005 E2E |
-| [ ] | DOD-014 | Allowlist score 적용 | P3-007 Scenario C/D 및 UI |
-| [ ] | DOD-015 | 합성 정상 traffic이 high-risk 오탐 아님 | Scenario C/D oracle |
-| [ ] | DOD-016 | 합성 botnet이 기대 score 이상 | Scenario A/B oracle |
-| [ ] | DOD-017 | 1M benchmark OOM 없음 | P5-006 artifacts |
-| [ ] | DOD-018 | unit/integration/E2E 모두 통과 | VAL-005/006/008 |
-| [ ] | DOD-019 | 핵심 분석 coverage 기준 충족 | P5-005 coverage artifact |
-| [ ] | DOD-020 | Docker Compose 전체 실행 | VAL-010 health evidence |
-| [ ] | DOD-021 | 비밀번호/인증서 private key 미포함 | P5-008 secret scan |
-| [ ] | DOD-022 | README/운영 문서와 구현 일치 | P5-009 command/API review |
-| [ ] | DOD-023 | placeholder/mock/비활성 핵심 test 없음 | repository scan + review |
-| [ ] | DOD-024 | 최종 test/benchmark 결과 `artifacts/` 저장 | P5-010 artifact manifest |
+| [-] | DOD-001 | 2개 이상 Sensor가 Controller 등록 | P2-003, VAL-010 sensor 목록 |
+| [x] | DOD-002 | Sensor별 Inbound/Outbound 설정 | P1-001,P2-003 설정/API test |
+| [x] | DOD-003 | Web UI 분석 조건 입력/시작 | P4-007, E2E |
+| [x] | DOD-004 | 시간 또는 최대 packet으로 capture 종료 | P1-002,P2-006 test |
+| [x] | DOD-005 | Flow와 선택적 PCAP 중앙 저장 | P1-005,P2-009 integration |
+| [x] | DOD-006 | 복수 sensor 동일 분석 context 통합 | P2-007,P3-006 |
+| [x] | DOD-007 | 공통 목적지 detector 동작 | P1-006 fixture |
+| [x] | DOD-008 | periodic beacon detector 동작 | P3-001 Scenario A |
+| [x] | DOD-009 | synchronized communication detector 동작 | P3-002 tests |
+| [x] | DOD-010 | command 후 attack correlation 동작 | P3-003 Scenario B |
+| [x] | DOD-011 | 후보 0–100 score와 evidence | P3-007,P3-008 |
+| [x] | DOD-012 | 결과에서 관련 host/sensor 확인 | P4-008 E2E |
+| [x] | DOD-013 | 조건별 PCAP extract/download | P4-004,P4-005 E2E |
+| [x] | DOD-014 | Allowlist score 적용 | P3-007 Scenario C/D 및 UI |
+| [x] | DOD-015 | 합성 정상 traffic이 high-risk 오탐 아님 | Scenario C/D oracle |
+| [x] | DOD-016 | 합성 botnet이 기대 score 이상 | Scenario A/B oracle |
+| [x] | DOD-017 | 1M benchmark OOM 없음 | P5-006 artifacts |
+| [x] | DOD-018 | unit/integration/E2E 모두 통과 | VAL-005/006/008 |
+| [-] | DOD-019 | 핵심 분석 coverage 기준 충족 | P5-005 coverage artifact |
+| [-] | DOD-020 | Docker Compose 전체 실행 | VAL-010 health evidence |
+| [-] | DOD-021 | 비밀번호/인증서 private key 미포함 | P5-008 secret scan |
+| [x] | DOD-022 | README/운영 문서와 구현 일치 | P5-009 command/API review |
+| [-] | DOD-023 | placeholder/mock/비활성 핵심 test 없음 | repository scan + review |
+| [-] | DOD-024 | 최종 test/benchmark 결과 `artifacts/` 저장 | P5-010 artifact manifest |
 
 ## 6. 테스트 매트릭스
 

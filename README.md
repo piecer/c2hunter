@@ -34,7 +34,25 @@ curl http://localhost:8000/api/v1/health
 open http://localhost:8080
 ```
 
-`C2HUNTER_DEV_LOGIN_ENABLED=true` permits the **Development login** UI only for local use. Set it to `false` outside an isolated workstation. `make down` stops services without deleting volumes.
+`C2HUNTER_DEV_LOGIN_ENABLED=true` permits the **Development login** UI only for local use. The
+Controller now validates its short-lived token and grants it `ADMIN`, but the session is in-memory and
+does not provide OIDC, MFA, refresh, or multi-process sharing. Set it to `false` outside an isolated
+workstation. `make down` stops services without deleting volumes.
+
+Human API authentication is fail-closed by default. For a non-development deployment, configure one
+or more SHA-256 token digests by role and deliver the original random token to the intended client over
+a separate secret channel:
+
+```bash
+# Generate a token once; store the plaintext only in an approved secret manager.
+TOKEN="$(openssl rand -base64 32)"
+# Put this digest in C2HUNTER_ADMIN_TOKEN_SHA256, not the plaintext token.
+printf '%s' "$TOKEN" | sha256sum
+```
+
+`VIEWER` can read, `ANALYST` can run investigations and manage findings, and `ADMIN` additionally
+manages sensors and detector settings. Static tokens are a minimum deployment control, not a substitute
+for individual OIDC/MFA identities. Keep the Controller private behind HTTPS ingress.
 
 ## 외부 Sensor 설치와 인터페이스 방향
 
@@ -115,6 +133,9 @@ Playwright fixtures exist only under `web/e2e`; production bundles contain no fa
 
 ## Known limitations
 
+- Production OIDC/MFA, per-user session revocation, and distributed rate limiting are not implemented.
+  Static role tokens must be rotated externally; development sessions and request counters are local to
+  one Controller process. Do not expose the Controller directly to the Internet.
 - MVP uses rule/statistical evidence, not ML or attribution.
 - TLS payloads are not decrypted; payload retention is disabled by default.
 - Compose는 Controller, Worker, Web, PostgreSQL, Redis, ClickHouse, MinIO만 실행하는 단일 호스트 개발 토폴로지이며 production HA 구성이 아니다.

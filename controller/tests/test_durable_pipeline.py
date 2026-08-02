@@ -258,7 +258,11 @@ def test_controller_persists_worker_result_before_ack() -> None:
 def test_operational_app_rejects_inline_flow_records() -> None:
     client = TestClient(
         create_app(
-            Settings(environment="production", inline_flow_records_enabled=False),
+            Settings(
+                environment="production",
+                inline_flow_records_enabled=False,
+                api_auth_required=False,
+            ),
             MemoryRepository(),
             flow_store=MemoryFlowStore(),
             queue=QueueStub(),
