@@ -170,6 +170,55 @@ func TestAnalysisJobPollingIsBoundedToOneSecond(t *testing.T) {
 	}
 }
 
+func TestActiveCaptureJobsDropsExpiredAndInvalidJobs(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	jobs := []config.CaptureJob{
+		{JobID: ""},
+		{JobID: "expired", EndTime: now},
+		{JobID: "active", StartTime: now, EndTime: now.Add(time.Minute)},
+		{JobID: "unbounded", StartTime: now},
+	}
+
+	active := activeCaptureJobs(jobs, now)
+	if len(active) != 2 || active[0].JobID != "active" || active[1].JobID != "unbounded" {
+		t.Fatalf("active jobs = %+v", active)
+	}
+}
+
+func TestCaptureJobWindowAndIDsCoverOverlappingAnalyses(t *testing.T) {
+	start := time.Unix(200, 0).UTC()
+	jobs := []config.CaptureJob{
+		{JobID: "job-b", StartTime: start.Add(30 * time.Second), EndTime: start.Add(2 * time.Minute)},
+		{JobID: "job-a", StartTime: start, EndTime: start.Add(time.Minute)},
+		{JobID: "job-a", StartTime: start, EndTime: start.Add(time.Minute)},
+	}
+
+	gotStart, gotEnd := captureJobWindow(jobs)
+	if !gotStart.Equal(start) || !gotEnd.Equal(start.Add(2*time.Minute)) {
+		t.Fatalf("capture window = %s .. %s", gotStart, gotEnd)
+	}
+	ids := captureJobIDs(jobs)
+	if len(ids) != 2 || ids[0] != "job-b" || ids[1] != "job-a" {
+		t.Fatalf("capture job IDs = %+v", ids)
+	}
+}
+
+func TestIdleCaptureRuntimeWaitsForCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- (idleCaptureRuntime{}).Run(ctx) }()
+
+	select {
+	case <-done:
+		t.Fatal("idle runtime stopped before cancellation")
+	case <-time.After(10 * time.Millisecond):
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestServiceSandboxAllowsNetlinkInterfaceDiscovery(t *testing.T) {
 	data, err := os.ReadFile("../../../deploy/sensor/c2hunter-sensor.service")
 	if err != nil {

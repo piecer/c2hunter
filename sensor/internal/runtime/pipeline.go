@@ -29,6 +29,7 @@ type PCAPSink interface {
 
 type PipelineConfig struct {
 	SensorID, JobID              string
+	ActiveJobIDs                 []string
 	Interface, Direction         string
 	IdleTimeout                  time.Duration
 	PayloadPreviewBytes          int
@@ -126,8 +127,12 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			<-p.manager.Done()
 		}()
 	}
+	activeJobs := append([]string(nil), p.cfg.ActiveJobIDs...)
+	if len(activeJobs) == 0 {
+		activeJobs = []string{p.cfg.JobID}
+	}
 	p.update(func(s *CaptureSnapshot) {
-		s.ActiveJobs = []string{p.cfg.JobID}
+		s.ActiveJobs = activeJobs
 		s.LastError = ""
 		s.StopReason = ""
 		s.Interfaces = []InterfaceSnapshot{{Interface: p.cfg.Interface, Direction: p.cfg.Direction, Status: "CAPTURING"}}

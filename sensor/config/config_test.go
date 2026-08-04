@@ -57,6 +57,9 @@ internal_networks: [10.0.0.0/8]
 	if cfg.HeartbeatInterval != 10*time.Second || cfg.FlowIdleTimeout != 60*time.Second {
 		t.Fatalf("defaults not applied: %+v", cfg)
 	}
+	if cfg.Agent.CaptureMode != CaptureModeOnDemand {
+		t.Fatalf("default capture mode = %q", cfg.Agent.CaptureMode)
+	}
 	if cfg.Batch.MaxItems <= 0 || cfg.Batch.MaxBytes <= 0 {
 		t.Fatalf("batch must be bounded: %+v", cfg.Batch)
 	}
@@ -150,5 +153,31 @@ pcap:
 	}
 	if cfg.PCAP.Directory != "/tmp/c2hunter-pcap" || cfg.PCAP.MaxSegmentDuration != time.Minute || cfg.PCAP.QueueSize != 128 {
 		t.Fatalf("PCAP config = %+v", cfg.PCAP)
+	}
+}
+
+func TestLoadSupportsContinuousCaptureModeEnvironmentOverride(t *testing.T) {
+	t.Setenv("C2HUNTER_SENSOR_ID", "sensor-a")
+	t.Setenv("C2HUNTER_CAPTURE_MODE", "CONTINUOUS")
+
+	cfg, err := Load(strings.NewReader(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.CaptureMode != CaptureModeContinuous {
+		t.Fatalf("capture mode = %q", cfg.Agent.CaptureMode)
+	}
+}
+
+func TestLoadRejectsInvalidCaptureMode(t *testing.T) {
+	_, err := Load(strings.NewReader(`
+sensor: {id: sensor-a, name: edge}
+agent:
+  capture_mode: sometimes
+capture_sources:
+  - {interface: eth0, direction: OUTBOUND}
+`))
+	if err == nil || !strings.Contains(err.Error(), "capture_mode") {
+		t.Fatalf("expected capture mode validation error, got %v", err)
 	}
 }

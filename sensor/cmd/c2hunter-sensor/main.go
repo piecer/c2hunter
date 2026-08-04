@@ -318,6 +318,7 @@ func applyDesired(cfg *config.Config, desired transport.DesiredConfig) {
 }
 
 func applyPipelines(supervisor *sensorruntime.Supervisor, cfg config.Config, uploader sensorruntime.FlowUploader, versionNumber int64) error {
+	cfg.CaptureJobs = activeCaptureJobs(cfg.CaptureJobs, time.Now().UTC())
 	pipelines, err := buildPipelines(cfg, uploader)
 	if err != nil {
 		return err
@@ -333,6 +334,63 @@ func captureJobsEqual(current []config.CaptureJob, desired []transport.DesiredCa
 	return reflect.DeepEqual(current, next)
 }
 
+func activeCaptureJobs(jobs []config.CaptureJob, now time.Time) []config.CaptureJob {
+	active := make([]config.CaptureJob, 0, len(jobs))
+	for _, job := range jobs {
+		if job.JobID == "" {
+			continue
+		}
+		if !job.EndTime.IsZero() && !job.EndTime.After(now) {
+			continue
+		}
+		active = append(active, job)
+	}
+	return active
+}
+
+func captureJobWindow(jobs []config.CaptureJob) (time.Time, time.Time) {
+	var start time.Time
+	var end time.Time
+	for _, job := range jobs {
+		if !job.StartTime.IsZero() && (start.IsZero() || job.StartTime.Before(start)) {
+			start = job.StartTime
+		}
+		if !job.EndTime.IsZero() && (end.IsZero() || job.EndTime.After(end)) {
+			end = job.EndTime
+		}
+	}
+	return start, end
+}
+
+func captureJobIDs(jobs []config.CaptureJob) []string {
+	seen := make(map[string]struct{}, len(jobs))
+	ids := make([]string, 0, len(jobs))
+	for _, job := range jobs {
+		if job.JobID == "" {
+			continue
+		}
+		if _, exists := seen[job.JobID]; exists {
+			continue
+		}
+		seen[job.JobID] = struct{}{}
+		ids = append(ids, job.JobID)
+	}
+	return ids
+}
+
+// idleCaptureRuntime keeps the durable spool and PCAP archive uploaders alive
+// while no AF_PACKET reader is running.
+type idleCaptureRuntime struct{}
+
+func (idleCaptureRuntime) Run(ctx context.Context) error {
+	<-ctx.Done()
+	return nil
+}
+
+func (idleCaptureRuntime) Snapshot() sensorruntime.CaptureSnapshot {
+	return sensorruntime.CaptureSnapshot{}
+}
+
 type captureWindowPCAPSink struct {
 	sink       sensorruntime.PCAPSink
 	start, end time.Time
@@ -346,25 +404,6 @@ func (s captureWindowPCAPSink) Enqueue(pkt packet.Packet) bool {
 }
 
 func buildPipelines(cfg config.Config, uploader sensorruntime.FlowUploader) ([]sensorruntime.CaptureRuntime, error) {
-	sources, err := validateCaptureSources(cfg.CaptureSources)
-	if err != nil {
-		return nil, err
-	}
-	if len(sources) == 0 {
-		return nil, errors.New("at least one enabled capture source is required")
-	}
-	directions := make(map[string]direction.Direction)
-	for _, source := range sources {
-		parsed, err := direction.Parse(source.Direction)
-		if err != nil {
-			return nil, err
-		}
-		directions[source.Interface] = parsed
-	}
-	classifier, err := direction.NewClassifier(directions, nil, cfg.InternalNetworks)
-	if err != nil {
-		return nil, err
-	}
 	store, err := spool.Open(cfg.Spool.Directory, spool.Limits{MaxBytes: cfg.Spool.MaxBytes, MaxAge: cfg.Spool.MaxAge}, time.Now)
 	if err != nil {
 		return nil, fmt.Errorf("open spool: %w", err)
@@ -398,6 +437,38 @@ func buildPipelines(cfg config.Config, uploader sensorruntime.FlowUploader) ([]s
 			return nil, fmt.Errorf("build PCAP archive manager: %w", err)
 		}
 		pipelines = append(pipelines, archive)
+	}
+	if cfg.Agent.CaptureMode == config.CaptureModeOnDemand && len(cfg.CaptureJobs) == 0 {
+		pipelines = append(pipelines, idleCaptureRuntime{})
+		return pipelines, nil
+	}
+
+	sources, err := validateCaptureSources(cfg.CaptureSources)
+	if err != nil {
+		return nil, err
+	}
+	if len(sources) == 0 {
+		return nil, errors.New("at least one enabled capture source is required")
+	}
+	directions := make(map[string]direction.Direction)
+	for _, source := range sources {
+		parsed, err := direction.Parse(source.Direction)
+		if err != nil {
+			return nil, err
+		}
+		directions[source.Interface] = parsed
+	}
+	classifier, err := direction.NewClassifier(directions, nil, cfg.InternalNetworks)
+	if err != nil {
+		return nil, err
+	}
+
+	captureStart := cfg.Capture.StartTime
+	captureEnd := cfg.Capture.EndTime
+	activeJobIDs := []string{cfg.Capture.JobID}
+	if len(cfg.CaptureJobs) > 0 {
+		captureStart, captureEnd = captureJobWindow(cfg.CaptureJobs)
+		activeJobIDs = captureJobIDs(cfg.CaptureJobs)
 	}
 	for _, source := range sources {
 		source := source
@@ -435,13 +506,14 @@ func buildPipelines(cfg config.Config, uploader sensorruntime.FlowUploader) ([]s
 		}
 		pipeline, err := sensorruntime.NewPipeline(sensorruntime.PipelineConfig{
 			SensorID: cfg.Sensor.ID, JobID: cfg.Capture.JobID + ":" + source.Interface + ":" + source.Direction,
-			Interface: source.Interface, Direction: source.Direction, IdleTimeout: cfg.FlowIdleTimeout,
+			ActiveJobIDs: activeJobIDs,
+			Interface:    source.Interface, Direction: source.Direction, IdleTimeout: cfg.FlowIdleTimeout,
 			PayloadPreviewBytes: cfg.Capture.PayloadPreviewBytes,
 			BatchMaxItems:       cfg.Batch.MaxItems, BatchMaxBytes: cfg.Batch.MaxBytes, PacketQueueSize: cfg.Capture.PacketQueueSize,
 			Source: func() (capture.Reader, error) {
 				return capture.NewLiveReader(source.Interface, capture.AFPacketOpener{}, classifier)
 			},
-			Filter: filter, Limits: capture.Limits{StartTime: cfg.Capture.StartTime, EndTime: cfg.Capture.EndTime, Duration: cfg.Capture.Duration, MaxPackets: cfg.Capture.MaxPackets, MaxBytes: cfg.Capture.MaxBytes},
+			Filter: filter, Limits: capture.Limits{StartTime: captureStart, EndTime: captureEnd, Duration: cfg.Capture.Duration, MaxPackets: cfg.Capture.MaxPackets, MaxBytes: cfg.Capture.MaxBytes},
 			BatchManager: manager, PCAPSinks: pcapSinks,
 		})
 		if err != nil {

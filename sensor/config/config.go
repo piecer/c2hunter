@@ -12,6 +12,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type CaptureMode string
+
+const (
+	CaptureModeOnDemand   CaptureMode = "on_demand"
+	CaptureModeContinuous CaptureMode = "continuous"
+)
+
 type Config struct {
 	Sensor struct {
 		ID   string `yaml:"id"`
@@ -55,6 +62,7 @@ type AgentConfig struct {
 	StateFile                 string        `yaml:"state_file"`
 	ConfigPollIntervalSeconds uint64        `yaml:"config_poll_interval_seconds"`
 	ConfigPollInterval        time.Duration `yaml:"-"`
+	CaptureMode               CaptureMode   `yaml:"capture_mode"`
 }
 
 type BatchConfig struct {
@@ -109,7 +117,7 @@ func Load(r io.Reader) (Config, error) {
 		Capture:           CaptureConfig{JobID: "continuous", PacketQueueSize: 4096},
 		Spool:             SpoolConfig{Directory: "/var/lib/c2hunter/spool", MaxBytes: 1 << 30, MaxAgeSeconds: 86400},
 		PCAP:              PCAPConfig{Directory: "/var/lib/c2hunter/pcap", MaxSegmentBytes: 128 << 20, MaxSegmentDurationSeconds: 300, MaxDiskBytes: 1 << 30, QueueSize: 4096},
-		Agent:             AgentConfig{StateFile: "/var/lib/c2hunter/state/agent.json", ConfigPollIntervalSeconds: 1},
+		Agent:             AgentConfig{StateFile: "/var/lib/c2hunter/state/agent.json", ConfigPollIntervalSeconds: 1, CaptureMode: CaptureModeOnDemand},
 	}
 	if err := yaml.NewDecoder(r).Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return Config{}, fmt.Errorf("decode config: %w", err)
@@ -149,6 +157,9 @@ func applyEnvironment(cfg *Config) {
 	}
 	if v := os.Getenv("C2HUNTER_STATE_FILE"); v != "" {
 		cfg.Agent.StateFile = v
+	}
+	if v := strings.TrimSpace(os.Getenv("C2HUNTER_CAPTURE_MODE")); v != "" {
+		cfg.Agent.CaptureMode = CaptureMode(strings.ToLower(v))
 	}
 }
 
@@ -203,6 +214,13 @@ func finalize(cfg *Config) error {
 	cfg.Agent.ConfigPollInterval = time.Duration(cfg.Agent.ConfigPollIntervalSeconds) * time.Second
 	if cfg.Agent.StateFile == "" || cfg.Agent.ConfigPollInterval <= 0 {
 		return errors.New("agent state file and config poll interval are required")
+	}
+	if cfg.Agent.CaptureMode == "" {
+		cfg.Agent.CaptureMode = CaptureModeOnDemand
+	}
+	if cfg.Agent.CaptureMode != CaptureModeOnDemand &&
+		cfg.Agent.CaptureMode != CaptureModeContinuous {
+		return errors.New("agent capture_mode must be on_demand or continuous")
 	}
 	if cfg.Capture.PayloadPreviewBytes < 0 || cfg.Capture.PayloadPreviewBytes > 256 {
 		return errors.New("capture payload_preview_bytes must be between 0 and 256")

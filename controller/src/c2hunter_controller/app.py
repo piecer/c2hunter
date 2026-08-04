@@ -683,12 +683,11 @@ def create_app(
                 "job_id": str(job["id"]),
                 "start_time": job["start_time"],
                 "end_time": job["end_time"],
-                "store_pcap": True,
+                "store_pcap": bool(job.get("capture", {}).get("store_pcap")),
             }
             for job in repo.list_active_live_jobs()
             if job.get("status") == JobState.CAPTURING
             and sensor_id in job.get("sensor_ids", [])
-            and bool(job.get("capture", {}).get("store_pcap"))
         ]
 
     @app.post(

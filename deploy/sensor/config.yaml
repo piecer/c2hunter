@@ -6,6 +6,10 @@ agent:
   # Prefer C2HUNTER_ENROLLMENT_TOKEN in /etc/c2hunter-sensor/environment.
   state_file: /var/lib/c2hunter-sensor/state/agent.json
   config_poll_interval_seconds: 1
+  # on_demand opens AF_PACKET only while the Controller reports an active
+  # LIVE analysis job. Use continuous only when historical flow analysis is
+  # intentionally required and the storage/retention impact is acceptable.
+  capture_mode: on_demand
 capture_sources: []
 # Raw packets are persisted only while a LIVE analysis with Store PCAP enabled is active.
 # Finalized segments are linked to that analysis, uploaded through the authenticated
