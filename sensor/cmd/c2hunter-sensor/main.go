@@ -309,9 +309,8 @@ func applyDesired(cfg *config.Config, desired transport.DesiredConfig) {
 	for _, job := range desired.CaptureJobs {
 		cfg.CaptureJobs = append(cfg.CaptureJobs, config.CaptureJob{
 			JobID: job.JobID, StartTime: derefTime(job.StartTime), EndTime: derefTime(job.EndTime),
-			StorePCAP:  job.StorePCAP,
-			MaxPackets: parseOptionalInt64(job.MaxPackets, 0),
-			MaxBytes:   parseOptionalInt64(job.MaxBytes, 0),
+			StorePCAP: job.StorePCAP, MaxPackets: parseOptionalInt64(job.MaxPackets, 0), MaxBytes: parseOptionalInt64(job.MaxBytes, 0),
+			BPFFilter: job.BPFFilter,
 		})
 	}
 	if desired.HeartbeatIntervalSeconds > 0 {
@@ -336,9 +335,8 @@ func captureJobsEqual(current []config.CaptureJob, desired []transport.DesiredCa
 	for _, job := range desired {
 		next = append(next, config.CaptureJob{
 			JobID: job.JobID, StartTime: derefTime(job.StartTime), EndTime: derefTime(job.EndTime),
-			StorePCAP:  job.StorePCAP,
-			MaxPackets: parseOptionalInt64(job.MaxPackets, 0),
-			MaxBytes:   parseOptionalInt64(job.MaxBytes, 0),
+			StorePCAP: job.StorePCAP, MaxPackets: parseOptionalInt64(job.MaxPackets, 0), MaxBytes: parseOptionalInt64(job.MaxBytes, 0),
+			BPFFilter: job.BPFFilter,
 		})
 	}
 	return reflect.DeepEqual(current, next)
@@ -400,6 +398,38 @@ func captureJobIDs(jobs []config.CaptureJob) []string {
 		ids = append(ids, job.JobID)
 	}
 	return ids
+}
+
+// captureJobBPF merges per-job BPF filters when all active analysis jobs use
+// the same predicate (after normalization). When no job uses a custom filter,
+// it returns an empty string so that the controller/sensor-level BPF takes
+// full effect; when only one distinct filter is present across all active
+// analysis jobs, it returns that filter. If two conflicting filters are found,
+// it returns an error and the pipeline configuration is rejected as-is because a
+// single shared AF_PACKET reader cannot split on different predicates.
+
+func captureJobBPF(jobs []config.CaptureJob) (string, error) {
+	var selected string
+	haveFilter := false
+	for _, job := range jobs {
+		normalized := strings.NewReplacer("(", " ( ", ")", " ) ").Replace(
+			strings.ToLower(strings.TrimSpace(job.BPFFilter)),
+		)
+		filter := strings.Join(strings.Fields(normalized), " ")
+		if !haveFilter {
+			selected = filter
+			haveFilter = true
+			continue
+		}
+		if filter != selected {
+			return "", fmt.Errorf(
+				"active capture jobs require identical BPF filters: %q conflicts with %q",
+				selected,
+				filter,
+			)
+		}
+	}
+	return selected, nil
 }
 
 // captureJobLimits returns the strictest configured limit. A shared AF_PACKET
@@ -523,9 +553,13 @@ func buildPipelines(cfg config.Config, uploader sensorruntime.FlowUploader) ([]s
 	for _, job := range cfg.CaptureJobs {
 		pcapBudgets[job.JobID] = sensorruntime.NewPCAPBudget(uint64(job.MaxPackets), uint64(job.MaxBytes))
 	}
+	jobBPF, err := captureJobBPF(cfg.CaptureJobs)
+	if err != nil {
+		return nil, err
+	}
 	for _, source := range sources {
 		source := source
-		bpfExpression := combineBPFExpressions(source.BPFFilter, cfg.Capture.BPF)
+		bpfExpression := combineBPFExpressions(source.BPFFilter, cfg.Capture.BPF, jobBPF)
 		matcher, err := packet.CompileBPFMatcher(bpfExpression)
 		if err != nil {
 			return nil, fmt.Errorf("capture source %s BPF: %w", source.Interface, err)

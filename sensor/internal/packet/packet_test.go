@@ -71,6 +71,37 @@ func TestCompileBPFMatcherAppliesSupportedExpressionAndRejectsUnknownSyntax(t *t
 	}
 }
 
+func TestCompileBPFMatcherSupportsCommonHostNetAndPortRangeSyntax(t *testing.T) {
+	p := Packet{IPVersion: 4, Protocol: TCP, SourceIP: netip.MustParseAddr("10.0.0.2"), DestinationIP: netip.MustParseAddr("203.0.113.2"),
+		SourcePort: 1250, DestinationPort: 450}
+	expressions := []string{
+		"host 203.0.113.2",
+		"src host 10.0.0.2 and dst net 203.0.113.0/24",
+		"tcp and dst portrange 400-500",
+		"src portrange 1200:1300",
+	}
+	for _, expression := range expressions {
+		matcher, err := CompileBPFMatcher(expression)
+		if err != nil {
+			t.Fatalf("compile %q: %v", expression, err)
+		}
+		if !matcher(expression, p) {
+			t.Fatalf("matching packet rejected by %q", expression)
+		}
+	}
+
+	for _, expression := range []string{
+		"host not-an-ip",
+		"net 10.0.0.0",
+		"portrange 9000-8000",
+		"src banana 1",
+	} {
+		if _, err := CompileBPFMatcher(expression); err == nil {
+			t.Fatalf("invalid BPF expression %q accepted", expression)
+		}
+	}
+}
+
 func TestCompileBPFMatcherSupportsBooleanOperatorsAndParentheses(t *testing.T) {
 	matcher, err := CompileBPFMatcher("(tcp and dst port 443) or (udp and port 53)")
 	if err != nil {

@@ -469,6 +469,7 @@ def test_sensor_configuration_exposes_active_analysis_pcap_jobs() -> None:
             "store_pcap": True,
             "max_packets": None,
             "max_bytes": None,
+            "bpf_filter": "",
         }
     ]
 

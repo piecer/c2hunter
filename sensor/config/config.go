@@ -60,6 +60,7 @@ type CaptureJob struct {
 	PacketQueue int
 	MaxPackets  int64
 	MaxBytes    int64
+	BPFFilter   string
 }
 
 type AgentConfig struct {

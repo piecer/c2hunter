@@ -130,6 +130,7 @@ class ActiveCaptureJob(BaseModel):
     store_pcap: bool
     max_packets: int | None = Field(default=None, ge=0)
     max_bytes: int | None = Field(default=None, ge=0)
+    bpf_filter: str | None = Field(default=None)
 
 
 class EnrollmentClaimResponse(BaseModel):

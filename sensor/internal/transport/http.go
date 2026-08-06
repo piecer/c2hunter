@@ -63,6 +63,7 @@ type DesiredCaptureJob struct {
 	StorePCAP  bool   `json:"store_pcap"`
 	MaxPackets *int64 `json:"max_packets"`
 	MaxBytes   *int64 `json:"max_bytes"`
+	BPFFilter  string `json:"bpf_filter"`
 }
 
 type controllerResponseError struct {

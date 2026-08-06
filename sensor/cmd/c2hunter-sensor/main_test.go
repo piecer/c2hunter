@@ -127,15 +127,39 @@ func TestCombineBPFExpressionsPreservesEachFilterScope(t *testing.T) {
 
 func TestApplyDesiredUsesAnalysisCaptureJobsInsteadOfPerInterfacePCAPSelection(t *testing.T) {
 	cfg := config.Config{}
+	mp := int64(100)
+	mb := int64(4096)
 	applyDesired(&cfg, transport.DesiredConfig{
 		CaptureSources: []transport.DesiredCaptureSource{{Interface: "eth0", Direction: "OUTBOUND", Enabled: true, StorePCAP: true}},
-		CaptureJobs:    []transport.DesiredCaptureJob{{JobID: "job-a", StorePCAP: true}},
+		CaptureJobs:    []transport.DesiredCaptureJob{{JobID: "job-a", StorePCAP: true, MaxPackets: &mp, MaxBytes: &mb, BPFFilter: "udp dst port 53"}},
 	})
 	if len(cfg.CaptureSources) != 1 || cfg.CaptureSources[0].StorePCAP {
 		t.Fatalf("per-interface PCAP remained enabled: %+v", cfg.CaptureSources)
 	}
 	if len(cfg.CaptureJobs) != 1 || cfg.CaptureJobs[0].JobID != "job-a" || !cfg.CaptureJobs[0].StorePCAP {
 		t.Fatalf("capture jobs = %+v", cfg.CaptureJobs)
+	}
+	if cfg.CaptureJobs[0].MaxPackets != 100 || cfg.CaptureJobs[0].MaxBytes != 4096 {
+		t.Fatalf("capture job limits = %+v", cfg.CaptureJobs[0])
+	}
+	if cfg.CaptureJobs[0].BPFFilter != "udp dst port 53" {
+		t.Fatalf("capture job BPF = %q", cfg.CaptureJobs[0].BPFFilter)
+	}
+}
+
+func TestCaptureJobBPFRequiresIdenticalNormalizedFilters(t *testing.T) {
+	filter, err := captureJobBPF([]config.CaptureJob{
+		{JobID: "job-a", BPFFilter: "udp   and dst port 53"},
+		{JobID: "job-b", BPFFilter: "udp and dst port 53"},
+	})
+	if err != nil || filter != "udp and dst port 53" {
+		t.Fatalf("normalized BPF = %q, %v", filter, err)
+	}
+	if _, err := captureJobBPF([]config.CaptureJob{
+		{JobID: "job-a", BPFFilter: "tcp"},
+		{JobID: "job-b", BPFFilter: "udp"},
+	}); err == nil {
+		t.Fatal("conflicting capture job BPF filters were accepted")
 	}
 }
 

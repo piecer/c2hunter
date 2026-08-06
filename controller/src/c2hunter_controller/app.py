@@ -686,10 +686,52 @@ def create_app(
                 "store_pcap": bool(job.get("capture", {}).get("store_pcap")),
                 "max_packets": job.get("capture", {}).get("max_packets"),
                 "max_bytes": job.get("capture", {}).get("max_bytes"),
+                "bpf_filter": str(job.get("capture", {}).get("bpf_filter", "")),
             }
             for job in repo.list_active_live_jobs()
             if job.get("status") == JobState.CAPTURING and sensor_id in job.get("sensor_ids", [])
         ]
+
+    def normalized_capture_bpf(value: object) -> str:
+        normalized = str(value or "").strip().lower()
+        normalized = normalized.replace("(", " ( ").replace(")", " ) ")
+        return " ".join(normalized.split())
+
+    def ensure_live_capture_bpf_compatible(payload: AnalysisJobCreate) -> None:
+        from .jobs import JobState
+
+        if payload.mode != "LIVE" or payload.flow_records:
+            return
+        requested_filter = normalized_capture_bpf(payload.capture.bpf_filter)
+        requested_sensors = set(payload.sensor_ids)
+        conflicts: list[dict[str, Any]] = []
+        for active_job in repo.list_active_live_jobs():
+            if active_job.get("status") != JobState.CAPTURING:
+                continue
+            if active_job.get("idempotency_key") == payload.idempotency_key:
+                continue
+            shared_sensors = sorted(requested_sensors & set(active_job.get("sensor_ids", [])))
+            if not shared_sensors:
+                continue
+            active_filter = normalized_capture_bpf(
+                active_job.get("capture", {}).get("bpf_filter", "")
+            )
+            if active_filter == requested_filter:
+                continue
+            conflicts.append(
+                {
+                    "job_id": str(active_job["id"]),
+                    "sensor_ids": shared_sensors,
+                    "bpf_filter": active_filter,
+                }
+            )
+        if conflicts:
+            raise ApiError(
+                409,
+                "CAPTURE_BPF_CONFLICT",
+                "같은 Sensor에서 동시에 실행되는 LIVE 분석은 동일한 BPF filter가 필요합니다",
+                {"requested_bpf_filter": requested_filter, "conflicts": conflicts},
+            )
 
     @app.post(
         "/api/v1/sensor-enrollments",
@@ -1477,6 +1519,7 @@ def create_app(
             configured_default = default_detector_weights()
             if configured_default is not None:
                 payload.analysis.detector_weights = configured_default
+        ensure_live_capture_bpf_compatible(payload)
         requested_job = build_job(payload)
         requested_job["payload_signatures"] = payload_signature_snapshot()
         requested_job["allowlist"] = allowlist_snapshot()
