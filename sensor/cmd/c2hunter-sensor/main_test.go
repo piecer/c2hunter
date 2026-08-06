@@ -255,3 +255,24 @@ func TestInstallersCreateWritablePCAPDirectory(t *testing.T) {
 		t.Fatal("sensor artifact does not package the canonical installer")
 	}
 }
+
+func TestCaptureJobLimitsReturnsStrictestAndSkipsZeros(t *testing.T) {
+	jobs := []config.CaptureJob{
+		{JobID: "a", MaxPackets: 100, MaxBytes: 4096},
+		{JobID: "b", MaxPackets: 200, MaxBytes: 2048},
+		{JobID: "c", MaxPackets: 0, MaxBytes: 8192},
+	}
+	packets, bytes := captureJobLimits(jobs)
+	if packets != 100 {
+		t.Errorf("max_packets = %d, want 100", packets)
+	}
+	if bytes != 2048 {
+		t.Errorf("max_bytes = %d, want 2048", bytes)
+	}
+
+	allZeros := []config.CaptureJob{{JobID: "x"}}
+	pz, bz := captureJobLimits(allZeros)
+	if pz != 0 || bz != 0 {
+		t.Error("expected zero limits when no job has them")
+	}
+}

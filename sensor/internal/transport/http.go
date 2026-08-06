@@ -57,11 +57,29 @@ type DesiredCaptureSource struct {
 	StorePCAP bool   `json:"store_pcap"`
 }
 type DesiredCaptureJob struct {
-	JobID     string    `json:"job_id"`
-	StartTime time.Time `json:"start_time"`
-	EndTime   time.Time `json:"end_time"`
-	StorePCAP bool      `json:"store_pcap"`
+	JobID      string `json:"job_id"`
+	StartTime  *int64 `json:"start_time"`
+	EndTime    *int64 `json:"end_time"`
+	StorePCAP  bool   `json:"store_pcap"`
+	MaxPackets *int64 `json:"max_packets"`
+	MaxBytes   *int64 `json:"max_bytes"`
 }
+
+type controllerResponseError struct {
+	statusCode int
+	rawBody    string
+}
+
+func (e controllerResponseError) Error() string {
+	return fmt.Sprintf("controller returned %d: %s", e.statusCode, strings.TrimSpace(e.rawBody))
+}
+
+// Permanent returns true when the controller rejects a PCAP segment with a status that indicates
+// the upload will not succeed on retry (e.g., quota exceeded, invalid analysis job).
+func (e controllerResponseError) Permanent() bool {
+	return e.statusCode == 413 || e.statusCode == 422
+}
+
 type DesiredConfig struct {
 	SensorID                  string                 `json:"sensor_id,omitempty"`
 	AgentToken                string                 `json:"agent_token,omitempty"`
@@ -238,7 +256,7 @@ func (h *HTTP) UploadPCAPSegment(
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		message, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
-		return fmt.Errorf("controller returned %s: %s", response.Status, strings.TrimSpace(string(message)))
+		return controllerResponseError{statusCode: response.StatusCode, rawBody: string(message)}
 	}
 	var ack struct {
 		SegmentID string `json:"segment_id"`

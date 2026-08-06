@@ -467,6 +467,8 @@ def test_sensor_configuration_exposes_active_analysis_pcap_jobs() -> None:
             "start_time": "2026-08-01T00:00:00+00:00",
             "end_time": "2026-08-01T01:00:00+00:00",
             "store_pcap": True,
+            "max_packets": None,
+            "max_bytes": None,
         }
     ]
 

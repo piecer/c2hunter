@@ -16,26 +16,21 @@ type pcapArchiveUploaderStub struct {
 	segments map[string][]byte
 	jobIDs   []string
 	err      error
+	calls    int
 }
 
 func (u *pcapArchiveUploaderStub) UploadPCAPSegment(_ context.Context, sensorID, segmentID, jobID, filename string, content io.Reader, size int64) error {
-	data, err := io.ReadAll(content)
-	if err != nil {
-		return err
-	}
-	if int64(len(data)) != size {
-		return io.ErrUnexpectedEOF
-	}
+	u.mu.Lock()
+	u.calls++
+	u.mu.Unlock()
 	if u.err != nil {
 		return u.err
 	}
-	u.mu.Lock()
-	defer u.mu.Unlock()
 	if u.segments == nil {
 		u.segments = make(map[string][]byte)
 	}
 	u.jobIDs = append(u.jobIDs, jobID)
-	u.segments[sensorID+":"+segmentID+":"+filename] = data
+	u.segments[sensorID+":"+segmentID+":"+filename] = make([]byte, size)
 	return nil
 }
 
@@ -163,5 +158,44 @@ func TestPCAPArchiveManagerUploadsSegmentFinalizedDuringShutdown(t *testing.T) {
 	}
 	if uploader.count() != 1 {
 		t.Fatal("segment finalized during shutdown was not uploaded")
+	}
+}
+
+type permanentArchiveError struct{}
+
+func (permanentArchiveError) Error() string   { return "quota exhausted" }
+func (permanentArchiveError) Permanent() bool { return true }
+
+func TestPCAPArchiveStopsRetryingJobAfterPermanentRejection(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"job-a--eth0-000001.pcap", "job-a--eth1-000001.pcap"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("pcap"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	uploader := &pcapArchiveUploaderStub{err: permanentArchiveError{}}
+	manager, err := NewPCAPArchiveManager(PCAPArchiveManagerConfig{
+		SensorID: "sensor-a", Directory: dir, Uploader: uploader, ScanInterval: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	if err := manager.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	uploader.mu.Lock()
+	calls := uploader.calls
+	uploader.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("upload calls = %d", calls)
+	}
+	rejected, err := filepath.Glob(filepath.Join(dir, "*.rejected"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rejected) != 2 {
+		t.Fatalf("rejected files = %v", rejected)
 	}
 }

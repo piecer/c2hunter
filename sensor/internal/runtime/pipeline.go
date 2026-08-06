@@ -38,6 +38,7 @@ type PipelineConfig struct {
 	Source                       func() (capture.Reader, error)
 	Filter                       *packet.Filter
 	Limits                       capture.Limits
+	CaptureBudget                *CaptureBudget
 	Spool                        *spool.Spool
 	Uploader                     FlowUploader
 	BatchManager                 *BatchManager
@@ -79,6 +80,41 @@ type Pipeline struct {
 	snapshot    CaptureSnapshot
 	// cachedDrop holds the latest dropped-packet count from periodic refresh.
 	cachedDrop atomic.Uint64
+}
+
+type CaptureBudget struct {
+	mu                   sync.Mutex
+	maxPackets, maxBytes uint64
+	packets, bytes       uint64
+}
+
+func NewCaptureBudget(maxPackets, maxBytes uint64) *CaptureBudget {
+	return &CaptureBudget{maxPackets: maxPackets, maxBytes: maxBytes}
+}
+
+// Reserve accounts one accepted packet. stopAfter is set when this packet
+// exactly consumes the budget; rejected packets are never processed further.
+func (b *CaptureBudget) Reserve(wireBytes uint64) (accepted bool, stopAfter capture.StopReason) {
+	if b == nil {
+		return true, ""
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.maxPackets > 0 && b.packets >= b.maxPackets {
+		return false, capture.StopMaxPackets
+	}
+	if b.maxBytes > 0 && (wireBytes > b.maxBytes-b.bytes) {
+		return false, capture.StopMaxBytes
+	}
+	b.packets++
+	b.bytes += wireBytes
+	if b.maxPackets > 0 && b.packets >= b.maxPackets {
+		return true, capture.StopMaxPackets
+	}
+	if b.maxBytes > 0 && b.bytes >= b.maxBytes {
+		return true, capture.StopMaxBytes
+	}
+	return true, ""
 }
 
 type packetEvent struct {
@@ -255,6 +291,14 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			if p.cfg.Filter != nil && !p.cfg.Filter.Match(pkt) {
 				continue
 			}
+			budgetStop := capture.StopReason("")
+			if p.cfg.CaptureBudget != nil {
+				accepted, reason := p.cfg.CaptureBudget.Reserve(uint64(pkt.WireLength))
+				if !accepted {
+					return finish(reason)
+				}
+				budgetStop = reason
+			}
 			if p.cfg.PCAPSink != nil {
 				p.cfg.PCAPSink.Enqueue(pkt)
 			}
@@ -273,6 +317,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 					s.Interfaces[0].ReceivedPackets++
 				}
 			})
+			if budgetStop != "" {
+				return finish(budgetStop)
+			}
 			if p.cfg.Limits.MaxPackets > 0 && capturedPackets >= p.cfg.Limits.MaxPackets {
 				return finish(capture.StopMaxPackets)
 			}

@@ -374,3 +374,23 @@ func TestPipelineOnlySendsAcceptedRawFramesToConfiguredPCAPSink(t *testing.T) {
 		t.Fatal("pipeline did not enable raw frame retention for PCAP sink")
 	}
 }
+
+func TestCaptureBudgetRespectsPackets(t *testing.T) {
+	pktBudget := NewCaptureBudget(1, 0)
+	if accepted, _ := pktBudget.Reserve(51); !accepted {
+		t.Fatal("first packet should be accepted")
+	}
+	if accepted, stop := pktBudget.Reserve(51); accepted || stop != capture.StopMaxPackets {
+		t.Fatalf("packet reservation = %v, %q", accepted, stop)
+	}
+}
+
+func TestCaptureBudgetRespectsBytes(t *testing.T) {
+	byteBudget := NewCaptureBudget(0, 150)
+	if accepted, _ := byteBudget.Reserve(100); !accepted {
+		t.Fatal("first byte reservation rejected")
+	}
+	if accepted, stop := byteBudget.Reserve(51); accepted || stop != capture.StopMaxBytes {
+		t.Fatalf("overflow reservation = %v, %q", accepted, stop)
+	}
+}

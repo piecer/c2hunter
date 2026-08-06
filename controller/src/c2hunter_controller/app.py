@@ -684,10 +684,11 @@ def create_app(
                 "start_time": job["start_time"],
                 "end_time": job["end_time"],
                 "store_pcap": bool(job.get("capture", {}).get("store_pcap")),
+                "max_packets": job.get("capture", {}).get("max_packets"),
+                "max_bytes": job.get("capture", {}).get("max_bytes"),
             }
             for job in repo.list_active_live_jobs()
-            if job.get("status") == JobState.CAPTURING
-            and sensor_id in job.get("sensor_ids", [])
+            if job.get("status") == JobState.CAPTURING and sensor_id in job.get("sensor_ids", [])
         ]
 
     @app.post(
@@ -1016,17 +1017,29 @@ def create_app(
         sensor_token: str | None = Header(alias="X-Sensor-Token"),
     ) -> dict[str, Any]:
         sensor = require_sensor_token(sensor_id, sensor_token)
+        analysis_job: dict[str, Any] | None = None
+        analysis_pcap_limit: int | None = None
+        stored_analysis_bytes = 0
         if analysis_job_id is not None:
-            job = repo.get_job(analysis_job_id)
+            analysis_job = repo.get_job(analysis_job_id)
             if (
-                job is None
-                or sensor_id not in job.get("sensor_ids", [])
-                or not bool(job.get("capture", {}).get("store_pcap"))
+                analysis_job is None
+                or sensor_id not in analysis_job.get("sensor_ids", [])
+                or not bool(analysis_job.get("capture", {}).get("store_pcap"))
             ):
                 raise ApiError(
                     422,
                     "INVALID_PCAP_ANALYSIS_JOB",
                     "PCAP 분석 작업이 sensor 할당과 일치하지 않습니다",
+                )
+            configured_limit = analysis_job.get("capture", {}).get("max_bytes")
+            if isinstance(configured_limit, int) and configured_limit > 0:
+                analysis_pcap_limit = configured_limit
+                stored_analysis_bytes = sum(
+                    int(segment.get("size_bytes", 0) or 0)
+                    for segment in repo.list_sensor_pcaps()
+                    if segment.get("analysis_job_id") == analysis_job_id
+                    and segment.get("id") != segment_id
                 )
         safe_characters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
         if not filename.endswith(".pcap") or any(
@@ -1058,6 +1071,16 @@ def create_app(
                 ) from exc
             if announced_size > config.pcap_upload_max_bytes:
                 raise ApiError(413, "PCAP_TOO_LARGE", "PCAP segment가 허용 크기를 초과합니다")
+            if (
+                analysis_pcap_limit is not None
+                and stored_analysis_bytes + announced_size > analysis_pcap_limit
+            ):
+                raise ApiError(
+                    413,
+                    "PCAP_ANALYSIS_LIMIT_REACHED",
+                    "분석 작업의 PCAP 저장 크기 제한에 도달했습니다",
+                    {"limit_bytes": analysis_pcap_limit, "stored_bytes": stored_analysis_bytes},
+                )
         uploaded = bytearray()
         async for chunk in request.stream():
             if len(uploaded) + len(chunk) > config.pcap_upload_max_bytes:
@@ -1089,6 +1112,16 @@ def create_app(
                 )
             public = {key: value for key, value in metadata.items() if key != "object_key"}
             return {**public, "segment_id": segment_id}
+        if (
+            analysis_pcap_limit is not None
+            and stored_analysis_bytes + len(content) > analysis_pcap_limit
+        ):
+            raise ApiError(
+                413,
+                "PCAP_ANALYSIS_LIMIT_REACHED",
+                "분석 작업의 PCAP 저장 크기 제한에 도달했습니다",
+                {"limit_bytes": analysis_pcap_limit, "stored_bytes": stored_analysis_bytes},
+            )
         metadata = {
             "id": segment_id,
             "sensor_id": sensor_id,

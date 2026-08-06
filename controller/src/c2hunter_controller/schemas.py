@@ -128,6 +128,8 @@ class ActiveCaptureJob(BaseModel):
     start_time: datetime
     end_time: datetime
     store_pcap: bool
+    max_packets: int | None = Field(default=None, ge=0)
+    max_bytes: int | None = Field(default=None, ge=0)
 
 
 class EnrollmentClaimResponse(BaseModel):

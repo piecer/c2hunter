@@ -207,3 +207,43 @@ func (s *blockingPCAPSegment) WritePacket(pcapstore.PacketInfo, []byte) error {
 	return nil
 }
 func (*blockingPCAPSegment) Close(pcapstore.RotationReason) error { return nil }
+
+func TestPCAPBudgetIsSharedAcrossInterfaceWriters(t *testing.T) {
+	dir := t.TempDir()
+	budget := NewPCAPBudget(0, 70)
+	newWriter := func(prefix string) *PCAPWriter {
+		rotator, err := pcapstore.NewRotator(
+			pcapstore.FileFactory{Directory: dir, Prefix: prefix},
+			pcapstore.Limits{MaxBytes: 1 << 20},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writer, err := NewPCAPWriter(PCAPWriterConfig{JobID: "job-a", Rotator: rotator, QueueSize: 1, Budget: budget})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return writer
+	}
+	first, second := newWriter("job-a--eth0"), newWriter("job-a--eth1")
+	packet := packet.Packet{Timestamp: time.Unix(1, 0), WireLength: 10, RawFrame: make([]byte, 10)}
+	first.write(packet)
+	second.write(packet)
+	if err := first.cfg.Rotator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.cfg.Rotator.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := filepath.Glob(filepath.Join(dir, "*.pcap"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("PCAP files = %v", files)
+	}
+	if second.Snapshot().PCAPDroppedPackets != 1 {
+		t.Fatalf("second writer snapshot = %+v", second.Snapshot())
+	}
+}

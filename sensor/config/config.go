@@ -1,11 +1,13 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,10 +53,13 @@ type CaptureSource struct {
 func (s CaptureSource) IsEnabled() bool { return s.Enabled == nil || *s.Enabled }
 
 type CaptureJob struct {
-	JobID     string
-	StartTime time.Time
-	EndTime   time.Time
-	StorePCAP bool
+	JobID       string
+	StartTime   time.Time
+	EndTime     time.Time
+	StorePCAP   bool
+	PacketQueue int
+	MaxPackets  int64
+	MaxBytes    int64
 }
 
 type AgentConfig struct {
@@ -68,6 +73,13 @@ type AgentConfig struct {
 type BatchConfig struct {
 	MaxItems int `yaml:"max_items"`
 	MaxBytes int `yaml:"max_bytes"`
+}
+
+func parseOptionalInt64(raw *int64, fallback int64) int64 {
+	if raw == nil {
+		return fallback
+	}
+	return *raw
 }
 
 type CaptureConfig struct {
@@ -91,6 +103,59 @@ type CaptureConfig struct {
 	IPVersions          []uint8       `yaml:"ip_versions"`
 	Directions          []string      `yaml:"directions"`
 	StorePCAP           bool          `yaml:"store_pcap"`
+}
+
+func parseCaptureJobs(rawJSON []byte) ([]CaptureJob, error) {
+	type jobWrapper struct {
+		JobID       string  `json:"job_id"`
+		StartTime   string  `json:"start_time"`
+		EndTime     string  `json:"end_time"`
+		StorePCAP   bool    `json:"store_pcap"`
+		PacketQueue *uint32 `json:"packet_queue"`
+		MaxPackets  *int64  `json:"max_packets"`
+		MaxBytes    *int64  `json:"max_bytes"`
+	}
+
+	var jobs []jobWrapper
+	if len(rawJSON) == 0 {
+		return nil, nil
+	}
+	if err := json.Unmarshal(rawJSON, &jobs); err != nil {
+		return nil, fmt.Errorf("unmarshal capture jobs: %w", err)
+	}
+	result := make([]CaptureJob, len(jobs))
+	for i, j := range jobs {
+		startTime := time.Time{}
+		if j.StartTime != "" {
+			t, err := time.Parse(time.RFC3339Nano, j.StartTime)
+			if err != nil {
+				return nil, fmt.Errorf("parse start_time for job %q: %w", j.JobID, err)
+			}
+			startTime = t
+		}
+		endTime := time.Time{}
+		if j.EndTime != "" {
+			t, err := time.Parse(time.RFC3339Nano, j.EndTime)
+			if err != nil {
+				return nil, fmt.Errorf("parse end_time for job %q: %w", j.JobID, err)
+			}
+			endTime = t
+		}
+		pq := 4096
+		if j.PacketQueue != nil {
+			pq = int(*j.PacketQueue)
+		}
+		result[i] = CaptureJob{
+			JobID:       j.JobID,
+			StartTime:   startTime,
+			EndTime:     endTime,
+			StorePCAP:   j.StorePCAP,
+			PacketQueue: pq,
+			MaxPackets:  parseOptionalInt64(j.MaxPackets, 0),
+			MaxBytes:    parseOptionalInt64(j.MaxBytes, 0),
+		}
+	}
+	return result, nil
 }
 
 type SpoolConfig struct {
@@ -242,4 +307,65 @@ func parseOptionalTime(value string) (time.Time, error) {
 		return time.Time{}, nil
 	}
 	return time.Parse(time.RFC3339Nano, value)
+}
+
+// MarshalJSON redacts the enrollment token before serialization.
+func (a AgentConfig) MarshalJSON() ([]byte, error) {
+	type mask struct {
+		StateFile                 string      `json:"state_file"`
+		ConfigPollIntervalSeconds uint64      `json:"config_poll_interval_seconds"`
+		CaptureMode               CaptureMode `json:"capture_mode"`
+		EnrollmentTokenProvided   *bool       `json:"enrollment_token_provided,omitempty"`
+	}
+	v := mask{StateFile: a.StateFile, ConfigPollIntervalSeconds: a.ConfigPollIntervalSeconds, CaptureMode: a.CaptureMode}
+	if a.EnrollmentToken != "" {
+		x := true
+		v.EnrollmentTokenProvided = &x
+	}
+	return json.Marshal(v)
+}
+
+// UnmarshalJSON restores the enrollment token when deserializing persisted state.
+func (a *AgentConfig) UnmarshalJSON(data []byte) error {
+	type raw struct {
+		EnrollmentToken           string      `json:"enrollment_token"`
+		StateFile                 string      `json:"state_file"`
+		ConfigPollIntervalSeconds uint64      `json:"config_poll_interval_seconds"`
+		CaptureMode               CaptureMode `json:"capture_mode"`
+		EnrollmentTokenProvided   *bool       `json:"enrollment_token_provided,omitempty"`
+	}
+	var r raw
+	if err := json.Unmarshal(data, &r); err != nil {
+		return fmt.Errorf("unmarshal agent config: %w", err)
+	}
+	a.StateFile = r.StateFile
+	a.ConfigPollIntervalSeconds = r.ConfigPollIntervalSeconds
+	a.CaptureMode = r.CaptureMode
+	a.EnrollmentToken = r.EnrollmentToken
+	return nil
+}
+
+func ParseValueOrDie[T string | int | uint32](val *T, envKey string) *T {
+	if val != nil {
+		return val
+	}
+	envVal := os.Getenv(envKey)
+	if envVal == "" {
+		return nil
+	}
+	var result T
+	switch any(&result).(type) {
+	case *string:
+		s := envVal
+		result = any(s).(T)
+	case *int:
+		parsed, _ := strconv.Atoi(envVal)
+		result = any(parsed).(T)
+	case *uint32:
+		parsed, _ := strconv.ParseUint(envVal, 10, 32)
+		result = any(uint32(parsed)).(T)
+	default:
+		panic("unsupported ParseValueOrDie type parameter")
+	}
+	return &result
 }

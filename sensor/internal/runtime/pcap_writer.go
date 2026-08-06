@@ -20,6 +20,58 @@ type PCAPWriterConfig struct {
 	Directory    string
 	MaxDiskBytes int64
 	Startup      *PCAPStartup
+	Budget       *PCAPBudget
+}
+
+type PCAPBudget struct {
+	mu                   sync.Mutex
+	maxPackets, maxBytes uint64
+	packets, bytes       uint64
+}
+
+func NewPCAPBudget(maxPackets, maxBytes uint64) *PCAPBudget {
+	return &PCAPBudget{maxPackets: maxPackets, maxBytes: maxBytes}
+}
+
+func (b *PCAPBudget) Exhausted() bool {
+	if b == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return (b.maxPackets > 0 && b.packets >= b.maxPackets) ||
+		(b.maxBytes > 0 && b.bytes >= b.maxBytes)
+}
+
+func (b *PCAPBudget) Reserve(bytes uint64) bool {
+	if b == nil {
+		return true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.maxPackets > 0 && b.packets >= b.maxPackets {
+		return false
+	}
+	if b.maxBytes > 0 && (bytes > b.maxBytes-b.bytes) {
+		return false
+	}
+	b.packets++
+	b.bytes += bytes
+	return true
+}
+
+func (b *PCAPBudget) Release(bytes uint64) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.packets > 0 {
+		b.packets--
+	}
+	if bytes <= b.bytes {
+		b.bytes -= bytes
+	}
 }
 
 type PCAPStartup struct {
@@ -66,6 +118,10 @@ func NewPCAPWriter(cfg PCAPWriterConfig) (*PCAPWriter, error) {
 func (w *PCAPWriter) Enqueue(pkt packet.Packet) bool {
 	if len(pkt.RawFrame) == 0 {
 		w.drop("raw frame is unavailable for PCAP storage")
+		return false
+	}
+	if w.cfg.Budget != nil && w.cfg.Budget.Exhausted() {
+		w.drop("analysis PCAP limit reached")
 		return false
 	}
 	select {
@@ -118,20 +174,37 @@ func (w *PCAPWriter) Run(ctx context.Context) error {
 func (w *PCAPWriter) write(pkt packet.Packet) {
 	info := pcapstore.PacketInfo{Timestamp: pkt.Timestamp, CaptureLength: len(pkt.RawFrame), WireLength: pkt.WireLength}
 	needed := w.cfg.Rotator.EstimatedWriteBytes(info, len(pkt.RawFrame))
+	reserved := false
+	if w.cfg.Budget != nil {
+		if !w.cfg.Budget.Reserve(uint64(needed)) {
+			w.drop("analysis PCAP limit reached")
+			return
+		}
+		reserved = true
+	}
 	if w.cfg.MaxDiskBytes > 0 {
 		pcapDiskMu.Lock()
 		defer pcapDiskMu.Unlock()
 		ok, err := makePCAPRoom(w.cfg.Directory, w.cfg.MaxDiskBytes, needed)
 		if err != nil {
+			if reserved {
+				w.cfg.Budget.Release(uint64(needed))
+			}
 			w.drop("enforce PCAP disk limit: " + err.Error())
 			return
 		}
 		if !ok {
+			if reserved {
+				w.cfg.Budget.Release(uint64(needed))
+			}
 			w.drop("PCAP disk limit reached")
 			return
 		}
 	}
 	if err := w.cfg.Rotator.WritePacket(info, pkt.RawFrame); err != nil {
+		if reserved {
+			w.cfg.Budget.Release(uint64(needed))
+		}
 		w.drop("write PCAP packet: " + err.Error())
 		return
 	}

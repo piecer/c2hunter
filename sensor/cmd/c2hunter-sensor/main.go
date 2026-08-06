@@ -307,7 +307,12 @@ func applyDesired(cfg *config.Config, desired transport.DesiredConfig) {
 	}
 	cfg.CaptureJobs = nil
 	for _, job := range desired.CaptureJobs {
-		cfg.CaptureJobs = append(cfg.CaptureJobs, config.CaptureJob{JobID: job.JobID, StartTime: job.StartTime, EndTime: job.EndTime, StorePCAP: job.StorePCAP})
+		cfg.CaptureJobs = append(cfg.CaptureJobs, config.CaptureJob{
+			JobID: job.JobID, StartTime: derefTime(job.StartTime), EndTime: derefTime(job.EndTime),
+			StorePCAP:  job.StorePCAP,
+			MaxPackets: parseOptionalInt64(job.MaxPackets, 0),
+			MaxBytes:   parseOptionalInt64(job.MaxBytes, 0),
+		})
 	}
 	if desired.HeartbeatIntervalSeconds > 0 {
 		cfg.HeartbeatInterval = time.Duration(desired.HeartbeatIntervalSeconds) * time.Second
@@ -329,9 +334,28 @@ func applyPipelines(supervisor *sensorruntime.Supervisor, cfg config.Config, upl
 func captureJobsEqual(current []config.CaptureJob, desired []transport.DesiredCaptureJob) bool {
 	next := make([]config.CaptureJob, 0, len(desired))
 	for _, job := range desired {
-		next = append(next, config.CaptureJob{JobID: job.JobID, StartTime: job.StartTime, EndTime: job.EndTime, StorePCAP: job.StorePCAP})
+		next = append(next, config.CaptureJob{
+			JobID: job.JobID, StartTime: derefTime(job.StartTime), EndTime: derefTime(job.EndTime),
+			StorePCAP:  job.StorePCAP,
+			MaxPackets: parseOptionalInt64(job.MaxPackets, 0),
+			MaxBytes:   parseOptionalInt64(job.MaxBytes, 0),
+		})
 	}
 	return reflect.DeepEqual(current, next)
+}
+
+func parseOptionalInt64(raw *int64, fallback int64) int64 {
+	if raw == nil {
+		return fallback
+	}
+	return *raw
+}
+
+func derefTime(raw *int64) time.Time {
+	if raw == nil {
+		return time.Time{}
+	}
+	return time.Unix(0, (*raw)*1e9)
 }
 
 func activeCaptureJobs(jobs []config.CaptureJob, now time.Time) []config.CaptureJob {
@@ -376,6 +400,23 @@ func captureJobIDs(jobs []config.CaptureJob) []string {
 		ids = append(ids, job.JobID)
 	}
 	return ids
+}
+
+// captureJobLimits returns the strictest configured limit. A shared AF_PACKET
+// pipeline cannot independently stop overlapping analyses, so using the
+// strictest bound guarantees that no active analysis exceeds its limit.
+func captureJobLimits(jobs []config.CaptureJob) (uint64, uint64) {
+	var maxPackets uint64
+	var maxBytes uint64
+	for _, job := range jobs {
+		if job.MaxPackets > 0 && (maxPackets == 0 || int64(maxPackets) > job.MaxPackets) {
+			maxPackets = uint64(job.MaxPackets)
+		}
+		if job.MaxBytes > 0 && (maxBytes == 0 || int64(maxBytes) > job.MaxBytes) {
+			maxBytes = uint64(job.MaxBytes)
+		}
+	}
+	return maxPackets, maxBytes
 }
 
 // idleCaptureRuntime keeps the durable spool and PCAP archive uploaders alive
@@ -466,9 +507,21 @@ func buildPipelines(cfg config.Config, uploader sensorruntime.FlowUploader) ([]s
 	captureStart := cfg.Capture.StartTime
 	captureEnd := cfg.Capture.EndTime
 	activeJobIDs := []string{cfg.Capture.JobID}
+	pipelineMaxPackets := cfg.Capture.MaxPackets
+	pipelineMaxBytes := cfg.Capture.MaxBytes
+	var captureBudget *sensorruntime.CaptureBudget
 	if len(cfg.CaptureJobs) > 0 {
 		captureStart, captureEnd = captureJobWindow(cfg.CaptureJobs)
 		activeJobIDs = captureJobIDs(cfg.CaptureJobs)
+		pipelineMaxPackets, pipelineMaxBytes = captureJobLimits(cfg.CaptureJobs)
+		if pipelineMaxPackets > 0 || pipelineMaxBytes > 0 {
+			captureBudget = sensorruntime.NewCaptureBudget(pipelineMaxPackets, pipelineMaxBytes)
+			pipelineMaxPackets, pipelineMaxBytes = 0, 0
+		}
+	}
+	pcapBudgets := make(map[string]*sensorruntime.PCAPBudget, len(cfg.CaptureJobs))
+	for _, job := range cfg.CaptureJobs {
+		pcapBudgets[job.JobID] = sensorruntime.NewPCAPBudget(uint64(job.MaxPackets), uint64(job.MaxBytes))
 	}
 	for _, source := range sources {
 		source := source
@@ -496,7 +549,7 @@ func buildPipelines(cfg config.Config, uploader sensorruntime.FlowUploader) ([]s
 			writer, err := sensorruntime.NewPCAPWriter(sensorruntime.PCAPWriterConfig{
 				JobID:   job.JobID,
 				Rotator: rotator, QueueSize: cfg.PCAP.QueueSize,
-				Directory: cfg.PCAP.Directory, MaxDiskBytes: cfg.PCAP.MaxDiskBytes, Startup: pcapStartup,
+				Directory: cfg.PCAP.Directory, MaxDiskBytes: cfg.PCAP.MaxDiskBytes, Startup: pcapStartup, Budget: pcapBudgets[job.JobID],
 			})
 			if err != nil {
 				return nil, fmt.Errorf("build PCAP writer for %s: %w", source.Interface, err)
@@ -506,14 +559,15 @@ func buildPipelines(cfg config.Config, uploader sensorruntime.FlowUploader) ([]s
 		}
 		pipeline, err := sensorruntime.NewPipeline(sensorruntime.PipelineConfig{
 			SensorID: cfg.Sensor.ID, JobID: cfg.Capture.JobID + ":" + source.Interface + ":" + source.Direction,
-			ActiveJobIDs: activeJobIDs,
-			Interface:    source.Interface, Direction: source.Direction, IdleTimeout: cfg.FlowIdleTimeout,
+			ActiveJobIDs:  activeJobIDs,
+			CaptureBudget: captureBudget,
+			Interface:     source.Interface, Direction: source.Direction, IdleTimeout: cfg.FlowIdleTimeout,
 			PayloadPreviewBytes: cfg.Capture.PayloadPreviewBytes,
 			BatchMaxItems:       cfg.Batch.MaxItems, BatchMaxBytes: cfg.Batch.MaxBytes, PacketQueueSize: cfg.Capture.PacketQueueSize,
 			Source: func() (capture.Reader, error) {
 				return capture.NewLiveReader(source.Interface, capture.AFPacketOpener{}, classifier)
 			},
-			Filter: filter, Limits: capture.Limits{StartTime: captureStart, EndTime: captureEnd, Duration: cfg.Capture.Duration, MaxPackets: cfg.Capture.MaxPackets, MaxBytes: cfg.Capture.MaxBytes},
+			Filter: filter, Limits: capture.Limits{StartTime: captureStart, EndTime: captureEnd, Duration: cfg.Capture.Duration, MaxPackets: pipelineMaxPackets, MaxBytes: pipelineMaxBytes},
 			BatchManager: manager, PCAPSinks: pcapSinks,
 		})
 		if err != nil {

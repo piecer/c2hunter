@@ -28,9 +28,10 @@ type PCAPArchiveManagerConfig struct {
 }
 
 type PCAPArchiveManager struct {
-	cfg      PCAPArchiveManagerConfig
-	mu       sync.RWMutex
-	snapshot CaptureSnapshot
+	cfg         PCAPArchiveManagerConfig
+	mu          sync.RWMutex
+	snapshot    CaptureSnapshot
+	blockedJobs map[string]struct{}
 }
 
 type pcapUploadClaim struct {
@@ -57,7 +58,11 @@ func NewPCAPArchiveManager(cfg PCAPArchiveManagerConfig) (*PCAPArchiveManager, e
 	if cfg.FinalTimeout <= 0 {
 		cfg.FinalTimeout = 30 * time.Second
 	}
-	return &PCAPArchiveManager{cfg: cfg}, nil
+	return &PCAPArchiveManager{cfg: cfg, blockedJobs: make(map[string]struct{})}, nil
+}
+
+type permanentPCAPUploadError interface {
+	Permanent() bool
 }
 
 func (m *PCAPArchiveManager) Run(ctx context.Context) error {
@@ -127,7 +132,25 @@ func (m *PCAPArchiveManager) uploadAvailable(ctx context.Context) {
 			m.clearError()
 			return
 		}
+		jobID := analysisJobIDFromPCAPFilename(claim.filename)
+		m.mu.RLock()
+		_, blocked := m.blockedJobs[jobID]
+		m.mu.RUnlock()
+		if jobID != "" && blocked {
+			_ = rejectPCAPClaim(*claim)
+			continue
+		}
 		if err := m.uploadClaim(ctx, *claim); err != nil {
+			if permanent, ok := err.(permanentPCAPUploadError); ok && permanent.Permanent() {
+				if jobID != "" {
+					m.mu.Lock()
+					m.blockedJobs[jobID] = struct{}{}
+					m.mu.Unlock()
+				}
+				_ = rejectPCAPClaim(*claim)
+				m.fail("PCAP upload permanently rejected: " + err.Error())
+				continue
+			}
 			restorePCAPClaim(*claim)
 			if ctx.Err() == nil {
 				m.fail("upload PCAP segment: " + err.Error())
@@ -230,6 +253,12 @@ func completePCAPClaim(claim pcapUploadClaim) error {
 	pcapDiskMu.Lock()
 	defer pcapDiskMu.Unlock()
 	return os.Rename(claim.path, claim.original+".uploaded")
+}
+
+func rejectPCAPClaim(claim pcapUploadClaim) error {
+	pcapDiskMu.Lock()
+	defer pcapDiskMu.Unlock()
+	return os.Rename(claim.path, claim.original+".rejected")
 }
 
 func (m *PCAPArchiveManager) Snapshot() CaptureSnapshot {
