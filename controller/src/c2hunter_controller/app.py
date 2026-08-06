@@ -24,6 +24,7 @@ from prometheus_client import (
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
+from .capture_limits import allocate_sensor_limit, limit_flow_records
 from .config import Settings
 from .detection_guidance import build_detection_guidance
 from .flow_review import (
@@ -678,19 +679,33 @@ def create_app(
         return sensor
 
     def active_capture_jobs(sensor_id: str) -> list[dict[str, Any]]:
-        return [
-            {
-                "job_id": str(job["id"]),
-                "start_time": job["start_time"],
-                "end_time": job["end_time"],
-                "store_pcap": bool(job.get("capture", {}).get("store_pcap")),
-                "max_packets": job.get("capture", {}).get("max_packets"),
-                "max_bytes": job.get("capture", {}).get("max_bytes"),
-                "bpf_filter": str(job.get("capture", {}).get("bpf_filter", "")),
-            }
-            for job in repo.list_active_live_jobs()
-            if job.get("status") == JobState.CAPTURING and sensor_id in job.get("sensor_ids", [])
-        ]
+        active: list[dict[str, Any]] = []
+        for job in repo.list_active_live_jobs():
+            if job.get("status") != JobState.CAPTURING or sensor_id not in job.get(
+                "sensor_ids", []
+            ):
+                continue
+            capture = job.get("capture", {})
+            sensor_ids = [str(value) for value in job.get("sensor_ids", [])]
+            max_packets = allocate_sensor_limit(capture.get("max_packets"), sensor_ids, sensor_id)
+            max_bytes = allocate_sensor_limit(capture.get("max_bytes"), sensor_ids, sensor_id)
+            # A zero quota means the analysis-wide limit is smaller than the
+            # number of selected sensors. Do not send the job to this sensor;
+            # zero has historically meant "unlimited" in the agent protocol.
+            if max_packets == 0 or max_bytes == 0:
+                continue
+            active.append(
+                {
+                    "job_id": str(job["id"]),
+                    "start_time": job["start_time"],
+                    "end_time": job["end_time"],
+                    "store_pcap": bool(capture.get("store_pcap")),
+                    "max_packets": max_packets,
+                    "max_bytes": max_bytes,
+                    "bpf_filter": str(capture.get("bpf_filter", "")),
+                }
+            )
+        return active
 
     def normalized_capture_bpf(value: object) -> str:
         normalized = str(value or "").strip().lower()
@@ -1303,6 +1318,24 @@ def create_app(
         )
         return dict(preset["detector_weights"]) if preset is not None else None
 
+    def apply_job_packet_limit(job: dict[str, Any]) -> None:
+        capture = job.get("capture", {})
+        records, summary = limit_flow_records(
+            list(job.get("flow_records", [])), capture.get("max_packets")
+        )
+        job["flow_records"] = records
+        if summary["discarded_packets"] <= 0:
+            return
+        job["capture_limit"] = summary
+        warning = (
+            "capture.max_packets 제한으로 분석 데이터셋을 "
+            f"{summary['retained_packets']} packets로 절단했습니다 "
+            f"({summary['discarded_packets']} packets 제외)"
+        )
+        warnings = job.setdefault("warnings", [])
+        if warning not in warnings:
+            warnings.append(warning)
+
     def enqueue_worker_job(job: dict[str, Any]) -> None:
         envelope: dict[str, Any] = {"id": job["id"]}
         if isinstance(work_queue, MemoryControllerQueue):
@@ -1323,6 +1356,7 @@ def create_app(
         )
         job["dataset_id"] = snapshot.dataset_id
         job["flow_records"] = [dict(record) for record in snapshot.records]
+        apply_job_packet_limit(job)
         job["flow_count"] = len(job["flow_records"])
         job["packet_count"] = sum(
             int(record.get("packet_count", 1)) for record in job["flow_records"]
@@ -1434,6 +1468,7 @@ def create_app(
         result_stop.set()
 
     def execute_analysis(job: dict[str, Any]) -> dict[str, Any]:
+        apply_job_packet_limit(job)
         for state, reason in (
             (JobState.WAITING_FOR_SENSOR, "sensors selected"),
             (JobState.CAPTURING, "dataset selected"),

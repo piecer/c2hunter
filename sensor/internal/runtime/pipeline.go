@@ -86,10 +86,38 @@ type CaptureBudget struct {
 	mu                   sync.Mutex
 	maxPackets, maxBytes uint64
 	packets, bytes       uint64
+	done                 chan struct{}
+	stopReason           capture.StopReason
+	stopOnce             sync.Once
 }
 
 func NewCaptureBudget(maxPackets, maxBytes uint64) *CaptureBudget {
-	return &CaptureBudget{maxPackets: maxPackets, maxBytes: maxBytes}
+	return &CaptureBudget{
+		maxPackets: maxPackets,
+		maxBytes:   maxBytes,
+		done:       make(chan struct{}),
+	}
+}
+
+func (b *CaptureBudget) Done() <-chan struct{} {
+	if b == nil {
+		return nil
+	}
+	return b.done
+}
+
+func (b *CaptureBudget) StopReason() capture.StopReason {
+	if b == nil {
+		return ""
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.stopReason
+}
+
+func (b *CaptureBudget) stopLocked(reason capture.StopReason) {
+	b.stopReason = reason
+	b.stopOnce.Do(func() { close(b.done) })
 }
 
 // Reserve accounts one accepted packet. stopAfter is set when this packet
@@ -101,17 +129,21 @@ func (b *CaptureBudget) Reserve(wireBytes uint64) (accepted bool, stopAfter capt
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.maxPackets > 0 && b.packets >= b.maxPackets {
+		b.stopLocked(capture.StopMaxPackets)
 		return false, capture.StopMaxPackets
 	}
 	if b.maxBytes > 0 && (wireBytes > b.maxBytes-b.bytes) {
+		b.stopLocked(capture.StopMaxBytes)
 		return false, capture.StopMaxBytes
 	}
 	b.packets++
 	b.bytes += wireBytes
 	if b.maxPackets > 0 && b.packets >= b.maxPackets {
+		b.stopLocked(capture.StopMaxPackets)
 		return true, capture.StopMaxPackets
 	}
 	if b.maxBytes > 0 && b.bytes >= b.maxBytes {
+		b.stopLocked(capture.StopMaxBytes)
 		return true, capture.StopMaxBytes
 	}
 	return true, ""
@@ -235,6 +267,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		idleTicks = ticker.C
 	}
 
+	var captureBudgetDone <-chan struct{}
+	if p.cfg.CaptureBudget != nil {
+		captureBudgetDone = p.cfg.CaptureBudget.Done()
+	}
+
 	finish := func(reason capture.StopReason) error {
 		cancelReader()
 		// AF_PACKET Close unmaps its ring. Wait until Next has returned so the
@@ -259,6 +296,12 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return finish(capture.StopContext)
+		case <-captureBudgetDone:
+			reason := p.cfg.CaptureBudget.StopReason()
+			if reason == "" {
+				reason = capture.StopMaxPackets
+			}
+			return finish(reason)
 		case tick := <-idleTicks:
 			if err := p.addRecords(queue, aggregator.Expire(tick)); err != nil {
 				return err

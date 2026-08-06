@@ -380,8 +380,18 @@ func TestCaptureBudgetRespectsPackets(t *testing.T) {
 	if accepted, _ := pktBudget.Reserve(51); !accepted {
 		t.Fatal("first packet should be accepted")
 	}
+	// With maxPackets=1 the first (and only) packet reaches the limit, so
+	// Done() is closed immediately by the same Reserve call.
 	if accepted, stop := pktBudget.Reserve(51); accepted || stop != capture.StopMaxPackets {
 		t.Fatalf("packet reservation = %v, %q", accepted, stop)
+	}
+	select {
+	case <-pktBudget.Done():
+	default:
+		t.Fatal("done channel should close after reaching the packet limit")
+	}
+	if reason := pktBudget.StopReason(); reason != capture.StopMaxPackets {
+		t.Fatalf("stop reason = %q", reason)
 	}
 }
 
@@ -390,7 +400,20 @@ func TestCaptureBudgetRespectsBytes(t *testing.T) {
 	if accepted, _ := byteBudget.Reserve(100); !accepted {
 		t.Fatal("first byte reservation rejected")
 	}
+	select {
+	case <-byteBudget.Done():
+		t.Fatal("done channel should not be closed before reaching the limit")
+	default:
+	}
 	if accepted, stop := byteBudget.Reserve(51); accepted || stop != capture.StopMaxBytes {
 		t.Fatalf("overflow reservation = %v, %q", accepted, stop)
+	}
+	select {
+	case <-byteBudget.Done():
+	default:
+		t.Fatal("done channel should close after reaching the byte limit")
+	}
+	if reason := byteBudget.StopReason(); reason != capture.StopMaxBytes {
+		t.Fatalf("stop reason = %q", reason)
 	}
 }
