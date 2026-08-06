@@ -48,6 +48,11 @@ type PipelineConfig struct {
 	IdleTicks                    <-chan time.Time
 }
 
+type CaptureCompletion struct {
+	JobID      string
+	StopReason capture.StopReason
+}
+
 type CaptureSnapshot struct {
 	ReceivedPackets    uint64
 	DroppedPackets     uint64
@@ -57,6 +62,7 @@ type CaptureSnapshot struct {
 	LostBytes          uint64
 	PCAPDroppedPackets uint64
 	ActiveJobs         []string
+	CompletedJobs      []CaptureCompletion
 	LastError          string
 	StopReason         capture.StopReason
 	Interfaces         []InterfaceSnapshot
@@ -201,6 +207,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 	p.update(func(s *CaptureSnapshot) {
 		s.ActiveJobs = activeJobs
+		s.CompletedJobs = nil
 		s.LastError = ""
 		s.StopReason = ""
 		s.Interfaces = []InterfaceSnapshot{{Interface: p.cfg.Interface, Direction: p.cfg.Direction, Status: "CAPTURING"}}
@@ -279,6 +286,18 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		<-readerDone
 		<-statsDone
 		p.setStopReason(reason)
+		if reason == capture.StopMaxPackets || reason == capture.StopMaxBytes {
+			completed := make([]CaptureCompletion, 0, len(activeJobs))
+			for _, jobID := range activeJobs {
+				if jobID == "" {
+					continue
+				}
+				completed = append(completed, CaptureCompletion{JobID: jobID, StopReason: reason})
+			}
+			p.update(func(s *CaptureSnapshot) {
+				s.CompletedJobs = completed
+			})
+		}
 		if err := p.addRecords(queue, aggregator.Flush()); err != nil {
 			return err
 		}

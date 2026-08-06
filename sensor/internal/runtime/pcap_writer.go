@@ -267,7 +267,9 @@ func makePCAPRoom(directory string, maxBytes, needed int64) (bool, error) {
 	var total int64
 	var finalized []pcapDiskFile
 	for _, entry := range entries {
-		isEvictable := strings.HasSuffix(entry.Name(), ".pcap.uploaded") || strings.Contains(entry.Name(), ".pcap.corrupt-")
+		isEvictable := strings.HasSuffix(entry.Name(), ".pcap.uploaded") ||
+			strings.HasSuffix(entry.Name(), ".pcap.rejected") ||
+			strings.Contains(entry.Name(), ".pcap.corrupt-")
 		isPending := strings.HasSuffix(entry.Name(), ".pcap")
 		isActive := strings.HasSuffix(entry.Name(), ".pcap.partial") || strings.HasSuffix(entry.Name(), ".pcap.uploading")
 		if entry.IsDir() || (!isEvictable && !isPending && !isActive) {

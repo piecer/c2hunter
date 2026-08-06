@@ -57,13 +57,13 @@ type DesiredCaptureSource struct {
 	StorePCAP bool   `json:"store_pcap"`
 }
 type DesiredCaptureJob struct {
-	JobID      string `json:"job_id"`
-	StartTime  *int64 `json:"start_time"`
-	EndTime    *int64 `json:"end_time"`
-	StorePCAP  bool   `json:"store_pcap"`
-	MaxPackets *int64 `json:"max_packets"`
-	MaxBytes   *int64 `json:"max_bytes"`
-	BPFFilter  string `json:"bpf_filter"`
+	JobID      string    `json:"job_id"`
+	StartTime  time.Time `json:"start_time"`
+	EndTime    time.Time `json:"end_time"`
+	StorePCAP  bool      `json:"store_pcap"`
+	MaxPackets *int64    `json:"max_packets"`
+	MaxBytes   *int64    `json:"max_bytes"`
+	BPFFilter  string    `json:"bpf_filter"`
 }
 
 type controllerResponseError struct {
@@ -161,6 +161,10 @@ func (h *HTTP) Heartbeat(ctx context.Context, heartbeat telemetry.Heartbeat) err
 	if activeJobs == nil {
 		activeJobs = []string{}
 	}
+	completedJobs := heartbeat.CompletedCaptureJobs
+	if completedJobs == nil {
+		completedJobs = []telemetry.CaptureCompletion{}
+	}
 	heartbeatInterfaces := limitControllerInterfaces(heartbeat.DiscoveredInterfaces)
 	discoveredInterfaces := make([]map[string]any, 0, len(heartbeatInterfaces))
 	for _, iface := range heartbeatInterfaces {
@@ -173,6 +177,7 @@ func (h *HTTP) Heartbeat(ctx context.Context, heartbeat telemetry.Heartbeat) err
 		"memory_percent": float64(0), "disk_percent": float64(0), "active_job_ids": activeJobs,
 		"received_packets": heartbeat.ReceivedPackets, "dropped_packets": heartbeat.DroppedPackets,
 		"pending_bytes": heartbeat.PendingBytes, "pcap_dropped_packets": heartbeat.PCAPDroppedPackets, "last_error": nil, "interfaces": heartbeat.Interfaces,
+		"completed_capture_jobs": completedJobs,
 	}
 	if len(discoveredInterfaces) > 0 {
 		payload["discovered_interfaces"] = discoveredInterfaces

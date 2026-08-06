@@ -678,6 +678,22 @@ def create_app(
             raise ApiError(404, "SENSOR_NOT_FOUND", "센서를 찾을 수 없습니다")
         return sensor
 
+    def capture_participant_sensor_ids(job: dict[str, Any]) -> set[str]:
+        capture = job.get("capture", {})
+        sensor_ids = sorted({str(value) for value in job.get("sensor_ids", [])})
+        participants: set[str] = set()
+        for candidate_sensor_id in sensor_ids:
+            max_packets = allocate_sensor_limit(
+                capture.get("max_packets"), sensor_ids, candidate_sensor_id
+            )
+            max_bytes = allocate_sensor_limit(
+                capture.get("max_bytes"), sensor_ids, candidate_sensor_id
+            )
+            if max_packets == 0 or max_bytes == 0:
+                continue
+            participants.add(candidate_sensor_id)
+        return participants
+
     def active_capture_jobs(sensor_id: str) -> list[dict[str, Any]]:
         active: list[dict[str, Any]] = []
         for job in repo.list_active_live_jobs():
@@ -1041,6 +1057,7 @@ def create_app(
         sensor = repo.update_sensor_heartbeat(sensor_id, fields)
         if sensor is None:
             raise ApiError(404, "SENSOR_NOT_FOUND", "센서를 찾을 수 없습니다")
+        record_capture_completions(sensor_id, payload, now)
         return sensor
 
     @app.post("/api/v1/sensors/{sensor_id}/flow-batches", status_code=202)
@@ -1189,7 +1206,22 @@ def create_app(
             "sha256": digest,
             "uploaded_at": datetime.now(UTC).isoformat(),
         }
-        stored = repo.save_sensor_pcap(metadata, content)
+        stored, save_status = repo.save_sensor_pcap_limited(metadata, content, analysis_pcap_limit)
+        if save_status == "LIMIT":
+            raise ApiError(
+                413,
+                "PCAP_ANALYSIS_LIMIT_REACHED",
+                "분석 작업의 PCAP 저장 크기 제한에 도달했습니다",
+                {"limit_bytes": analysis_pcap_limit},
+            )
+        if save_status == "CONFLICT":
+            raise ApiError(
+                409,
+                "PCAP_SEGMENT_CONFLICT",
+                "동일 segment ID에 다른 PCAP이 저장되어 있습니다",
+            )
+        if stored is None:
+            raise RuntimeError(f"unexpected sensor PCAP save status: {save_status}")
         public = {key: value for key, value in stored.items() if key != "object_key"}
         return {**public, "segment_id": segment_id}
 
@@ -1296,6 +1328,38 @@ def create_app(
         return _page(items, page, page_size)
 
     machine = StateMachine()
+
+    def record_capture_completions(sensor_id: str, payload: Heartbeat, now: datetime) -> None:
+        for completion in payload.completed_capture_jobs:
+            current = repo.get_job_summary(completion.job_id)
+            if current is None or current.get("status") != JobState.CAPTURING:
+                continue
+            capture = current.get("capture", {})
+            limit_field = "max_packets" if completion.stop_reason == "MAX_PACKETS" else "max_bytes"
+            configured_limit = capture.get(limit_field)
+            if not isinstance(configured_limit, int) or configured_limit <= 0:
+                continue
+            participants = capture_participant_sensor_ids(current)
+            if sensor_id not in participants:
+                continue
+            completions = dict(current.get("capture_completions", {}))
+            completions[sensor_id] = {
+                "stop_reason": completion.stop_reason,
+                "reported_at": payload.reported_at.isoformat(),
+            }
+            current["capture_completions"] = completions
+            if participants and participants.issubset(completions):
+                capture = dict(current.get("capture", {}))
+                capture.setdefault("requested_end_time", current.get("end_time"))
+                current["capture"] = capture
+                current["end_time"] = now.isoformat()
+                current["capture_stopped_at"] = now.isoformat()
+                machine.transition(
+                    current,
+                    JobState.UPLOADING,
+                    "all assigned sensors reached the capture packet/byte limit",
+                )
+            repo.save_job_metadata(current)
 
     def payload_signature_snapshot() -> list[dict[str, Any]]:
         return [

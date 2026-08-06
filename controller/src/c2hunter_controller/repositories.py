@@ -58,6 +58,9 @@ class Repository(Protocol):
     def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any]: ...
     def get_export(self, export_id: str) -> tuple[dict[str, Any], bytes] | None: ...
     def save_sensor_pcap(self, segment: dict[str, Any], content: bytes) -> dict[str, Any]: ...
+    def save_sensor_pcap_limited(
+        self, segment: dict[str, Any], content: bytes, max_total_bytes: int | None
+    ) -> tuple[dict[str, Any] | None, str]: ...
     def get_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], bytes] | None: ...
     def list_sensor_pcaps(self) -> list[dict[str, Any]]: ...
     def create_enrollment(self, enrollment: dict[str, Any]) -> dict[str, Any]: ...
@@ -323,10 +326,34 @@ class MemoryRepository:
         return deepcopy(self.exports[export_id]), bytes(self.export_content[export_id])
 
     def save_sensor_pcap(self, segment: dict[str, Any], content: bytes) -> dict[str, Any]:
+        stored, status = self.save_sensor_pcap_limited(segment, content, None)
+        if stored is None or status not in {"OK", "EXISTS"}:
+            raise RuntimeError(f"sensor PCAP save failed: {status}")
+        return stored
+
+    def save_sensor_pcap_limited(
+        self, segment: dict[str, Any], content: bytes, max_total_bytes: int | None
+    ) -> tuple[dict[str, Any] | None, str]:
         with self._lock:
+            existing = self.sensor_pcaps.get(segment["id"])
+            if existing is not None:
+                matches = all(
+                    existing.get(field) == segment.get(field)
+                    for field in ("sensor_id", "analysis_job_id", "sha256")
+                )
+                return (deepcopy(existing), "EXISTS") if matches else (None, "CONFLICT")
+            analysis_job_id = segment.get("analysis_job_id")
+            if max_total_bytes is not None and analysis_job_id is not None:
+                used = sum(
+                    int(item.get("size_bytes", 0) or 0)
+                    for item in self.sensor_pcaps.values()
+                    if item.get("analysis_job_id") == analysis_job_id
+                )
+                if used + len(content) > max_total_bytes:
+                    return None, "LIMIT"
             self.sensor_pcaps[segment["id"]] = deepcopy(segment)
             self.sensor_pcap_content[segment["id"]] = bytes(content)
-            return deepcopy(segment)
+            return deepcopy(segment), "OK"
 
     def get_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], bytes] | None:
         if segment_id not in self.sensor_pcaps:
@@ -828,15 +855,55 @@ class SQLiteRepository:
         return (metadata, bytes(row[0])) if metadata is not None and row else None
 
     def save_sensor_pcap(self, segment: dict[str, Any], content: bytes) -> dict[str, Any]:
+        stored, status = self.save_sensor_pcap_limited(segment, content, None)
+        if stored is None or status not in {"OK", "EXISTS"}:
+            raise RuntimeError(f"sensor PCAP save failed: {status}")
+        return stored
+
+    def save_sensor_pcap_limited(
+        self, segment: dict[str, Any], content: bytes, max_total_bytes: int | None
+    ) -> tuple[dict[str, Any] | None, str]:
         with self._lock:
-            self._put("sensor_pcap", segment["id"], segment)
-            self.connection.execute(
-                "INSERT INTO sensor_pcap_blobs(segment_id,content) VALUES(?,?) "
-                "ON CONFLICT(segment_id) DO UPDATE SET content=excluded.content",
-                (segment["id"], content),
-            )
-            self.connection.commit()
-            return deepcopy(segment)
+            try:
+                self.connection.execute("BEGIN IMMEDIATE")
+                row = self.connection.execute(
+                    "SELECT data FROM objects WHERE kind='sensor_pcap' AND id=?",
+                    (segment["id"],),
+                ).fetchone()
+                if row is not None:
+                    existing = json.loads(row[0])
+                    matches = all(
+                        existing.get(field) == segment.get(field)
+                        for field in ("sensor_id", "analysis_job_id", "sha256")
+                    )
+                    self.connection.commit()
+                    return (existing, "EXISTS") if matches else (None, "CONFLICT")
+                analysis_job_id = segment.get("analysis_job_id")
+                if max_total_bytes is not None and analysis_job_id is not None:
+                    used_row = self.connection.execute(
+                        "SELECT COALESCE("
+                        "SUM(CAST(json_extract(data, '$.size_bytes') AS INTEGER)),0) "
+                        "FROM objects WHERE kind='sensor_pcap' "
+                        "AND json_extract(data, '$.analysis_job_id')=?",
+                        (analysis_job_id,),
+                    ).fetchone()
+                    used = int(used_row[0] if used_row else 0)
+                    if used + len(content) > max_total_bytes:
+                        self.connection.commit()
+                        return None, "LIMIT"
+                self.connection.execute(
+                    "INSERT INTO objects(kind,id,data) VALUES('sensor_pcap',?,?)",
+                    (segment["id"], self._serialize(segment)),
+                )
+                self.connection.execute(
+                    "INSERT INTO sensor_pcap_blobs(segment_id,content) VALUES(?,?)",
+                    (segment["id"], content),
+                )
+                self.connection.commit()
+                return deepcopy(segment), "OK"
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def get_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], bytes] | None:
         metadata = self._get("sensor_pcap", segment_id)

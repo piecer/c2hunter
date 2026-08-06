@@ -183,6 +183,12 @@ class HeartbeatInterface(BaseModel):
     last_error: str | None = Field(default=None, max_length=2000)
 
 
+class CaptureCompletion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    job_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,200}$")
+    stop_reason: str = Field(pattern=r"^(MAX_PACKETS|MAX_BYTES)$")
+
+
 class Heartbeat(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reported_at: datetime
@@ -195,6 +201,7 @@ class Heartbeat(BaseModel):
     dropped_packets: int = Field(ge=0)
     pending_bytes: int = Field(ge=0)
     pcap_dropped_packets: int = Field(default=0, ge=0)
+    completed_capture_jobs: list[CaptureCompletion] = Field(default_factory=list, max_length=128)
     last_error: str | None = Field(default=None, max_length=2000)
     interfaces: list[HeartbeatInterface] = Field(default_factory=list)
     discovered_interfaces: list[DiscoveredInterface] | None = Field(

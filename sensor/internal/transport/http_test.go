@@ -36,8 +36,9 @@ func TestHTTPTransportUsesControllerSensorRESTContract(t *testing.T) {
 			}
 		} else {
 			activeJobs, ok := body["active_job_ids"].([]any)
+			completed, completedOK := body["completed_capture_jobs"].([]any)
 			discovered, discoveredOK := body["discovered_interfaces"].([]any)
-			if body["reported_at"] == nil || body["status"] != "DEGRADED" || body["pcap_dropped_packets"] != float64(7) || !ok || len(activeJobs) != 0 || !discoveredOK || len(discovered) != 2 {
+			if body["reported_at"] == nil || body["status"] != "DEGRADED" || body["pcap_dropped_packets"] != float64(7) || !ok || len(activeJobs) != 0 || !completedOK || len(completed) != 1 || !discoveredOK || len(discovered) != 2 {
 				t.Fatalf("heartbeat body = %#v", body)
 			}
 			loopback := discovered[1].(map[string]any)
@@ -63,6 +64,7 @@ func TestHTTPTransportUsesControllerSensorRESTContract(t *testing.T) {
 	heartbeat := telemetry.Heartbeat{
 		SensorID: "sensor-a", Status: telemetry.StatusDegraded, CurrentTime: time.Now(), LastError: "capture unavailable",
 		PCAPDroppedPackets:   7,
+		CompletedCaptureJobs: []telemetry.CaptureCompletion{{JobID: "job-a", StopReason: "MAX_PACKETS"}},
 		DiscoveredInterfaces: []telemetry.Interface{{Name: "eth0", MAC: "00:00:00:00:00:00"}, {Name: "lo"}},
 	}
 	if err := client.Heartbeat(context.Background(), heartbeat); err != nil {
@@ -102,6 +104,51 @@ func TestHTTPTransportCapsHeartbeatDiscoveredInterfacesToControllerLimit(t *test
 	}
 	if err := client.Heartbeat(context.Background(), heartbeat); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAgentConfigDecodesRFC3339CaptureJobTimes(t *testing.T) {
+	start := time.Date(2026, 8, 7, 1, 2, 3, 0, time.UTC)
+	end := start.Add(5 * time.Minute)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/v1/sensors/sensor-a/agent-config" {
+			t.Fatalf("path = %s", request.URL.Path)
+		}
+		if request.Header.Get("X-Sensor-Token") != "sensor-token" {
+			t.Fatalf("token = %q", request.Header.Get("X-Sensor-Token"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{
+			"sensor_id":"sensor-a",
+			"config_version":2,
+			"capture_sources":[],
+			"capture_jobs":[{
+				"job_id":"job-a",
+				"start_time":%q,
+				"end_time":%q,
+				"store_pcap":true,
+				"max_packets":100,
+				"max_bytes":4096,
+				"bpf_filter":"udp and dst port 53"
+			}],
+			"internal_networks":[],
+			"heartbeat_interval_seconds":15,
+			"config_poll_interval_seconds":1
+		}`, start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano))
+	}))
+	defer server.Close()
+
+	client, err := NewHTTP(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.SetIdentity("sensor-a", "sensor-token")
+	desired, err := client.AgentConfig(context.Background(), "sensor-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(desired.CaptureJobs) != 1 || !desired.CaptureJobs[0].StartTime.Equal(start) || !desired.CaptureJobs[0].EndTime.Equal(end) {
+		t.Fatalf("capture jobs = %+v", desired.CaptureJobs)
 	}
 }
 

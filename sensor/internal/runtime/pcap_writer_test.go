@@ -169,6 +169,27 @@ func TestMakePCAPRoomProtectsPendingUpload(t *testing.T) {
 	}
 }
 
+func TestMakePCAPRoomCountsAndEvictsRejectedSegments(t *testing.T) {
+	dir := t.TempDir()
+	rejected := filepath.Join(dir, "job-a--eth0-000001.pcap.rejected")
+	if err := os.WriteFile(rejected, make([]byte, 80), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(rejected, time.Unix(1, 0), time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := makePCAPRoom(dir, 100, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("rejected segment was not considered evictable")
+	}
+	if _, err := os.Stat(rejected); !os.IsNotExist(err) {
+		t.Fatalf("rejected segment was not evicted: %v", err)
+	}
+}
+
 func TestPCAPStartupDefersCrashRecoveryUntilNewGroupRuns(t *testing.T) {
 	dir := t.TempDir()
 	partial := filepath.Join(dir, "active.pcap.partial")

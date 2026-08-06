@@ -97,32 +97,41 @@ func (g *CaptureGroup) Run(ctx context.Context) error {
 func (g *CaptureGroup) Snapshot() CaptureSnapshot {
 	var out CaptureSnapshot
 	jobs := make(map[string]struct{})
+	completed := make(map[string]struct{})
 	var messages []string
 	for _, member := range g.members {
-		snapshot := member.Snapshot()
-		out.ReceivedPackets += snapshot.ReceivedPackets
-		out.DroppedPackets += snapshot.DroppedPackets
-		out.DecodeErrors += snapshot.DecodeErrors
-		out.PCAPDroppedPackets += snapshot.PCAPDroppedPackets
-		if snapshot.PendingBytes > out.PendingBytes {
-			out.PendingBytes = snapshot.PendingBytes
+		snap := member.Snapshot()
+		out.ReceivedPackets += snap.ReceivedPackets
+		out.DroppedPackets += snap.DroppedPackets
+		out.DecodeErrors += snap.DecodeErrors
+		out.PCAPDroppedPackets += snap.PCAPDroppedPackets
+		if snap.PendingBytes > out.PendingBytes {
+			out.PendingBytes = snap.PendingBytes
 		}
-		if snapshot.LostBatches > out.LostBatches {
-			out.LostBatches = snapshot.LostBatches
+		if snap.LostBatches > out.LostBatches {
+			out.LostBatches = snap.LostBatches
 		}
-		if snapshot.LostBytes > out.LostBytes {
-			out.LostBytes = snapshot.LostBytes
+		if snap.LostBytes > out.LostBytes {
+			out.LostBytes = snap.LostBytes
 		}
-		if snapshot.StopReason != "" {
-			out.StopReason = snapshot.StopReason
+		if snap.StopReason != "" {
+			out.StopReason = snap.StopReason
 		}
-		for _, job := range snapshot.ActiveJobs {
+		for _, job := range snap.ActiveJobs {
 			jobs[job] = struct{}{}
 		}
-		if snapshot.LastError != "" {
-			messages = append(messages, snapshot.LastError)
+		if snap.LastError != "" {
+			messages = append(messages, snap.LastError)
 		}
-		out.Interfaces = append(out.Interfaces, snapshot.Interfaces...)
+		out.Interfaces = append(out.Interfaces, snap.Interfaces...)
+		for _, completion := range snap.CompletedJobs {
+			key := completion.JobID + "\x00" + string(completion.StopReason)
+			if _, exists := completed[key]; exists {
+				continue
+			}
+			completed[key] = struct{}{}
+			out.CompletedJobs = append(out.CompletedJobs, completion)
+		}
 	}
 	g.mu.RLock()
 	messages = append(messages, g.errors...)
@@ -130,6 +139,7 @@ func (g *CaptureGroup) Snapshot() CaptureSnapshot {
 	for job := range jobs {
 		out.ActiveJobs = append(out.ActiveJobs, job)
 	}
+
 	out.LastError = strings.Join(uniqueStrings(messages), "; ")
 	return out
 }

@@ -474,6 +474,50 @@ def test_sensor_configuration_exposes_active_analysis_pcap_jobs() -> None:
     ]
 
 
+def test_capture_limit_completion_moves_live_job_to_uploading() -> None:
+    api, repo = api_and_repo()
+    sensor_id, token = enroll_and_claim(api)
+    requested_end = "2026-08-08T00:00:00+00:00"
+    repo.save_job(
+        {
+            "id": "job-a",
+            "mode": "LIVE",
+            "status": "CAPTURING",
+            "sensor_ids": [sensor_id],
+            "start_time": "2026-08-07T00:00:00+00:00",
+            "end_time": requested_end,
+            "capture": {"store_pcap": False, "max_packets": 10},
+            "transitions": [],
+        }
+    )
+    response = api.post(
+        f"/api/v1/sensors/{sensor_id}/heartbeat",
+        headers={"X-Sensor-Token": token},
+        json={
+            "reported_at": datetime.now(UTC).isoformat(),
+            "status": "ONLINE",
+            "cpu_percent": 0,
+            "memory_percent": 0,
+            "disk_percent": 0,
+            "active_job_ids": [],
+            "completed_capture_jobs": [{"job_id": "job-a", "stop_reason": "MAX_PACKETS"}],
+            "received_packets": 10,
+            "dropped_packets": 0,
+            "pending_bytes": 0,
+            "pcap_dropped_packets": 0,
+            "last_error": None,
+            "interfaces": [],
+        },
+    )
+    assert response.status_code == 200
+    job = repo.get_job_summary("job-a")
+    assert job is not None
+    assert job["status"] == "UPLOADING"
+    assert job["capture"]["requested_end_time"] == requested_end
+    assert job["capture_completions"][sensor_id]["stop_reason"] == "MAX_PACKETS"
+    assert job["end_time"] != requested_end
+
+
 def test_sensor_pcap_upload_is_linked_to_assigned_analysis_job() -> None:
     api, repo = api_and_repo()
     sensor_id, token = enroll_and_claim(api)

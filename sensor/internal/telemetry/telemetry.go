@@ -56,6 +56,11 @@ type Registration struct {
 	AvailableDiskBytes, ReceivedPackets, DroppedPackets       uint64
 }
 
+type CaptureCompletion struct {
+	JobID      string `json:"job_id"`
+	StopReason string `json:"stop_reason"`
+}
+
 func (r Registration) Validate() error {
 	if r.SensorID == "" || r.Name == "" || r.Hostname == "" || r.AgentVersion == "" || r.OS == "" || r.KernelVersion == "" || r.CurrentTime.IsZero() {
 		return fmt.Errorf("registration identity, platform and time fields are required")
@@ -70,6 +75,7 @@ type Heartbeat struct {
 	CPUPercent                                    float64
 	MemoryBytes, DiskUsedBytes                    uint64
 	ActiveJobs                                    []string
+	CompletedCaptureJobs                          []CaptureCompletion
 	ReceivedPackets, DroppedPackets, PendingBytes uint64
 	PCAPDroppedPackets                            uint64
 	LastError                                     string
@@ -92,6 +98,11 @@ func (h Heartbeat) Validate() error {
 	}
 	if h.CPUPercent < 0 || h.CPUPercent > 100 {
 		return fmt.Errorf("CPU percent out of range")
+	}
+	for _, completion := range h.CompletedCaptureJobs {
+		if completion.JobID == "" || (completion.StopReason != "MAX_PACKETS" && completion.StopReason != "MAX_BYTES") {
+			return fmt.Errorf("invalid capture completion")
+		}
 	}
 	return nil
 }

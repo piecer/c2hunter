@@ -308,7 +308,7 @@ func applyDesired(cfg *config.Config, desired transport.DesiredConfig) {
 	cfg.CaptureJobs = nil
 	for _, job := range desired.CaptureJobs {
 		cfg.CaptureJobs = append(cfg.CaptureJobs, config.CaptureJob{
-			JobID: job.JobID, StartTime: derefTime(job.StartTime), EndTime: derefTime(job.EndTime),
+			JobID: job.JobID, StartTime: job.StartTime, EndTime: job.EndTime,
 			StorePCAP: job.StorePCAP, MaxPackets: parseOptionalInt64(job.MaxPackets, 0), MaxBytes: parseOptionalInt64(job.MaxBytes, 0),
 			BPFFilter: job.BPFFilter,
 		})
@@ -334,7 +334,7 @@ func captureJobsEqual(current []config.CaptureJob, desired []transport.DesiredCa
 	next := make([]config.CaptureJob, 0, len(desired))
 	for _, job := range desired {
 		next = append(next, config.CaptureJob{
-			JobID: job.JobID, StartTime: derefTime(job.StartTime), EndTime: derefTime(job.EndTime),
+			JobID: job.JobID, StartTime: job.StartTime, EndTime: job.EndTime,
 			StorePCAP: job.StorePCAP, MaxPackets: parseOptionalInt64(job.MaxPackets, 0), MaxBytes: parseOptionalInt64(job.MaxBytes, 0),
 			BPFFilter: job.BPFFilter,
 		})
@@ -347,13 +347,6 @@ func parseOptionalInt64(raw *int64, fallback int64) int64 {
 		return fallback
 	}
 	return *raw
-}
-
-func derefTime(raw *int64) time.Time {
-	if raw == nil {
-		return time.Time{}
-	}
-	return time.Unix(0, (*raw)*1e9)
 }
 
 func activeCaptureJobs(jobs []config.CaptureJob, now time.Time) []config.CaptureJob {

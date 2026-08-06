@@ -160,6 +160,14 @@ func (r *Runner) runHeartbeats(ctx context.Context) bool {
 					heartbeat.DiscoveredInterfaces = discovered
 				}
 			}
+			for _, completion := range snapshot.CompletedJobs {
+				heartbeat.CompletedCaptureJobs = append(
+					heartbeat.CompletedCaptureJobs,
+					telemetry.CaptureCompletion{
+						JobID: completion.JobID, StopReason: string(completion.StopReason),
+					},
+				)
+			}
 			for _, item := range snapshot.Interfaces {
 				heartbeat.Interfaces = append(heartbeat.Interfaces, telemetry.InterfaceStatus{Interface: item.Interface, Direction: item.Direction, Status: item.Status, ReceivedPackets: item.ReceivedPackets, DroppedPackets: item.DroppedPackets, LastError: item.LastError})
 			}

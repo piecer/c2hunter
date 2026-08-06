@@ -226,8 +226,12 @@ func TestPipelineAppliesStartFilterAndPacketLimit(t *testing.T) {
 	}
 	waitFor(t, func() bool { return len(uploader.snapshot()) == 1 })
 	uploaded := uploader.snapshot()
-	if uploaded[0].Flows[0].DestinationPort != 443 || pipeline.Snapshot().ReceivedPackets != 1 {
-		t.Fatalf("batches=%+v snapshot=%+v", uploaded, pipeline.Snapshot())
+	snapshot := pipeline.Snapshot()
+	if uploaded[0].Flows[0].DestinationPort != 443 || snapshot.ReceivedPackets != 1 {
+		t.Fatalf("batches=%+v snapshot=%+v", uploaded, snapshot)
+	}
+	if len(snapshot.CompletedJobs) != 1 || snapshot.CompletedJobs[0].JobID != "job-a" || snapshot.CompletedJobs[0].StopReason != capture.StopMaxPackets {
+		t.Fatalf("capture completions = %+v", snapshot.CompletedJobs)
 	}
 }
 

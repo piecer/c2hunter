@@ -741,10 +741,75 @@ class PostgresRepository:
         return metadata, self.blob_store.get(str(metadata["object_key"]))
 
     def save_sensor_pcap(self, segment: dict[str, Any], content: bytes) -> dict[str, Any]:
-        key = f"sensor-pcaps/{segment['sensor_id']}/{segment['id']}.pcap"
-        self.blob_store.put(key, content)
-        stored = {**segment, "object_key": key}
-        return self._put("sensor_pcap", segment["id"], stored)
+        stored, status = self.save_sensor_pcap_limited(segment, content, None)
+        if stored is None or status not in {"OK", "EXISTS"}:
+            raise RuntimeError(f"sensor PCAP save failed: {status}")
+        return stored
+
+    def save_sensor_pcap_limited(
+        self, segment: dict[str, Any], content: bytes, max_total_bytes: int | None
+    ) -> tuple[dict[str, Any] | None, str]:
+        connection = self.connection
+        analysis_job_id = segment.get("analysis_job_id")
+        lock_key = f"sensor-pcap:{analysis_job_id or segment['id']}"
+        object_key = f"sensor-pcaps/{segment['sensor_id']}/{segment['id']}.pcap"
+        uploaded = False
+        with self._lock:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                        (lock_key,),
+                    )
+                    cursor.execute(
+                        "SELECT data FROM controller_objects "
+                        "WHERE kind='sensor_pcap' AND id=%s FOR UPDATE",
+                        (segment["id"],),
+                    )
+                    row = cursor.fetchone()
+                    if row is not None:
+                        value = row[0]
+                        existing = value if isinstance(value, dict) else json.loads(value)
+                        matches = all(
+                            existing.get(field) == segment.get(field)
+                            for field in ("sensor_id", "analysis_job_id", "sha256")
+                        )
+                        connection.commit()
+                        return (deepcopy(existing), "EXISTS") if matches else (None, "CONFLICT")
+                    if max_total_bytes is not None and analysis_job_id is not None:
+                        cursor.execute(
+                            "SELECT COALESCE(SUM((data->>'size_bytes')::bigint),0) "
+                            "FROM controller_objects WHERE kind='sensor_pcap' "
+                            "AND data->>'analysis_job_id'=%s",
+                            (analysis_job_id,),
+                        )
+                        used = int(cursor.fetchone()[0])
+                        if used + len(content) > max_total_bytes:
+                            connection.commit()
+                            return None, "LIMIT"
+                    self.blob_store.put(object_key, content)
+                    uploaded = True
+                    stored = {**segment, "object_key": object_key}
+                    cursor.execute(
+                        "INSERT INTO controller_objects(kind,id,data) "
+                        "VALUES('sensor_pcap',%s,%s::jsonb)",
+                        (segment["id"], self._json(stored)),
+                    )
+                    cursor.execute(
+                        "INSERT INTO audit_events(kind,object_id,occurred_at,data) "
+                        "VALUES('sensor_pcap',%s,%s,%s::jsonb)",
+                        (segment["id"], datetime.now(UTC), self._json(stored)),
+                    )
+                connection.commit()
+                return deepcopy(stored), "OK"
+            except Exception:
+                connection.rollback()
+                if uploaded:
+                    try:
+                        self.blob_store.delete(object_key)
+                    except Exception:
+                        pass
+                raise
 
     def get_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], bytes] | None:
         metadata = self._get("sensor_pcap", segment_id)
