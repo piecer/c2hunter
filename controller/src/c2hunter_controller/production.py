@@ -58,6 +58,7 @@ class PostgresRepository:
     """PostgreSQL JSONB control-plane repository with MinIO export blobs and audit rows."""
 
     _DETECTOR_PRESET_ADVISORY_LOCK = 112737
+    _FLOW_RECORD_CHUNK_TARGET_BYTES = 8 * 1024 * 1024
 
     def __init__(self, database_url: str, blob_store: MinioBlobStore) -> None:
         self.database_url = database_url
@@ -90,6 +91,11 @@ class PostgresRepository:
                         CREATE TABLE IF NOT EXISTS job_flow_records (
                           job_id text PRIMARY KEY, data jsonb NOT NULL
                         );
+                        CREATE TABLE IF NOT EXISTS job_flow_record_chunks (
+                          job_id text NOT NULL, chunk_no integer NOT NULL,
+                          data jsonb NOT NULL,
+                          PRIMARY KEY(job_id,chunk_no)
+                        );
                         CREATE TABLE IF NOT EXISTS job_payload_signatures (
                           job_id text PRIMARY KEY, data jsonb NOT NULL
                         );
@@ -109,6 +115,18 @@ class PostgresRepository:
                         UPDATE controller_objects
                           SET data=data-'flow_records'
                           WHERE kind='job' AND data ? 'flow_records';
+                        INSERT INTO job_flow_record_chunks(job_id,chunk_no,data)
+                          SELECT job_id,0,data
+                          FROM job_flow_records
+                          ON CONFLICT(job_id,chunk_no) DO NOTHING;
+                        DELETE FROM job_flow_records AS legacy
+                          WHERE EXISTS (
+                            SELECT 1
+                            FROM job_flow_record_chunks AS chunk
+                            WHERE chunk.job_id=legacy.job_id
+                          );
+                        CREATE INDEX IF NOT EXISTS job_flow_record_chunks_job_id
+                          ON job_flow_record_chunks(job_id,chunk_no);
                         INSERT INTO job_payload_signatures(job_id,data)
                           SELECT id,data->'payload_signatures'
                           FROM controller_objects
@@ -149,6 +167,75 @@ class PostgresRepository:
             default=str,
             ensure_ascii=False,
         )
+
+    @classmethod
+    def _json_array_chunks(cls, values: list[Any]) -> list[str]:
+        """Serialize a JSON array into independently storable bounded chunks."""
+        target = cls._FLOW_RECORD_CHUNK_TARGET_BYTES
+        chunks: list[str] = []
+        current: list[str] = []
+        current_size = 2  # opening and closing brackets
+
+        for value in values:
+            serialized = cls._json(value)
+            serialized_size = len(serialized.encode("utf-8"))
+            separator_size = 1 if current else 0
+            if current and current_size + separator_size + serialized_size > target:
+                chunks.append(",".join(current))
+                current = []
+                current_size = 2
+                separator_size = 0
+            current.append(serialized)
+            current_size += separator_size + serialized_size
+
+        if current:
+            chunks.append(",".join(current))
+        return chunks
+
+    @classmethod
+    def _replace_job_flow_records(cls, cursor: Any, job_id: str, records: list[Any]) -> None:
+        try:
+            cursor.execute("DELETE FROM job_flow_record_chunks WHERE job_id=%s", (job_id,))
+            cursor.execute("DELETE FROM job_flow_records WHERE job_id=%s", (job_id,))
+            for chunk_no, chunk in enumerate(cls._json_array_chunks(records)):
+                cursor.execute(
+                    "INSERT INTO job_flow_record_chunks(job_id,chunk_no,data) "
+                    "VALUES(%s,%s,[%s]::jsonb)",
+                    (job_id, chunk_no, chunk),
+                )
+        except Exception:
+            # A failed statement leaves a PostgreSQL transaction aborted until rollback.
+            # Roll back here because both create_job() and save_job() call this helper.
+            cursor.connection.rollback()
+            raise
+
+    @staticmethod
+    def _load_job_flow_records(cursor: Any, job_id: str) -> list[Any]:
+        cursor.execute(
+            "SELECT data FROM job_flow_record_chunks WHERE job_id=%s ORDER BY chunk_no",
+            (job_id,),
+        )
+        rows = cursor.fetchall()
+        if rows:
+            records: list[Any] = []
+            for row in rows:
+                value = row[0]
+                chunk = value if isinstance(value, list) else json.loads(value)
+                if not isinstance(chunk, list):
+                    raise RuntimeError("stored flow-record chunk is not a JSON array")
+                records.extend(chunk)
+            return records
+
+        # Compatibility fallback for a database that has not yet been migrated.
+        cursor.execute("SELECT data FROM job_flow_records WHERE job_id=%s", (job_id,))
+        row = cursor.fetchone()
+        if row is None:
+            return []
+        value = row[0]
+        records = value if isinstance(value, list) else json.loads(value)
+        if not isinstance(records, list):
+            raise RuntimeError("stored flow records are not a JSON array")
+        return records
 
     def ready(self) -> bool:
         return self.database_ready() and self.blob_store.ready()
@@ -410,10 +497,7 @@ class PostgresRepository:
                 "INSERT INTO controller_objects(kind,id,data) VALUES('job',%s,%s::jsonb)",
                 (job["id"], self._json(metadata)),
             )
-            cursor.execute(
-                "INSERT INTO job_flow_records(job_id,data) VALUES(%s,%s::jsonb)",
-                (job["id"], self._json(job.get("flow_records", []))),
-            )
+            self._replace_job_flow_records(cursor, job["id"], list(job.get("flow_records", [])))
             cursor.execute(
                 "INSERT INTO job_payload_signatures(job_id,data) VALUES(%s,%s::jsonb)",
                 (job["id"], self._json(job.get("payload_signatures", []))),
@@ -435,11 +519,7 @@ class PostgresRepository:
                 (job["id"], self._json(metadata)),
             )
             if "flow_records" in job:
-                cursor.execute(
-                    "INSERT INTO job_flow_records(job_id,data) VALUES(%s,%s::jsonb) "
-                    "ON CONFLICT(job_id) DO UPDATE SET data=excluded.data",
-                    (job["id"], self._json(job["flow_records"])),
-                )
+                self._replace_job_flow_records(cursor, job["id"], list(job["flow_records"]))
             if "payload_signatures" in job:
                 cursor.execute(
                     "INSERT INTO job_payload_signatures(job_id,data) VALUES(%s,%s::jsonb) "
@@ -471,14 +551,8 @@ class PostgresRepository:
         if job is None:
             return None
         with self.connection.cursor() as cursor:
-            cursor.execute("SELECT data FROM job_flow_records WHERE job_id=%s", (job_id,))
-            row = cursor.fetchone()
+            job["flow_records"] = self._load_job_flow_records(cursor, job_id)
             self.connection.commit()
-        if row is None:
-            job["flow_records"] = []
-        else:
-            value = row[0]
-            job["flow_records"] = value if isinstance(value, list) else json.loads(value)
         with self.connection.cursor() as cursor:
             cursor.execute("SELECT data FROM job_payload_signatures WHERE job_id=%s", (job_id,))
             row = cursor.fetchone()
@@ -528,6 +602,7 @@ class PostgresRepository:
                 (job_id,),
             )
             cursor.execute("DELETE FROM job_candidates WHERE job_id=%s", (job_id,))
+            cursor.execute("DELETE FROM job_flow_record_chunks WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM job_flow_records WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM job_payload_signatures WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM job_idempotency WHERE job_id=%s", (job_id,))

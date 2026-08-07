@@ -30,9 +30,17 @@ class PostgresJobLoader:
             if metadata_row is None:
                 raise LookupError(f"analysis job {job_id} was not found")
             cursor.execute(
-                "SELECT data FROM job_flow_records WHERE job_id=%s", (job_id,)
+                "SELECT data FROM job_flow_record_chunks "
+                "WHERE job_id=%s ORDER BY chunk_no",
+                (job_id,),
             )
-            flow_row = cursor.fetchone()
+            flow_rows = cursor.fetchall()
+            flow_row = None
+            if not flow_rows:
+                cursor.execute(
+                    "SELECT data FROM job_flow_records WHERE job_id=%s", (job_id,)
+                )
+                flow_row = cursor.fetchone()
             cursor.execute(
                 "SELECT data FROM job_payload_signatures WHERE job_id=%s", (job_id,)
             )
@@ -43,7 +51,20 @@ class PostgresJobLoader:
             if isinstance(raw_metadata, dict)
             else json.loads(raw_metadata)
         )
-        if flow_row is None:
+        if flow_rows:
+            flow_records: list[Any] = []
+            for row in flow_rows:
+                raw_chunk = row[0]
+                chunk = (
+                    list(raw_chunk)
+                    if isinstance(raw_chunk, list)
+                    else json.loads(raw_chunk)
+                )
+                if not isinstance(chunk, list):
+                    raise RuntimeError("stored flow-record chunk is not a JSON array")
+                flow_records.extend(chunk)
+            metadata["flow_records"] = flow_records
+        elif flow_row is None:
             metadata["flow_records"] = []
         else:
             raw_flows = flow_row[0]

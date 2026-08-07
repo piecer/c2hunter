@@ -14,6 +14,8 @@ from c2hunter_controller.production import MinioBlobStore, PostgresRepository
 class FakeCursor:
     def __init__(self, connection: FakeConnection) -> None:
         self.connection = connection
+        self._last_row: tuple[object, ...] | None = None
+        self._rows: list[tuple[object, ...]] = []
 
     def __enter__(self) -> FakeCursor:
         return self
@@ -22,7 +24,20 @@ class FakeCursor:
         return None
 
     def execute(self, query: str, params: tuple | None = None) -> None:
+        connection = cast(FakeConnection, self.connection)
+        if getattr(connection, "execute_error", None) is not None:
+            raise connection.execute_error
         self.connection.queries.append(query)
+        if "RETURNING job_id" in query:
+            self._last_row = ("job-id",)
+        elif "SELECT job_id FROM job_idempotency" in query:
+            self._last_row = ("job-1",)
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        return self._last_row
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return self._rows
 
 
 class FakeConnection:
@@ -30,14 +45,16 @@ class FakeConnection:
         self.closed = False
         self.execute_error = execute_error
         self.queries: list[str] = []
+        self.rolled_back = False
 
     def cursor(self) -> FakeCursor:
-        if self.execute_error is not None:
-            raise self.execute_error
         return FakeCursor(self)
 
     def commit(self) -> None:
         return None
+
+    def rollback(self) -> None:
+        self.rolled_back = True
 
     def close(self) -> None:
         self.closed = True
@@ -140,6 +157,7 @@ def test_connection_initialization_is_thread_safe(monkeypatch: Any) -> None:
     assert connection_count == 1
     schema = "\n".join(first.result().queries)
     assert "CREATE TABLE IF NOT EXISTS job_flow_records" in schema
+    assert "CREATE TABLE IF NOT EXISTS job_flow_record_chunks" in schema
     assert "CREATE TABLE IF NOT EXISTS job_payload_signatures" in schema
     assert "SET data=data-'flow_records'" in schema
     assert "SET data=data-'payload_signatures'" in schema
@@ -286,3 +304,66 @@ def test_set_default_preset_rolls_back_when_update_fails(monkeypatch: Any) -> No
         repository.set_default_detector_weight_preset("current")
 
     assert connection.rolled_back
+
+
+def test_json_array_chunks_bounded_size() -> None:
+    large_value = {"data": "x" * 100_000}
+    chunks = PostgresRepository._json_array_chunks([large_value])
+    for chunk in chunks:
+        assert len(chunk.encode("utf-8")) <= (
+            PostgresRepository._FLOW_RECORD_CHUNK_TARGET_BYTES + 1
+        )
+
+
+def test_replacement_splitting_large_flow_records(monkeypatch: Any) -> None:
+    fake_connection = FakeConnection()
+    monkeypatch.setitem(
+        sys.modules, "psycopg", SimpleNamespace(connect=lambda *a, **kw: fake_connection)
+    )
+    repository = PostgresRepository("postgresql://test", cast(MinioBlobStore, SimpleNamespace()))
+
+    large_record = {"flow": "z" * 20_000}
+    job = {
+        "id": "job-1",
+        "status": "RUNNING",
+        "flow_records": [large_record],
+        "payload_signatures": [],
+        "idempotency_key": "key-1",
+    }
+
+    repository.create_job(job)
+    chunk_queries = [q for q in fake_connection.queries if "job_flow_record_chunks" in q]
+    assert len(chunk_queries) >= 1
+
+
+def test_replacing_job_flow_records_rolls_back_on_failure(monkeypatch: Any) -> None:
+    class FlowFailCursor(FakeCursor):
+        def execute(self, query, params=None):
+            super().execute(query, params)
+            if "DELETE FROM job_flow_record_chunks WHERE job_id" in query:
+                raise RuntimeError("disk full")
+
+    class FlowFailConnection(FakeConnection):
+        def cursor(self) -> FakeCursor:
+            return FlowFailCursor(self)
+
+    failing_connection = FlowFailConnection()
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg",
+        SimpleNamespace(connect=lambda *a, **kw: failing_connection),
+    )
+    repository = PostgresRepository("postgresql://test", cast(MinioBlobStore, SimpleNamespace()))
+
+    job = {
+        "id": "job-1",
+        "status": "RUNNING",
+        "flow_records": [{"source_ip": "10.0.0.1"}],
+        "payload_signatures": [],
+        "idempotency_key": "key-1",
+    }
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        repository.create_job(job)
+
+    assert failing_connection.rolled_back
