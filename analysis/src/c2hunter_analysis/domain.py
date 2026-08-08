@@ -33,6 +33,7 @@ class Flow:
     attack_target_ip: str | None = None
     duration_seconds: float = 0.0
     last_payload_hash: str | None = None
+    tcp_flags: Mapping[str, int] | None = None
 
 
 @dataclass(frozen=True)

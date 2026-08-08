@@ -302,6 +302,22 @@ class FlowRecord(BaseModel):
     direction: Direction
     packet_count: int = Field(default=1, ge=1)
     total_bytes: int = Field(default=0, ge=0)
+    tcp_flags: dict[str, int] | None = Field(default=None)
+
+    @field_validator("tcp_flags", mode="before")
+    @classmethod
+    def validate_tcp_flags(cls, value: object) -> dict[str, int] | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("tcp_flags must be an object or null")
+        for key, val in value.items():
+            if not isinstance(val, int | float) or isinstance(val, bool):
+                raise ValueError(f"tcp_flags[{key}] must be numeric")
+            if int(val) < 0:
+                raise ValueError(f"tcp_flags[{key}] must be non-negative")
+        return {k: int(v) for k, v in value.items()}
+
     payload_hash: str | None = None
     last_payload_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     payload_prefix_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")

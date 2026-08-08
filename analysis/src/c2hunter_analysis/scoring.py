@@ -18,6 +18,7 @@ CAPS = {
     "ANALYST_PAYLOAD_SIGNATURE": 80,
     "NON_WELL_KNOWN_PORT": 25,
     "ML_POPULATION_ANOMALY": 5,
+    "TCP_SESSION_QUALITY": 8,
 }
 
 DETECTOR_NAMES = (
@@ -32,6 +33,7 @@ DETECTOR_NAMES = (
     "protocol_similarity",
     "multi_sensor_context",
     "ml_population_anomaly",
+    "tcp_session_quality",
 )
 DEFAULT_DETECTOR_WEIGHTS = {name: 1.0 for name in DETECTOR_NAMES}
 MAX_DETECTOR_WEIGHT = 2.0

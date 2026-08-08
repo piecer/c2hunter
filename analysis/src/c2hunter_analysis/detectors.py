@@ -3,12 +3,47 @@ from __future__ import annotations
 import math
 import statistics
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 
 from .domain import AnalysisContext, Detector, Evidence, Flow
 from .payload_features import simhash_hamming_distance
+
+
+def _tcp_quality_gate(
+    candidate_ip: str,
+    flows: Sequence[Flow],
+    threshold: float = 1.0,
+) -> bool:
+    quality_issues = 0
+    total_tcp_flows = 0
+    for flow in flows:
+        if flow.destination_ip != candidate_ip and flow.source_ip != candidate_ip:
+            continue
+        tcp = getattr(flow, "tcp_flags", None)
+        if not tcp:
+            continue
+        if not isinstance(tcp, Mapping):
+            continue
+        syn_count = tcp.get("syn", 0)
+        ack_count = tcp.get("ack", 0)
+        rst_count = tcp.get("rst", 0)
+        is_valid = all(
+            isinstance(v, int | float) and not isinstance(v, bool)
+            for v in (syn_count, ack_count, rst_count)
+        )
+        if not is_valid:
+            continue
+        total_tcp_flows += 1
+        packet_count = max(1, flow.packet_count)
+        rst_ratio = rst_count / packet_count
+        if rst_ratio > 0.2:
+            quality_issues += 1
+    if total_tcp_flows == 0:
+        return True
+    bad_ratio = quality_issues / total_tcp_flows
+    return bad_ratio < min(0.5, 1.0 / max(threshold, 1.0))
 
 
 def _candidate_host(context: AnalysisContext, flow: Flow) -> tuple[str, str] | None:
@@ -146,6 +181,11 @@ class CommonDestinationDetector:
             if trusted_cdn_suffix is not None:
                 metrics["trusted_cdn_suffix"] = trusted_cdn_suffix
             contribution = min(20.0, 10 + 10 * min(1.0, len(hosts) / minimum))
+            tcp_threshold = float(
+                context.parameters.get("tcp_session_quality_low_threshold", 1.0),
+            )
+            if not _tcp_quality_gate(candidate, context.flows, tcp_threshold):
+                continue
             result.append(
                 _base_evidence(
                     candidate,
@@ -285,6 +325,11 @@ class PeriodicBeaconDetector:
                 "matching_hosts": len(matching),
                 "distinct_sensors": len({flow.sensor_id for _, flow in selected}),
             }
+            tcp_threshold = float(
+                context.parameters.get("tcp_session_quality_low_threshold", 1.0),
+            )
+            if not _tcp_quality_gate(candidate, context.flows, tcp_threshold):
+                continue
             result.append(
                 _base_evidence(
                     candidate,
@@ -341,6 +386,11 @@ class SingleHostCompositeBeaconDetector:
                 "average_packets": average_packets,
                 "distinct_sensors": len({flow.sensor_id for _, flow in rows}),
             }
+            tcp_threshold = float(
+                context.parameters.get("tcp_session_quality_low_threshold", 1.0),
+            )
+            if not _tcp_quality_gate(candidate, context.flows, tcp_threshold):
+                continue
             result.append(
                 _base_evidence(
                     candidate,
@@ -992,6 +1042,61 @@ class MultiSensorDetector:
         return result
 
 
+@dataclass(frozen=True)
+class TCPSessionQualityDetector:
+    name: str = "tcp_session_quality"
+    version: str = "1.0.0"
+
+    def analyze(self, context: AnalysisContext) -> list[Evidence]:
+        threshold = float(context.parameters.get("tcp_session_quality_low_threshold", 1.0))
+        result: list[Evidence] = []
+        for candidate, rows in _groups(context).items():
+            tcp_flows: list[tuple[str, Flow]] = []
+            quality_issues = []
+            for host, flow in rows:
+                tcp = getattr(flow, "tcp_flags", None)
+                if not tcp:
+                    continue
+                if not isinstance(tcp, Mapping):
+                    continue
+                syn_count = tcp.get("syn", 0)
+                ack_count = tcp.get("ack", 0)
+                rst_count = tcp.get("rst", 0)
+                is_valid = all(
+                    isinstance(v, int | float) and not isinstance(v, bool)
+                    for v in (syn_count, ack_count, rst_count)
+                )
+                if not is_valid:
+                    continue
+                packet_count = max(1, flow.packet_count)
+                tcp_flows.append((host, flow))
+                if rst_count / packet_count > 0.2:
+                    quality_issues.append((host, flow))
+            if len(tcp_flows) < 2:
+                continue
+            bad_ratio = len(quality_issues) / len(tcp_flows)
+            if bad_ratio >= min(0.5, 1.0 / max(threshold, 1.0)) and len(quality_issues) >= 1:
+                metrics = {
+                    "tcp_flows": len(tcp_flows),
+                    "quality_issue_count": len(quality_issues),
+                    "bad_ratio": round(bad_ratio, 4),
+                    "threshold": threshold,
+                    "sample_count": len(rows),
+                }
+                result.append(
+                    _base_evidence(
+                        candidate,
+                        "TCP_SESSION_QUALITY",
+                        self.name,
+                        min(8.0, 2 + 6 * min(1.0, bad_ratio)),
+                        rows,
+                        metrics,
+                        "RST 비율 또는 SYN/ACK 이상으로 인한 세션 품질 저하",
+                    )
+                )
+        return result
+
+
 DEFAULT_DETECTORS: tuple[Detector, ...] = (
     CommonDestinationDetector(),
     NonWellKnownPortDetector(),
@@ -1004,6 +1109,7 @@ DEFAULT_DETECTORS: tuple[Detector, ...] = (
     ProtocolSimilarityDetector(),
     MultiSensorDetector(),
     PopulationAnomalyDetector(),
+    TCPSessionQualityDetector(),
 )
 
 

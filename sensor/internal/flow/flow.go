@@ -29,6 +29,9 @@ type Record struct {
 	MinPacketSize, MaxPacketSize       uint32
 	AvgPacketSize                      float64
 	TCPFlags                           FlagCounts
+	SYNACKRatio                        *float64 `json:"syn_ack_ratio,omitempty"`
+	RSTRatio                           *float64 `json:"rst_ratio,omitempty"`
+	ConnectionCount                    *uint64  `json:"connection_count,omitempty"`
 	Bidirectional                      bool
 	MinPayloadLength, MaxPayloadLength uint32
 	AvgPayloadLength                   float64
@@ -155,6 +158,7 @@ func finalize(r Record) Record {
 	if r.PacketCount > 0 {
 		r.AvgPacketSize = float64(r.packetSizeSum) / float64(r.PacketCount)
 		r.AvgPayloadLength = float64(r.payloadLengthSum) / float64(r.PacketCount)
+		addTCPFlagCombinations(&r)
 	}
 	return r
 }
@@ -194,5 +198,21 @@ func addFlags(c *FlagCounts, f packet.TCPFlags) {
 	}
 	if f.CWR {
 		c.CWR++
+	}
+}
+
+// addTCPFlagCombinations computes SYN/ACK ratio, RST ratio, and connection count.
+func addTCPFlagCombinations(r *Record) {
+	if r.TCPFlags.SYN > 0 && r.TCPFlags.ACK > 0 {
+		ratio := float64(r.TCPFlags.SYN) / float64(r.TCPFlags.ACK)
+		r.SYNACKRatio = &ratio
+	}
+	if r.PacketCount > 0 {
+		rstRatio := float64(r.TCPFlags.RST) / float64(r.PacketCount)
+		r.RSTRatio = &rstRatio
+	}
+	connections := r.TCPFlags.SYN
+	if connections > 0 {
+		r.ConnectionCount = &connections
 	}
 }

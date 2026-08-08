@@ -355,8 +355,11 @@ def _decode_packet(
         "domain": _application_domain(protocol, source_port, destination_port, payload),
         "packet_sizes": (len(captured.data),),
     }
+    tcp_flags = decoded.pop("tcp_flags", None)
     if features is not None:
         record.update(features.as_dict())
+    if tcp_flags:
+        record["tcp_flags"] = tcp_flags
     if retain_payload_sample_bytes and payload:
         record["payload_sample_hex"] = payload[:retain_payload_sample_bytes].hex()
     if retain_packet_bytes:
@@ -429,10 +432,10 @@ def _decode_ipv4(packet: bytes) -> dict[str, Any] | None:
     protocol_number = packet[9]
     fragment_offset = int.from_bytes(packet[6:8], "big") & 0x1FFF
     transport = packet[header_length:end]
-    protocol, source_port, destination_port, payload = _transport(
+    protocol, source_port, destination_port, payload, tcp_flags = _transport(
         protocol_number, transport, fragment_offset == 0
     )
-    return {
+    result: dict[str, Any] = {
         "source_ip": ip_address(packet[12:16]),
         "destination_ip": ip_address(packet[16:20]),
         "source_port": source_port,
@@ -440,6 +443,9 @@ def _decode_ipv4(packet: bytes) -> dict[str, Any] | None:
         "protocol": protocol,
         "payload": payload,
     }
+    if tcp_flags:
+        result["tcp_flags"] = tcp_flags
+    return result
 
 
 def _decode_ipv6(packet: bytes) -> dict[str, Any] | None:
@@ -473,10 +479,10 @@ def _decode_ipv6(packet: bytes) -> dict[str, Any] | None:
             return None
         next_header = following
         offset += length
-    protocol, source_port, destination_port, payload = _transport(
+    protocol, source_port, destination_port, payload, tcp_flags = _transport(
         next_header, packet[offset:end], first_fragment
     )
-    return {
+    result: dict[str, Any] = {
         "source_ip": ip_address(packet[8:24]),
         "destination_ip": ip_address(packet[24:40]),
         "source_port": source_port,
@@ -484,27 +490,43 @@ def _decode_ipv6(packet: bytes) -> dict[str, Any] | None:
         "protocol": protocol,
         "payload": payload,
     }
+    if tcp_flags:
+        result["tcp_flags"] = tcp_flags
+    return result
 
 
 def _transport(
     protocol_number: int, transport: bytes, first_fragment: bool
-) -> tuple[str, int | None, int | None, bytes]:
+) -> tuple[str, int | None, int | None, bytes, dict[str, int]]:
+    """Return (protocol, source_port, dest_port, payload, tcp_flags_map)."""
+
+    tcp_flags: dict[str, int] = {}
     protocol = {1: "ICMP", 6: "TCP", 17: "UDP", 58: "ICMPV6"}.get(
         protocol_number, f"IP_{protocol_number}"
     )
     if not first_fragment:
-        return protocol, None, None, b""
+        return protocol, None, None, b"", tcp_flags
     if protocol_number == 6 and len(transport) >= 20:
         source_port, destination_port = struct.unpack_from("!HH", transport)
         header_length = (transport[12] >> 4) * 4
         payload = transport[header_length:] if 20 <= header_length <= len(transport) else b""
-        return protocol, source_port, destination_port, payload
+        # Extract TCP flag bits from byte offset 13.
+        flags_byte: int = transport[13]
+        tcp_flags = {
+            "fin": (flags_byte & 0x01) >> 0,
+            "syn": (flags_byte & 0x02) >> 1,
+            "rst": (flags_byte & 0x04) >> 2,
+            "psh": (flags_byte & 0x08) >> 3,
+            "ack": (flags_byte & 0x10) >> 4,
+            "urg": (flags_byte & 0x20) >> 5,
+        }
+        return protocol, source_port, destination_port, payload, tcp_flags
     if protocol_number == 17 and len(transport) >= 8:
         source_port, destination_port, udp_length = struct.unpack_from("!HHH", transport)
         end = min(len(transport), udp_length) if udp_length >= 8 else len(transport)
-        return protocol, source_port, destination_port, transport[8:end]
+        return protocol, source_port, destination_port, transport[8:end], tcp_flags
     header_length = 8 if protocol_number in {1, 58} and len(transport) >= 8 else 0
-    return protocol, None, None, transport[header_length:]
+    return protocol, None, None, transport[header_length:], tcp_flags
 
 
 def _direction(source: str, destination: str, networks: tuple[Network, ...]) -> str:

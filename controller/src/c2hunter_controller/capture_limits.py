@@ -2,6 +2,17 @@ from __future__ import annotations
 
 from typing import Any
 
+_TCP_COUNTER_FIELDS = (
+    "tcp_flags.fin",
+    "tcp_flags.syn",
+    "tcp_flags.rst",
+    "tcp_flags.psh",
+    "tcp_flags.ack",
+    "tcp_flags.urg",
+    "tcp_flags.ece",
+    "tcp_flags.cwr",
+)
+
 
 def _positive_int(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -69,6 +80,12 @@ def limit_flow_records(
         item["packet_count"] = remaining
         total_bytes = _record_bytes(item)
         item["total_bytes"] = total_bytes * remaining // packet_count
+        # Clear TCP counters when packet boundaries are uncertain.
+        tcp_flags = item.get("tcp_flags")
+        if isinstance(tcp_flags, dict):
+            for key in tuple(tcp_flags):
+                if f"tcp_flags.{key}" in _TCP_COUNTER_FIELDS:
+                    del tcp_flags[key]
         retained.append(item)
         retained_packets += remaining
         remaining = 0

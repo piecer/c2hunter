@@ -23,6 +23,7 @@ type FlowRecord struct {
 	Direction              string    `json:"direction"`
 	PacketCount            uint64    `json:"packet_count"`
 	TotalBytes             uint64    `json:"total_bytes"`
+	TcpFlags               *TcpFlags `json:"tcp_flags,omitempty"`
 	PayloadHash            string    `json:"payload_hash,omitempty"`
 	LastPayloadHash        string    `json:"last_payload_hash,omitempty"`
 	PayloadPrefixHash      string    `json:"payload_prefix_hash,omitempty"`
@@ -36,6 +37,20 @@ type FlowRecord struct {
 	CertificateFingerprint string    `json:"certificate_fingerprint,omitempty"`
 	Domain                 string    `json:"domain,omitempty"`
 	PacketSizes            []uint32  `json:"packet_sizes"`
+}
+
+type TcpFlags struct {
+	FIN             *uint64  `json:"fin,omitempty"`
+	SYN             *uint64  `json:"syn,omitempty"`
+	RST             *uint64  `json:"rst,omitempty"`
+	PSH             *uint64  `json:"psh,omitempty"`
+	ACK             *uint64  `json:"ack,omitempty"`
+	URG             *uint64  `json:"urg,omitempty"`
+	ECE             *uint64  `json:"ece,omitempty"`
+	CWR             *uint64  `json:"cwr,omitempty"`
+	SYNACKRatio     *float64 `json:"syn_ack_ratio,omitempty"`
+	RSTRatio        *float64 `json:"rst_ratio,omitempty"`
+	ConnectionCount *uint64  `json:"connection_count,omitempty"`
 }
 
 type Batch struct {
@@ -102,6 +117,25 @@ func fromRecord(record flow.Record) FlowRecord {
 		out.PacketSizes = []uint32{record.MinPacketSize}
 	} else {
 		out.PacketSizes = []uint32{record.MinPacketSize, record.MaxPacketSize}
+	}
+	out.TcpFlags = &TcpFlags{
+		FIN: &record.TCPFlags.FIN,
+		SYN: &record.TCPFlags.SYN,
+		RST: &record.TCPFlags.RST,
+		PSH: &record.TCPFlags.PSH,
+		ACK: &record.TCPFlags.ACK,
+		URG: &record.TCPFlags.URG,
+		ECE: &record.TCPFlags.ECE,
+		CWR: &record.TCPFlags.CWR,
+	}
+	if record.TCPFlags.SYN > 0 && record.TCPFlags.ACK > 0 {
+		out.TcpFlags.SYNACKRatio = record.SYNACKRatio
+	}
+	if record.RSTRatio != nil {
+		out.TcpFlags.RSTRatio = record.RSTRatio
+	}
+	if record.ConnectionCount != nil {
+		out.TcpFlags.ConnectionCount = record.ConnectionCount
 	}
 	applyMetadata(&out, record.ProtocolMetadata)
 	return out

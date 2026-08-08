@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from c2hunter_analysis.scoring import DEFAULT_DETECTOR_WEIGHTS
 from fastapi.testclient import TestClient
 
 from c2hunter_controller.app import create_app
@@ -137,7 +138,9 @@ def test_analysis_request_normalizes_and_validates_detector_weights() -> None:
     weights = response.json()["analysis"]["detector_weights"]
     assert weights["common_destination"] == 0.25
     assert weights["analyst_payload_signature"] == 1.0
-    assert len(weights) == 11
+    assert weights["tcp_session_quality"] == 1.0
+    assert set(weights) == set(DEFAULT_DETECTOR_WEIGHTS)
+    assert len(weights) == len(DEFAULT_DETECTOR_WEIGHTS)
 
     for key, value in (("unknown_detector", 1.0), ("common_destination", 2.01)):
         invalid = payload(key=f"invalid-{key}-{value}")
