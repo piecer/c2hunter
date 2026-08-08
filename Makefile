@@ -35,6 +35,7 @@ down:
 	$(COMPOSE) down --remove-orphans
 
 lint:
+	$(VENV)/bin/python tools/check_tracked_elf.py
 	@test -z "$$(gofmt -l sensor)" || { gofmt -l sensor; exit 1; }
 	cd sensor && go vet ./...
 	$(RUFF) check controller analysis tools

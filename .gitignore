@@ -12,6 +12,7 @@ web/playwright-report/
 *.tsbuildinfo
 artifacts/*
 !artifacts/.gitkeep
+/c2hunter-sensor/c2hunter-sensor
 testdata/generated/*
 !testdata/generated/.gitkeep
 *.pem
