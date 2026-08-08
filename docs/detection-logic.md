@@ -154,8 +154,15 @@ anomaly-only Candidate까지 생성하려면 `ml_anomaly_allow_standalone=true`�
 | 단일 내부 host | 최대 -20 (`SINGLE_HOST_BEACON`은 -10, analyst exact는 미적용) |
 | 표본 부족 | 최대 -20 |
 | 대용량 endpoint (byte/packet threshold 초과) | 최대 -30 (`HIGH_VOLUME`) |
+| 대용량 TCP 세션 (양방향 5-tuple 합산) | 기본 LOW 상한 20 (`HIGH_VOLUME_TCP_SESSION`) |
 
 기본값은 `score = clamp(0, 100, sum(capped contributions) + sum(adjustments))`로 계산한다. 실행별 detector weight는 type별 기본 cap을 적용한 contribution에 곱하고 최대 `2 × cap`까지 허용하므로, `0.0–1.0` 감쇠뿐 아니라 `1.0–2.0` 증폭도 유효하다. 최종 점수는 항상 100으로 clamp하며 weight와 조정 점수를 run에 snapshot한다.
+
+TCP 세션 대용량 판정은 센서별 내부 endpoint와 외부 후보 endpoint의 양방향 5-tuple을
+합산한다. 기본 임계값은 세션당 50 MiB 또는 100,000 packet이며 둘 중 하나를 넘으면
+기존 감점 적용 후 점수를 20 이하로 제한한다. 각 임계값을 `0`으로 설정하면 해당 조건을
+비활성화할 수 있다. 분석가가 payload signature를 `EXACT`로 확인한 경우에는 이 상한보다
+명시적 확인을 우선한다.
 
 Detector weight preset은 모든 detector의 완전한 weight map으로 저장한다. 하나의 preset만 system default일 수 있으며 새 sensor 분석이나 PCAP 업로드에서 weight를 생략하면 해당 default를 job snapshot에 복사한다. 요청이 weight를 명시하면 preset보다 우선한다. Reanalysis는 원 job의 snapshot을 기본으로 유지하고, analyst가 저장 preset을 선택하거나 weight를 수정했을 때만 override한다. 이후 preset 변경이나 삭제는 이미 생성된 job의 계산 재현성에 영향을 주지 않는다.
 

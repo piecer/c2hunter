@@ -58,6 +58,9 @@ def score_candidates(
     high_volume_bytes_threshold: int = 50 * 1024 * 1024,
     high_volume_packet_threshold: int = 100_000,
     high_volume_penalty: int = 30,
+    high_volume_tcp_session_bytes_threshold: int = 50 * 1024 * 1024,
+    high_volume_tcp_session_packet_threshold: int = 100_000,
+    high_volume_tcp_session_score_cap: int = 20,
     detector_weights: Mapping[str, float] | None = None,
     now: datetime | None = None,
 ) -> list[Candidate]:
@@ -133,6 +136,38 @@ def score_candidates(
                     "HIGH_VOLUME",
                     -abs(int(high_volume_penalty)),
                     "대용량 endpoint 통신: " + ", ".join(volume_reasons),
+                )
+            )
+        max_tcp_session_bytes = max(0, int(profile.get("max_tcp_session_bytes", 0) or 0))
+        max_tcp_session_packets = max(0, int(profile.get("max_tcp_session_packets", 0) or 0))
+        tcp_session_reasons = []
+        if (
+            high_volume_tcp_session_bytes_threshold > 0
+            and max_tcp_session_bytes >= high_volume_tcp_session_bytes_threshold
+        ):
+            tcp_session_reasons.append(
+                f"bytes {max_tcp_session_bytes:,} >= {high_volume_tcp_session_bytes_threshold:,}"
+            )
+        if (
+            high_volume_tcp_session_packet_threshold > 0
+            and max_tcp_session_packets >= high_volume_tcp_session_packet_threshold
+        ):
+            tcp_session_reasons.append(
+                "packets "
+                f"{max_tcp_session_packets:,} >= {high_volume_tcp_session_packet_threshold:,}"
+            )
+        adjusted_score = score + sum(item.points for item in adjustments)
+        if (
+            tcp_session_reasons
+            and not exact_analyst_match
+            and adjusted_score > high_volume_tcp_session_score_cap
+        ):
+            adjustments.append(
+                ScoreAdjustment(
+                    "HIGH_VOLUME_TCP_SESSION",
+                    high_volume_tcp_session_score_cap - adjusted_score,
+                    "대용량 TCP 세션으로 proxy/relay 가능성 우선: "
+                    + ", ".join(tcp_session_reasons),
                 )
             )
         final = max(0, min(100, round(score + sum(item.points for item in adjustments))))

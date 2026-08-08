@@ -73,6 +73,15 @@ def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
             analysis.get("high_volume_packet_threshold", 100_000)
         ),
         high_volume_penalty=int(analysis.get("high_volume_penalty", 30)),
+        high_volume_tcp_session_bytes_threshold=int(
+            analysis.get("high_volume_tcp_session_bytes_threshold", 50 * 1024 * 1024)
+        ),
+        high_volume_tcp_session_packet_threshold=int(
+            analysis.get("high_volume_tcp_session_packet_threshold", 100_000)
+        ),
+        high_volume_tcp_session_score_cap=int(
+            analysis.get("high_volume_tcp_session_score_cap", 20)
+        ),
         detector_weights={
             str(name): float(weight)
             for name, weight in dict(analysis.get("detector_weights", {})).items()

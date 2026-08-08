@@ -255,6 +255,15 @@ def evaluate_candidates(
         ),
         high_volume_packet_threshold=int(parameters.get("high_volume_packet_threshold", 100_000)),
         high_volume_penalty=int(parameters.get("high_volume_penalty", 30)),
+        high_volume_tcp_session_bytes_threshold=int(
+            parameters.get("high_volume_tcp_session_bytes_threshold", 50 * 1024 * 1024)
+        ),
+        high_volume_tcp_session_packet_threshold=int(
+            parameters.get("high_volume_tcp_session_packet_threshold", 100_000)
+        ),
+        high_volume_tcp_session_score_cap=int(
+            parameters.get("high_volume_tcp_session_score_cap", 20)
+        ),
         detector_weights={
             str(name): float(weight)
             for name, weight in dict(parameters.get("detector_weights", {})).items()

@@ -257,6 +257,9 @@ class AnalysisParameters(BaseModel):
     high_volume_bytes_threshold: int = Field(default=50 * 1024 * 1024, ge=0)
     high_volume_packet_threshold: int = Field(default=100000, ge=0)
     high_volume_penalty: int = Field(default=30, ge=0, le=100)
+    high_volume_tcp_session_bytes_threshold: int = Field(default=50 * 1024 * 1024, ge=0)
+    high_volume_tcp_session_packet_threshold: int = Field(default=100000, ge=0)
+    high_volume_tcp_session_score_cap: int = Field(default=20, ge=0, le=100)
     detector_weights: dict[str, float] = Field(
         default_factory=lambda: dict(DEFAULT_DETECTOR_WEIGHTS)
     )

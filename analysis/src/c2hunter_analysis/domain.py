@@ -277,29 +277,68 @@ class AnalysisContext:
     def candidate_traffic_profiles(self) -> dict[str, dict[str, int]]:
         """Aggregate all scoped traffic per external endpoint for score adjustments."""
         profiles: dict[str, dict[str, int]] = {}
+        tcp_sessions: dict[str, dict[tuple[str, str, int | None, str, int | None], list[int]]] = {}
         for flow in self.scoped_flows():
             direction = flow.direction.upper()
             if direction == "OUTBOUND":
                 candidate_ip = flow.destination_ip
+                internal_ip = flow.source_ip
+                internal_port = flow.source_port
+                candidate_port = flow.destination_port
             elif direction == "INBOUND":
                 candidate_ip = flow.source_ip
+                internal_ip = flow.destination_ip
+                internal_port = flow.destination_port
+                candidate_port = flow.source_port
             else:
                 source_internal = self.is_internal(flow.source_ip)
                 destination_internal = self.is_internal(flow.destination_ip)
                 if source_internal == destination_internal:
                     continue
-                candidate_ip = flow.destination_ip if source_internal else flow.source_ip
+                if source_internal:
+                    candidate_ip = flow.destination_ip
+                    internal_ip = flow.source_ip
+                    internal_port = flow.source_port
+                    candidate_port = flow.destination_port
+                else:
+                    candidate_ip = flow.source_ip
+                    internal_ip = flow.destination_ip
+                    internal_port = flow.destination_port
+                    candidate_port = flow.source_port
             profile = profiles.setdefault(
                 candidate_ip,
                 {
                     "flow_count": 0,
                     "total_packets": 0,
                     "total_bytes": 0,
+                    "tcp_session_count": 0,
+                    "max_tcp_session_packets": 0,
+                    "max_tcp_session_bytes": 0,
                 },
             )
             profile["flow_count"] += 1
             profile["total_packets"] += max(0, int(flow.packet_count))
             profile["total_bytes"] += max(0, int(flow.total_bytes))
+            if flow.protocol.upper() == "TCP":
+                session_key = (
+                    flow.sensor_id,
+                    internal_ip,
+                    internal_port,
+                    candidate_ip,
+                    candidate_port,
+                )
+                totals = tcp_sessions.setdefault(candidate_ip, {}).setdefault(session_key, [0, 0])
+                totals[0] += max(0, int(flow.packet_count))
+                totals[1] += max(0, int(flow.total_bytes))
+        for candidate_ip, sessions in tcp_sessions.items():
+            profile = profiles[candidate_ip]
+            profile["tcp_session_count"] = len(sessions)
+            profile["max_tcp_session_packets"] = max(
+                (totals[0] for totals in sessions.values()), default=0
+            )
+            profile["max_tcp_session_bytes"] = max(
+                (totals[1] for totals in sessions.values()), default=0
+            )
         return profiles
 
 
