@@ -45,3 +45,12 @@ class Settings(BaseSettings):
             # Unit tests use isolated in-memory repositories; deployable modes are closed.
             self.api_auth_required = self.environment != "test"
         return self
+
+    @model_validator(mode="after")
+    def reject_dev_login_in_production(self) -> "Settings":
+        if self.dev_login_enabled and self.environment not in {"development", "test"}:
+            raise ValueError(
+                f"dev_login_enabled=True is not allowed in environment='{self.environment}'. "
+                "Disable C2HUNTER_DEV_LOGIN_ENABLED or use static hashed tokens instead."
+            )
+        return self
