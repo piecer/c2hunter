@@ -95,13 +95,14 @@ describe('C2Hunter UI', () => {
 
     expect(await screen.findByRole('link', { name: '203.0.113.9' })).toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText('Severity'), 'HIGH');
+    await user.selectOptions(screen.getByLabelText('Verdict'), 'CONFIRMED_C2');
     await user.clear(screen.getByLabelText('Minimum score'));
     await user.type(screen.getByLabelText('Minimum score'), '70');
     await user.click(screen.getByLabelText('Include suppressed candidates'));
     await user.selectOptions(screen.getByLabelText('Sort candidates'), 'candidate_ip');
     await user.click(screen.getByRole('button', { name: 'Apply filters' }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/candidates?page=1&page_size=50&minimum_score=70&sort=candidate_ip&severity=HIGH&include_suppressed=true', expect.anything()));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/candidates?page=1&page_size=50&minimum_score=70&sort=candidate_ip&severity=HIGH&verdict=CONFIRMED_C2&include_suppressed=true', expect.anything()));
     await user.click(screen.getByRole('button', { name: 'Next candidates' }));
     expect(await screen.findByRole('link', { name: '198.51.100.7' })).toBeInTheDocument();
     expect(screen.getByText('Candidates 51–51 of 51')).toBeInTheDocument();
@@ -288,7 +289,7 @@ describe('C2Hunter UI', () => {
       name: 'Web analysis', sensor_ids: ['sensor-a'], mode: 'LIVE', internal_networks: ['10.0.0.0/8'],
       idempotency_key: expect.any(String), start_time: expect.any(String), end_time: expect.any(String),
       analysis: expect.objectContaining({
-        minimum_candidate_score: 20,
+        minimum_candidate_score: 50,
         minimum_distinct_clients: 3,
         detector_weights: expect.objectContaining({
           common_destination: 0.25,
@@ -382,6 +383,54 @@ describe('C2Hunter UI', () => {
     expect(JSON.parse(String(exportCall?.[1]?.body))).toEqual({ job_id: 'job-1', candidate_id: 'candidate-1' });
     const reanalyzeCall = fetchMock.mock.calls.find(([url]) => url === '/api/v1/analysis-jobs/job-1/reanalyze');
     expect(JSON.parse(String(reanalyzeCall?.[1]?.body))).toEqual({ idempotency_key: expect.any(String) });
+  });
+
+  it('records verdicts, looks up TI, and exports confirmed candidates to MISP', async () => {
+    const original = responses['/api/v1/candidates/candidate-1'] as Record<string, unknown>;
+    let candidate = { ...original };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/v1/candidates/candidate-1/verdicts' && init?.method === 'POST') {
+        const verdict = { verdict: 'CONFIRMED_C2', confidence: 'HIGH', note: 'Beacon verified', created_by: 'analyst', created_at: '2026-07-20T11:00:00Z' };
+        candidate = { ...candidate, current_verdict: verdict, verdict_history: [verdict] };
+        return new Response(JSON.stringify(candidate), { status: 201 });
+      }
+      if (path === '/api/v1/candidates/candidate-1/threat-intelligence/lookups' && init?.method === 'POST') {
+        const threatIntelligence = { fetched_at: '2026-07-20T11:01:00Z', summary: { malicious: 8, suspicious: 2, harmless: 12, abuse_confidence_score: 91 }, providers: { virustotal: { status: 'OK', malicious: 8, suspicious: 2, harmless: 12, reputation: -20 }, abuseipdb: { status: 'OK', abuse_confidence_score: 91, total_reports: 13, country_code: 'US', isp: 'Example ISP' } } };
+        candidate = { ...candidate, threat_intelligence: threatIntelligence };
+        return new Response(JSON.stringify(threatIntelligence), { status: 200 });
+      }
+      if (path === '/api/v1/candidates/candidate-1/misp-exports' && init?.method === 'POST') {
+        const result = { status: 'EXPORTED', event_id: '42', attribute_id: '9001', created_at: '2026-07-20T11:02:00Z' };
+        candidate = { ...candidate, misp_exports: [result] };
+        return new Response(JSON.stringify(result), { status: 201 });
+      }
+      if (path === '/api/v1/candidates/candidate-1') return new Response(JSON.stringify(candidate), { status: 200 });
+      return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404 });
+    });
+    renderAt('/candidates/candidate-1', fetchMock);
+    const user = userEvent.setup();
+
+    expect(await screen.findByRole('heading', { name: '판정 및 외부 검증' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'MISP로 전송' })).toBeDisabled();
+    await user.selectOptions(screen.getByLabelText('Candidate verdict'), 'CONFIRMED_C2');
+    await user.selectOptions(screen.getByLabelText('Verdict confidence'), 'HIGH');
+    await user.type(screen.getByLabelText('Verdict note'), 'Beacon verified');
+    await user.click(screen.getByRole('button', { name: '판정 저장' }));
+    await waitFor(() => expect(screen.getByText('확정 C2')).toBeInTheDocument());
+
+    await user.click(screen.getByRole('button', { name: '외부 TI 조회' }));
+    expect(await screen.findByText('악성 8')).toBeInTheDocument();
+    expect(screen.getByText('Abuse 신뢰도 91%')).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText('MISP event ID'), '42');
+    await user.click(screen.getByRole('button', { name: 'MISP로 전송' }));
+    expect(await screen.findByText(/Event 42/)).toBeInTheDocument();
+
+    const verdictCall = fetchMock.mock.calls.find(([url]) => url === '/api/v1/candidates/candidate-1/verdicts');
+    expect(JSON.parse(String(verdictCall?.[1]?.body))).toEqual({ verdict: 'CONFIRMED_C2', confidence: 'HIGH', note: 'Beacon verified' });
+    const mispCall = fetchMock.mock.calls.find(([url]) => url === '/api/v1/candidates/candidate-1/misp-exports');
+    expect(JSON.parse(String(mispCall?.[1]?.body))).toEqual({ event_id: '42' });
   });
 
   it('requires confirmation before permanently deleting a candidate', async () => {

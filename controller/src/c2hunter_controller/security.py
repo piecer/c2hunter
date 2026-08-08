@@ -157,6 +157,8 @@ def required_role(method: str, path: str) -> Role | None:
 
     if method == "GET":
         return Role.VIEWER
+    if method == "POST" and parts[0] == "candidates" and parts[-1] == "misp-exports":
+        return Role.ADMIN
     if parts[0] in {"sensor-enrollments", "sensor-groups", "detector-weight-presets"}:
         return Role.ADMIN
     if parts[0] == "sensors" and parts[-1] in {"configuration", "rotate", "revoke"}:

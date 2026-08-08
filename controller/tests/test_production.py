@@ -367,3 +367,25 @@ def test_replacing_job_flow_records_rolls_back_on_failure(monkeypatch: Any) -> N
         repository.create_job(job)
 
     assert failing_connection.rolled_back
+
+
+def test_candidate_workflow_resource_uses_object_store_and_audit(monkeypatch: Any) -> None:
+    connection = FakeConnection()
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg",
+        SimpleNamespace(connect=lambda *args, **kwargs: connection),
+    )
+    repository = PostgresRepository("postgresql://test", cast(MinioBlobStore, SimpleNamespace()))
+
+    repository.save_candidate_decision(
+        {
+            "id": "decision-1",
+            "candidate_id": "candidate-1",
+            "verdict": "CONFIRMED_C2",
+            "created_at": "2026-08-08T00:00:00+00:00",
+        }
+    )
+
+    assert any("INSERT INTO controller_objects" in query for query in connection.queries)
+    assert any("INSERT INTO audit_events" in query for query in connection.queries)

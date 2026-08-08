@@ -51,6 +51,33 @@ Values marked "SHA-256" must be 64-character lowercase hex digests — never pla
 | `C2HUNTER_PCAP_UPLOAD_MAX_BYTES`      | `524288000` (500 MiB)| Maximum PCAP upload size                            |
 | `C2HUNTER_PCAP_UPLOAD_MAX_PACKETS`    | `2000000`           | Maximum packets per PCAP upload                     |
 
+### Candidate 외부 검증 및 MISP 연동
+
+Candidate 상세 화면에서 분석가가 판정을 기록하고, VirusTotal/AbuseIPDB를 조회하며,
+`CONFIRMED_C2` 판정 후 MISP Event에 `ip-src` attribute를 전송할 수 있다. 외부 조회와
+전송은 비용·rate limit·오전송을 막기 위해 자동 실행하지 않고 분석가의 명시적 동작으로만
+수행된다. 판정 이력, TI 조회, MISP 전송 성공·실패 이력은 detector Candidate JSON과 분리된
+감사 resource로 보존되고 Candidate 조회 시 합성된다. `FALSE_POSITIVE` 판정은 detector 결과를
+숨기거나 Allowlist에 자동 등록하지 않으며, 영구 억제는 별도 Allowlist 작업으로 수행한다.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `C2HUNTER_VIRUSTOTAL_API_KEY` | *(empty)* | VirusTotal v3 API key; empty disables provider |
+| `C2HUNTER_ABUSEIPDB_API_KEY` | *(empty)* | AbuseIPDB v2 API key; empty disables provider |
+| `C2HUNTER_THREAT_INTEL_TIMEOUT_SECONDS` | `10` | Provider request timeout, 1–30 seconds |
+| `C2HUNTER_ABUSEIPDB_MAX_AGE_DAYS` | `90` | AbuseIPDB report lookback, 1–365 days |
+| `C2HUNTER_MISP_URL` | *(empty)* | MISP base URL; empty disables export |
+| `C2HUNTER_MISP_API_KEY` | *(empty)* | MISP automation/API key |
+| `C2HUNTER_MISP_DEFAULT_EVENT_ID` | *(empty)* | Optional default Event ID; UI input overrides it |
+| `C2HUNTER_MISP_VERIFY_TLS` | `true` | Verify the MISP server certificate |
+
+운영 환경에서는 API 키를 `.env`, 이미지, Git에 저장하지 말고 secret manager에서 주입한다.
+MISP 계정은 대상 Event에 attribute를 추가할 수 있는 최소 권한만 부여한다. MISP 전송은
+동일 Candidate IP/Event 조합의 성공 이력을 확인해 중복 호출을 막으며, false-positive 또는
+미판정 Candidate는 전송할 수 없다. 판정과 TI 조회는 ANALYST 이상, MISP 전송은 ADMIN만
+호출할 수 있다. `C2HUNTER_MISP_VERIFY_TLS=false`는 신뢰 가능한 격리
+개발망 외에는 사용하지 않는다.
+
 ## Certificates
 
 Development certificates must be generated locally and ignored by Git. A minimal internal-CA workflow is:

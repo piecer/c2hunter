@@ -28,6 +28,13 @@ def test_sensor_authenticated_and_operational_routes_do_not_require_human_roles(
     [
         ("GET", "/api/v1/dashboard", Role.VIEWER),
         ("POST", "/api/v1/analysis-jobs", Role.ANALYST),
+        ("POST", "/api/v1/candidates/candidate-1/verdicts", Role.ANALYST),
+        (
+            "POST",
+            "/api/v1/candidates/candidate-1/threat-intelligence/lookups",
+            Role.ANALYST,
+        ),
+        ("POST", "/api/v1/candidates/candidate-1/misp-exports", Role.ADMIN),
         ("DELETE", "/api/v1/candidates/candidate-1", Role.ANALYST),
         ("POST", "/api/v1/sensor-enrollments", Role.ADMIN),
         ("PUT", "/api/v1/sensors/sensor-1/configuration", Role.ADMIN),

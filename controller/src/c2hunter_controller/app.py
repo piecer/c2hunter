@@ -33,6 +33,14 @@ from .flow_review import (
     label_snapshot,
     payload_ascii,
 )
+from .integrations import (
+    IntegrationError,
+    JsonHttpClient,
+    MispClient,
+    MispPublisher,
+    ThreatIntelLookup,
+    ThreatIntelService,
+)
 from .jobs import JobState, StateMachine, build_job, calculate, summarize_candidate_traffic
 from .pcap import build_pcap, filter_records
 from .production import MinioBlobStore, PostgresRepository
@@ -45,6 +53,7 @@ from .schemas import (
     AnalysisParameters,
     CancelRequest,
     CandidateUpdate,
+    CandidateVerdictCreate,
     DetectorWeightPresetCreate,
     DetectorWeightPresetUpdate,
     DevLoginRequest,
@@ -55,6 +64,7 @@ from .schemas import (
     FlowBatchCreate,
     FlowLabelCreate,
     Heartbeat,
+    MispExportCreate,
     PayloadSignatureUpdate,
     PcapExportCreate,
     ReanalysisRequest,
@@ -194,6 +204,59 @@ def _public_candidate(
         **traffic,
         "related_attack_targets": sorted(related_targets),
     }
+
+
+def _find_candidate(
+    repo: Repository, candidate_id: str
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    workflow = _candidate_workflow_index(repo, candidate_id)
+    jobs = {str(job["id"]): job for job in repo.list_jobs()}
+    for job_id, candidates in repo.list_candidate_sets().items():
+        candidate = next((item for item in candidates if item.get("id") == candidate_id), None)
+        if candidate is not None and job_id in jobs:
+            return jobs[job_id], _with_candidate_workflow(candidate, workflow)
+    return None
+
+
+def _candidate_workflow_index(
+    repo: Repository, candidate_id: str | None = None
+) -> dict[str, dict[str, Any]]:
+    workflow: dict[str, dict[str, Any]] = {}
+    decisions = sorted(
+        repo.list_candidate_decisions(candidate_id), key=lambda item: str(item["created_at"])
+    )
+    for decision in decisions:
+        entry = workflow.setdefault(str(decision["candidate_id"]), {})
+        entry.setdefault("verdict_history", []).append(decision)
+        entry["current_verdict"] = decision
+    lookups = sorted(
+        repo.list_candidate_ti_lookups(candidate_id), key=lambda item: str(item["fetched_at"])
+    )
+    for lookup in lookups:
+        workflow.setdefault(str(lookup["candidate_id"]), {})["threat_intelligence"] = lookup
+    actions = sorted(
+        repo.list_candidate_misp_actions(candidate_id), key=lambda item: str(item["created_at"])
+    )
+    for action in actions:
+        entry = workflow.setdefault(str(action["candidate_id"]), {})
+        entry.setdefault("misp_exports", []).append(action)
+    return workflow
+
+
+def _with_candidate_workflow(
+    candidate: dict[str, Any], workflow: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    return {**candidate, **workflow.get(str(candidate["id"]), {})}
+
+
+def _candidate_verdict(candidate: dict[str, Any]) -> str:
+    current = candidate.get("current_verdict")
+    return str(current.get("verdict")) if isinstance(current, dict) else "UNREVIEWED"
+
+
+def _request_actor(request: Request) -> str:
+    principal = getattr(request.state, "principal", None)
+    return str(getattr(principal, "subject", "system"))
 
 
 def _utc_datetime(value: Any) -> datetime | None:
@@ -473,6 +536,8 @@ def create_app(
     *,
     flow_store: FlowStore | None = None,
     queue: ControllerQueue | None = None,
+    threat_intel_service: ThreatIntelLookup | None = None,
+    misp_client: MispPublisher | None = None,
 ) -> FastAPI:
     config = settings or Settings()
     if repository is not None:
@@ -513,11 +578,41 @@ def create_app(
             config.redis_url,
             visibility_timeout=config.queue_visibility_timeout_seconds,
         )
+    virustotal_key = config.virustotal_api_key.get_secret_value()
+    abuseipdb_key = config.abuseipdb_api_key.get_secret_value()
+    if threat_intel_service is not None:
+        threat_intel = threat_intel_service
+    elif virustotal_key or abuseipdb_key:
+        threat_intel = ThreatIntelService(
+            virustotal_api_key=virustotal_key,
+            abuseipdb_api_key=abuseipdb_key,
+            abuseipdb_max_age_days=config.abuseipdb_max_age_days,
+            http_client=JsonHttpClient(config.threat_intel_timeout_seconds),
+        )
+    else:
+        threat_intel = None
+    misp_key = config.misp_api_key.get_secret_value()
+    if misp_client is not None:
+        misp = misp_client
+    elif config.misp_url and misp_key:
+        misp = MispClient(
+            config.misp_url,
+            misp_key,
+            http_client=JsonHttpClient(
+                config.threat_intel_timeout_seconds,
+                verify_tls=config.misp_verify_tls,
+            ),
+        )
+    else:
+        misp = None
     app = FastAPI(title="C2Hunter Controller", version="0.1.0")
     app.state.settings = config
     app.state.repository = repo
     app.state.flow_store = flows
     app.state.queue = work_queue
+    app.state.threat_intel_service = threat_intel
+    app.state.misp_client = misp
+    misp_export_lock = threading.Lock()
     sessions = SessionStore()
     authenticator = TokenAuthenticator(
         sessions,
@@ -2229,6 +2324,10 @@ def create_app(
         page: int = Query(1, ge=1),
         page_size: int = Query(50, ge=1, le=200),
         severity: str | None = None,
+        verdict: Annotated[
+            str | None,
+            Query(pattern=r"^(UNREVIEWED|UNDER_REVIEW|CONFIRMED_C2|FALSE_POSITIVE)$"),
+        ] = None,
         minimum_score: int = Query(0, ge=0, le=100),
         include_suppressed: bool = False,
         sort: str = "-score",
@@ -2236,14 +2335,19 @@ def create_app(
         job = repo.get_job_summary(job_id)
         if job is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
+        workflow = _candidate_workflow_index(repo)
         items = [
-            _public_candidate(item, job)
+            _public_candidate(_with_candidate_workflow(item, workflow), job)
             for item in repo.get_candidates(job_id)
             if item["score"] >= minimum_score
-            and (include_suppressed or not item.get("excluded", False))
+            and (
+                include_suppressed or verdict == "FALSE_POSITIVE" or not item.get("excluded", False)
+            )
         ]
         if severity:
             items = [item for item in items if item["severity"] == severity]
+        if verdict:
+            items = [item for item in items if _candidate_verdict(item) == verdict]
         descending = sort.startswith("-")
         field = sort.removeprefix("-")
         if field not in {"score", "candidate_ip", "first_seen", "last_seen", "severity"}:
@@ -2263,31 +2367,45 @@ def create_app(
             raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
         if "traffic_buckets" not in candidate:
             job = repo.get_job(job_id) or job
-        return _public_candidate(candidate, job, include_traffic=True)
+        workflow = _candidate_workflow_index(repo, candidate_id)
+        return _public_candidate(
+            _with_candidate_workflow(candidate, workflow), job, include_traffic=True
+        )
 
     @app.get("/api/v1/candidates")
     def list_all_candidates(
         page: int = Query(1, ge=1),
         page_size: int = Query(50, ge=1, le=200),
         severity: str | None = None,
+        verdict: Annotated[
+            str | None,
+            Query(pattern=r"^(UNREVIEWED|UNDER_REVIEW|CONFIRMED_C2|FALSE_POSITIVE)$"),
+        ] = None,
         minimum_score: int = Query(0, ge=0, le=100),
         include_suppressed: bool = False,
         sort: str = "-score",
     ) -> dict[str, Any]:
         jobs = {str(job["id"]): job for job in repo.list_jobs()}
+        workflow = _candidate_workflow_index(repo)
         items: list[dict[str, Any]] = []
         for job_id, candidates in repo.list_candidate_sets().items():
             job = jobs.get(job_id)
             if job is None:
                 continue
             items.extend(
-                _public_candidate(candidate, job)
+                _public_candidate(_with_candidate_workflow(candidate, workflow), job)
                 for candidate in candidates
                 if candidate["score"] >= minimum_score
-                and (include_suppressed or not candidate.get("excluded", False))
+                and (
+                    include_suppressed
+                    or verdict == "FALSE_POSITIVE"
+                    or not candidate.get("excluded", False)
+                )
             )
         if severity:
             items = [item for item in items if item["severity"] == severity]
+        if verdict:
+            items = [item for item in items if _candidate_verdict(item) == verdict]
         descending = sort.startswith("-")
         field = sort.removeprefix("-")
         if field not in {"score", "candidate_ip", "first_seen", "last_seen", "severity"}:
@@ -2330,6 +2448,118 @@ def create_app(
                     if updated is not None:
                         return _public_candidate(updated, job)
         raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
+
+    @app.post("/api/v1/candidates/{candidate_id}/verdicts")
+    def create_candidate_verdict(
+        candidate_id: str, payload: CandidateVerdictCreate, request: Request
+    ) -> dict[str, Any]:
+        found = _find_candidate(repo, candidate_id)
+        if found is None:
+            raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
+        job, candidate = found
+        decision = {
+            "id": str(uuid.uuid4()),
+            "candidate_id": candidate_id,
+            "job_id": str(job["id"]),
+            "candidate_ip": str(candidate["candidate_ip"]),
+            **payload.model_dump(),
+            "created_by": _request_actor(request),
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        repo.save_candidate_decision(decision)
+        refreshed = _find_candidate(repo, candidate_id)
+        if refreshed is None:
+            raise ApiError(409, "CANDIDATE_UPDATE_CONFLICT", "후보 판정을 저장하지 못했습니다")
+        return _public_candidate(refreshed[1], job, include_traffic=True)
+
+    @app.post("/api/v1/candidates/{candidate_id}/threat-intelligence/lookups")
+    def lookup_candidate_threat_intelligence(candidate_id: str) -> dict[str, Any]:
+        if threat_intel is None:
+            raise ApiError(
+                503,
+                "THREAT_INTELLIGENCE_NOT_CONFIGURED",
+                "VirusTotal 또는 AbuseIPDB API 키가 설정되지 않았습니다",
+            )
+        found = _find_candidate(repo, candidate_id)
+        if found is None:
+            raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
+        job, candidate = found
+        try:
+            result = threat_intel.lookup_ip(str(candidate["candidate_ip"]))
+        except IntegrationError as exc:
+            raise ApiError(502, "THREAT_INTELLIGENCE_FAILED", exc.message) from exc
+        repo.save_candidate_ti_lookup(
+            {
+                "id": str(uuid.uuid4()),
+                "candidate_id": candidate_id,
+                "job_id": str(job["id"]),
+                "candidate_ip": str(candidate["candidate_ip"]),
+                **result,
+            }
+        )
+        return result
+
+    @app.post("/api/v1/candidates/{candidate_id}/misp-exports")
+    def export_candidate_to_misp(
+        candidate_id: str, payload: MispExportCreate, request: Request
+    ) -> dict[str, Any]:
+        if misp is None:
+            raise ApiError(503, "MISP_NOT_CONFIGURED", "MISP URL과 API 키가 설정되지 않았습니다")
+        event_id = payload.event_id or config.misp_default_event_id
+        if not event_id:
+            raise ApiError(422, "MISP_EVENT_REQUIRED", "MISP Event ID가 필요합니다")
+        with misp_export_lock:
+            found = _find_candidate(repo, candidate_id)
+            if found is None:
+                raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
+            job, candidate = found
+            current_verdict = candidate.get("current_verdict")
+            if (
+                not isinstance(current_verdict, dict)
+                or current_verdict.get("verdict") != "CONFIRMED_C2"
+            ):
+                raise ApiError(
+                    409,
+                    "CANDIDATE_NOT_CONFIRMED",
+                    "CONFIRMED_C2 판정 후에만 MISP로 전송할 수 있습니다",
+                )
+            exports = [item for item in candidate.get("misp_exports", []) if isinstance(item, dict)]
+            duplicate = next(
+                (
+                    item
+                    for item in exports
+                    if item.get("event_id") == event_id and item.get("status") == "EXPORTED"
+                ),
+                None,
+            )
+            if duplicate is not None:
+                return {**duplicate, "status": "ALREADY_EXPORTED"}
+            exported_at = datetime.now(UTC).isoformat()
+            base_record = {
+                "id": str(uuid.uuid4()),
+                "candidate_id": candidate_id,
+                "job_id": str(job["id"]),
+                "event_id": event_id,
+                "candidate_ip": str(candidate["candidate_ip"]),
+                "attribute_type": "ip-src",
+                "idempotency_key": f"{candidate_id}:{event_id}",
+                "comment": payload.comment,
+                "created_by": _request_actor(request),
+                "created_at": exported_at,
+            }
+            try:
+                external = misp.add_ip_attribute(
+                    event_id,
+                    str(candidate["candidate_ip"]),
+                    payload.comment,
+                )
+            except IntegrationError as exc:
+                failed = {**base_record, "status": "FAILED", "error": exc.message}
+                repo.save_candidate_misp_action(failed)
+                raise ApiError(502, "MISP_EXPORT_FAILED", exc.message) from exc
+            exported = {**base_record, **external, "status": "EXPORTED"}
+            repo.save_candidate_misp_action(exported)
+            return exported
 
     @app.delete("/api/v1/candidates/{candidate_id}")
     def delete_candidate(candidate_id: str) -> dict[str, Any]:

@@ -61,6 +61,30 @@ test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', 
   await expect(page.getByText('No allowlist entries')).toBeVisible();
 });
 
+test('administrator validates a candidate with TI and exports it to MISP', async ({ page }) => {
+  await installApiFixture(page);
+  await page.goto('/login');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByRole('button', { name: 'Development login' }).click();
+  await page.goto('/candidates/candidate-1');
+
+  await expect(page.getByRole('heading', { name: '판정 및 외부 검증' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'MISP로 전송' })).toBeDisabled();
+  await page.getByLabel('Candidate verdict').selectOption('CONFIRMED_C2');
+  await page.getByLabel('Verdict confidence').selectOption('HIGH');
+  await page.getByLabel('Verdict note').fill('Beacon and reputation verified');
+  await page.getByRole('button', { name: '판정 저장' }).click();
+  await expect(page.getByText('확정 C2')).toBeVisible();
+
+  await page.getByRole('button', { name: '외부 TI 조회' }).click();
+  await expect(page.getByText('악성 8')).toBeVisible();
+  await expect(page.getByText('Abuse 신뢰도 91%')).toBeVisible();
+
+  await page.getByLabel('MISP event ID').fill('42');
+  await page.getByRole('button', { name: 'MISP로 전송' }).click();
+  await expect(page.getByText(/Event 42/)).toBeVisible();
+});
+
 test('analyst can manage history and upload an offline PCAP', async ({ page }) => {
   await installApiFixture(page);
   await page.goto('/login');

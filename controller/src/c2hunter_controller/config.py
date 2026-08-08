@@ -1,4 +1,4 @@
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     dev_login_rate_limit: int = Field(default=10, gt=0)
     enrollment_claim_rate_limit: int = Field(default=10, gt=0)
     analysis_job_rate_limit: int = Field(default=30, gt=0)
+    virustotal_api_key: SecretStr = SecretStr("")
+    abuseipdb_api_key: SecretStr = SecretStr("")
+    threat_intel_timeout_seconds: float = Field(default=10.0, gt=0, le=30)
+    abuseipdb_max_age_days: int = Field(default=90, ge=1, le=365)
+    misp_url: str = ""
+    misp_api_key: SecretStr = SecretStr("")
+    misp_verify_tls: bool = True
+    misp_default_event_id: str = Field(default="", max_length=100)
 
     @model_validator(mode="after")
     def compatibility_defaults(self) -> "Settings":

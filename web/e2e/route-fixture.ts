@@ -7,10 +7,11 @@ async function fulfill(route: Route, body: unknown, status = 200) { await route.
 
 export async function installApiFixture(page: Page) {
   let allowlist: Array<{ id: string; type: string; value: string; description: string }> = [];
+  let currentCandidate: typeof candidate & Record<string, unknown> = { ...candidate };
   await page.route('**/api/v1/**', async route => {
     const request = route.request(); const path = new URL(request.url()).pathname.replace('/api/v1', ''); const method = request.method();
     if (path === '/auth/dev-login' && method === 'POST') return fulfill(route, { access_token: 'deterministic-e2e-token' });
-    if (path === '/dashboard') return fulfill(route, { generated_at: '2026-07-20T10:10:00Z', fleet: { total: 2, online: 2, offline: 0, degraded: 0, dropped_packets: 4 }, analyses: { total: 3, active: 1, completed_24h: 2, failed_24h: 0, partially_completed_24h: 0, by_status: { WAITING_FOR_SENSOR: 0, CAPTURING: 0, UPLOADING: 0, INGESTING: 0, ANALYZING: 1 } }, candidates: { total: 1, critical: 1, high: 0, medium: 0, low: 0, new_24h: 1 }, candidate_trend: [{ hour: '2026-07-20T08:00:00Z', count: 0 }, { hour: '2026-07-20T09:00:00Z', count: 0 }, { hour: '2026-07-20T10:00:00Z', count: 1 }], priority_candidates: [{ ...candidate, evidence_count: 2 }], recent_analyses: [{ id: 'job-1', name: 'E2E investigation', status: 'COMPLETED', candidate_count: 1, packet_count: 720000, flow_count: 18000, created_at: '2026-07-20T10:00:00Z' }], sensor_quality: [{ sensor_id: 'sensor-a', name: 'Sensor A', status: 'ONLINE', received_packets: 716000, dropped_packets: 4000, drop_rate_percent: 0.56, last_heartbeat_at: '2026-07-20T10:09:50Z', last_error: null }], attention: [{ kind: 'CRITICAL_CANDIDATE', severity: 'CRITICAL', title: '203.0.113.10 조사 필요', detail: '점수 87 · CRITICAL', href: '/candidates/candidate-1' }] });
+    if (path === '/dashboard') return fulfill(route, { generated_at: '2026-07-20T10:10:00Z', fleet: { total: 2, online: 2, offline: 0, degraded: 0, dropped_packets: 4 }, analyses: { total: 3, active: 1, completed_24h: 2, failed_24h: 0, partially_completed_24h: 0, by_status: { WAITING_FOR_SENSOR: 0, CAPTURING: 0, UPLOADING: 0, INGESTING: 0, ANALYZING: 1 } }, candidates: { total: 1, critical: 1, high: 0, medium: 0, low: 0, new_24h: 1 }, candidate_trend: [{ hour: '2026-07-20T08:00:00Z', count: 0 }, { hour: '2026-07-20T09:00:00Z', count: 0 }, { hour: '2026-07-20T10:00:00Z', count: 1 }], priority_candidates: [{ ...currentCandidate, evidence_count: 2 }], recent_analyses: [{ id: 'job-1', name: 'E2E investigation', status: 'COMPLETED', candidate_count: 1, packet_count: 720000, flow_count: 18000, created_at: '2026-07-20T10:00:00Z' }], sensor_quality: [{ sensor_id: 'sensor-a', name: 'Sensor A', status: 'ONLINE', received_packets: 716000, dropped_packets: 4000, drop_rate_percent: 0.56, last_heartbeat_at: '2026-07-20T10:09:50Z', last_error: null }], attention: [{ kind: 'CRITICAL_CANDIDATE', severity: 'CRITICAL', title: '203.0.113.10 조사 필요', detail: '점수 87 · CRITICAL', href: '/candidates/candidate-1' }] });
     if (path === '/sensors') return fulfill(route, { items: [sensor, { ...sensor, sensor_id: 'sensor-b', name: 'Sensor B', interfaces: [{ name: 'eth1', direction: 'OUTBOUND' }] }] });
     if (path === '/sensors/sensor-a') return fulfill(route, sensor);
     if (path === '/sensor-pcaps' && method === 'GET') return fulfill(route, { items: [{ id: 'segment-a', sensor_id: 'sensor-a', sensor_name: 'Sensor A', analysis_job_id: 'job-1', filename: 'job-1--eth0-000001.pcap', size_bytes: 24, sha256: 'digest', uploaded_at: '2026-07-20T10:08:00Z' }], page: 1, page_size: 50, total: 1 });
@@ -23,8 +24,25 @@ export async function installApiFixture(page: Page) {
     if (path === '/analysis-jobs/job-1/cancel') return fulfill(route, { status: 'CANCELLED' });
     if (path === '/pcap-analysis-jobs' && method === 'POST') return fulfill(route, { id: 'upload-job', name: 'Uploaded E2E capture', status: 'COMPLETED' }, 201);
     if (path === '/analysis-jobs/upload-job' && method === 'GET') return fulfill(route, { id: 'upload-job', name: 'Uploaded E2E capture', status: 'COMPLETED', source_type: 'PCAP_UPLOAD', source: { filename: 'fixture.pcap', size_bytes: 4 }, packet_count: 1, flow_count: 1, candidate_count: 0 });
-    if (path === '/candidates') return fulfill(route, { items: [candidate] });
-    if (path === '/candidates/candidate-1') return fulfill(route, candidate);
+    if (path === '/candidates') return fulfill(route, { items: [currentCandidate] });
+    if (path === '/candidates/candidate-1/verdicts' && method === 'POST') {
+      const body = request.postDataJSON();
+      const verdict = { id: 'verdict-1', ...body, created_by: 'analyst', created_at: '2026-07-20T10:11:00Z' };
+      currentCandidate = { ...currentCandidate, current_verdict: verdict, verdict_history: [verdict] };
+      return fulfill(route, currentCandidate);
+    }
+    if (path === '/candidates/candidate-1/threat-intelligence/lookups' && method === 'POST') {
+      const result = { ip_address: candidate.candidate_ip, fetched_at: '2026-07-20T10:12:00Z', summary: { malicious: 8, suspicious: 2, harmless: 12, abuse_confidence_score: 91 }, providers: { virustotal: { status: 'OK', malicious: 8, suspicious: 2, harmless: 12, reputation: -20 }, abuseipdb: { status: 'OK', abuse_confidence_score: 91, total_reports: 13, country_code: 'US' } } };
+      currentCandidate = { ...currentCandidate, threat_intelligence: result };
+      return fulfill(route, result);
+    }
+    if (path === '/candidates/candidate-1/misp-exports' && method === 'POST') {
+      const body = request.postDataJSON();
+      const result = { id: 'misp-1', status: 'EXPORTED', event_id: body.event_id || '42', candidate_ip: candidate.candidate_ip, attribute_type: 'ip-src', attribute_id: '9001', created_by: 'analyst', created_at: '2026-07-20T10:13:00Z' };
+      currentCandidate = { ...currentCandidate, misp_exports: [result] };
+      return fulfill(route, result);
+    }
+    if (path === '/candidates/candidate-1') return fulfill(route, currentCandidate);
     if (path === '/analysis-jobs/job-1/flows' && method === 'GET') return fulfill(route, { items: [flow], page: 1, page_size: 50, total: 1 });
     if (path === '/analysis-jobs/job-1/flow-labels' && method === 'POST') return fulfill(route, { label: { id: 'label-e2e', flow_id: flow.flow_id, verdict: 'C2', confidence: 'HIGH', created_at: '2026-07-20T10:06:00Z' }, signature: null }, 201);
     if (path === '/analysis-jobs/job-1/flows/e2e-flow/detection-guidance' && method === 'GET') return fulfill(route, { flow_id: flow.flow_id, candidate_ip: flow.external_ip, initially_detected: false, suppressed_by_policy: false, current_score: 5, minimum_candidate_score: 20, score_gap: 15, conditions: [{ evidence_type: 'PERIODIC_BEACON', detector: 'periodic_beacon', contribution: 15, weighted_contribution: 15, description: '허용 jitter 범위 내 주기 통신', metrics: { sample_count: 5 } }], adjustments: [{ kind: 'SINGLE_HOST', points: -10, explanation: '단일 호스트 관측 감점' }], recommendations: [{ kind: 'DETECTOR_WEIGHT', detector: 'periodic_beacon', current_value: 1, recommended_value: 2, projected_score: 20, score_gain: 15, rationale: '주기 통신 가중치 조정으로 후보 기준에 도달합니다.', risk: 'MEDIUM', risk_note: '정상 주기 통신 점수도 증가합니다.' }], recommended_reanalysis: { minimum_candidate_score: 20, detector_weights: { periodic_beacon: 2 } }, warnings: ['정상 데이터셋에서 오탐 증가를 검증해야 합니다.'] });

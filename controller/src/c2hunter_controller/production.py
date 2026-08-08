@@ -664,6 +664,33 @@ class PostgresRepository:
             for job_id, data in rows
         }
 
+    def save_candidate_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
+        return self._put("candidate-decision", decision["id"], decision)
+
+    def list_candidate_decisions(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
+        values = self._list("candidate-decision")
+        return [
+            item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
+        ]
+
+    def save_candidate_ti_lookup(self, lookup: dict[str, Any]) -> dict[str, Any]:
+        return self._put("candidate-ti-lookup", lookup["id"], lookup)
+
+    def list_candidate_ti_lookups(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
+        values = self._list("candidate-ti-lookup")
+        return [
+            item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
+        ]
+
+    def save_candidate_misp_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        return self._put("candidate-misp-action", action["id"], action)
+
+    def list_candidate_misp_actions(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
+        values = self._list("candidate-misp-action")
+        return [
+            item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
+        ]
+
     def update_candidate(self, candidate_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
         """Update a candidate by ID across all jobs."""
         from copy import deepcopy as dp

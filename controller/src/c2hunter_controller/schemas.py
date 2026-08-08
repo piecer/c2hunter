@@ -558,6 +558,26 @@ class CandidateUpdate(BaseModel):
         return v
 
 
+class CandidateVerdictCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: str = Field(pattern=r"^(CONFIRMED_C2|FALSE_POSITIVE|UNDER_REVIEW)$")
+    confidence: str = Field(pattern=r"^(CONFIRMED|HIGH|MEDIUM|LOW)$")
+    note: str = Field(min_length=1, max_length=5000)
+
+
+class MispExportCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9-]+$",
+    )
+    comment: str = Field(default="C2Hunter confirmed C2 candidate", min_length=1, max_length=1000)
+
+
 class CandidateResponse(BaseModel):
     """후보 단일 조회 응답 스키마."""
 

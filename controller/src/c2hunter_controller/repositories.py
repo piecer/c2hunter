@@ -38,6 +38,16 @@ class Repository(Protocol):
         self, candidate_id: str, updates: dict[str, Any]
     ) -> dict[str, Any] | None: ...
     def delete_candidate(self, candidate_id: str) -> bool: ...
+    def save_candidate_decision(self, decision: dict[str, Any]) -> dict[str, Any]: ...
+    def list_candidate_decisions(self, candidate_id: str | None = None) -> list[dict[str, Any]]: ...
+    def save_candidate_ti_lookup(self, lookup: dict[str, Any]) -> dict[str, Any]: ...
+    def list_candidate_ti_lookups(
+        self, candidate_id: str | None = None
+    ) -> list[dict[str, Any]]: ...
+    def save_candidate_misp_action(self, action: dict[str, Any]) -> dict[str, Any]: ...
+    def list_candidate_misp_actions(
+        self, candidate_id: str | None = None
+    ) -> list[dict[str, Any]]: ...
     def save_flow_label(self, label: dict[str, Any]) -> dict[str, Any]: ...
     def list_flow_labels(self, job_id: str | None = None) -> list[dict[str, Any]]: ...
     def save_payload_signature(self, signature: dict[str, Any]) -> dict[str, Any]: ...
@@ -84,6 +94,9 @@ class MemoryRepository:
         self.jobs: dict[str, dict[str, Any]] = {}
         self.idempotency_keys: dict[str, str] = {}
         self.candidates: dict[str, list[dict[str, Any]]] = {}
+        self.candidate_decisions: dict[str, dict[str, Any]] = {}
+        self.candidate_ti_lookups: dict[str, dict[str, Any]] = {}
+        self.candidate_misp_actions: dict[str, dict[str, Any]] = {}
         self.job_captures: dict[str, bytes] = {}
         self.flow_labels: dict[str, dict[str, Any]] = {}
         self.payload_signatures: dict[str, dict[str, Any]] = {}
@@ -271,6 +284,42 @@ class MemoryRepository:
 
     def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]:
         return deepcopy(self.candidates)
+
+    def save_candidate_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self.candidate_decisions[decision["id"]] = deepcopy(decision)
+            return deepcopy(decision)
+
+    def list_candidate_decisions(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
+        values = self.candidate_decisions.values()
+        selected = [
+            item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
+        ]
+        return sorted(deepcopy(selected), key=lambda item: str(item["created_at"]))
+
+    def save_candidate_ti_lookup(self, lookup: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self.candidate_ti_lookups[lookup["id"]] = deepcopy(lookup)
+            return deepcopy(lookup)
+
+    def list_candidate_ti_lookups(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
+        values = self.candidate_ti_lookups.values()
+        selected = [
+            item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
+        ]
+        return sorted(deepcopy(selected), key=lambda item: str(item["fetched_at"]))
+
+    def save_candidate_misp_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self.candidate_misp_actions[action["id"]] = deepcopy(action)
+            return deepcopy(action)
+
+    def list_candidate_misp_actions(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
+        values = self.candidate_misp_actions.values()
+        selected = [
+            item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
+        ]
+        return sorted(deepcopy(selected), key=lambda item: str(item["created_at"]))
 
     def save_flow_label(self, label: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -739,6 +788,33 @@ class SQLiteRepository:
     def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]:
         rows = self.connection.execute("SELECT job_id,data FROM candidates").fetchall()
         return {str(job_id): json.loads(data) for job_id, data in rows}
+
+    def save_candidate_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
+        return self._put("candidate-decision", decision["id"], decision)
+
+    def list_candidate_decisions(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
+        values = self._list("candidate-decision")
+        return [
+            item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
+        ]
+
+    def save_candidate_ti_lookup(self, lookup: dict[str, Any]) -> dict[str, Any]:
+        return self._put("candidate-ti-lookup", lookup["id"], lookup)
+
+    def list_candidate_ti_lookups(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
+        values = self._list("candidate-ti-lookup")
+        return [
+            item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
+        ]
+
+    def save_candidate_misp_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        return self._put("candidate-misp-action", action["id"], action)
+
+    def list_candidate_misp_actions(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
+        values = self._list("candidate-misp-action")
+        return [
+            item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
+        ]
 
     def update_candidate(self, candidate_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
         """Update a candidate by ID across all jobs."""

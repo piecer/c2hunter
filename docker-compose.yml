@@ -48,6 +48,14 @@ services:
       C2HUNTER_ANALYSIS_JOB_RATE_LIMIT: "${C2HUNTER_ANALYSIS_JOB_RATE_LIMIT:-30}"
       C2HUNTER_PCAP_UPLOAD_MAX_BYTES: "${C2HUNTER_PCAP_UPLOAD_MAX_BYTES:-524288000}"
       C2HUNTER_PCAP_UPLOAD_MAX_PACKETS: "${C2HUNTER_PCAP_UPLOAD_MAX_PACKETS:-2000000}"
+      C2HUNTER_VIRUSTOTAL_API_KEY: "${C2HUNTER_VIRUSTOTAL_API_KEY:-}"
+      C2HUNTER_ABUSEIPDB_API_KEY: "${C2HUNTER_ABUSEIPDB_API_KEY:-}"
+      C2HUNTER_THREAT_INTEL_TIMEOUT_SECONDS: "${C2HUNTER_THREAT_INTEL_TIMEOUT_SECONDS:-10}"
+      C2HUNTER_ABUSEIPDB_MAX_AGE_DAYS: "${C2HUNTER_ABUSEIPDB_MAX_AGE_DAYS:-90}"
+      C2HUNTER_MISP_URL: "${C2HUNTER_MISP_URL:-}"
+      C2HUNTER_MISP_API_KEY: "${C2HUNTER_MISP_API_KEY:-}"
+      C2HUNTER_MISP_DEFAULT_EVENT_ID: "${C2HUNTER_MISP_DEFAULT_EVENT_ID:-}"
+      C2HUNTER_MISP_VERIFY_TLS: "${C2HUNTER_MISP_VERIFY_TLS:-true}"
     ports: ["${CONTROLLER_PORT:-8000}:8000"]
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, clickhouse: { condition: service_healthy }, minio: { condition: service_healthy } }
     healthcheck: { test: [CMD, python, -m, c2hunter_controller.healthcheck], interval: 10s, timeout: 5s, retries: 15 }
