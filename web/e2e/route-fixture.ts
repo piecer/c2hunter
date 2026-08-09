@@ -8,6 +8,26 @@ async function fulfill(route: Route, body: unknown, status = 200) { await route.
 export async function installApiFixture(page: Page) {
   let allowlist: Array<{ id: string; type: string; value: string; description: string }> = [];
   let currentCandidate: typeof candidate & Record<string, unknown> = { ...candidate };
+  let aiRuns: Array<Record<string, unknown>> = [];
+  const aiAssessment = {
+    id: 'assessment-1',
+    run_id: 'ai-run-1',
+    candidate_id: 'candidate-1',
+    external_ip: '203.0.113.10',
+    assessment: {
+      candidate: {
+        external_ip: '203.0.113.10',
+        verdict: 'LIKELY_C2',
+        confidence: 0.93,
+        summary_ko: '결정론적 근거가 주기적 비콘 동작을 지지합니다.',
+        summary_en: 'Deterministic evidence supports beaconing behavior.',
+      },
+      supporting_factors: [{ title: 'Stable periodic callback', explanation: 'Repeated timing is stable.', strength: 'HIGH', evidence_ids: ['E-C2H-001'] }],
+      counter_factors: [{ title: 'No DNS tunnel evidence', explanation: 'Only flow metadata is present.', evidence_ids: ['E-C2H-001'] }],
+      missing_information: ['Destination ownership'],
+      limitations: ['FakeGateway milestone output'],
+    },
+  };
   await page.route('**/api/v1/**', async route => {
     const request = route.request(); const path = new URL(request.url()).pathname.replace('/api/v1', ''); const method = request.method();
     if (path === '/auth/dev-login' && method === 'POST') return fulfill(route, { access_token: 'deterministic-e2e-token' });
@@ -18,6 +38,13 @@ export async function installApiFixture(page: Page) {
     if (path === '/sensor-pcaps/segment-a/download' && method === 'GET') return route.fulfill({ status: 200, contentType: 'application/vnd.tcpdump.pcap', headers: { 'Content-Disposition': 'attachment; filename="job-1--eth0-000001.pcap"' }, body: Buffer.from([0xd4, 0xc3, 0xb2, 0xa1]) });
     if (path === '/analysis-jobs' && method === 'GET') return fulfill(route, { items: [{ id: 'job-1', name: 'E2E investigation', status: 'COMPLETED', candidate_count: 1 }] });
     if (path === '/analysis-jobs' && method === 'POST') return fulfill(route, { id: 'job-1', name: 'E2E investigation', status: 'CREATED' }, 201);
+    if (path === '/analysis-jobs/job-1/ai-runs' && method === 'GET') return fulfill(route, { items: aiRuns, total: aiRuns.length });
+    if (path === '/analysis-jobs/job-1/ai-runs' && method === 'POST') {
+      aiRuns = [{ id: 'ai-run-1', analysis_job_id: 'job-1', status: 'COMPLETED', progress_percent: 100, candidate_count: 1, created_at: '2026-07-20T10:15:00Z' }];
+      return fulfill(route, aiRuns[0], 201);
+    }
+    if (path === '/ai-runs/ai-run-1' && method === 'GET') return fulfill(route, aiRuns[0]);
+    if (path === '/ai-runs/ai-run-1/assessments' && method === 'GET') return fulfill(route, { items: [aiAssessment], total: 1 });
     if (path === '/analysis-jobs/job-1' && method === 'PATCH') { const body = request.postDataJSON(); return fulfill(route, { id: 'job-1', name: body.name, description: body.description, status: 'COMPLETED' }); }
     if (path === '/analysis-jobs/job-1' && method === 'DELETE') return fulfill(route, undefined, 204);
     if (path === '/analysis-jobs/job-1' && method === 'GET') return fulfill(route, { id: 'job-1', name: 'E2E investigation', status: 'ANALYZING', progress_percent: 72, packet_count: 720000, flow_count: 18000, candidate_count: 1, sensor_ids: ['sensor-a'], internal_networks: ['10.0.0.0/8'], capture: { directions: ['OUTBOUND', 'INBOUND'], store_pcap: true, max_packets: 2000000, limits: { max_duration_seconds: 300 } }, analysis: { profile: 'ddos_botnet', minimum_candidate_score: 60, minimum_distinct_clients: 3, periodicity_min_samples: 5, ml_anomaly_enabled: true, detector_weights: { periodic_beacon: 1.5, common_destination: 0.25, dns_tunnel: 0 }, custom_policy: { mode: 'strict', tags: ['production', 'edge'] } } });

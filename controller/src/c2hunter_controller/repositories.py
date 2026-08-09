@@ -34,6 +34,14 @@ class Repository(Protocol):
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None: ...
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]: ...
     def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]: ...
+    def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]: ...
+    def save_ai_run(self, run: dict[str, Any]) -> dict[str, Any]: ...
+    def get_ai_run(self, run_id: str) -> dict[str, Any] | None: ...
+    def list_ai_runs(self, job_id: str) -> list[dict[str, Any]]: ...
+    def save_ai_assessment(self, assessment: dict[str, Any]) -> dict[str, Any]: ...
+    def get_ai_assessment(self, assessment_id: str) -> dict[str, Any] | None: ...
+    def list_ai_assessments(self, run_id: str) -> list[dict[str, Any]]: ...
+    def append_audit_event(self, kind: str, object_id: str, data: dict[str, Any]) -> None: ...
     def update_candidate(
         self, candidate_id: str, updates: dict[str, Any]
     ) -> dict[str, Any] | None: ...
@@ -94,6 +102,10 @@ class MemoryRepository:
         self.jobs: dict[str, dict[str, Any]] = {}
         self.idempotency_keys: dict[str, str] = {}
         self.candidates: dict[str, list[dict[str, Any]]] = {}
+        self.ai_runs: dict[str, dict[str, Any]] = {}
+        self.ai_run_idempotency_keys: dict[tuple[str, str], str] = {}
+        self.ai_assessments: dict[str, dict[str, Any]] = {}
+        self.audit_events: list[dict[str, Any]] = []
         self.candidate_decisions: dict[str, dict[str, Any]] = {}
         self.candidate_ti_lookups: dict[str, dict[str, Any]] = {}
         self.candidate_misp_actions: dict[str, dict[str, Any]] = {}
@@ -234,6 +246,73 @@ class MemoryRepository:
 
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]:
         return deepcopy(self.candidates.get(job_id, []))
+
+    def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        key = (run["analysis_job_id"], run["idempotency_key"])
+        with self._lock:
+            existing_id = self.ai_run_idempotency_keys.get(key)
+            if existing_id is not None:
+                return deepcopy(self.ai_runs[existing_id]), False
+            self.ai_runs[run["id"]] = deepcopy(run)
+            self.ai_run_idempotency_keys[key] = run["id"]
+            return deepcopy(run), True
+
+    def save_ai_run(self, run: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            existing = self.ai_runs.get(run["id"])
+            if existing is not None and existing.get("status") in {
+                "COMPLETED",
+                "FAILED",
+                "CANCELLED",
+            }:
+                return deepcopy(existing)
+            self.ai_runs[run["id"]] = deepcopy(run)
+            return deepcopy(run)
+
+    def get_ai_run(self, run_id: str) -> dict[str, Any] | None:
+        value = self.ai_runs.get(run_id)
+        return deepcopy(value) if value is not None else None
+
+    def list_ai_runs(self, job_id: str) -> list[dict[str, Any]]:
+        return deepcopy(
+            sorted(
+                (run for run in self.ai_runs.values() if run["analysis_job_id"] == job_id),
+                key=lambda run: run["created_at"],
+                reverse=True,
+            )
+        )
+
+    def save_ai_assessment(self, assessment: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self.ai_assessments.setdefault(assessment["id"], deepcopy(assessment))
+            return deepcopy(self.ai_assessments[assessment["id"]])
+
+    def get_ai_assessment(self, assessment_id: str) -> dict[str, Any] | None:
+        value = self.ai_assessments.get(assessment_id)
+        return deepcopy(value) if value is not None else None
+
+    def list_ai_assessments(self, run_id: str) -> list[dict[str, Any]]:
+        return deepcopy(
+            sorted(
+                (
+                    assessment
+                    for assessment in self.ai_assessments.values()
+                    if assessment["ai_run_id"] == run_id
+                ),
+                key=lambda assessment: assessment["created_at"],
+            )
+        )
+
+    def append_audit_event(self, kind: str, object_id: str, data: dict[str, Any]) -> None:
+        with self._lock:
+            self.audit_events.append(
+                {
+                    "kind": kind,
+                    "object_id": object_id,
+                    "occurred_at": datetime.now().astimezone().isoformat(),
+                    "data": deepcopy(data),
+                }
+            )
 
     def update_candidate(self, candidate_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
         """Update a candidate and return it, or None if not found."""
@@ -537,6 +616,31 @@ class SQLiteRepository:
             CREATE TABLE IF NOT EXISTS candidates (
               job_id TEXT PRIMARY KEY, data TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS ai_analysis_runs (
+              run_id TEXT PRIMARY KEY,
+              analysis_job_id TEXT NOT NULL,
+              idempotency_key TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              data TEXT NOT NULL,
+              UNIQUE(analysis_job_id, idempotency_key)
+            );
+            CREATE INDEX IF NOT EXISTS ai_analysis_runs_job_created
+              ON ai_analysis_runs(analysis_job_id, created_at DESC);
+            CREATE TABLE IF NOT EXISTS ai_candidate_assessments (
+              assessment_id TEXT PRIMARY KEY,
+              ai_run_id TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              data TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ai_candidate_assessments_run_created
+              ON ai_candidate_assessments(ai_run_id, created_at);
+            CREATE TABLE IF NOT EXISTS audit_events (
+              sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+              kind TEXT NOT NULL,
+              object_id TEXT NOT NULL,
+              occurred_at TEXT NOT NULL,
+              data TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS job_flow_records (
               job_id TEXT PRIMARY KEY, data TEXT NOT NULL
             );
@@ -784,6 +888,97 @@ class SQLiteRepository:
             "SELECT data FROM candidates WHERE job_id=?", (job_id,)
         ).fetchone()
         return json.loads(row[0]) if row else []
+
+    def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        with self._lock:
+            existing = self.connection.execute(
+                "SELECT data FROM ai_analysis_runs WHERE analysis_job_id=? AND idempotency_key=?",
+                (run["analysis_job_id"], run["idempotency_key"]),
+            ).fetchone()
+            if existing is not None:
+                return json.loads(existing[0]), False
+            self.connection.execute(
+                "INSERT INTO ai_analysis_runs"
+                "(run_id,analysis_job_id,idempotency_key,created_at,data) VALUES(?,?,?,?,?)",
+                (
+                    run["id"],
+                    run["analysis_job_id"],
+                    run["idempotency_key"],
+                    run["created_at"],
+                    self._serialize(run),
+                ),
+            )
+            self.connection.commit()
+            return deepcopy(run), True
+
+    def save_ai_run(self, run: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT data FROM ai_analysis_runs WHERE run_id=?", (run["id"],)
+            ).fetchone()
+            if row is not None:
+                existing = json.loads(row[0])
+                if existing.get("status") in {"COMPLETED", "FAILED", "CANCELLED"}:
+                    return existing
+            self.connection.execute(
+                "UPDATE ai_analysis_runs SET data=? WHERE run_id=?",
+                (self._serialize(run), run["id"]),
+            )
+            self.connection.commit()
+            return deepcopy(run)
+
+    def get_ai_run(self, run_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT data FROM ai_analysis_runs WHERE run_id=?", (run_id,)
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def list_ai_runs(self, job_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT data FROM ai_analysis_runs WHERE analysis_job_id=? ORDER BY created_at DESC",
+            (job_id,),
+        ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def save_ai_assessment(self, assessment: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self.connection.execute(
+                "INSERT OR IGNORE INTO ai_candidate_assessments"
+                "(assessment_id,ai_run_id,created_at,data) VALUES(?,?,?,?)",
+                (
+                    assessment["id"],
+                    assessment["ai_run_id"],
+                    assessment["created_at"],
+                    self._serialize(assessment),
+                ),
+            )
+            self.connection.commit()
+            stored = self.get_ai_assessment(assessment["id"])
+            if stored is None:
+                raise RuntimeError("AI assessment was not persisted")
+            return stored
+
+    def get_ai_assessment(self, assessment_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT data FROM ai_candidate_assessments WHERE assessment_id=?",
+            (assessment_id,),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def list_ai_assessments(self, run_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT data FROM ai_candidate_assessments WHERE ai_run_id=? ORDER BY created_at",
+            (run_id,),
+        ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def append_audit_event(self, kind: str, object_id: str, data: dict[str, Any]) -> None:
+        with self._lock:
+            self.connection.execute(
+                "INSERT INTO audit_events(kind,object_id,occurred_at,data) VALUES(?,?,?,?)",
+                (kind, object_id, datetime.now().astimezone().isoformat(), self._serialize(data)),
+            )
+            self.connection.commit()
 
     def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]:
         rows = self.connection.execute("SELECT job_id,data FROM candidates").fetchall()

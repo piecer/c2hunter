@@ -598,3 +598,16 @@ class CandidateListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class AIAnalysisRunCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(min_length=1, max_length=200)
+    candidate_limit: int = Field(default=5, ge=1, le=5)
+
+
+class AIAnalysisRunCancel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=1000)

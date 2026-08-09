@@ -88,6 +88,24 @@ class PostgresRepository:
                         CREATE TABLE IF NOT EXISTS job_candidates (
                           job_id text PRIMARY KEY, data jsonb NOT NULL
                         );
+                        CREATE TABLE IF NOT EXISTS ai_analysis_runs (
+                          run_id text PRIMARY KEY,
+                          analysis_job_id text NOT NULL,
+                          idempotency_key text NOT NULL,
+                          created_at timestamptz NOT NULL,
+                          data jsonb NOT NULL,
+                          UNIQUE(analysis_job_id,idempotency_key)
+                        );
+                        CREATE INDEX IF NOT EXISTS ai_analysis_runs_job_created
+                          ON ai_analysis_runs(analysis_job_id,created_at DESC);
+                        CREATE TABLE IF NOT EXISTS ai_candidate_assessments (
+                          assessment_id text PRIMARY KEY,
+                          ai_run_id text NOT NULL REFERENCES ai_analysis_runs(run_id),
+                          created_at timestamptz NOT NULL,
+                          data jsonb NOT NULL
+                        );
+                        CREATE INDEX IF NOT EXISTS ai_candidate_assessments_run_created
+                          ON ai_candidate_assessments(ai_run_id,created_at);
                         CREATE TABLE IF NOT EXISTS job_flow_records (
                           job_id text PRIMARY KEY, data jsonb NOT NULL
                         );
@@ -653,6 +671,156 @@ class PostgresRepository:
         if not row:
             return []
         return row[0] if isinstance(row[0], list) else json.loads(row[0])
+
+    def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        connection = self.connection
+        with self._lock:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "INSERT INTO ai_analysis_runs"
+                        "(run_id,analysis_job_id,idempotency_key,created_at,data) "
+                        "VALUES(%s,%s,%s,%s,%s::jsonb) "
+                        "ON CONFLICT(analysis_job_id,idempotency_key) DO NOTHING "
+                        "RETURNING data",
+                        (
+                            run["id"],
+                            run["analysis_job_id"],
+                            run["idempotency_key"],
+                            run["created_at"],
+                            self._json(run),
+                        ),
+                    )
+                    row = cursor.fetchone()
+                    if row is None:
+                        cursor.execute(
+                            "SELECT data FROM ai_analysis_runs "
+                            "WHERE analysis_job_id=%s AND idempotency_key=%s",
+                            (run["analysis_job_id"], run["idempotency_key"]),
+                        )
+                        existing_row = cursor.fetchone()
+                        if existing_row is None:
+                            raise RuntimeError("AI run idempotency conflict could not be read")
+                        connection.commit()
+                        value = existing_row[0]
+                        return (value if isinstance(value, dict) else json.loads(value)), False
+                    cursor.execute(
+                        "INSERT INTO audit_events(kind,object_id,occurred_at,data) "
+                        "VALUES('ai-run',%s,%s,%s::jsonb)",
+                        (run["id"], datetime.now(UTC), self._json(run)),
+                    )
+                connection.commit()
+                return deepcopy(run), True
+            except Exception:
+                connection.rollback()
+                raise
+
+    def save_ai_run(self, run: dict[str, Any]) -> dict[str, Any]:
+        connection = self.connection
+        with self._lock:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT data FROM ai_analysis_runs WHERE run_id=%s FOR UPDATE",
+                        (run["id"],),
+                    )
+                    row = cursor.fetchone()
+                    if row is None:
+                        connection.commit()
+                        raise KeyError(f"AI run not found: {run['id']}")
+                    value = row[0]
+                    existing = value if isinstance(value, dict) else json.loads(value)
+                    if existing.get("status") in {"COMPLETED", "FAILED", "CANCELLED"}:
+                        connection.commit()
+                        return existing
+                    cursor.execute(
+                        "UPDATE ai_analysis_runs SET data=%s::jsonb WHERE run_id=%s",
+                        (self._json(run), run["id"]),
+                    )
+                    cursor.execute(
+                        "INSERT INTO audit_events(kind,object_id,occurred_at,data) "
+                        "VALUES('ai-run',%s,%s,%s::jsonb)",
+                        (run["id"], datetime.now(UTC), self._json(run)),
+                    )
+                connection.commit()
+                return deepcopy(run)
+            except Exception:
+                connection.rollback()
+                raise
+
+    def get_ai_run(self, run_id: str) -> dict[str, Any] | None:
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT data FROM ai_analysis_runs WHERE run_id=%s", (run_id,))
+            row = cursor.fetchone()
+            self.connection.commit()
+        if row is None:
+            return None
+        value = row[0]
+        return value if isinstance(value, dict) else json.loads(value)
+
+    def list_ai_runs(self, job_id: str) -> list[dict[str, Any]]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT data FROM ai_analysis_runs "
+                "WHERE analysis_job_id=%s ORDER BY created_at DESC",
+                (job_id,),
+            )
+            rows = cursor.fetchall()
+            self.connection.commit()
+        return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
+
+    def save_ai_assessment(self, assessment: dict[str, Any]) -> dict[str, Any]:
+        connection = self.connection
+        with self._lock:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "INSERT INTO ai_candidate_assessments"
+                        "(assessment_id,ai_run_id,created_at,data) VALUES(%s,%s,%s,%s::jsonb) "
+                        "ON CONFLICT(assessment_id) DO NOTHING",
+                        (
+                            assessment["id"],
+                            assessment["ai_run_id"],
+                            assessment["created_at"],
+                            self._json(assessment),
+                        ),
+                    )
+                    cursor.execute(
+                        "INSERT INTO audit_events(kind,object_id,occurred_at,data) "
+                        "VALUES('ai-assessment',%s,%s,%s::jsonb)",
+                        (assessment["id"], datetime.now(UTC), self._json(assessment)),
+                    )
+                connection.commit()
+                return deepcopy(assessment)
+            except Exception:
+                connection.rollback()
+                raise
+
+    def get_ai_assessment(self, assessment_id: str) -> dict[str, Any] | None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT data FROM ai_candidate_assessments WHERE assessment_id=%s",
+                (assessment_id,),
+            )
+            row = cursor.fetchone()
+            self.connection.commit()
+        if row is None:
+            return None
+        value = row[0]
+        return value if isinstance(value, dict) else json.loads(value)
+
+    def list_ai_assessments(self, run_id: str) -> list[dict[str, Any]]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT data FROM ai_candidate_assessments WHERE ai_run_id=%s ORDER BY created_at",
+                (run_id,),
+            )
+            rows = cursor.fetchall()
+            self.connection.commit()
+        return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
+
+    def append_audit_event(self, kind: str, object_id: str, data: dict[str, Any]) -> None:
+        self._audit(kind, object_id, data)
 
     def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]:
         with self.connection.cursor() as cursor:

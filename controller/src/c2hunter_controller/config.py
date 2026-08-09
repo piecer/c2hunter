@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     dev_login_rate_limit: int = Field(default=10, gt=0)
     enrollment_claim_rate_limit: int = Field(default=10, gt=0)
     analysis_job_rate_limit: int = Field(default=30, gt=0)
+    ai_analysis_enabled: bool = False
     virustotal_api_key: SecretStr = SecretStr("")
     abuseipdb_api_key: SecretStr = SecretStr("")
     threat_intel_timeout_seconds: float = Field(default=10.0, gt=0, le=30)

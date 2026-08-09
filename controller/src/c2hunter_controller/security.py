@@ -156,6 +156,8 @@ def required_role(method: str, path: str) -> Role | None:
             return None
 
     if method == "GET":
+        if parts[0] == "ai-assessments" and parts[-1] == "evidence-bundle":
+            return Role.ANALYST
         return Role.VIEWER
     if method == "POST" and parts[0] == "candidates" and parts[-1] == "misp-exports":
         return Role.ADMIN

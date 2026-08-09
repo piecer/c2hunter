@@ -66,6 +66,7 @@ test('administrator validates a candidate with TI and exports it to MISP', async
   await page.goto('/login');
   await page.getByLabel('Username').fill('admin');
   await page.getByRole('button', { name: 'Development login' }).click();
+  await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
   await page.goto('/candidates/candidate-1');
 
   await expect(page.getByRole('heading', { name: '판정 및 외부 검증' })).toBeVisible();
@@ -126,11 +127,45 @@ test('analyst can download an archived sensor PCAP', async ({ page }) => {
   expect(download.suggestedFilename()).toBe('job-1--eth0-000001.pcap');
 });
 
+test('analyst can run bounded AI analysis and inspect the candidate assessment', async ({ page }) => {
+  await installApiFixture(page);
+  await page.route(/\/api\/v1\/analysis-jobs\/job-1$/, async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        id: 'job-1',
+        name: 'E2E investigation',
+        status: 'COMPLETED',
+        progress_percent: 100,
+        candidate_count: 1,
+      }),
+    });
+  });
+  await page.goto('/login');
+  await page.getByLabel('Username').fill('analyst');
+  await page.getByRole('button', { name: 'Development login' }).click();
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
+  await page.goto('/analyses/job-1');
+
+  const aiPanel = page.getByRole('region', { name: 'AI C2 분석' });
+  await aiPanel.getByRole('button', { name: 'Run AI analysis' }).click();
+  await expect(aiPanel.getByText('COMPLETED')).toBeVisible();
+  await expect(aiPanel.getByText('LIKELY_C2')).toBeVisible();
+  await expect(aiPanel.getByText('E-C2H-001').first()).toBeVisible();
+
+  await page.getByRole('link', { name: '203.0.113.10' }).click();
+  const candidateAI = page.getByRole('region', { name: 'AI C2 판정' });
+  await expect(candidateAI.getByText('LIKELY_C2')).toBeVisible();
+  await expect(candidateAI.getByText('Stable periodic callback')).toBeVisible();
+});
+
 test('analysis configuration is structured and responsive', async ({ page }) => {
   await installApiFixture(page);
   await page.goto('/login');
   await page.getByLabel('Username').fill('analyst');
   await page.getByRole('button', { name: 'Development login' }).click();
+  await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
   await page.goto('/analyses/job-1');
 
   const configuration = page.getByRole('region', { name: '분석 구성' });

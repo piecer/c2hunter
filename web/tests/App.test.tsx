@@ -36,6 +36,21 @@ responses['/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&include_filter=
 responses['/api/v1/candidates?page=1&page_size=50&minimum_score=0&sort=-score'] =
   responses['/api/v1/candidates'];
 responses['/api/v1/sensor-pcaps?analysis_job_id=job-1&page_size=200'] = { items: [], total: 0, page: 1, page_size: 200 };
+responses['/api/v1/analysis-jobs/job-1/ai-runs'] = {
+  items: [{ id: 'ai-run-1', analysis_job_id: 'job-1', status: 'COMPLETED', candidate_count: 1, created_at: '2026-07-20T10:11:00Z' }],
+  total: 1,
+};
+responses['/api/v1/ai-runs/ai-run-1/assessments'] = {
+  items: [{
+    id: 'assessment-1', candidate_id: 'candidate-1', external_ip: '203.0.113.9',
+    assessment: {
+      candidate: { external_ip: '203.0.113.9', verdict: 'SUSPICIOUS', confidence: 0.75, summary_ko: '주기 통신 근거를 검토해야 합니다.', summary_en: 'Review periodic traffic evidence.' },
+      supporting_factors: [{ title: 'Periodic traffic', evidence_ids: ['E-C2H-candidate-1-01'], explanation: 'Repeated timing', strength: 'HIGH' }],
+      counter_factors: [], missing_information: ['Local reputation'], recommended_actions: [], stable_detection_features: [], limitations: [],
+    },
+  }],
+  total: 1,
+};
 
 function renderAt(route: string, handler?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
   localStorage.setItem('c2hunter-token', 'token');
@@ -122,6 +137,30 @@ describe('C2Hunter UI', () => {
     expect(await screen.findByRole('table', { name: 'Analysis candidates' })).toBeInTheDocument();
     expect(await screen.findByRole('table', { name: 'Analysis flows' })).toBeInTheDocument();
     expect(screen.getByText('analysis requested')).toBeInTheDocument();
+  });
+
+  it('shows AI run status and evidence-linked candidate assessment', async () => {
+    renderAt('/analyses/job-1');
+
+    const region = await screen.findByRole('region', { name: 'AI C2 분석' });
+    expect(await within(region).findByText('COMPLETED')).toBeInTheDocument();
+    expect(await within(region).findByText('SUSPICIOUS')).toBeInTheDocument();
+    expect(within(region).getByText('신뢰도 75%')).toBeInTheDocument();
+    expect(within(region).getByText('주기 통신 근거를 검토해야 합니다.')).toBeInTheDocument();
+    expect(within(region).getByText('E-C2H-candidate-1-01')).toBeInTheDocument();
+    expect(within(region).getByRole('link', { name: '203.0.113.9' })).toHaveAttribute(
+      'href',
+      '/candidates/candidate-1',
+    );
+  });
+
+  it('shows the latest validated AI assessment on candidate detail', async () => {
+    renderAt('/candidates/candidate-1');
+
+    const region = await screen.findByRole('region', { name: 'AI C2 판정' });
+    expect(await within(region).findByText('SUSPICIOUS')).toBeInTheDocument();
+    expect(within(region).getByText('신뢰도 75%')).toBeInTheDocument();
+    expect(within(region).getByText('E-C2H-candidate-1-01')).toBeInTheDocument();
   });
 
   it('presents nested capture and detection configuration without exposed raw JSON', async () => {

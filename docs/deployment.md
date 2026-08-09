@@ -48,6 +48,7 @@ Values marked "SHA-256" must be 64-character lowercase hex digests — never pla
 | `C2HUNTER_DEV_LOGIN_RATE_LIMIT`       | `10`                | Max dev-login attempts per window per client IP     |
 | `C2HUNTER_ENROLLMENT_CLAIM_RATE_LIMIT`| `10`                | Max enrollment claims per window per client IP      |
 | `C2HUNTER_ANALYSIS_JOB_RATE_LIMIT`    | `30`                | Max analysis job creations per window per subject   |
+| `C2HUNTER_AI_ANALYSIS_ENABLED`        | `false`             | Enable manual AI Runs; start Compose with `--profile ai` |
 | `C2HUNTER_PCAP_UPLOAD_MAX_BYTES`      | `524288000` (500 MiB)| Maximum PCAP upload size                            |
 | `C2HUNTER_PCAP_UPLOAD_MAX_PACKETS`    | `2000000`           | Maximum packets per PCAP upload                     |
 

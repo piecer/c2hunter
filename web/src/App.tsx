@@ -33,6 +33,9 @@ type ThreatIntelProvider = { status: 'OK' | 'ERROR' | 'AUTH_ERROR' | 'RATE_LIMIT
 type ThreatIntelligence = { ip_address: string; fetched_at: string; providers: Record<string, ThreatIntelProvider>; summary: { malicious: number; suspicious: number; harmless: number; abuse_confidence_score: number; country_code?: string | null; network_owner?: string | null } };
 type MispExport = { id: string; event_id: string; candidate_ip: string; attribute_type: 'ip-src'; status: 'EXPORTED' | 'ALREADY_EXPORTED' | 'FAILED'; attribute_id?: string | null; error?: string; created_by: string; created_at: string };
 type Candidate = { id: string; job_id?: string; candidate_ip: string; score: number; severity: string; distinct_internal_hosts?: number; hosts?: string[]; internal_hosts?: string[]; sensors?: string[]; sensor_ids?: string[]; protocols?: string[]; ports?: number[]; domains?: string[]; first_seen?: string; last_seen?: string; evidence?: Evidence[]; evidence_count?: number; adjustments?: ScoreAdjustment[]; traffic_series?: number[]; traffic_buckets?: TrafficBucket[]; related_attack_targets?: string[]; flow_count?: number; packet_count?: number; byte_count?: number; current_verdict?: CandidateVerdict; verdict_history?: CandidateVerdict[]; threat_intelligence?: ThreatIntelligence; misp_exports?: MispExport[] };
+type AIFactor = { title: string; evidence_ids: string[]; explanation: string; strength?: string };
+type AIAssessment = { id: string; candidate_id: string; external_ip: string; assessment: { candidate: { external_ip: string; verdict: string; confidence: number; summary_ko: string; summary_en: string }; supporting_factors: AIFactor[]; counter_factors: AIFactor[]; missing_information: string[]; limitations: string[] } };
+type AIRun = { id: string; analysis_job_id: string; status: string; progress_percent?: number; candidate_count: number; created_at: string; error_code?: string; error_message?: string };
 type FlowLabel = { id: string; verdict: 'C2' | 'BENIGN'; confidence: 'CONFIRMED' | 'HIGH' | 'MEDIUM'; note: string; created_by?: string; created_at: string };
 type FlowRecordReview = { flow_id: string; job_id: string; sensor_id?: string; timestamp: string; source_ip: string; destination_ip: string; source_port?: number; destination_port?: number; internal_ip?: string; external_ip?: string; service_port?: number; protocol: string; direction: string; packet_count?: number; total_bytes?: number; payload_hash?: string; payload_prefix_hash?: string; payload_length?: number; payload_entropy?: number; payload_printable_ratio?: number; payload_simhash?: string; payload_feature_version?: string; has_payload: boolean; current_label?: FlowLabel | null };
 type PayloadPreview = { flow_id: string; payload_hex: string; payload_ascii: string; sample_bytes: number; payload_length?: number; truncated: boolean; payload_hash?: string };
@@ -420,6 +423,53 @@ function JobReanalysis({ job }: { job: Job }) {
   return <section className="panel compact"><h2>가중치 조정 후 재분석</h2><p className="muted">데이터셋 {job.dataset_id}을 다시 업로드하거나 파싱하지 않고 탐지 가중치별 후보 점수를 비교합니다.</p><DetectorWeightFields weights={weights} setWeights={setWeights} applyDefault={false}/>{reanalyze.error && <p role="alert" className="error-text">{reanalyze.error.message}</p>}<button disabled={reanalyze.isPending} onClick={() => reanalyze.mutate()}>{reanalyze.isPending ? '재분석 생성 중…' : '탐지 가중치로 재분석'}</button></section>;
 }
 
+function AIAnalysisPanel({ job }: { job: Job }) {
+  const queryClient = useQueryClient();
+  const runs = useQuery<List<AIRun>, Error>({
+    queryKey: ['ai-runs', job.id],
+    queryFn: () => api.get(`/analysis-jobs/${job.id}/ai-runs`),
+    refetchInterval: query => items(query.state.data).some(run => !terminalStatuses.has(run.status)) ? 2000 : false,
+  });
+  const latest = items(runs.data)[0];
+  const assessments = useQuery<List<AIAssessment>, Error>({
+    queryKey: ['ai-assessments', latest?.id],
+    queryFn: () => api.get(`/ai-runs/${latest?.id}/assessments`),
+    enabled: Boolean(latest?.id),
+    refetchInterval: latest && !terminalStatuses.has(latest.status) ? 2000 : false,
+  });
+  const start = useMutation({
+    mutationFn: () => api.post<AIRun>(`/analysis-jobs/${job.id}/ai-runs`, {
+      idempotency_key: `web-${job.id}-${Date.now()}`,
+      candidate_limit: 5,
+    }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['ai-runs', job.id] });
+    },
+  });
+  const canStart = job.status === 'COMPLETED' || job.status === 'PARTIALLY_COMPLETED';
+  return <section className="panel" aria-labelledby="ai-c2-analysis-heading">
+    <div className="header-actions">
+      <div><p className="eyebrow">BOUNDED EVIDENCE · LOCAL MODEL</p><h2 id="ai-c2-analysis-heading">AI C2 분석</h2></div>
+      <button type="button" disabled={!canStart || start.isPending} onClick={() => start.mutate()}>{start.isPending ? 'AI 분석 실행 중…' : 'Run AI analysis'}</button>
+    </div>
+    {!canStart && <p className="muted">완료되거나 부분 완료된 분석에서만 새 AI Run을 시작할 수 있습니다.</p>}
+    {runs.isError && <p role="alert" className="error-text">AI 분석 기능을 사용할 수 없습니다: {runs.error.message}</p>}
+    {start.error && <p role="alert" className="error-text">AI Run 생성 실패: {start.error.message}</p>}
+    {!runs.isLoading && !latest && !runs.isError && <p className="muted">아직 실행된 AI Run이 없습니다.</p>}
+    {latest && <><div className="ai-run-summary"><span className={`badge ${latest.status.toLowerCase()}`}>{latest.status}</span><span>{latest.candidate_count}개 후보</span><span>{fmt(latest.created_at)}</span>{latest.error_code && <span className="error-text">{latest.error_code}: {latest.error_message}</span>}</div><progress aria-label="AI analysis progress" max="100" value={latest.progress_percent ?? (latest.status === 'COMPLETED' ? 100 : 0)} /></>}
+    {assessments.isLoading && latest && <p role="status">AI 후보 판정을 불러오는 중…</p>}
+    {items(assessments.data).map(item => {
+      const result = item.assessment;
+      const evidenceIds = [...result.supporting_factors, ...result.counter_factors].flatMap(factor => factor.evidence_ids);
+      return <article className="ai-assessment" key={item.id}>
+        <div className="header-actions"><h3><Link to={`/candidates/${item.candidate_id}`}>{item.external_ip}</Link></h3><div><span className={`badge verdict-${result.candidate.verdict.toLowerCase()}`}>{result.candidate.verdict}</span> <strong>신뢰도 {Math.round(result.candidate.confidence * 100)}%</strong></div></div>
+        <p>{result.candidate.summary_ko}</p>
+        <dl><dt>근거 ID</dt><dd>{evidenceIds.length ? evidenceIds.map(id => <code key={id}>{id}</code>) : '연결된 근거 없음'}</dd><dt>누락 정보</dt><dd>{result.missing_information.join(', ') || '없음'}</dd></dl>
+      </article>;
+    })}
+  </section>;
+}
+
 function JobDetail() {
   const { id } = useParams();
   const [notice, setNotice] = useState('');
@@ -447,6 +497,7 @@ function JobDetail() {
         {!terminal && <button className="danger" disabled={cancel.isPending} onClick={() => cancel.mutate()}>{cancel.isPending ? 'Cancelling…' : 'Cancel analysis'}</button>}
         {cancel.error && <p role="alert" className="error-text">{cancel.error.message}</p>}{notice && <p role="status">{notice}</p>}
       </section>
+      <AIAnalysisPanel job={j}/>
       <section className="grid compact">
         <article className="panel"><h2>Source and parsing</h2><dl><dt>Type</dt><dd>{j.source_type === 'PCAP_UPLOAD' ? 'PCAP upload' : j.mode ?? 'Sensor capture'}</dd><dt>File</dt><dd>{source?.filename ?? 'Sensor dataset'}</dd><dt>Format</dt><dd>{source?.capture_format ?? 'Not reported'}</dd><dt>Size</dt><dd>{formatBytes(source?.size_bytes)}</dd><dt>Captured packets</dt><dd>{formatValue(source?.captured_packet_count)}</dd><dt>Parsed packets</dt><dd>{formatValue(source?.parsed_packet_count)}</dd><dt>Skipped packets</dt><dd>{formatValue(source?.skipped_packet_count)}</dd><dt>Link types</dt><dd>{formatValue(source?.link_types)}</dd><dt>SHA-256</dt><dd className="hash-value">{source?.sha256 ?? 'Not applicable'}</dd></dl></article>
         <article className="panel"><h2>Observation timeline</h2><dl><dt>Observed from</dt><dd>{fmt(j.start_time)}</dd><dt>Observed to</dt><dd>{fmt(j.end_time)}</dd><dt>Created</dt><dd>{fmt(j.created_at)}</dd><dt>Updated</dt><dd>{fmt(j.updated_at)}</dd><dt>Completed</dt><dd>{fmt(j.completed_at)}</dd><dt>Parent analysis</dt><dd>{j.parent_job_id ? <Link to={`/analyses/${j.parent_job_id}`}>{j.parent_job_id}</Link> : 'None'}</dd></dl></article>
@@ -558,6 +609,29 @@ function CandidateEnrichmentPanel({ candidate, onUpdated }: { candidate: Candida
   </section>;
 }
 
+function CandidateAIAnalysis({ candidate }: { candidate: Candidate }) {
+  const runs = useQuery<List<AIRun>, Error>({
+    queryKey: ['ai-runs', candidate.job_id],
+    queryFn: () => api.get(`/analysis-jobs/${candidate.job_id}/ai-runs`),
+    enabled: Boolean(candidate.job_id),
+  });
+  const latestRun = items(runs.data)[0];
+  const assessments = useQuery<List<AIAssessment>, Error>({
+    queryKey: ['ai-assessments', latestRun?.id],
+    queryFn: () => api.get(`/ai-runs/${latestRun?.id}/assessments`),
+    enabled: Boolean(latestRun?.id),
+  });
+  const assessment = items(assessments.data).find(item => item.candidate_id === candidate.id);
+  if (!candidate.job_id || (!latestRun && !runs.isLoading)) return null;
+  return <section className="panel compact" aria-labelledby="candidate-ai-analysis-heading">
+    <div className="section-heading"><div><p className="eyebrow">LATEST VALIDATED RUN</p><h2 id="candidate-ai-analysis-heading">AI C2 판정</h2></div>{latestRun && <span className={`badge ${latestRun.status === 'COMPLETED' ? 'low' : 'medium'}`}>{latestRun.status}</span>}</div>
+    {(runs.isLoading || assessments.isLoading) && <p className="muted">AI 판정을 불러오는 중…</p>}
+    {(runs.error || assessments.error) && <p className="muted">AI 판정을 조회할 수 없습니다.</p>}
+    {assessment && <article className="ai-assessment-card"><div className="header-actions"><strong>{assessment.assessment.candidate.verdict}</strong><span>신뢰도 {Math.round(assessment.assessment.candidate.confidence * 100)}%</span></div><p>{assessment.assessment.candidate.summary_ko}</p>{assessment.assessment.supporting_factors.map(factor => <div className="ai-factor" key={`${assessment.id}-${factor.title}`}><strong>{factor.title}</strong><p>{factor.explanation}</p><div className="config-tags">{factor.evidence_ids.map(evidenceId => <code className="config-tag" key={evidenceId}>{evidenceId}</code>)}</div></div>)}</article>}
+    {!assessment && !assessments.isLoading && latestRun?.status === 'COMPLETED' && <p className="muted">최신 Run에 이 후보의 AI 판정이 없습니다.</p>}
+  </section>;
+}
+
 function CandidateDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -591,6 +665,7 @@ function CandidateDetail() {
       <header className="header-actions"><div><p className="eyebrow">CANDIDATE DETAIL</p><h1>{candidate.candidate_ip}</h1><span className={`badge ${candidate.severity.toLowerCase()}`}>{candidate.score} · {candidate.severity}</span><p className="record-id">Candidate {candidate.id}</p></div>{candidate.job_id && <Link to={`/analyses/${candidate.job_id}`}>View source analysis</Link>}</header>
       <section className="metrics compact"><article><strong>{hosts.length || candidate.distinct_internal_hosts || 0}</strong><span>내부 호스트</span></article><article><strong>{sensors.length}</strong><span>센서</span></article><article><strong>{(candidate.flow_count ?? 0).toLocaleString()}</strong><span>흐름</span></article><article><strong>{(candidate.packet_count ?? 0).toLocaleString()}</strong><span>패킷</span></article><article><strong>{formatBytes(candidate.byte_count)}</strong><span>통신량</span></article><article><strong>{evidence.length}</strong><span>탐지 신호</span></article></section>
       <div className="grid compact"><section className="panel"><h2>Traffic over time</h2>{traffic.length ? <MiniChart values={traffic} label="Traffic over time" /> : <p className="muted">No traffic series was retained for this candidate.</p>}{buckets.length > 0 && <div className="table-wrap"><table aria-label="Candidate traffic buckets"><thead><tr><th>Bucket start</th><th>Flows</th><th>Packets</th><th>Bytes</th></tr></thead><tbody>{buckets.map(bucket => <tr key={bucket.start}><td>{fmt(bucket.start)}</td><td>{bucket.flows}</td><td>{bucket.packets}</td><td>{formatBytes(bucket.bytes)}</td></tr>)}</tbody></table></div>}</section><section className="panel"><h2>Network context</h2><dl><dt>Protocols</dt><dd>{formatValue(protocols)}</dd><dt>Service ports</dt><dd>{formatValue(ports)}</dd><dt>Domains</dt><dd>{formatValue(domains)}</dd><dt>First observed</dt><dd>{fmt(candidate.first_seen)}</dd><dt>Last observed</dt><dd>{fmt(candidate.last_seen)}</dd><dt>Internal hosts</dt><dd>{formatValue(hosts)}</dd><dt>Sensors</dt><dd>{formatValue(sensors)}</dd><dt>Related attack targets</dt><dd>{formatValue(candidate.related_attack_targets)}</dd></dl></section></div>
+      <CandidateAIAnalysis candidate={candidate} />
       <CandidateEnrichmentPanel candidate={candidate} onUpdated={async () => { await q.refetch(); }} />
       <FlowReviewPanel candidate={candidate} />
       <section className="panel compact detection-evidence"><h2>탐지 근거</h2>{evidence.length ? evidence.map((item, index) => <article className="evidence detailed" key={`${item.detector ?? item.type}-${index}`}><div className="evidence-heading"><strong title={item.type}>{evidenceLabel(item.type)}</strong><small title={item.detector}>{detectorLabel(item.detector)}{item.version ? ` · v${item.version}` : ''}</small></div><span className="evidence-score">+{formatValue(item.contribution ?? item.score ?? item.raw_score ?? 0)}</span><p>{item.description ?? '기록된 탐지 근거 설명이 없습니다.'}</p><dl><dt>원시 점수</dt><dd>{formatValue(item.raw_score)}</dd><dt>신뢰도</dt><dd>{item.confidence === undefined ? '기록 없음' : `${Math.round(item.confidence * 100)}%`}</dd><dt>관측 시각</dt><dd>{fmt(item.first_seen)} – {fmt(item.last_seen)}</dd><dt>호스트</dt><dd>{formatValue(item.hosts)}</dd><dt>센서</dt><dd>{formatValue(item.sensors)}</dd></dl>{item.metrics && Object.keys(item.metrics).length > 0 && <EvidenceMetrics metrics={item.metrics}/>} {strings(item.warnings).map(warning => <p className="warning" key={warning}>{warning}</p>)}</article>) : <p className="muted">기록된 탐지 근거가 없습니다.</p>}</section>

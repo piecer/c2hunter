@@ -27,6 +27,11 @@ def test_sensor_authenticated_and_operational_routes_do_not_require_human_roles(
     ("method", "path", "role"),
     [
         ("GET", "/api/v1/dashboard", Role.VIEWER),
+        (
+            "GET",
+            "/api/v1/ai-assessments/assessment-1/evidence-bundle",
+            Role.ANALYST,
+        ),
         ("POST", "/api/v1/analysis-jobs", Role.ANALYST),
         ("POST", "/api/v1/candidates/candidate-1/verdicts", Role.ANALYST),
         (

@@ -24,6 +24,12 @@ from prometheus_client import (
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
+from .ai_analysis import AIAnalysisError, AIAnalysisService, FakeGateway, ModelGateway
+from .ai_queueing import (
+    AIAnalysisTaskQueue,
+    InlineAIAnalysisTaskQueue,
+    RedisAIAnalysisTaskQueue,
+)
 from .capture_limits import allocate_sensor_limit, limit_flow_records
 from .config import Settings
 from .detection_guidance import build_detection_guidance
@@ -47,6 +53,8 @@ from .production import MinioBlobStore, PostgresRepository
 from .queueing import ControllerQueue, MemoryControllerQueue, RedisControllerQueue
 from .repositories import MemoryRepository, Repository
 from .schemas import (
+    AIAnalysisRunCancel,
+    AIAnalysisRunCreate,
     AllowlistCreate,
     AnalysisJobCreate,
     AnalysisJobUpdate,
@@ -538,6 +546,8 @@ def create_app(
     queue: ControllerQueue | None = None,
     threat_intel_service: ThreatIntelLookup | None = None,
     misp_client: MispPublisher | None = None,
+    ai_gateway: ModelGateway | None = None,
+    ai_task_queue: AIAnalysisTaskQueue | None = None,
 ) -> FastAPI:
     config = settings or Settings()
     if repository is not None:
@@ -605,6 +615,16 @@ def create_app(
         )
     else:
         misp = None
+    gateway = ai_gateway or (FakeGateway() if config.ai_analysis_enabled else None)
+    ai_service = AIAnalysisService(repo, gateway) if gateway is not None else None
+    if ai_task_queue is not None:
+        ai_tasks = ai_task_queue
+    elif ai_service is not None and config.redis_url == "memory://":
+        ai_tasks = InlineAIAnalysisTaskQueue(ai_service.execute)
+    elif ai_service is not None:
+        ai_tasks = RedisAIAnalysisTaskQueue(config.redis_url)
+    else:
+        ai_tasks = None
     app = FastAPI(title="C2Hunter Controller", version="0.1.0")
     app.state.settings = config
     app.state.repository = repo
@@ -612,6 +632,8 @@ def create_app(
     app.state.queue = work_queue
     app.state.threat_intel_service = threat_intel
     app.state.misp_client = misp
+    app.state.ai_analysis_service = ai_service
+    app.state.ai_analysis_queue = ai_tasks
     misp_export_lock = threading.Lock()
     sessions = SessionStore()
     authenticator = TokenAuthenticator(
@@ -1950,6 +1972,129 @@ def create_app(
         if job is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
         return _public_job(job)
+
+    @app.post("/api/v1/analysis-jobs/{job_id}/ai-runs", status_code=201)
+    def create_ai_analysis_run(
+        job_id: str,
+        payload: AIAnalysisRunCreate,
+        request: Request,
+        response: Response,
+    ) -> dict[str, Any]:
+        if not config.ai_analysis_enabled or ai_service is None or ai_tasks is None:
+            raise ApiError(503, "AI_ANALYSIS_DISABLED", "AI 분석 기능이 비활성화되어 있습니다")
+        principal = getattr(request.state, "principal", None)
+        created_by = str(getattr(principal, "subject", "anonymous"))
+        try:
+            run, created = ai_service.create_run(
+                analysis_job_id=job_id,
+                idempotency_key=payload.idempotency_key,
+                candidate_limit=payload.candidate_limit,
+                created_by=created_by,
+            )
+        except AIAnalysisError as exc:
+            message = str(exc)
+            if message == "analysis job not found":
+                raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다") from exc
+            raise ApiError(409, "AI_RUN_NOT_ALLOWED", message) from exc
+        if not created:
+            response.status_code = 200
+        else:
+            ai_tasks.enqueue(run["id"])
+            stored_run = repo.get_ai_run(run["id"])
+            if stored_run is None:
+                raise ApiError(
+                    500,
+                    "AI_RUN_PERSISTENCE_ERROR",
+                    "AI Run 저장 상태를 읽을 수 없습니다",
+                )
+            run = stored_run
+        repo.append_audit_event(
+            "ai-run-create",
+            run["id"],
+            {
+                "analysis_job_id": job_id,
+                "created_by": created_by,
+                "created": created,
+                "status": run["status"],
+            },
+        )
+        return {**run, "candidate_count": len(run.get("candidate_ids", []))}
+
+    @app.get("/api/v1/analysis-jobs/{job_id}/ai-runs")
+    def list_ai_analysis_runs(
+        job_id: str,
+        page: int = Query(1, ge=1),
+        page_size: int = Query(50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        if repo.get_job_summary(job_id) is None:
+            raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
+        runs = [
+            {**run, "candidate_count": len(run.get("candidate_ids", []))}
+            for run in repo.list_ai_runs(job_id)
+        ]
+        return _page(runs, page, page_size)
+
+    @app.get("/api/v1/ai-runs/{run_id}")
+    def get_ai_analysis_run(run_id: str) -> dict[str, Any]:
+        run = repo.get_ai_run(run_id)
+        if run is None:
+            raise ApiError(404, "AI_RUN_NOT_FOUND", "AI 분석 Run을 찾을 수 없습니다")
+        return {**run, "candidate_count": len(run.get("candidate_ids", []))}
+
+    @app.get("/api/v1/ai-runs/{run_id}/assessments")
+    def list_ai_analysis_assessments(
+        run_id: str,
+        page: int = Query(1, ge=1),
+        page_size: int = Query(50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        if repo.get_ai_run(run_id) is None:
+            raise ApiError(404, "AI_RUN_NOT_FOUND", "AI 분석 Run을 찾을 수 없습니다")
+        return _page(repo.list_ai_assessments(run_id), page, page_size)
+
+    @app.get("/api/v1/ai-assessments/{assessment_id}")
+    def get_ai_analysis_assessment(assessment_id: str) -> dict[str, Any]:
+        assessment = repo.get_ai_assessment(assessment_id)
+        if assessment is None:
+            raise ApiError(404, "AI_ASSESSMENT_NOT_FOUND", "AI 후보 판정을 찾을 수 없습니다")
+        return assessment
+
+    @app.get("/api/v1/ai-assessments/{assessment_id}/evidence-bundle")
+    def get_ai_analysis_evidence_bundle(assessment_id: str, request: Request) -> dict[str, Any]:
+        assessment = repo.get_ai_assessment(assessment_id)
+        if assessment is None:
+            raise ApiError(404, "AI_ASSESSMENT_NOT_FOUND", "AI 후보 판정을 찾을 수 없습니다")
+        bundle = assessment.get("evidence_bundle")
+        if not isinstance(bundle, dict):
+            raise ApiError(404, "EVIDENCE_BUNDLE_NOT_FOUND", "Evidence Bundle을 찾을 수 없습니다")
+        principal = getattr(request.state, "principal", None)
+        repo.append_audit_event(
+            "ai-evidence-bundle-view",
+            assessment_id,
+            {"viewed_by": str(getattr(principal, "subject", "anonymous"))},
+        )
+        return bundle
+
+    @app.post("/api/v1/ai-runs/{run_id}/cancel")
+    def cancel_ai_analysis_run(
+        run_id: str, payload: AIAnalysisRunCancel, request: Request
+    ) -> dict[str, Any]:
+        if ai_service is None:
+            raise ApiError(503, "AI_ANALYSIS_DISABLED", "AI 분석 기능이 비활성화되어 있습니다")
+        try:
+            run = ai_service.cancel(run_id, payload.reason)
+        except AIAnalysisError as exc:
+            raise ApiError(404, "AI_RUN_NOT_FOUND", "AI 분석 Run을 찾을 수 없습니다") from exc
+        principal = getattr(request.state, "principal", None)
+        repo.append_audit_event(
+            "ai-run-cancel",
+            run_id,
+            {
+                "cancelled_by": str(getattr(principal, "subject", "anonymous")),
+                "reason": payload.reason,
+                "status": run["status"],
+            },
+        )
+        return {**run, "candidate_count": len(run.get("candidate_ids", []))}
 
     @app.get("/api/v1/analysis-jobs/{job_id}/flows")
     def list_analysis_flows(
