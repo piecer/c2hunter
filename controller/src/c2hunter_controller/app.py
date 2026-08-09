@@ -32,6 +32,7 @@ from .ai_analysis import (
     ModelGateway,
 )
 from .ai_artifacts import AIArtifactError, AIArtifactService, build_ai_artifacts
+from .ai_feedback import AIFeedbackError, AIFeedbackService
 from .ai_gateway import create_model_gateway
 from .ai_queueing import (
     AIAnalysisTaskQueue,
@@ -64,6 +65,7 @@ from .schemas import (
     AIAnalysisRunCancel,
     AIAnalysisRunCreate,
     AIArtifactReview,
+    AIFeedbackCreate,
     AllowlistCreate,
     AnalysisJobCreate,
     AnalysisJobUpdate,
@@ -2072,7 +2074,14 @@ def create_app(
     ) -> dict[str, Any]:
         if repo.get_ai_run(run_id) is None:
             raise ApiError(404, "AI_RUN_NOT_FOUND", "AI 분석 Run을 찾을 수 없습니다")
-        return _page(repo.list_ai_assessments(run_id), page, page_size)
+        assessments = sorted(
+            repo.list_ai_assessments(run_id),
+            key=lambda item: (
+                -int(item.get("review_priority", 0)),
+                str(item.get("created_at", "")),
+            ),
+        )
+        return _page(assessments, page, page_size)
 
     @app.get("/api/v1/ai-assessments/{assessment_id}")
     def get_ai_analysis_assessment(assessment_id: str) -> dict[str, Any]:
@@ -2080,6 +2089,41 @@ def create_app(
         if assessment is None:
             raise ApiError(404, "AI_ASSESSMENT_NOT_FOUND", "AI 후보 판정을 찾을 수 없습니다")
         return assessment
+
+    @app.get("/api/v1/ai-assessments/{assessment_id}/feedback")
+    def list_ai_feedback(assessment_id: str) -> dict[str, Any]:
+        try:
+            feedback = AIFeedbackService(repo).list(assessment_id)
+        except AIFeedbackError as exc:
+            raise ApiError(404, "AI_ASSESSMENT_NOT_FOUND", str(exc)) from exc
+        return {"items": feedback, "total": len(feedback)}
+
+    @app.post("/api/v1/ai-assessments/{assessment_id}/feedback", status_code=201)
+    def create_ai_feedback(
+        assessment_id: str, payload: AIFeedbackCreate, request: Request
+    ) -> dict[str, Any]:
+        principal = getattr(request.state, "principal", None)
+        created_by = str(getattr(principal, "subject", "anonymous"))
+        try:
+            feedback = AIFeedbackService(repo).append(
+                assessment_id=assessment_id,
+                verdict=payload.verdict,
+                corrected_confidence=payload.corrected_confidence,
+                note=payload.note,
+                created_by=created_by,
+            )
+        except AIFeedbackError as exc:
+            raise ApiError(404, "AI_ASSESSMENT_NOT_FOUND", str(exc)) from exc
+        repo.append_audit_event(
+            "ai-feedback-create",
+            feedback["id"],
+            {
+                "assessment_id": assessment_id,
+                "verdict": payload.verdict,
+                "created_by": created_by,
+            },
+        )
+        return feedback
 
     @app.get("/api/v1/ai-assessments/{assessment_id}/evidence-bundle")
     def get_ai_analysis_evidence_bundle(assessment_id: str, request: Request) -> dict[str, Any]:

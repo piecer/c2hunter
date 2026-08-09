@@ -78,9 +78,17 @@ Phase 5 완료 — Validated Splunk/MISP Artifacts
 
 ## Remaining milestones
 
-아래 작업은 명세의 후속 단계이며 Milestone 1 범위에 포함되지 않는다.
+Phase 6까지 구현됐다.
 
-1. analyst feedback, calibration materialization, drift observability
+- AI Run candidate limit, 진행 상태, review-priority 정렬
+- AI verdict와 analyst-confirmed verdict를 분리한 assessment UI
+- append-only analyst feedback ledger 및 Memory/SQLite/PostgreSQL 영속화
+- VIEWER 읽기, ANALYST/ADMIN 피드백 작성 권한
+- Playwright fixture 기반 analyst workflow 검증
+
+아래 작업은 Phase 7 범위다.
+
+1. calibration materialization과 drift observability
 2. 보존 기간 cleanup과 대규모 성능/부하 검증
 
 각 후속 milestone도 schema/fixture부터 RED → GREEN → REFACTOR 순으로 진행한다.

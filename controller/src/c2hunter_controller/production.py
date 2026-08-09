@@ -115,6 +115,15 @@ class PostgresRepository:
                         );
                         CREATE INDEX IF NOT EXISTS ai_generated_artifacts_assessment_created
                           ON ai_generated_artifacts(assessment_id,created_at);
+                        CREATE TABLE IF NOT EXISTS ai_feedback (
+                          feedback_id text PRIMARY KEY,
+                          assessment_id text NOT NULL
+                            REFERENCES ai_candidate_assessments(assessment_id),
+                          created_at timestamptz NOT NULL,
+                          data jsonb NOT NULL
+                        );
+                        CREATE INDEX IF NOT EXISTS ai_feedback_assessment_created
+                          ON ai_feedback(assessment_id,created_at);
                         CREATE TABLE IF NOT EXISTS job_flow_records (
                           job_id text PRIMARY KEY, data jsonb NOT NULL
                         );
@@ -866,6 +875,39 @@ class PostgresRepository:
             cursor.execute(
                 "SELECT data FROM ai_generated_artifacts "
                 "WHERE assessment_id=%s ORDER BY created_at,artifact_id",
+                (assessment_id,),
+            )
+            rows = cursor.fetchall()
+            self.connection.commit()
+        return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
+
+    def save_ai_feedback(self, feedback: dict[str, Any]) -> dict[str, Any]:
+        connection = self.connection
+        with self._lock:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "INSERT INTO ai_feedback"
+                        "(feedback_id,assessment_id,created_at,data) VALUES(%s,%s,%s,%s::jsonb) "
+                        "ON CONFLICT(feedback_id) DO NOTHING",
+                        (
+                            feedback["id"],
+                            feedback["assessment_id"],
+                            feedback["created_at"],
+                            self._json(feedback),
+                        ),
+                    )
+                connection.commit()
+                return deepcopy(feedback)
+            except Exception:
+                connection.rollback()
+                raise
+
+    def list_ai_feedback(self, assessment_id: str) -> list[dict[str, Any]]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT data FROM ai_feedback "
+                "WHERE assessment_id=%s ORDER BY created_at,feedback_id",
                 (assessment_id,),
             )
             rows = cursor.fetchall()

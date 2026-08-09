@@ -34,8 +34,9 @@ type ThreatIntelligence = { ip_address: string; fetched_at: string; providers: R
 type MispExport = { id: string; event_id: string; candidate_ip: string; attribute_type: 'ip-src'; status: 'EXPORTED' | 'ALREADY_EXPORTED' | 'FAILED'; attribute_id?: string | null; error?: string; created_by: string; created_at: string };
 type Candidate = { id: string; job_id?: string; candidate_ip: string; score: number; severity: string; distinct_internal_hosts?: number; hosts?: string[]; internal_hosts?: string[]; sensors?: string[]; sensor_ids?: string[]; protocols?: string[]; ports?: number[]; domains?: string[]; first_seen?: string; last_seen?: string; evidence?: Evidence[]; evidence_count?: number; adjustments?: ScoreAdjustment[]; traffic_series?: number[]; traffic_buckets?: TrafficBucket[]; related_attack_targets?: string[]; flow_count?: number; packet_count?: number; byte_count?: number; current_verdict?: CandidateVerdict; verdict_history?: CandidateVerdict[]; threat_intelligence?: ThreatIntelligence; misp_exports?: MispExport[] };
 type AIFactor = { title: string; evidence_ids: string[]; explanation: string; strength?: string };
-type AIAssessment = { id: string; candidate_id: string; external_ip: string; assessment: { candidate: { external_ip: string; verdict: string; confidence: number; summary_ko: string; summary_en: string }; supporting_factors: AIFactor[]; counter_factors: AIFactor[]; missing_information: string[]; limitations: string[] } };
+type AIAssessment = { id: string; candidate_id: string; external_ip: string; review_priority?: number; assessment: { candidate: { external_ip: string; verdict: string; confidence: number; summary_ko: string; summary_en: string }; supporting_factors: AIFactor[]; counter_factors: AIFactor[]; missing_information: string[]; limitations: string[] } };
 type AIArtifact = { id: string; artifact_type: 'SPLUNK_HUNT' | 'SPLUNK_DETECTION' | 'MISP_DRAFT'; validation_status: string; approved_status: 'PENDING' | 'APPROVED' | 'REJECTED'; content: Record<string, unknown> };
+type AIFeedback = { id: string; verdict: 'CONFIRM_C2' | 'CONFIRM_BENIGN' | 'NEED_MORE_DATA' | 'REJECT_EXPLANATION'; corrected_confidence?: number | null; note: string; created_by: string; created_at: string };
 type AIRun = { id: string; analysis_job_id: string; status: string; progress_percent?: number; candidate_count: number; created_at: string; error_code?: string; error_message?: string };
 type FlowLabel = { id: string; verdict: 'C2' | 'BENIGN'; confidence: 'CONFIRMED' | 'HIGH' | 'MEDIUM'; note: string; created_by?: string; created_at: string };
 type FlowRecordReview = { flow_id: string; job_id: string; sensor_id?: string; timestamp: string; source_ip: string; destination_ip: string; source_port?: number; destination_port?: number; internal_ip?: string; external_ip?: string; service_port?: number; protocol: string; direction: string; packet_count?: number; total_bytes?: number; payload_hash?: string; payload_prefix_hash?: string; payload_length?: number; payload_entropy?: number; payload_printable_ratio?: number; payload_simhash?: string; payload_feature_version?: string; has_payload: boolean; current_label?: FlowLabel | null };
@@ -454,8 +455,39 @@ function AIArtifactPanel({ assessmentId }: { assessmentId: string }) {
   </section>;
 }
 
+function AIFeedbackPanel({ assessmentId }: { assessmentId: string }) {
+  const queryClient = useQueryClient();
+  const [verdict, setVerdict] = useState<AIFeedback['verdict']>('NEED_MORE_DATA');
+  const [note, setNote] = useState('');
+  const feedback = useQuery<List<AIFeedback>, Error>({
+    queryKey: ['ai-feedback', assessmentId],
+    queryFn: () => api.get(`/ai-assessments/${assessmentId}/feedback`),
+  });
+  const submit = useMutation({
+    mutationFn: () => api.post(`/ai-assessments/${assessmentId}/feedback`, { verdict, note }),
+    onSuccess: async () => {
+      setNote('');
+      await queryClient.invalidateQueries({ queryKey: ['ai-feedback', assessmentId] });
+    },
+  });
+  return <section className="feedback-panel" aria-label="Analyst confirmed feedback">
+    <h4>Analyst feedback</h4>
+    <p className="muted">Confirmed analyst feedback is append-only and does not replace the AI verdict above.</p>
+    {feedback.isLoading && <p role="status">분석가 피드백을 불러오는 중…</p>}
+    {feedback.isError && <p role="alert" className="error-text">피드백 조회 실패: {feedback.error.message}</p>}
+    {items(feedback.data).map(item => <article className="feedback-entry" key={item.id}><span className={`badge feedback-${item.verdict.toLowerCase()}`}>{item.verdict}</span><p>{item.note}</p><small>{item.created_by} · {fmt(item.created_at)}</small></article>)}
+    <form onSubmit={event => { event.preventDefault(); if (note.trim()) submit.mutate(); }}>
+      <label>Confirmed assessment<select value={verdict} onChange={event => setVerdict(event.target.value as AIFeedback['verdict'])}><option value="CONFIRM_C2">Confirm C2</option><option value="CONFIRM_BENIGN">Confirm benign</option><option value="NEED_MORE_DATA">Need more data</option><option value="REJECT_EXPLANATION">Reject AI explanation</option></select></label>
+      <label>Analyst note<textarea required minLength={1} maxLength={5000} value={note} onChange={event => setNote(event.target.value)} /></label>
+      <button disabled={submit.isPending || !note.trim()}>{submit.isPending ? 'Saving feedback…' : 'Save confirmed feedback'}</button>
+    </form>
+    {submit.error && <p role="alert" className="error-text">피드백 저장 실패: {submit.error.message}</p>}
+  </section>;
+}
+
 function AIAnalysisPanel({ job }: { job: Job }) {
   const queryClient = useQueryClient();
+  const [candidateLimit, setCandidateLimit] = useState(5);
   const runs = useQuery<List<AIRun>, Error>({
     queryKey: ['ai-runs', job.id],
     queryFn: () => api.get(`/analysis-jobs/${job.id}/ai-runs`),
@@ -471,7 +503,7 @@ function AIAnalysisPanel({ job }: { job: Job }) {
   const start = useMutation({
     mutationFn: () => api.post<AIRun>(`/analysis-jobs/${job.id}/ai-runs`, {
       idempotency_key: `web-${job.id}-${Date.now()}`,
-      candidate_limit: 5,
+      candidate_limit: candidateLimit,
     }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['ai-runs', job.id] });
@@ -481,7 +513,7 @@ function AIAnalysisPanel({ job }: { job: Job }) {
   return <section className="panel" aria-labelledby="ai-c2-analysis-heading">
     <div className="header-actions">
       <div><p className="eyebrow">BOUNDED EVIDENCE · LOCAL MODEL</p><h2 id="ai-c2-analysis-heading">AI C2 분석</h2></div>
-      <button type="button" disabled={!canStart || start.isPending} onClick={() => start.mutate()}>{start.isPending ? 'AI 분석 실행 중…' : 'Run AI analysis'}</button>
+      <div className="ai-run-controls"><label>Candidate limit<select value={candidateLimit} onChange={event => setCandidateLimit(Number(event.target.value))}>{[1, 2, 3, 4, 5].map(value => <option key={value} value={value}>{value}</option>)}</select></label><button type="button" disabled={!canStart || start.isPending} onClick={() => start.mutate()}>{start.isPending ? 'AI 분석 실행 중…' : 'Run AI analysis'}</button></div>
     </div>
     {!canStart && <p className="muted">완료되거나 부분 완료된 분석에서만 새 AI Run을 시작할 수 있습니다.</p>}
     {runs.isError && <p role="alert" className="error-text">AI 분석 기능을 사용할 수 없습니다: {runs.error.message}</p>}
@@ -493,10 +525,11 @@ function AIAnalysisPanel({ job }: { job: Job }) {
       const result = item.assessment;
       const evidenceIds = [...result.supporting_factors, ...result.counter_factors].flatMap(factor => factor.evidence_ids);
       return <article className="ai-assessment" key={item.id}>
-        <div className="header-actions"><h3><Link to={`/candidates/${item.candidate_id}`}>{item.external_ip}</Link></h3><div><span className={`badge verdict-${result.candidate.verdict.toLowerCase()}`}>{result.candidate.verdict}</span> <strong>신뢰도 {Math.round(result.candidate.confidence * 100)}%</strong></div></div>
+        <div className="header-actions"><h3><Link to={`/candidates/${item.candidate_id}`}>{item.external_ip}</Link></h3><div><span className={`badge verdict-${result.candidate.verdict.toLowerCase()}`}>AI {result.candidate.verdict}</span> <strong>신뢰도 {Math.round(result.candidate.confidence * 100)}%</strong> <span>Review priority {item.review_priority ?? 0}</span></div></div>
         <p>{result.candidate.summary_ko}</p>
         <dl><dt>근거 ID</dt><dd>{evidenceIds.length ? evidenceIds.map(id => <code key={id}>{id}</code>) : '연결된 근거 없음'}</dd><dt>누락 정보</dt><dd>{result.missing_information.join(', ') || '없음'}</dd></dl>
         <AIArtifactPanel assessmentId={item.id}/>
+        <AIFeedbackPanel assessmentId={item.id}/>
       </article>;
     })}
   </section>;

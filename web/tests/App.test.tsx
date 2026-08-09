@@ -42,7 +42,7 @@ responses['/api/v1/analysis-jobs/job-1/ai-runs'] = {
 };
 responses['/api/v1/ai-runs/ai-run-1/assessments'] = {
   items: [{
-    id: 'assessment-1', candidate_id: 'candidate-1', external_ip: '203.0.113.9',
+    id: 'assessment-1', candidate_id: 'candidate-1', external_ip: '203.0.113.9', review_priority: 55,
     assessment: {
       candidate: { external_ip: '203.0.113.9', verdict: 'SUSPICIOUS', confidence: 0.75, summary_ko: '주기 통신 근거를 검토해야 합니다.', summary_en: 'Review periodic traffic evidence.' },
       supporting_factors: [{ title: 'Periodic traffic', evidence_ids: ['E-C2H-candidate-1-01'], explanation: 'Repeated timing', strength: 'HIGH' }],
@@ -59,6 +59,11 @@ responses['/api/v1/ai-assessments/assessment-1/artifacts'] = {
     { id: 'artifact-misp', artifact_type: 'MISP_DRAFT', validation_status: 'VALID', approved_status: 'PENDING', content: { Event: { info: 'C2Hunter suspected candidate', published: false, Attribute: [{ type: 'ip-dst', value: '203.0.113.9', to_ids: false }] } } },
   ],
   total: 3,
+};
+
+responses['/api/v1/ai-assessments/assessment-1/feedback'] = {
+  items: [{ id: 'feedback-1', verdict: 'CONFIRM_C2', corrected_confidence: 0.95, note: 'Confirmed from passive endpoint telemetry', created_by: 'alice', created_at: '2026-07-20T10:20:00Z' }],
+  total: 1,
 };
 
 function renderAt(route: string, handler?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
@@ -153,8 +158,10 @@ describe('C2Hunter UI', () => {
 
     const region = await screen.findByRole('region', { name: 'AI C2 분석' });
     expect(await within(region).findByText('COMPLETED')).toBeInTheDocument();
-    expect(await within(region).findByText('SUSPICIOUS')).toBeInTheDocument();
+    expect(await within(region).findByText('AI SUSPICIOUS')).toBeInTheDocument();
     expect(within(region).getByText('신뢰도 75%')).toBeInTheDocument();
+    expect(within(region).getByText('Review priority 55')).toBeInTheDocument();
+    expect(within(region).getByLabelText('Candidate limit')).toHaveValue('5');
     expect(within(region).getByText('주기 통신 근거를 검토해야 합니다.')).toBeInTheDocument();
     expect(within(region).getByText('E-C2H-candidate-1-01')).toBeInTheDocument();
     expect(await within(region).findByText('Splunk hunting SPL')).toBeInTheDocument();
@@ -162,6 +169,9 @@ describe('C2Hunter UI', () => {
     expect(within(region).getByText(/Not published/)).toBeInTheDocument();
     expect(within(region).getByText('203.0.113.9', { selector: 'dd' })).toBeInTheDocument();
     expect(within(region).getAllByText('PENDING')).toHaveLength(2);
+    expect(await within(region).findByText('CONFIRM_C2')).toBeInTheDocument();
+    expect(within(region).getByText('Confirmed from passive endpoint telemetry')).toBeInTheDocument();
+    expect(within(region).getByText(/does not replace the AI verdict/)).toBeInTheDocument();
     expect(within(region).getByRole('link', { name: '203.0.113.9' })).toHaveAttribute(
       'href',
       '/candidates/candidate-1',

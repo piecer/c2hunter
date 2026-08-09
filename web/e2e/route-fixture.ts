@@ -14,6 +14,7 @@ export async function installApiFixture(page: Page) {
     run_id: 'ai-run-1',
     candidate_id: 'candidate-1',
     external_ip: '203.0.113.10',
+    review_priority: 72,
     assessment: {
       candidate: {
         external_ip: '203.0.113.10',
@@ -52,6 +53,10 @@ export async function installApiFixture(page: Page) {
         { id: 'artifact-misp', artifact_type: 'MISP_DRAFT', validation_status: 'VALID', approved_status: 'PENDING', content: { Event: { info: 'C2Hunter suspected candidate', published: false, Attribute: [{ type: 'ip-dst', value: '203.0.113.10', to_ids: false }] } } },
       ],
       total: 3,
+    });
+    if (path === '/ai-assessments/assessment-1/feedback' && method === 'GET') return fulfill(route, {
+      items: [{ id: 'feedback-1', verdict: 'NEED_MORE_DATA', note: 'Endpoint telemetry review is pending.', created_by: 'analyst', created_at: '2026-07-20T10:20:00Z' }],
+      total: 1,
     });
     if (path === '/analysis-jobs/job-1' && method === 'PATCH') { const body = request.postDataJSON(); return fulfill(route, { id: 'job-1', name: body.name, description: body.description, status: 'COMPLETED' }); }
     if (path === '/analysis-jobs/job-1' && method === 'DELETE') return fulfill(route, undefined, 204);

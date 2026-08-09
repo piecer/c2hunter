@@ -28,6 +28,7 @@ def test_sensor_authenticated_and_operational_routes_do_not_require_human_roles(
     [
         ("GET", "/api/v1/dashboard", Role.VIEWER),
         ("GET", "/api/v1/ai-artifacts/artifact-1", Role.VIEWER),
+        ("GET", "/api/v1/ai-assessments/assessment-1/feedback", Role.VIEWER),
         (
             "GET",
             "/api/v1/ai-assessments/assessment-1/evidence-bundle",
@@ -35,6 +36,7 @@ def test_sensor_authenticated_and_operational_routes_do_not_require_human_roles(
         ),
         ("POST", "/api/v1/analysis-jobs", Role.ANALYST),
         ("POST", "/api/v1/ai-artifacts/artifact-1/approve", Role.ANALYST),
+        ("POST", "/api/v1/ai-assessments/assessment-1/feedback", Role.ANALYST),
         (
             "POST",
             "/api/v1/ai-assessments/assessment-1/artifacts/regenerate",

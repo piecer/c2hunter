@@ -14,6 +14,7 @@ from c2hunter_analysis.ai_candidates import generate_high_recall_candidates
 from c2hunter_analysis.domain import AnalysisContext, Flow
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from .ai_feedback import REVIEW_PRIORITY_VERSION, calculate_review_priority
 from .ai_gateway import AIAnalysisCancelled
 
 
@@ -826,6 +827,13 @@ class AIAnalysisService:
                         "existing_c2hunter_score": bundle.candidate.existing_c2hunter_score,
                         "prefilter_score": bundle.candidate.prefilter_score,
                         "prefilter_score_version": bundle.candidate.prefilter_score_version,
+                        "review_priority": calculate_review_priority(
+                            existing_score=bundle.candidate.existing_c2hunter_score,
+                            prefilter_score=bundle.candidate.prefilter_score,
+                            ai_verdict=assessment.candidate.verdict,
+                            ai_confidence=assessment.candidate.confidence,
+                        ),
+                        "review_priority_version": REVIEW_PRIORITY_VERSION,
                         "assessment": assessment.model_dump(mode="json"),
                         "evidence_bundle": bundle.model_dump(mode="json", by_alias=True),
                         "evidence_bundle_hash": (

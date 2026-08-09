@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from enum import StrEnum
 from ipaddress import ip_address, ip_network
-from typing import Any
+from typing import Any, Literal
 
 from c2hunter_analysis.scoring import DEFAULT_DETECTOR_WEIGHTS, MAX_DETECTOR_WEIGHT
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -617,3 +617,16 @@ class AIArtifactReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     note: str = Field(min_length=1, max_length=2000)
+
+
+class AIFeedbackCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: Literal[
+        "CONFIRM_C2",
+        "CONFIRM_BENIGN",
+        "NEED_MORE_DATA",
+        "REJECT_EXPLANATION",
+    ]
+    corrected_confidence: float | None = Field(default=None, ge=0, le=1)
+    note: str = Field(min_length=1, max_length=5000)

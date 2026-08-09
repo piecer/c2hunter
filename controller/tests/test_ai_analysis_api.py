@@ -190,3 +190,38 @@ def test_ai_artifact_api_lists_regenerates_and_reviews_drafts_without_publishing
         "ai-artifact-approved",
         "ai-artifacts-regenerate",
     ]
+
+
+def test_ai_feedback_api_is_append_only_and_keeps_ai_verdict_separate() -> None:
+    client, repository = api()
+    run = client.post(
+        "/api/v1/analysis-jobs/job-1/ai-runs",
+        json={"idempotency_key": "feedback-api", "candidate_limit": 5},
+    ).json()
+    assessment = client.get(f"/api/v1/ai-runs/{run['id']}/assessments").json()["items"][0]
+    original_ai_verdict = assessment["assessment"]["candidate"]["verdict"]
+
+    created = client.post(
+        f"/api/v1/ai-assessments/{assessment['id']}/feedback",
+        json={
+            "verdict": "CONFIRM_C2",
+            "corrected_confidence": 0.95,
+            "note": "Confirmed from passive endpoint telemetry",
+        },
+    )
+    invalid = client.post(
+        f"/api/v1/ai-assessments/{assessment['id']}/feedback",
+        json={"verdict": "CONFIRM_BENIGN", "corrected_confidence": 2, "note": "invalid"},
+    )
+    listing = client.get(f"/api/v1/ai-assessments/{assessment['id']}/feedback")
+    stored_assessment = repository.get_ai_assessment(assessment["id"])
+
+    assert assessment["review_priority"] == 55
+    assert assessment["review_priority_version"] == "review-priority-v1"
+    assert created.status_code == 201
+    assert listing.status_code == 200
+    assert listing.json()["items"][0]["verdict"] == "CONFIRM_C2"
+    assert invalid.status_code == 422
+    assert stored_assessment is not None
+    assert stored_assessment["assessment"]["candidate"]["verdict"] == original_ai_verdict
+    assert repository.audit_events[-1]["kind"] == "ai-feedback-create"

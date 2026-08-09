@@ -151,8 +151,10 @@ test('analyst can run bounded AI analysis and inspect the candidate assessment',
   const aiPanel = page.getByRole('region', { name: 'AI C2 분석' });
   await aiPanel.getByRole('button', { name: 'Run AI analysis' }).click();
   await expect(aiPanel.getByText('COMPLETED')).toBeVisible();
-  await expect(aiPanel.getByText('LIKELY_C2')).toBeVisible();
+  await expect(aiPanel.getByText('AI LIKELY_C2')).toBeVisible();
   await expect(aiPanel.getByText('E-C2H-001').first()).toBeVisible();
+  await expect(aiPanel.getByText('Review priority 72')).toBeVisible();
+  await expect(aiPanel.getByText('NEED_MORE_DATA')).toBeVisible();
   await expect(aiPanel.getByText('Splunk hunting SPL')).toBeVisible();
   await expect(aiPanel.getByText(/Not published/)).toBeVisible();
   await expect(aiPanel.getByText(/AI-generated, analyst review required/).first()).toBeVisible();

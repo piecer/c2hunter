@@ -44,6 +44,8 @@ class Repository(Protocol):
     def save_ai_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]: ...
     def get_ai_artifact(self, artifact_id: str) -> dict[str, Any] | None: ...
     def list_ai_artifacts(self, assessment_id: str) -> list[dict[str, Any]]: ...
+    def save_ai_feedback(self, feedback: dict[str, Any]) -> dict[str, Any]: ...
+    def list_ai_feedback(self, assessment_id: str) -> list[dict[str, Any]]: ...
     def append_audit_event(self, kind: str, object_id: str, data: dict[str, Any]) -> None: ...
     def update_candidate(
         self, candidate_id: str, updates: dict[str, Any]
@@ -109,6 +111,7 @@ class MemoryRepository:
         self.ai_run_idempotency_keys: dict[tuple[str, str], str] = {}
         self.ai_assessments: dict[str, dict[str, Any]] = {}
         self.ai_artifacts: dict[str, dict[str, Any]] = {}
+        self.ai_feedback: dict[str, dict[str, Any]] = {}
         self.audit_events: list[dict[str, Any]] = []
         self.candidate_decisions: dict[str, dict[str, Any]] = {}
         self.candidate_ti_lookups: dict[str, dict[str, Any]] = {}
@@ -325,6 +328,23 @@ class MemoryRepository:
                     if artifact["assessment_id"] == assessment_id
                 ),
                 key=lambda artifact: (artifact["created_at"], artifact["artifact_type"]),
+            )
+        )
+
+    def save_ai_feedback(self, feedback: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self.ai_feedback.setdefault(feedback["id"], deepcopy(feedback))
+            return deepcopy(self.ai_feedback[feedback["id"]])
+
+    def list_ai_feedback(self, assessment_id: str) -> list[dict[str, Any]]:
+        return deepcopy(
+            sorted(
+                (
+                    feedback
+                    for feedback in self.ai_feedback.values()
+                    if feedback["assessment_id"] == assessment_id
+                ),
+                key=lambda feedback: feedback["created_at"],
             )
         )
 
@@ -667,6 +687,14 @@ class SQLiteRepository:
             );
             CREATE INDEX IF NOT EXISTS ai_generated_artifacts_assessment_created
               ON ai_generated_artifacts(assessment_id, created_at);
+            CREATE TABLE IF NOT EXISTS ai_feedback (
+              feedback_id TEXT PRIMARY KEY,
+              assessment_id TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              data TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ai_feedback_assessment_created
+              ON ai_feedback(assessment_id, created_at);
             CREATE TABLE IF NOT EXISTS audit_events (
               sequence INTEGER PRIMARY KEY AUTOINCREMENT,
               kind TEXT NOT NULL,
@@ -1031,6 +1059,28 @@ class SQLiteRepository:
         rows = self.connection.execute(
             "SELECT data FROM ai_generated_artifacts "
             "WHERE assessment_id=? ORDER BY created_at,artifact_id",
+            (assessment_id,),
+        ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def save_ai_feedback(self, feedback: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self.connection.execute(
+                "INSERT OR IGNORE INTO ai_feedback"
+                "(feedback_id,assessment_id,created_at,data) VALUES(?,?,?,?)",
+                (
+                    feedback["id"],
+                    feedback["assessment_id"],
+                    feedback["created_at"],
+                    self._serialize(feedback),
+                ),
+            )
+            self.connection.commit()
+        return deepcopy(feedback)
+
+    def list_ai_feedback(self, assessment_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT data FROM ai_feedback WHERE assessment_id=? ORDER BY created_at,feedback_id",
             (assessment_id,),
         ).fetchall()
         return [json.loads(row[0]) for row in rows]

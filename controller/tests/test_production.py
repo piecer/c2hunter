@@ -159,6 +159,8 @@ def test_connection_initialization_is_thread_safe(monkeypatch: Any) -> None:
     assert "CREATE TABLE IF NOT EXISTS job_flow_records" in schema
     assert "CREATE TABLE IF NOT EXISTS job_flow_record_chunks" in schema
     assert "CREATE TABLE IF NOT EXISTS job_payload_signatures" in schema
+    assert "CREATE TABLE IF NOT EXISTS ai_feedback" in schema
+    assert "ai_feedback_assessment_created" in schema
     assert "SET data=data-'flow_records'" in schema
     assert "SET data=data-'payload_signatures'" in schema
 
