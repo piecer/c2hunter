@@ -149,3 +149,44 @@ def test_ai_run_api_enqueues_reference_without_model_payload() -> None:
     assert response.status_code == 201
     assert response.json()["status"] == "QUEUED"
     assert queue.run_ids == [response.json()["id"]]
+
+
+def test_ai_artifact_api_lists_regenerates_and_reviews_drafts_without_publishing() -> None:
+    client, repository = api()
+    run = client.post(
+        "/api/v1/analysis-jobs/job-1/ai-runs",
+        json={"idempotency_key": "artifact-api", "candidate_limit": 5},
+    ).json()
+    assessment = client.get(f"/api/v1/ai-runs/{run['id']}/assessments").json()["items"][0]
+
+    listing = client.get(f"/api/v1/ai-assessments/{assessment['id']}/artifacts")
+
+    assert listing.status_code == 200
+    assert listing.json()["total"] == 3
+    artifacts = listing.json()["items"]
+    misp = next(item for item in artifacts if item["artifact_type"] == "MISP_DRAFT")
+    assert misp["content"]["Event"]["published"] is False
+
+    detail = client.get(f"/api/v1/ai-artifacts/{misp['id']}")
+    approved = client.post(
+        f"/api/v1/ai-artifacts/{misp['id']}/approve",
+        json={"note": "schema and provenance reviewed"},
+    )
+    conflict = client.post(
+        f"/api/v1/ai-artifacts/{misp['id']}/reject",
+        json={"note": "cannot reverse approval"},
+    )
+    regenerated = client.post(f"/api/v1/ai-assessments/{assessment['id']}/artifacts/regenerate")
+
+    assert detail.status_code == 200
+    assert approved.status_code == 200
+    assert approved.json()["approved_status"] == "APPROVED"
+    assert approved.json()["review_note"] == "schema and provenance reviewed"
+    assert conflict.status_code == 409
+    assert regenerated.status_code == 201
+    assert regenerated.json()["total"] == 3
+    assert len(repository.list_ai_artifacts(assessment["id"])) == 6
+    assert [event["kind"] for event in repository.audit_events[-2:]] == [
+        "ai-artifact-approved",
+        "ai-artifacts-regenerate",
+    ]

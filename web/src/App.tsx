@@ -35,6 +35,7 @@ type MispExport = { id: string; event_id: string; candidate_ip: string; attribut
 type Candidate = { id: string; job_id?: string; candidate_ip: string; score: number; severity: string; distinct_internal_hosts?: number; hosts?: string[]; internal_hosts?: string[]; sensors?: string[]; sensor_ids?: string[]; protocols?: string[]; ports?: number[]; domains?: string[]; first_seen?: string; last_seen?: string; evidence?: Evidence[]; evidence_count?: number; adjustments?: ScoreAdjustment[]; traffic_series?: number[]; traffic_buckets?: TrafficBucket[]; related_attack_targets?: string[]; flow_count?: number; packet_count?: number; byte_count?: number; current_verdict?: CandidateVerdict; verdict_history?: CandidateVerdict[]; threat_intelligence?: ThreatIntelligence; misp_exports?: MispExport[] };
 type AIFactor = { title: string; evidence_ids: string[]; explanation: string; strength?: string };
 type AIAssessment = { id: string; candidate_id: string; external_ip: string; assessment: { candidate: { external_ip: string; verdict: string; confidence: number; summary_ko: string; summary_en: string }; supporting_factors: AIFactor[]; counter_factors: AIFactor[]; missing_information: string[]; limitations: string[] } };
+type AIArtifact = { id: string; artifact_type: 'SPLUNK_HUNT' | 'SPLUNK_DETECTION' | 'MISP_DRAFT'; validation_status: string; approved_status: 'PENDING' | 'APPROVED' | 'REJECTED'; content: Record<string, unknown> };
 type AIRun = { id: string; analysis_job_id: string; status: string; progress_percent?: number; candidate_count: number; created_at: string; error_code?: string; error_message?: string };
 type FlowLabel = { id: string; verdict: 'C2' | 'BENIGN'; confidence: 'CONFIRMED' | 'HIGH' | 'MEDIUM'; note: string; created_by?: string; created_at: string };
 type FlowRecordReview = { flow_id: string; job_id: string; sensor_id?: string; timestamp: string; source_ip: string; destination_ip: string; source_port?: number; destination_port?: number; internal_ip?: string; external_ip?: string; service_port?: number; protocol: string; direction: string; packet_count?: number; total_bytes?: number; payload_hash?: string; payload_prefix_hash?: string; payload_length?: number; payload_entropy?: number; payload_printable_ratio?: number; payload_simhash?: string; payload_feature_version?: string; has_payload: boolean; current_label?: FlowLabel | null };
@@ -423,6 +424,36 @@ function JobReanalysis({ job }: { job: Job }) {
   return <section className="panel compact"><h2>가중치 조정 후 재분석</h2><p className="muted">데이터셋 {job.dataset_id}을 다시 업로드하거나 파싱하지 않고 탐지 가중치별 후보 점수를 비교합니다.</p><DetectorWeightFields weights={weights} setWeights={setWeights} applyDefault={false}/>{reanalyze.error && <p role="alert" className="error-text">{reanalyze.error.message}</p>}<button disabled={reanalyze.isPending} onClick={() => reanalyze.mutate()}>{reanalyze.isPending ? '재분석 생성 중…' : '탐지 가중치로 재분석'}</button></section>;
 }
 
+function AIArtifactPanel({ assessmentId }: { assessmentId: string }) {
+  const queryClient = useQueryClient();
+  const artifacts = useQuery<List<AIArtifact>, Error>({
+    queryKey: ['ai-artifacts', assessmentId],
+    queryFn: () => api.get(`/ai-assessments/${assessmentId}/artifacts`),
+  });
+  const review = useMutation({
+    mutationFn: ({ id, action }: { id: string; action: 'approve' | 'reject' }) => api.post(`/ai-artifacts/${id}/${action}`, { note: 'Reviewed from C2Hunter web console' }),
+    onSuccess: async () => queryClient.invalidateQueries({ queryKey: ['ai-artifacts', assessmentId] }),
+  });
+  if (artifacts.isLoading) return <p role="status">AI 생성 초안을 불러오는 중…</p>;
+  if (artifacts.isError) return <p role="alert" className="error-text">AI 생성 초안을 불러오지 못했습니다: {artifacts.error.message}</p>;
+  if (!items(artifacts.data).length) return <p className="muted">생성된 Splunk/MISP 초안이 없습니다.</p>;
+  return <section aria-label="AI-generated artifacts" className="artifact-grid">
+    {items(artifacts.data).map(artifact => {
+      const content = artifact.content ?? {};
+      const event = content.Event && typeof content.Event === 'object' ? content.Event as Record<string, unknown> : {};
+      const attributes = Array.isArray(event.Attribute) ? event.Attribute.filter(value => value && typeof value === 'object') as Record<string, unknown>[] : [];
+      const isMisp = artifact.artifact_type === 'MISP_DRAFT';
+      return <article className="artifact-card" key={artifact.id}>
+        <div className="header-actions"><h4>{isMisp ? 'MISP draft' : artifact.artifact_type === 'SPLUNK_HUNT' ? 'Splunk hunting SPL' : 'Splunk scheduled detection'}</h4><span className={`badge ${artifact.approved_status.toLowerCase()}`}>{artifact.approved_status}</span></div>
+        {isMisp ? <><p><strong>Not published</strong> · {String(event.info ?? 'C2Hunter candidate draft')}</p><dl><dt>IOC</dt><dd>{attributes.map(item => String(item.value ?? '')).filter(Boolean).join(', ') || '없음'}</dd><dt>Attributes</dt><dd>{attributes.length}</dd></dl></> : <><p>{String(content.purpose ?? '')}</p><pre className="artifact-code"><code>{String(content.spl ?? '')}</code></pre></>}
+        <p className="muted">AI-generated, analyst review required · {artifact.validation_status}</p>
+        {artifact.approved_status === 'PENDING' && <div className="row-actions"><button type="button" disabled={review.isPending} onClick={() => review.mutate({ id: artifact.id, action: 'approve' })}>Approve draft</button><button type="button" className="secondary" disabled={review.isPending} onClick={() => review.mutate({ id: artifact.id, action: 'reject' })}>Reject draft</button></div>}
+      </article>;
+    })}
+    {review.error && <p role="alert" className="error-text">초안 검토 실패: {review.error.message}</p>}
+  </section>;
+}
+
 function AIAnalysisPanel({ job }: { job: Job }) {
   const queryClient = useQueryClient();
   const runs = useQuery<List<AIRun>, Error>({
@@ -465,6 +496,7 @@ function AIAnalysisPanel({ job }: { job: Job }) {
         <div className="header-actions"><h3><Link to={`/candidates/${item.candidate_id}`}>{item.external_ip}</Link></h3><div><span className={`badge verdict-${result.candidate.verdict.toLowerCase()}`}>{result.candidate.verdict}</span> <strong>신뢰도 {Math.round(result.candidate.confidence * 100)}%</strong></div></div>
         <p>{result.candidate.summary_ko}</p>
         <dl><dt>근거 ID</dt><dd>{evidenceIds.length ? evidenceIds.map(id => <code key={id}>{id}</code>) : '연결된 근거 없음'}</dd><dt>누락 정보</dt><dd>{result.missing_information.join(', ') || '없음'}</dd></dl>
+        <AIArtifactPanel assessmentId={item.id}/>
       </article>;
     })}
   </section>;

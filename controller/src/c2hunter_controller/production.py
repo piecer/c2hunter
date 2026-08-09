@@ -106,6 +106,15 @@ class PostgresRepository:
                         );
                         CREATE INDEX IF NOT EXISTS ai_candidate_assessments_run_created
                           ON ai_candidate_assessments(ai_run_id,created_at);
+                        CREATE TABLE IF NOT EXISTS ai_generated_artifacts (
+                          artifact_id text PRIMARY KEY,
+                          assessment_id text NOT NULL
+                            REFERENCES ai_candidate_assessments(assessment_id),
+                          created_at timestamptz NOT NULL,
+                          data jsonb NOT NULL
+                        );
+                        CREATE INDEX IF NOT EXISTS ai_generated_artifacts_assessment_created
+                          ON ai_generated_artifacts(assessment_id,created_at);
                         CREATE TABLE IF NOT EXISTS job_flow_records (
                           job_id text PRIMARY KEY, data jsonb NOT NULL
                         );
@@ -218,7 +227,7 @@ class PostgresRepository:
             for chunk_no, chunk in enumerate(cls._json_array_chunks(records)):
                 cursor.execute(
                     "INSERT INTO job_flow_record_chunks(job_id,chunk_no,data) "
-                    "VALUES(%s,%s,[%s]::jsonb)",
+                    "VALUES(%s,%s,('[' || %s || ']')::jsonb)",
                     (job_id, chunk_no, chunk),
                 )
         except Exception:
@@ -814,6 +823,50 @@ class PostgresRepository:
             cursor.execute(
                 "SELECT data FROM ai_candidate_assessments WHERE ai_run_id=%s ORDER BY created_at",
                 (run_id,),
+            )
+            rows = cursor.fetchall()
+            self.connection.commit()
+        return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
+
+    def save_ai_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]:
+        connection = self.connection
+        with self._lock:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "INSERT INTO ai_generated_artifacts"
+                        "(artifact_id,assessment_id,created_at,data) VALUES(%s,%s,%s,%s::jsonb) "
+                        "ON CONFLICT(artifact_id) DO UPDATE SET data=excluded.data",
+                        (
+                            artifact["id"],
+                            artifact["assessment_id"],
+                            artifact["created_at"],
+                            self._json(artifact),
+                        ),
+                    )
+                connection.commit()
+                return deepcopy(artifact)
+            except Exception:
+                connection.rollback()
+                raise
+
+    def get_ai_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT data FROM ai_generated_artifacts WHERE artifact_id=%s", (artifact_id,)
+            )
+            row = cursor.fetchone()
+            self.connection.commit()
+        if row is None:
+            return None
+        return row[0] if isinstance(row[0], dict) else json.loads(row[0])
+
+    def list_ai_artifacts(self, assessment_id: str) -> list[dict[str, Any]]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT data FROM ai_generated_artifacts "
+                "WHERE assessment_id=%s ORDER BY created_at,artifact_id",
+                (assessment_id,),
             )
             rows = cursor.fetchall()
             self.connection.commit()

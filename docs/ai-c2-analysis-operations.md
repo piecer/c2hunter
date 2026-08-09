@@ -41,6 +41,13 @@ AI worker는 시작 시 provider의 model 목록을 조회해 readiness를 확�
 - common DNS/NTP, bulk transfer, trusted peer penalty는 LLM 호출 전에 적용된다.
 - Flow가 없으면 기존 Candidate만 사용하고, 기존 Candidate가 없어도 적합한 external peer가 있으면 AI Run을 생성할 수 있다.
 
+## Splunk/MISP 초안
+
+- 완료된 assessment마다 `SPLUNK_HUNT`, `SPLUNK_DETECTION`, `MISP_DRAFT` 3개를 생성한다.
+- SPL은 read-only profile validator, MISP는 unpublished/IOC/internal-IP validator를 통과한 경우만 저장한다.
+- 승인과 거절은 조사 workflow 상태이며 외부 시스템 전송을 의미하지 않는다.
+- regenerate는 새 PENDING artifact ID를 만들고 이전 review 이력을 덮어쓰지 않는다.
+
 ## 확인
 
 ```bash

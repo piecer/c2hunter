@@ -45,6 +45,14 @@ export async function installApiFixture(page: Page) {
     }
     if (path === '/ai-runs/ai-run-1' && method === 'GET') return fulfill(route, aiRuns[0]);
     if (path === '/ai-runs/ai-run-1/assessments' && method === 'GET') return fulfill(route, { items: [aiAssessment], total: 1 });
+    if (path === '/ai-assessments/assessment-1/artifacts' && method === 'GET') return fulfill(route, {
+      items: [
+        { id: 'artifact-hunt', artifact_type: 'SPLUNK_HUNT', validation_status: 'VALID', approved_status: 'PENDING', content: { purpose: 'Inspect candidate communication', spl: 'index=c2hunter earliest=-15m latest=now dst_ip="203.0.113.10" | table _time,dst_ip' } },
+        { id: 'artifact-detection', artifact_type: 'SPLUNK_DETECTION', validation_status: 'VALID', approved_status: 'PENDING', content: { purpose: 'Detect repeated communication', spl: 'index=c2hunter earliest=-10m latest=now | stats count by dst_ip' } },
+        { id: 'artifact-misp', artifact_type: 'MISP_DRAFT', validation_status: 'VALID', approved_status: 'PENDING', content: { Event: { info: 'C2Hunter suspected candidate', published: false, Attribute: [{ type: 'ip-dst', value: '203.0.113.10', to_ids: false }] } } },
+      ],
+      total: 3,
+    });
     if (path === '/analysis-jobs/job-1' && method === 'PATCH') { const body = request.postDataJSON(); return fulfill(route, { id: 'job-1', name: body.name, description: body.description, status: 'COMPLETED' }); }
     if (path === '/analysis-jobs/job-1' && method === 'DELETE') return fulfill(route, undefined, 204);
     if (path === '/analysis-jobs/job-1' && method === 'GET') return fulfill(route, { id: 'job-1', name: 'E2E investigation', status: 'ANALYZING', progress_percent: 72, packet_count: 720000, flow_count: 18000, candidate_count: 1, sensor_ids: ['sensor-a'], internal_networks: ['10.0.0.0/8'], capture: { directions: ['OUTBOUND', 'INBOUND'], store_pcap: true, max_packets: 2000000, limits: { max_duration_seconds: 300 } }, analysis: { profile: 'ddos_botnet', minimum_candidate_score: 60, minimum_distinct_clients: 3, periodicity_min_samples: 5, ml_anomaly_enabled: true, detector_weights: { periodic_beacon: 1.5, common_destination: 0.25, dns_tunnel: 0 }, custom_policy: { mode: 'strict', tags: ['production', 'edge'] } } });

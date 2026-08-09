@@ -84,11 +84,11 @@ INLINE_EVIDENCE_BUNDLE_BYTES = 64 * 1024
 
 
 class EvidenceItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    evidence_id: str = Field(serialization_alias="id")
-    evidence_type: str = Field(serialization_alias="type")
-    description: str = Field(max_length=2048, serialization_alias="summary")
+    evidence_id: str = Field(alias="id")
+    evidence_type: str = Field(alias="type")
+    description: str = Field(alias="summary", max_length=2048)
     contribution: float | None = None
     metrics: dict[str, Any] = Field(default_factory=dict)
 
@@ -249,6 +249,7 @@ class AIRepository(Protocol):
     def list_ai_runs(self, job_id: str) -> list[dict[str, Any]]: ...
     def save_ai_assessment(self, assessment: dict[str, Any]) -> dict[str, Any]: ...
     def list_ai_assessments(self, run_id: str) -> list[dict[str, Any]]: ...
+    def save_ai_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]: ...
 
 
 def _now() -> str:
@@ -396,9 +397,9 @@ def build_evidence_bundle(
             continue
         evidence.append(
             EvidenceItem(
-                evidence_id=f"E-C2H-{index:03d}",
-                evidence_type=str(item.get("type") or item.get("detector") or "UNKNOWN")[:100],
-                description=str(item.get("description") or "Detector evidence")[:2048],
+                id=f"E-C2H-{index:03d}",
+                type=str(item.get("type") or item.get("detector") or "UNKNOWN")[:100],
+                summary=str(item.get("description") or "Detector evidence")[:2048],
                 contribution=item.get("contribution"),
                 metrics=_safe_metrics(item.get("metrics", {})),
             )
@@ -406,9 +407,9 @@ def build_evidence_bundle(
     if not evidence:
         evidence.append(
             EvidenceItem(
-                evidence_id="E-C2H-001",
-                evidence_type="CANDIDATE_SCORE",
-                description="Candidate selected by the existing deterministic C2Hunter pipeline.",
+                id="E-C2H-001",
+                type="CANDIDATE_SCORE",
+                summary="Candidate selected by the existing deterministic C2Hunter pipeline.",
                 contribution=float(candidate.get("score", 0)),
             )
         )
@@ -815,7 +816,7 @@ class AIAnalysisService:
                 assessment = CandidateAssessment.model_validate(response)
                 validate_assessment_evidence(assessment, bundle)
                 now = _now()
-                self.repository.save_ai_assessment(
+                stored_assessment = self.repository.save_ai_assessment(
                     {
                         "id": str(uuid.uuid4()),
                         "ai_run_id": run_id,
@@ -833,6 +834,16 @@ class AIAnalysisService:
                         "created_at": now,
                     }
                 )
+                from .ai_artifacts import build_ai_artifacts
+
+                for artifact in build_ai_artifacts(
+                    assessment_id=stored_assessment["id"],
+                    ai_run_id=run_id,
+                    analysis_job_id=run["analysis_job_id"],
+                    assessment=assessment,
+                    bundle=bundle,
+                ):
+                    self.repository.save_ai_artifact(artifact)
                 if bundle is not bundles[-1]:
                     run = self._transition(
                         run, AIAnalysisState.ANALYZING, "analyzing next candidate"

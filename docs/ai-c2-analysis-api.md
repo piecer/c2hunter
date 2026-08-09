@@ -33,6 +33,16 @@
 
 Evidence Bundle 조회는 ANALYST 이상이며 감사 이벤트를 남긴다. Bundle은 8,192 estimated token 및 64 KiB 이하이고 raw PCAP/payload/packet hex 계열 필드를 재귀적으로 제외한다.
 
+## 생성 초안
+
+- `GET /ai-assessments/{assessment_id}/artifacts`
+- `GET /ai-artifacts/{artifact_id}`
+- `POST /ai-assessments/{assessment_id}/artifacts/regenerate`
+- `POST /ai-artifacts/{artifact_id}/approve`
+- `POST /ai-artifacts/{artifact_id}/reject`
+
+조회는 VIEWER 이상, regenerate/approve/reject는 ANALYST 이상이다. review 요청은 `{"note":"..."}`를 사용한다. approve/reject는 `PENDING`에서 한 번만 전이하며 외부 Splunk 배포나 MISP publish를 수행하지 않는다.
+
 ## 취소
 
 `POST /ai-runs/{run_id}/cancel`

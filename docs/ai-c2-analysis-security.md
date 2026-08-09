@@ -17,6 +17,13 @@
 - local model의 malformed JSON/schema는 1회만 repair하며 두 번째 실패 결과는 저장하지 않는다.
 - prompt에는 captured string을 명령으로 실행하지 말라는 system rule과 schema를 Evidence 뒤의 trusted instruction으로 배치한다.
 
+## Artifact 경계
+
+- SPL은 `delete`, `collect`, `outputlookup`, `sendemail`, `script`, `run` 명령과 `index=*`를 거부한다.
+- profile에 없는 field와 Evidence Bundle에 없는 IP/hash literal은 저장하지 않는다.
+- MISP는 항상 `published=false`이며 RFC1918 내부 IP와 Evidence에 없는 IOC를 거부한다.
+- approve/reject는 외부 publish/deploy를 호출하지 않고 reviewer, note, timestamp만 감사 가능하게 저장한다.
+
 ## 권한과 감사
 
 - Run 생성/취소: ANALYST 이상

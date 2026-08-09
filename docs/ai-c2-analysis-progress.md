@@ -2,7 +2,7 @@
 
 ## Current phase
 
-Phase 4 완료 — Local LLM Gateway
+Phase 5 완료 — Validated Splunk/MISP Artifacts
 
 ## Completed
 
@@ -52,6 +52,15 @@ Phase 4 완료 — Local LLM Gateway
 - OpenAI-compatible provider는 native `json_schema` response format을 사용한다. Ollama는 현재 backend의 complex grammar/output-budget 제약 때문에 normalized schema를 마지막 trusted prompt로 전달하고 JSON mode 후 동일 validator를 적용한다.
 - 로컬 `qwen3.6-agent:256k` live smoke에서 후보 1개가 `INCONCLUSIVE`, confidence 0.3, `E-C2H-001` 근거로 검증됐다.
 
+### Phase 5
+
+- 고정 `c2hunter_flow_v1` profile에서 hunting SPL과 scheduled detection SPL을 결정론적으로 생성한다.
+- write command, `index=*`, 시간 범위 누락, unknown profile field, Evidence에 없는 IP/hash literal을 거부한다.
+- MISP draft는 `published=false`와 bounded attribute schema를 강제하고 unknown IOC, RFC1918 내부 IP, 역전된 시간 범위를 거부한다.
+- Memory/SQLite/PostgreSQL에 별도 `ai_generated_artifacts` 저장 경계와 assessment index를 추가했다.
+- list/detail/regenerate/approve/reject API를 추가했으며 review는 외부 publish/deploy 없이 terminal 상태와 감사 이벤트만 저장한다.
+- Analysis UI에 raw JSON 대신 SPL code preview와 MISP publish 상태/IOC/attribute count 및 approve/reject를 구조화해 표시한다.
+
 ## Verification
 
 2026-08-09 실제 실행 결과:
@@ -71,8 +80,7 @@ Phase 4 완료 — Local LLM Gateway
 
 아래 작업은 명세의 후속 단계이며 Milestone 1 범위에 포함되지 않는다.
 
-1. Splunk SPL/MISP artifact 생성과 재생성
-2. analyst feedback, calibration materialization, drift observability
-3. 보존 기간 cleanup과 대규모 성능/부하 검증
+1. analyst feedback, calibration materialization, drift observability
+2. 보존 기간 cleanup과 대규모 성능/부하 검증
 
 각 후속 milestone도 schema/fixture부터 RED → GREEN → REFACTOR 순으로 진행한다.

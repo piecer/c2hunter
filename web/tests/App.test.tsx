@@ -52,6 +52,15 @@ responses['/api/v1/ai-runs/ai-run-1/assessments'] = {
   total: 1,
 };
 
+responses['/api/v1/ai-assessments/assessment-1/artifacts'] = {
+  items: [
+    { id: 'artifact-hunt', artifact_type: 'SPLUNK_HUNT', validation_status: 'VALID', approved_status: 'PENDING', content: { purpose: 'Inspect candidate communication', spl: 'index=c2hunter earliest=-15m dst_ip="203.0.113.9" | table _time,dst_ip' } },
+    { id: 'artifact-detection', artifact_type: 'SPLUNK_DETECTION', validation_status: 'VALID', approved_status: 'APPROVED', content: { purpose: 'Detect repeated communication', spl: 'index=c2hunter earliest=-10m | stats count by dst_ip' } },
+    { id: 'artifact-misp', artifact_type: 'MISP_DRAFT', validation_status: 'VALID', approved_status: 'PENDING', content: { Event: { info: 'C2Hunter suspected candidate', published: false, Attribute: [{ type: 'ip-dst', value: '203.0.113.9', to_ids: false }] } } },
+  ],
+  total: 3,
+};
+
 function renderAt(route: string, handler?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
   localStorage.setItem('c2hunter-token', 'token');
   vi.stubGlobal('fetch', vi.fn(handler ?? (async (input: RequestInfo | URL) => {
@@ -148,6 +157,11 @@ describe('C2Hunter UI', () => {
     expect(within(region).getByText('신뢰도 75%')).toBeInTheDocument();
     expect(within(region).getByText('주기 통신 근거를 검토해야 합니다.')).toBeInTheDocument();
     expect(within(region).getByText('E-C2H-candidate-1-01')).toBeInTheDocument();
+    expect(await within(region).findByText('Splunk hunting SPL')).toBeInTheDocument();
+    expect(within(region).getByText(/index=c2hunter earliest=-15m/)).toBeInTheDocument();
+    expect(within(region).getByText(/Not published/)).toBeInTheDocument();
+    expect(within(region).getByText('203.0.113.9', { selector: 'dd' })).toBeInTheDocument();
+    expect(within(region).getAllByText('PENDING')).toHaveLength(2);
     expect(within(region).getByRole('link', { name: '203.0.113.9' })).toHaveAttribute(
       'href',
       '/candidates/candidate-1',

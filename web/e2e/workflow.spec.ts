@@ -153,6 +153,9 @@ test('analyst can run bounded AI analysis and inspect the candidate assessment',
   await expect(aiPanel.getByText('COMPLETED')).toBeVisible();
   await expect(aiPanel.getByText('LIKELY_C2')).toBeVisible();
   await expect(aiPanel.getByText('E-C2H-001').first()).toBeVisible();
+  await expect(aiPanel.getByText('Splunk hunting SPL')).toBeVisible();
+  await expect(aiPanel.getByText(/Not published/)).toBeVisible();
+  await expect(aiPanel.getByText(/AI-generated, analyst review required/).first()).toBeVisible();
 
   await page.getByRole('link', { name: '203.0.113.10' }).click();
   const candidateAI = page.getByRole('region', { name: 'AI C2 판정' });

@@ -7,7 +7,7 @@ import secrets
 import threading
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 
 from c2hunter_analysis.domain import AllowlistEntry
 from c2hunter_analysis.pcap import PcapParseError, find_pcap_record, parse_pcap
@@ -24,7 +24,14 @@ from prometheus_client import (
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from .ai_analysis import AIAnalysisError, AIAnalysisService, ModelGateway
+from .ai_analysis import (
+    AIAnalysisError,
+    AIAnalysisService,
+    CandidateAssessment,
+    CandidateEvidenceBundle,
+    ModelGateway,
+)
+from .ai_artifacts import AIArtifactError, AIArtifactService, build_ai_artifacts
 from .ai_gateway import create_model_gateway
 from .ai_queueing import (
     AIAnalysisTaskQueue,
@@ -56,6 +63,7 @@ from .repositories import MemoryRepository, Repository
 from .schemas import (
     AIAnalysisRunCancel,
     AIAnalysisRunCreate,
+    AIArtifactReview,
     AllowlistCreate,
     AnalysisJobCreate,
     AnalysisJobUpdate,
@@ -2088,6 +2096,95 @@ def create_app(
             {"viewed_by": str(getattr(principal, "subject", "anonymous"))},
         )
         return bundle
+
+    @app.get("/api/v1/ai-assessments/{assessment_id}/artifacts")
+    def list_ai_artifacts(
+        assessment_id: str,
+        page: int = Query(1, ge=1),
+        page_size: int = Query(50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        if repo.get_ai_assessment(assessment_id) is None:
+            raise ApiError(404, "AI_ASSESSMENT_NOT_FOUND", "AI 후보 판정을 찾을 수 없습니다")
+        return _page(repo.list_ai_artifacts(assessment_id), page, page_size)
+
+    @app.get("/api/v1/ai-artifacts/{artifact_id}")
+    def get_ai_artifact(artifact_id: str) -> dict[str, Any]:
+        artifact = repo.get_ai_artifact(artifact_id)
+        if artifact is None:
+            raise ApiError(404, "AI_ARTIFACT_NOT_FOUND", "AI 생성 초안을 찾을 수 없습니다")
+        return artifact
+
+    @app.post("/api/v1/ai-assessments/{assessment_id}/artifacts/regenerate", status_code=201)
+    def regenerate_ai_artifacts(assessment_id: str, request: Request) -> dict[str, Any]:
+        stored = repo.get_ai_assessment(assessment_id)
+        if stored is None:
+            raise ApiError(404, "AI_ASSESSMENT_NOT_FOUND", "AI 후보 판정을 찾을 수 없습니다")
+        try:
+            assessment = CandidateAssessment.model_validate(stored.get("assessment"))
+            bundle = CandidateEvidenceBundle.model_validate(stored.get("evidence_bundle"))
+            artifacts = build_ai_artifacts(
+                assessment_id=assessment_id,
+                ai_run_id=str(stored["ai_run_id"]),
+                analysis_job_id=str(stored["analysis_job_id"]),
+                assessment=assessment,
+                bundle=bundle,
+            )
+        except (AIArtifactError, ValidationError, KeyError, TypeError, ValueError) as exc:
+            raise ApiError(409, "AI_ARTIFACT_REGENERATION_FAILED", str(exc)) from exc
+        for artifact in artifacts:
+            repo.save_ai_artifact(artifact)
+        principal = getattr(request.state, "principal", None)
+        repo.append_audit_event(
+            "ai-artifacts-regenerate",
+            assessment_id,
+            {
+                "regenerated_by": str(getattr(principal, "subject", "anonymous")),
+                "artifact_ids": [artifact["id"] for artifact in artifacts],
+            },
+        )
+        return {"items": artifacts, "total": len(artifacts)}
+
+    def review_ai_artifact(
+        artifact_id: str,
+        payload: AIArtifactReview,
+        request: Request,
+        status: Literal["APPROVED", "REJECTED"],
+    ) -> dict[str, Any]:
+        principal = getattr(request.state, "principal", None)
+        reviewed_by = str(getattr(principal, "subject", "anonymous"))
+        try:
+            artifact = AIArtifactService(repo).review(
+                artifact_id,
+                status=status,
+                reviewed_by=reviewed_by,
+                note=payload.note,
+            )
+        except AIArtifactError as exc:
+            code = (
+                "AI_ARTIFACT_NOT_FOUND"
+                if str(exc) == "AI artifact not found"
+                else "AI_ARTIFACT_REVIEW_CONFLICT"
+            )
+            status_code = 404 if code == "AI_ARTIFACT_NOT_FOUND" else 409
+            raise ApiError(status_code, code, str(exc)) from exc
+        repo.append_audit_event(
+            f"ai-artifact-{status.lower()}",
+            artifact_id,
+            {"reviewed_by": reviewed_by, "note": payload.note},
+        )
+        return artifact
+
+    @app.post("/api/v1/ai-artifacts/{artifact_id}/approve")
+    def approve_ai_artifact(
+        artifact_id: str, payload: AIArtifactReview, request: Request
+    ) -> dict[str, Any]:
+        return review_ai_artifact(artifact_id, payload, request, "APPROVED")
+
+    @app.post("/api/v1/ai-artifacts/{artifact_id}/reject")
+    def reject_ai_artifact(
+        artifact_id: str, payload: AIArtifactReview, request: Request
+    ) -> dict[str, Any]:
+        return review_ai_artifact(artifact_id, payload, request, "REJECTED")
 
     @app.post("/api/v1/ai-runs/{run_id}/cancel")
     def cancel_ai_analysis_run(
