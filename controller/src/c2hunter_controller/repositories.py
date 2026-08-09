@@ -55,6 +55,8 @@ class Repository(Protocol):
     def delete_candidate(self, candidate_id: str) -> bool: ...
     def save_candidate_decision(self, decision: dict[str, Any]) -> dict[str, Any]: ...
     def list_candidate_decisions(self, candidate_id: str | None = None) -> list[dict[str, Any]]: ...
+    def save_candidate_action(self, action: dict[str, Any]) -> dict[str, Any]: ...
+    def list_candidate_actions(self, candidate_id: str | None = None) -> list[dict[str, Any]]: ...
     def save_candidate_ti_lookup(self, lookup: dict[str, Any]) -> dict[str, Any]: ...
     def list_candidate_ti_lookups(
         self, candidate_id: str | None = None
@@ -116,6 +118,7 @@ class MemoryRepository:
         self.ai_feedback: dict[str, dict[str, Any]] = {}
         self.audit_events: list[dict[str, Any]] = []
         self.candidate_decisions: dict[str, dict[str, Any]] = {}
+        self.candidate_actions: dict[str, dict[str, Any]] = {}
         self.candidate_ti_lookups: dict[str, dict[str, Any]] = {}
         self.candidate_misp_actions: dict[str, dict[str, Any]] = {}
         self.job_captures: dict[str, bytes] = {}
@@ -453,6 +456,18 @@ class MemoryRepository:
 
     def list_candidate_decisions(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
         values = self.candidate_decisions.values()
+        selected = [
+            item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
+        ]
+        return sorted(deepcopy(selected), key=lambda item: str(item["created_at"]))
+
+    def save_candidate_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            self.candidate_actions[action["id"]] = deepcopy(action)
+            return deepcopy(action)
+
+    def list_candidate_actions(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
+        values = self.candidate_actions.values()
         selected = [
             item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
         ]
@@ -1176,6 +1191,15 @@ class SQLiteRepository:
 
     def list_candidate_decisions(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
         values = self._list("candidate-decision")
+        return [
+            item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
+        ]
+
+    def save_candidate_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        return self._put("candidate-action", action["id"], action)
+
+    def list_candidate_actions(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
+        values = self._list("candidate-action")
         return [
             item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
         ]

@@ -10,9 +10,12 @@ const responses: Record<string, unknown> = {
     generated_at: '2026-07-20T10:10:00Z',
     fleet: { total: 3, online: 2, offline: 1, degraded: 0, dropped_packets: 6 },
     analyses: { total: 4, active: 1, completed_24h: 2, failed_24h: 1, partially_completed_24h: 1, by_status: { WAITING_FOR_SENSOR: 0, CAPTURING: 0, UPLOADING: 0, INGESTING: 0, ANALYZING: 1 } },
-    candidates: { total: 5, critical: 1, high: 1, medium: 2, low: 1, new_24h: 3 },
+    candidates: { total: 5, critical: 1, high: 1, medium: 2, low: 1, new_24h: 3, needs_review: 2, in_review: 1, action_required: 1, done: 1 },
     candidate_trend: [{ hour: '07:00', count: 0 }, { hour: '08:00', count: 1 }, { hour: '09:00', count: 0 }, { hour: '10:00', count: 2 }],
-    priority_candidates: [{ id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 91, severity: 'CRITICAL', last_seen: '2026-07-20T10:05:00Z', evidence_count: 2 }],
+    priority_candidates: [
+      { id: 'candidate-new', job_id: 'job-1', candidate_ip: '203.0.113.20', score: 65, severity: 'MEDIUM', last_seen: '2026-07-20T10:09:00Z', evidence_count: 1 },
+      { id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 91, severity: 'CRITICAL', last_seen: '2026-07-20T10:05:00Z', evidence_count: 2 },
+    ],
     recent_analyses: [{ id: 'job-1', name: 'Investigation', status: 'COMPLETED', created_at: '2026-07-20T10:00:00Z', candidate_count: 2, packet_count: 100, flow_count: 50 }],
     sensor_quality: [{ sensor_id: 'sensor-b', name: 'Sensor B', status: 'OFFLINE', received_packets: 94, dropped_packets: 6, drop_rate_percent: 6, last_heartbeat_at: '2026-07-20T09:00:00Z', last_error: 'capture stopped' }],
     attention: [
@@ -24,7 +27,7 @@ const responses: Record<string, unknown> = {
   '/api/v1/sensors': { items: [{ sensor_id: 'sensor-a', name: 'Sensor A', status: 'ONLINE', last_heartbeat: '2026-07-20T10:00:00Z', interfaces: [{ name: 'eth0', direction: 'INBOUND' }], version: '0.1.0', cpu_percent: 10, memory_percent: 20, disk_percent: 30, received_packets: 1000, dropped_packets: 2 }, { sensor_id: 'sensor-b', name: 'Sensor B', status: 'ONLINE', interfaces: [{ name: 'eth1', direction: 'OUTBOUND' }] }] },
   '/api/v1/analysis-jobs/job-1': { id: 'job-1', dataset_id: 'dataset-1', name: 'Investigation', status: 'ANALYZING', sensor_ids: ['sensor-a'], internal_networks: ['10.0.0.0/8'], capture: { max_packets: 2000, directions: ['OUTBOUND'] }, analysis: { profile: 'ddos_botnet', minimum_candidate_score: 60 }, transitions: [{ to_status: 'CREATED', occurred_at: '2026-07-20T10:00:00Z', reason: 'analysis requested' }], packet_count: 100, flow_count: 50, candidate_count: 1 },
   '/api/v1/analysis-jobs/job-1/candidates?page_size=200': { items: [{ id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', hosts: ['10.0.0.5'], sensors: ['sensor-a'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', contribution: 15, description: 'Periodic traffic' }] }] },
-  '/api/v1/candidates': { items: [{ id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', hosts: ['10.0.0.5'], sensors: ['sensor-a'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', contribution: 15, description: 'Periodic traffic' }] }] },
+  '/api/v1/candidates': { items: [{ id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', workflow_status: 'NEEDS_REVIEW', action_status: 'NOT_REQUIRED', hosts: ['10.0.0.5'], sensors: ['sensor-a'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', contribution: 15, description: 'Periodic traffic' }] }], workflow_counts: { needs_review: 1, in_review: 2, action_required: 3, action_in_progress: 4, action_completed: 5, false_positive: 6, done: 11 } },
   '/api/v1/candidates/candidate-1': { id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', hosts: ['10.0.0.5'], sensors: ['sensor-a'], protocols: ['TCP'], ports: [443], domains: ['c2.example'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', flow_count: 5, packet_count: 20, byte_count: 2048, traffic_buckets: [{ start: '2026-07-20T10:00:00Z', flows: 5, packets: 20, bytes: 2048 }], evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', version: '1.0.0', raw_score: 15, contribution: 15, confidence: 0.9, description: 'Periodic traffic', hosts: ['10.0.0.5'], sensors: ['sensor-a'], metrics: { sample_count: 7, period_seconds: 30 } }], adjustments: [{ kind: 'SINGLE_HOST', points: -20, explanation: 'Single internal host observed' }] },
   '/api/v1/analysis-jobs/job-1/flows?candidate_ip=203.0.113.9&page=1&page_size=50': { items: [{ flow_id: '0123456789abcdef01234567', job_id: 'job-1', sensor_id: 'sensor-a', timestamp: '2026-07-20T10:00:00Z', source_ip: '10.0.0.5', destination_ip: '203.0.113.9', source_port: 51000, destination_port: 443, internal_ip: '10.0.0.5', external_ip: '203.0.113.9', service_port: 443, protocol: 'TCP', direction: 'OUTBOUND', packet_count: 2, total_bytes: 128, payload_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_prefix_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_length: 6, payload_entropy: 2.585, payload_printable_ratio: 1, payload_simhash: 'e627bf19152d67b3', payload_feature_version: '1', has_payload: true, current_label: null }], page: 1, page_size: 50, total: 1 },
   '/api/v1/analysis-jobs/job-1/flows/0123456789abcdef01234567/payload-preview': { flow_id: '0123456789abcdef01234567', payload_hex: '626561636f6e', payload_ascii: 'beacon', sample_bytes: 6, payload_length: 6, truncated: false, payload_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887' },
@@ -33,7 +36,7 @@ const responses: Record<string, unknown> = {
 };
 responses['/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&include_filter=%7B%22has_payload%22%3Atrue%7D'] =
   responses['/api/v1/analysis-jobs/job-1/flows?candidate_ip=203.0.113.9&page=1&page_size=50'];
-responses['/api/v1/candidates?page=1&page_size=50&minimum_score=0&sort=-score'] =
+responses['/api/v1/candidates?page=1&page_size=50&minimum_score=0&sort=-last_seen'] =
   responses['/api/v1/candidates'];
 responses['/api/v1/sensor-pcaps?analysis_job_id=job-1&page_size=200'] = { items: [], total: 0, page: 1, page_size: 200 };
 responses['/api/v1/analysis-jobs/job-1/ai-runs'] = {
@@ -80,9 +83,9 @@ describe('C2Hunter UI', () => {
     renderAt('/');
     expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeInTheDocument();
     expect(await screen.findByText('온라인 센서')).toBeInTheDocument();
-    expect(screen.getByText('High / Critical 후보')).toBeInTheDocument();
+    expect(screen.getByText('조치 필요', { selector: '.metric span' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '지금 확인할 항목' })).toBeInTheDocument();
-    const priorityHeading = screen.getByRole('heading', { name: '우선 조사 후보' });
+    const priorityHeading = screen.getByRole('heading', { name: '분석 및 조치 필요 후보' });
     expect(priorityHeading).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '최근 분석' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '후보 심각도' })).toBeInTheDocument();
@@ -101,12 +104,43 @@ describe('C2Hunter UI', () => {
     expect(screen.getByRole('table', { name: 'Sensors' })).toBeInTheDocument();
   });
 
-  it('renders raw Controller candidates without assuming optional arrays exist', async () => {
+  it('renders candidates with normalized optional fields', async () => {
     renderAt('/candidates');
     expect(await screen.findByRole('table', { name: 'C2 candidates' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: '203.0.113.9' })).toBeInTheDocument();
     expect(screen.getByText('Unknown')).toBeInTheDocument();
     expect(screen.getByText('주기적 비콘')).toBeInTheDocument();
+  });
+
+  it('shows the dashboard review queue newest first', async () => {
+    renderAt('/');
+
+    const metrics = await screen.findByRole('region', { name: '운영 핵심 지표' });
+    const reviewMetric = within(metrics).getByText('분석 필요').closest('article') as HTMLElement;
+    const actionMetric = within(metrics).getByText('조치 필요').closest('article') as HTMLElement;
+    expect(within(reviewMetric).getByText('2')).toBeInTheDocument();
+    expect(within(actionMetric).getByText('1')).toBeInTheDocument();
+    const queue = screen.getByRole('list', { name: '분석 및 조치 필요 후보' });
+    const candidates = within(queue).getAllByRole('listitem');
+    expect(within(candidates[0]).getByText('203.0.113.20')).toBeInTheDocument();
+    expect(within(candidates[1]).getByText('203.0.113.9')).toBeInTheDocument();
+  });
+
+  it('summarizes candidate workflow states with explicit labels', async () => {
+    renderAt('/candidates');
+
+    const summary = await screen.findByRole('region', { name: 'Candidate 처리 현황' });
+    expect(within(summary).getByText('미분석')).toBeInTheDocument();
+    expect(within(summary).getByText('분석 중')).toBeInTheDocument();
+    expect(within(summary).getByText('조치 필요')).toBeInTheDocument();
+    expect(within(summary).getByText('조치 중')).toBeInTheDocument();
+    expect(within(summary).getByText('조치 완료')).toBeInTheDocument();
+    expect(within(summary).getByText('오탐 처리 완료')).toBeInTheDocument();
+    expect(within(summary).getByText('1')).toBeInTheDocument();
+    expect(within(summary).getByText('2')).toBeInTheDocument();
+    expect(within(summary).getByText('3')).toBeInTheDocument();
+    expect(within(summary).getByText('4')).toBeInTheDocument();
+    expect(screen.getByText('미분석', { selector: '.workflow-badge' })).toBeInTheDocument();
   });
 
   it('filters, sorts, and paginates candidates through the Controller API', async () => {
@@ -124,14 +158,14 @@ describe('C2Hunter UI', () => {
 
     expect(await screen.findByRole('link', { name: '203.0.113.9' })).toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText('Severity'), 'HIGH');
-    await user.selectOptions(screen.getByLabelText('Verdict'), 'CONFIRMED_C2');
+    await user.selectOptions(screen.getByLabelText('처리 상태'), 'ACTION_COMPLETED');
     await user.clear(screen.getByLabelText('Minimum score'));
     await user.type(screen.getByLabelText('Minimum score'), '70');
     await user.click(screen.getByLabelText('Include suppressed candidates'));
     await user.selectOptions(screen.getByLabelText('Sort candidates'), 'candidate_ip');
     await user.click(screen.getByRole('button', { name: 'Apply filters' }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/candidates?page=1&page_size=50&minimum_score=70&sort=candidate_ip&severity=HIGH&verdict=CONFIRMED_C2&include_suppressed=true', expect.anything()));
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/candidates?page=1&page_size=50&minimum_score=70&sort=candidate_ip&severity=HIGH&workflow_status=ACTION_COMPLETED&include_suppressed=true', expect.anything());
     await user.click(screen.getByRole('button', { name: 'Next candidates' }));
     expect(await screen.findByRole('link', { name: '198.51.100.7' })).toBeInTheDocument();
     expect(screen.getByText('Candidates 51–51 of 51')).toBeInTheDocument();
@@ -451,12 +485,21 @@ describe('C2Hunter UI', () => {
   it('records verdicts, looks up TI, and exports confirmed candidates to MISP', async () => {
     const original = responses['/api/v1/candidates/candidate-1'] as Record<string, unknown>;
     let candidate = { ...original };
+    let actionSequence = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path === '/api/v1/candidates/candidate-1/verdicts' && init?.method === 'POST') {
-        const verdict = { verdict: 'CONFIRMED_C2', confidence: 'HIGH', note: 'Beacon verified', created_by: 'analyst', created_at: '2026-07-20T11:00:00Z' };
-        candidate = { ...candidate, current_verdict: verdict, verdict_history: [verdict] };
+        const verdict = { id: 'verdict-1', verdict: 'CONFIRMED_C2', confidence: 'HIGH', note: 'Beacon verified', created_by: 'analyst', created_at: '2026-07-20T11:00:00Z' };
+        const action = { id: 'action-pending', verdict_id: verdict.id, status: 'PENDING', note: 'Follow-up created', created_by: 'analyst', created_at: verdict.created_at };
+        candidate = { ...candidate, workflow_status: 'ACTION_REQUIRED', action_status: 'PENDING', current_verdict: verdict, verdict_history: [verdict], current_action: action, action_history: [action] };
         return new Response(JSON.stringify(candidate), { status: 201 });
+      }
+      if (path === '/api/v1/candidates/candidate-1/actions' && init?.method === 'POST') {
+        actionSequence += 1;
+        const body = JSON.parse(String(init.body)) as { status: 'IN_PROGRESS' | 'COMPLETED'; note: string };
+        const action = { id: `action-${actionSequence}`, verdict_id: 'verdict-1', ...body, created_by: 'analyst', created_at: `2026-07-20T11:0${actionSequence}:00Z`, completed_at: body.status === 'COMPLETED' ? `2026-07-20T11:0${actionSequence}:00Z` : null };
+        candidate = { ...candidate, workflow_status: body.status === 'COMPLETED' ? 'ACTION_COMPLETED' : 'ACTION_IN_PROGRESS', action_status: body.status, current_action: action, action_history: [...(candidate.action_history as object[]), action] };
+        return new Response(JSON.stringify(candidate), { status: 200 });
       }
       if (path === '/api/v1/candidates/candidate-1/threat-intelligence/lookups' && init?.method === 'POST') {
         const threatIntelligence = { fetched_at: '2026-07-20T11:01:00Z', summary: { malicious: 8, suspicious: 2, harmless: 12, abuse_confidence_score: 91 }, providers: { virustotal: { status: 'OK', malicious: 8, suspicious: 2, harmless: 12, reputation: -20 }, abuseipdb: { status: 'OK', abuse_confidence_score: 91, total_reports: 13, country_code: 'US', isp: 'Example ISP' } } };
@@ -481,6 +524,15 @@ describe('C2Hunter UI', () => {
     await user.type(screen.getByLabelText('Verdict note'), 'Beacon verified');
     await user.click(screen.getByRole('button', { name: '판정 저장' }));
     await waitFor(() => expect(screen.getByText('확정 C2')).toBeInTheDocument());
+    expect(screen.getByRole('heading', { name: '후속 대응 조치' })).toBeInTheDocument();
+    expect(screen.getByText('조치 필요', { selector: '.workflow-badge' })).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText('조치 내용'), 'Host isolation initiated');
+    await user.click(screen.getByRole('button', { name: '조치 시작' }));
+    await waitFor(() => expect(screen.getByText('조치 중', { selector: '.workflow-badge' })).toBeInTheDocument());
+    await user.type(screen.getByLabelText('조치 내용'), 'Host isolated and IOC blocked');
+    await user.click(screen.getByRole('button', { name: '조치 완료' }));
+    await waitFor(() => expect(screen.getByText('조치 완료', { selector: '.workflow-badge' })).toBeInTheDocument());
 
     await user.click(screen.getByRole('button', { name: '외부 TI 조회' }));
     expect(await screen.findByText('악성 8')).toBeInTheDocument();
@@ -492,6 +544,11 @@ describe('C2Hunter UI', () => {
 
     const verdictCall = fetchMock.mock.calls.find(([url]) => url === '/api/v1/candidates/candidate-1/verdicts');
     expect(JSON.parse(String(verdictCall?.[1]?.body))).toEqual({ verdict: 'CONFIRMED_C2', confidence: 'HIGH', note: 'Beacon verified' });
+    const actionCalls = fetchMock.mock.calls.filter(([url]) => url === '/api/v1/candidates/candidate-1/actions');
+    expect(actionCalls.map(([, init]) => JSON.parse(String(init?.body)))).toEqual([
+      { status: 'IN_PROGRESS', note: 'Host isolation initiated' },
+      { status: 'COMPLETED', note: 'Host isolated and IOC blocked' },
+    ]);
     const mispCall = fetchMock.mock.calls.find(([url]) => url === '/api/v1/candidates/candidate-1/misp-exports');
     expect(JSON.parse(String(mispCall?.[1]?.body))).toEqual({ event_id: '42' });
   });

@@ -505,6 +505,16 @@ def test_candidate_workflow_resource_uses_object_store_and_audit(monkeypatch: An
             "created_at": "2026-08-08T00:00:00+00:00",
         }
     )
+    action = {
+        "id": "action-1",
+        "candidate_id": "candidate-1",
+        "verdict_id": "decision-1",
+        "status": "PENDING",
+        "note": "response required",
+        "created_at": "2026-08-08T00:01:00+00:00",
+    }
+    saved_action = repository.save_candidate_action(action)
 
-    assert any("INSERT INTO controller_objects" in query for query in connection.queries)
-    assert any("INSERT INTO audit_events" in query for query in connection.queries)
+    assert saved_action == action
+    assert sum("INSERT INTO controller_objects" in query for query in connection.queries) == 2
+    assert sum("INSERT INTO audit_events" in query for query in connection.queries) == 2

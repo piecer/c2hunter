@@ -74,6 +74,7 @@ from .schemas import (
     AnalysisJobUpdate,
     AnalysisParameters,
     CancelRequest,
+    CandidateActionCreate,
     CandidateUpdate,
     CandidateVerdictCreate,
     DetectorWeightPresetCreate,
@@ -225,6 +226,8 @@ def _public_candidate(
         "adjustments": adjustments,
         **traffic,
         "related_attack_targets": sorted(related_targets),
+        "workflow_status": _candidate_workflow_status(candidate),
+        "action_status": _candidate_action_status(candidate),
     }
 
 
@@ -251,6 +254,17 @@ def _candidate_workflow_index(
         entry = workflow.setdefault(str(decision["candidate_id"]), {})
         entry.setdefault("verdict_history", []).append(decision)
         entry["current_verdict"] = decision
+    candidate_actions = sorted(
+        repo.list_candidate_actions(candidate_id), key=lambda item: str(item["created_at"])
+    )
+    for action in candidate_actions:
+        entry = workflow.setdefault(str(action["candidate_id"]), {})
+        entry.setdefault("action_history", []).append(action)
+        current_verdict = entry.get("current_verdict")
+        if isinstance(current_verdict, dict) and action.get("verdict_id") == current_verdict.get(
+            "id"
+        ):
+            entry["current_action"] = action
     lookups = sorted(
         repo.list_candidate_ti_lookups(candidate_id), key=lambda item: str(item["fetched_at"])
     )
@@ -274,6 +288,40 @@ def _with_candidate_workflow(
 def _candidate_verdict(candidate: dict[str, Any]) -> str:
     current = candidate.get("current_verdict")
     return str(current.get("verdict")) if isinstance(current, dict) else "UNREVIEWED"
+
+
+def _candidate_workflow_status(candidate: dict[str, Any]) -> str:
+    verdict = _candidate_verdict(candidate)
+    if verdict == "CONFIRMED_C2":
+        return {
+            "IN_PROGRESS": "ACTION_IN_PROGRESS",
+            "COMPLETED": "ACTION_COMPLETED",
+        }.get(_candidate_action_status(candidate), "ACTION_REQUIRED")
+    return {
+        "UNREVIEWED": "NEEDS_REVIEW",
+        "UNDER_REVIEW": "IN_REVIEW",
+        "FALSE_POSITIVE": "FALSE_POSITIVE",
+    }[verdict]
+
+
+def _candidate_action_status(candidate: dict[str, Any]) -> str:
+    current = candidate.get("current_action")
+    if isinstance(current, dict):
+        return str(current.get("status") or "PENDING")
+    return "PENDING" if _candidate_verdict(candidate) == "CONFIRMED_C2" else "NOT_REQUIRED"
+
+
+def _candidate_workflow_counts(candidates: list[dict[str, Any]]) -> dict[str, int]:
+    statuses = [_candidate_workflow_status(candidate) for candidate in candidates]
+    return {
+        "needs_review": statuses.count("NEEDS_REVIEW"),
+        "in_review": statuses.count("IN_REVIEW"),
+        "action_required": statuses.count("ACTION_REQUIRED"),
+        "action_in_progress": statuses.count("ACTION_IN_PROGRESS"),
+        "action_completed": statuses.count("ACTION_COMPLETED"),
+        "false_positive": statuses.count("FALSE_POSITIVE"),
+        "done": statuses.count("ACTION_COMPLETED") + statuses.count("FALSE_POSITIVE"),
+    }
 
 
 def _request_actor(request: Request) -> str:
@@ -301,8 +349,9 @@ def _dashboard_snapshot(
     sensors = repo.list_sensors()
     jobs = repo.list_jobs()
     jobs_by_id = {str(job["id"]): job for job in jobs}
+    workflow = _candidate_workflow_index(repo)
     candidates = [
-        _public_candidate(candidate, job)
+        _public_candidate(_with_candidate_workflow(candidate, workflow), job)
         for job_id, candidate_set in repo.list_candidate_sets().items()
         if (job := jobs_by_id.get(job_id)) is not None
         for candidate in candidate_set
@@ -372,17 +421,16 @@ def _dashboard_snapshot(
         if bucket in trend_counts:
             trend_counts[bucket] += 1
 
+    workflow_counts = _candidate_workflow_counts(candidates)
     priority_candidates = sorted(
         (
             candidate
             for candidate in candidates
-            if candidate.get("severity") in {"CRITICAL", "HIGH"}
+            if _candidate_workflow_status(candidate)
+            in {"NEEDS_REVIEW", "IN_REVIEW", "ACTION_REQUIRED", "ACTION_IN_PROGRESS"}
         ),
-        key=lambda candidate: (
-            0 if candidate.get("severity") == "CRITICAL" else 1,
-            -int(candidate.get("score", 0)),
-            str(candidate.get("last_seen", "")),
-        ),
+        key=lambda candidate: str(candidate.get("last_seen", "")),
+        reverse=True,
     )[:5]
     recent_analyses = sorted(
         jobs,
@@ -492,6 +540,7 @@ def _dashboard_snapshot(
                 >= window_start
                 for candidate in candidates
             ),
+            **workflow_counts,
         },
         "candidate_trend": [
             {"hour": hour.isoformat(), "count": trend_counts[hour]} for hour in trend_hours
@@ -505,6 +554,7 @@ def _dashboard_snapshot(
                 "severity": candidate.get("severity", "LOW"),
                 "last_seen": candidate.get("last_seen"),
                 "evidence_count": candidate.get("evidence_count", 0),
+                "workflow_status": _candidate_workflow_status(candidate),
             }
             for candidate in priority_candidates
         ],
@@ -662,6 +712,7 @@ def create_app(
     app.state.misp_client = misp
     app.state.ai_analysis_service = ai_service
     app.state.ai_analysis_queue = ai_tasks
+    candidate_action_lock = threading.Lock()
     misp_export_lock = threading.Lock()
     sessions = SessionStore()
     authenticator = TokenAuthenticator(
@@ -2697,6 +2748,12 @@ def create_app(
             str | None,
             Query(pattern=r"^(UNREVIEWED|UNDER_REVIEW|CONFIRMED_C2|FALSE_POSITIVE)$"),
         ] = None,
+        workflow_status: Annotated[
+            str | None,
+            Query(
+                pattern=r"^(NEEDS_REVIEW|IN_REVIEW|ACTION_REQUIRED|ACTION_IN_PROGRESS|ACTION_COMPLETED|FALSE_POSITIVE)$"
+            ),
+        ] = None,
         minimum_score: int = Query(0, ge=0, le=100),
         include_suppressed: bool = False,
         sort: str = "-score",
@@ -2713,16 +2770,21 @@ def create_app(
                 include_suppressed or verdict == "FALSE_POSITIVE" or not item.get("excluded", False)
             )
         ]
+        workflow_counts = _candidate_workflow_counts(items)
         if severity:
             items = [item for item in items if item["severity"] == severity]
         if verdict:
             items = [item for item in items if _candidate_verdict(item) == verdict]
+        if workflow_status:
+            items = [item for item in items if _candidate_workflow_status(item) == workflow_status]
         descending = sort.startswith("-")
         field = sort.removeprefix("-")
         if field not in {"score", "candidate_ip", "first_seen", "last_seen", "severity"}:
             raise ApiError(422, "INVALID_SORT", "허용되지 않은 정렬 필드")
         items.sort(key=lambda item: str(item.get(field, "")), reverse=descending)
-        return _page(items, page, page_size)
+        response = _page(items, page, page_size)
+        response["workflow_counts"] = workflow_counts
+        return response
 
     @app.get("/api/v1/analysis-jobs/{job_id}/candidates/{candidate_id}")
     def get_candidate(job_id: str, candidate_id: str) -> dict[str, Any]:
@@ -2750,6 +2812,12 @@ def create_app(
             str | None,
             Query(pattern=r"^(UNREVIEWED|UNDER_REVIEW|CONFIRMED_C2|FALSE_POSITIVE)$"),
         ] = None,
+        workflow_status: Annotated[
+            str | None,
+            Query(
+                pattern=r"^(NEEDS_REVIEW|IN_REVIEW|ACTION_REQUIRED|ACTION_IN_PROGRESS|ACTION_COMPLETED|FALSE_POSITIVE)$"
+            ),
+        ] = None,
         minimum_score: int = Query(0, ge=0, le=100),
         include_suppressed: bool = False,
         sort: str = "-score",
@@ -2771,20 +2839,26 @@ def create_app(
                     or not candidate.get("excluded", False)
                 )
             )
+        workflow_counts = _candidate_workflow_counts(items)
         if severity:
             items = [item for item in items if item["severity"] == severity]
         if verdict:
             items = [item for item in items if _candidate_verdict(item) == verdict]
+        if workflow_status:
+            items = [item for item in items if _candidate_workflow_status(item) == workflow_status]
         descending = sort.startswith("-")
         field = sort.removeprefix("-")
         if field not in {"score", "candidate_ip", "first_seen", "last_seen", "severity"}:
             raise ApiError(422, "INVALID_SORT", "허용되지 않은 정렬 필드")
         items.sort(key=lambda item: str(item.get(field, "")), reverse=descending)
-        return _page(items, page, page_size)
+        response = _page(items, page, page_size)
+        response["workflow_counts"] = workflow_counts
+        return response
 
     @app.get("/api/v1/candidates/{candidate_id}")
     def get_global_candidate(candidate_id: str) -> dict[str, Any]:
         jobs = {str(job["id"]): job for job in repo.list_jobs()}
+        workflow = _candidate_workflow_index(repo, candidate_id)
         for job_id, candidates in repo.list_candidate_sets().items():
             candidate = next(
                 (item for item in candidates if item["id"] == candidate_id),
@@ -2796,7 +2870,9 @@ def create_app(
                     break
                 if "traffic_buckets" not in candidate:
                     job = repo.get_job(job_id) or job
-                return _public_candidate(candidate, job, include_traffic=True)
+                return _public_candidate(
+                    _with_candidate_workflow(candidate, workflow), job, include_traffic=True
+                )
         raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
 
     @app.patch("/api/v1/candidates/{candidate_id}")
@@ -2835,11 +2911,68 @@ def create_app(
             "created_by": _request_actor(request),
             "created_at": datetime.now(UTC).isoformat(),
         }
-        repo.save_candidate_decision(decision)
+        with candidate_action_lock:
+            repo.save_candidate_decision(decision)
+            if payload.verdict == "CONFIRMED_C2":
+                repo.save_candidate_action(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "candidate_id": candidate_id,
+                        "verdict_id": decision["id"],
+                        "job_id": str(job["id"]),
+                        "candidate_ip": str(candidate["candidate_ip"]),
+                        "status": "PENDING",
+                        "note": "CONFIRMED_C2 판정으로 후속 조치가 생성되었습니다",
+                        "created_by": _request_actor(request),
+                        "created_at": decision["created_at"],
+                    }
+                )
         refreshed = _find_candidate(repo, candidate_id)
         if refreshed is None:
             raise ApiError(409, "CANDIDATE_UPDATE_CONFLICT", "후보 판정을 저장하지 못했습니다")
         return _public_candidate(refreshed[1], job, include_traffic=True)
+
+    @app.post("/api/v1/candidates/{candidate_id}/actions")
+    def create_candidate_action(
+        candidate_id: str, payload: CandidateActionCreate, request: Request
+    ) -> dict[str, Any]:
+        with candidate_action_lock:
+            found = _find_candidate(repo, candidate_id)
+            if found is None:
+                raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
+            job, candidate = found
+            current_verdict = candidate.get("current_verdict")
+            if (
+                not isinstance(current_verdict, dict)
+                or current_verdict.get("verdict") != "CONFIRMED_C2"
+            ):
+                raise ApiError(
+                    409,
+                    "CANDIDATE_NOT_CONFIRMED",
+                    "CONFIRMED_C2 판정 후에만 대응 조치 상태를 변경할 수 있습니다",
+                )
+            current_action = candidate.get("current_action")
+            if isinstance(current_action, dict) and current_action.get("status") == "COMPLETED":
+                raise ApiError(409, "CANDIDATE_ACTION_COMPLETED", "이미 완료된 대응 조치입니다")
+            if isinstance(current_action, dict) and current_action.get("status") == payload.status:
+                raise ApiError(409, "CANDIDATE_ACTION_UNCHANGED", "현재 조치 상태와 동일합니다")
+            created_at = datetime.now(UTC).isoformat()
+            action = {
+                "id": str(uuid.uuid4()),
+                "candidate_id": candidate_id,
+                "verdict_id": str(current_verdict["id"]),
+                "job_id": str(job["id"]),
+                "candidate_ip": str(candidate["candidate_ip"]),
+                **payload.model_dump(),
+                "created_by": _request_actor(request),
+                "created_at": created_at,
+                "completed_at": created_at if payload.status == "COMPLETED" else None,
+            }
+            repo.save_candidate_action(action)
+            refreshed = _find_candidate(repo, candidate_id)
+            if refreshed is None:
+                raise ApiError(409, "CANDIDATE_UPDATE_CONFLICT", "조치 상태를 저장하지 못했습니다")
+            return _public_candidate(refreshed[1], job, include_traffic=True)
 
     @app.post("/api/v1/candidates/{candidate_id}/threat-intelligence/lookups")
     def lookup_candidate_threat_intelligence(candidate_id: str) -> dict[str, Any]:

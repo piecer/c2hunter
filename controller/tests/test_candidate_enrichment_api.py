@@ -98,6 +98,11 @@ def test_candidate_verdict_history_is_persisted_without_mutating_detection_outpu
 
     assert confirmed.status_code == 200
     assert confirmed.json()["current_verdict"]["verdict"] == "CONFIRMED_C2"
+    assert confirmed.json()["current_action"]["status"] == "PENDING"
+    assert (
+        confirmed.json()["current_action"]["verdict_id"]
+        == confirmed.json()["current_verdict"]["id"]
+    )
     assert false_positive.status_code == 200
     body = false_positive.json()
     assert body["current_verdict"]["verdict"] == "FALSE_POSITIVE"
@@ -109,15 +114,105 @@ def test_candidate_verdict_history_is_persisted_without_mutating_detection_outpu
     assert repository.list_candidate_decisions("candidate-1") == body["verdict_history"]
 
 
+def test_confirmed_candidate_action_progress_and_completion_are_audited() -> None:
+    client, repository, _, _ = _client()
+    confirmed = client.post(
+        "/api/v1/candidates/candidate-1/verdicts",
+        json={"verdict": "CONFIRMED_C2", "confidence": "HIGH", "note": "verified"},
+    ).json()
+
+    in_progress = client.post(
+        "/api/v1/candidates/candidate-1/actions",
+        json={"status": "IN_PROGRESS", "note": "EDR에서 호스트 격리 중"},
+    )
+    completed = client.post(
+        "/api/v1/candidates/candidate-1/actions",
+        json={"status": "COMPLETED", "note": "호스트 격리 및 IOC 차단 완료"},
+    )
+    persisted = client.get("/api/v1/candidates/candidate-1")
+
+    assert in_progress.status_code == 200, in_progress.text
+    assert in_progress.json()["workflow_status"] == "ACTION_IN_PROGRESS"
+    assert completed.status_code == 200, completed.text
+    body = completed.json()
+    assert body["workflow_status"] == "ACTION_COMPLETED"
+    assert body["current_verdict"]["verdict"] == "CONFIRMED_C2"
+    assert body["current_action"]["status"] == "COMPLETED"
+    assert body["current_action"]["completed_at"] == body["current_action"]["created_at"]
+    assert body["current_action"]["created_by"] == "system"
+    assert persisted.status_code == 200, persisted.text
+    assert persisted.json()["workflow_status"] == "ACTION_COMPLETED"
+    assert persisted.json()["current_action"] == body["current_action"]
+    assert [item["status"] for item in body["action_history"]] == [
+        "PENDING",
+        "IN_PROGRESS",
+        "COMPLETED",
+    ]
+    assert all(
+        item["verdict_id"] == confirmed["current_verdict"]["id"] for item in body["action_history"]
+    )
+    assert repository.list_candidate_actions("candidate-1") == body["action_history"]
+
+
+def test_candidate_action_requires_current_confirmed_c2_verdict() -> None:
+    client, _, _, _ = _client()
+
+    response = client.post(
+        "/api/v1/candidates/candidate-1/actions",
+        json={"status": "COMPLETED", "note": "should not be accepted"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "CANDIDATE_NOT_CONFIRMED"
+
+
+def test_new_confirmed_verdict_starts_a_new_action_cycle() -> None:
+    client, _, _, _ = _client()
+    first = client.post(
+        "/api/v1/candidates/candidate-1/verdicts",
+        json={"verdict": "CONFIRMED_C2", "confidence": "HIGH", "note": "first incident"},
+    ).json()
+    client.post(
+        "/api/v1/candidates/candidate-1/actions",
+        json={"status": "COMPLETED", "note": "first incident resolved"},
+    )
+    client.post(
+        "/api/v1/candidates/candidate-1/verdicts",
+        json={"verdict": "UNDER_REVIEW", "confidence": "MEDIUM", "note": "new evidence"},
+    )
+
+    second = client.post(
+        "/api/v1/candidates/candidate-1/verdicts",
+        json={"verdict": "CONFIRMED_C2", "confidence": "HIGH", "note": "second incident"},
+    ).json()
+
+    assert second["current_verdict"]["id"] != first["current_verdict"]["id"]
+    assert second["current_action"]["status"] == "PENDING"
+    assert second["current_action"]["verdict_id"] == second["current_verdict"]["id"]
+    assert second["workflow_status"] == "ACTION_REQUIRED"
+
+
 def test_candidate_list_filters_current_verdict_and_keeps_false_positives_manageable() -> None:
     client, _, _, _ = _client()
 
-    assert client.get("/api/v1/candidates?verdict=UNREVIEWED").json()["total"] == 1
+    unreviewed = client.get("/api/v1/candidates?verdict=UNREVIEWED").json()
+    assert unreviewed["total"] == 1
+    assert unreviewed["workflow_counts"] == {
+        "needs_review": 1,
+        "in_review": 0,
+        "action_required": 0,
+        "action_in_progress": 0,
+        "action_completed": 0,
+        "false_positive": 0,
+        "done": 0,
+    }
     client.post(
         "/api/v1/candidates/candidate-1/verdicts",
         json={"verdict": "CONFIRMED_C2", "confidence": "HIGH", "note": "verified"},
     )
-    assert client.get("/api/v1/candidates?verdict=CONFIRMED_C2").json()["total"] == 1
+    confirmed = client.get("/api/v1/candidates?verdict=CONFIRMED_C2").json()
+    assert confirmed["total"] == 1
+    assert confirmed["workflow_counts"]["action_required"] == 1
     client.post(
         "/api/v1/candidates/candidate-1/verdicts",
         json={"verdict": "FALSE_POSITIVE", "confidence": "HIGH", "note": "trusted proxy"},
@@ -127,7 +222,31 @@ def test_candidate_list_filters_current_verdict_and_keeps_false_positives_manage
 
     assert false_positives.status_code == 200
     assert false_positives.json()["total"] == 1
+    assert false_positives.json()["workflow_counts"]["false_positive"] == 1
+    assert false_positives.json()["workflow_counts"]["done"] == 1
     assert client.get("/api/v1/candidates?verdict=INVALID").status_code == 422
+
+
+def test_candidate_list_filters_response_workflow_independently_from_verdict() -> None:
+    client, _, _, _ = _client()
+    client.post(
+        "/api/v1/candidates/candidate-1/verdicts",
+        json={"verdict": "CONFIRMED_C2", "confidence": "HIGH", "note": "verified"},
+    )
+
+    required = client.get("/api/v1/candidates?workflow_status=ACTION_REQUIRED")
+    client.post(
+        "/api/v1/candidates/candidate-1/actions",
+        json={"status": "COMPLETED", "note": "isolated and blocked"},
+    )
+    completed = client.get("/api/v1/candidates?workflow_status=ACTION_COMPLETED")
+
+    assert required.status_code == 200
+    assert required.json()["total"] == 1
+    assert completed.status_code == 200
+    assert completed.json()["total"] == 1
+    assert completed.json()["items"][0]["current_verdict"]["verdict"] == "CONFIRMED_C2"
+    assert client.get("/api/v1/candidates?workflow_status=INVALID").status_code == 422
 
 
 def test_candidate_threat_intelligence_lookup_is_persisted() -> None:

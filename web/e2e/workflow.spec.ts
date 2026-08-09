@@ -8,7 +8,7 @@ test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', 
   await page.getByRole('button', { name: 'Development login' }).click();
   await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '지금 확인할 항목' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: '우선 조사 후보' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '분석 및 조치 필요 후보' })).toBeVisible();
   await expect(page.getByRole('link', { name: /203\.0\.113\.10/ }).first()).toBeVisible();
 
   await page.getByRole('link', { name: 'Sensors', exact: true }).click();
@@ -75,7 +75,16 @@ test('administrator validates a candidate with TI and exports it to MISP', async
   await page.getByLabel('Verdict confidence').selectOption('HIGH');
   await page.getByLabel('Verdict note').fill('Beacon and reputation verified');
   await page.getByRole('button', { name: '판정 저장' }).click();
-  await expect(page.getByText('확정 C2')).toBeVisible();
+  await expect(page.getByText('확정 C2', { exact: true })).toBeVisible();
+
+  await expect(page.getByRole('heading', { name: '후속 대응 조치' })).toBeVisible();
+  await expect(page.locator('.workflow-badge', { hasText: '조치 필요' })).toBeVisible();
+  await page.getByLabel('조치 내용').fill('Endpoint isolation started');
+  await page.getByRole('button', { name: '조치 시작' }).click();
+  await expect(page.locator('.workflow-badge', { hasText: '조치 중' })).toBeVisible();
+  await page.getByLabel('조치 내용').fill('Endpoint isolated and IOC blocked');
+  await page.getByRole('button', { name: '조치 완료' }).click();
+  await expect(page.locator('.workflow-badge', { hasText: '조치 완료' })).toBeVisible();
 
   await page.getByRole('button', { name: '외부 TI 조회' }).click();
   await expect(page.getByText('악성 8')).toBeVisible();
@@ -223,4 +232,22 @@ test('analyst can combine multiple flow filters and filter-out patterns', async 
   await page.setViewportSize({ width: 420, height: 900 });
   const filterBuilder = page.locator('.flow-filter-builder');
   expect(await filterBuilder.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+});
+
+test('candidate queue exposes workflow status and defaults to latest activity', async ({ page }) => {
+  await installApiFixture(page);
+  await page.goto('/login');
+  await page.getByLabel('Username').fill('analyst');
+  await page.getByRole('button', { name: 'Development login' }).click();
+  await page.getByRole('link', { name: 'Candidates', exact: true }).click();
+
+  const summary = page.getByRole('region', { name: 'Candidate 처리 현황' });
+  await expect(summary.getByText('미분석')).toBeVisible();
+  await expect(summary.getByText('분석 중')).toBeVisible();
+  await expect(summary.getByText('조치 필요')).toBeVisible();
+  await expect(summary.getByText('조치 중')).toBeVisible();
+  await expect(summary.getByText('조치 완료')).toBeVisible();
+  await expect(summary.getByText('오탐 처리 완료')).toBeVisible();
+  await expect(page.getByLabel('Sort candidates')).toHaveValue('-last_seen');
+  await expect(page.locator('.workflow-badge', { hasText: '미분석' })).toBeVisible();
 });

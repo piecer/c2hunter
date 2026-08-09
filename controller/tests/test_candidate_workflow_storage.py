@@ -35,6 +35,16 @@ def test_sqlite_candidate_workflow_resources_survive_reopen(tmp_path: Path) -> N
             "created_at": "2026-08-08T00:02:00+00:00",
         }
     )
+    repository.save_candidate_action(
+        {
+            "id": "response-1",
+            "candidate_id": "candidate-1",
+            "verdict_id": "decision-1",
+            "status": "COMPLETED",
+            "note": "isolated",
+            "created_at": "2026-08-08T00:03:00+00:00",
+        }
+    )
     repository.connection.close()
 
     reopened = SQLiteRepository(path)
@@ -45,3 +55,4 @@ def test_sqlite_candidate_workflow_resources_survive_reopen(tmp_path: Path) -> N
     assert reopened.list_candidate_decisions("candidate-1")[0]["id"] == "decision-1"
     assert reopened.list_candidate_ti_lookups("candidate-1")[0]["id"] == "lookup-1"
     assert reopened.list_candidate_misp_actions("candidate-1")[0]["id"] == "action-1"
+    assert reopened.list_candidate_actions("candidate-1")[0]["id"] == "response-1"

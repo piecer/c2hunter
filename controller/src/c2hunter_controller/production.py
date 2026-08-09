@@ -975,6 +975,15 @@ class PostgresRepository:
             item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
         ]
 
+    def save_candidate_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        return self._put("candidate-action", action["id"], action)
+
+    def list_candidate_actions(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
+        values = self._list("candidate-action")
+        return [
+            item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
+        ]
+
     def save_candidate_ti_lookup(self, lookup: dict[str, Any]) -> dict[str, Any]:
         return self._put("candidate-ti-lookup", lookup["id"], lookup)
 

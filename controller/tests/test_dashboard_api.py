@@ -134,6 +134,7 @@ def test_dashboard_prioritizes_operational_health_and_recent_threats() -> None:
         "severity",
         "last_seen",
         "evidence_count",
+        "workflow_status",
     }
     assert dashboard["recent_analyses"][0]["id"] == "job-active"
     assert "transitions" not in dashboard["recent_analyses"][0]
@@ -156,6 +157,132 @@ def test_dashboard_prioritizes_operational_health_and_recent_threats() -> None:
         "FAILED_ANALYSIS",
         "CRITICAL_CANDIDATE",
     }
+
+
+def test_dashboard_work_queue_hides_completed_items_and_orders_latest_candidates() -> None:
+    now = datetime.now(UTC)
+    repository = MemoryRepository()
+    repository.jobs["job-1"] = {"id": "job-1", "name": "Review queue"}
+    repository.save_candidates(
+        "job-1",
+        [
+            {
+                "id": "candidate-old",
+                "candidate_ip": "203.0.113.10",
+                "score": 95,
+                "severity": "CRITICAL",
+                "last_seen": (now - timedelta(minutes=30)).isoformat(),
+            },
+            {
+                "id": "candidate-new",
+                "candidate_ip": "203.0.113.20",
+                "score": 45,
+                "severity": "MEDIUM",
+                "last_seen": (now - timedelta(minutes=2)).isoformat(),
+            },
+            {
+                "id": "candidate-in-review",
+                "candidate_ip": "203.0.113.30",
+                "score": 99,
+                "severity": "CRITICAL",
+                "last_seen": (now - timedelta(minutes=1)).isoformat(),
+            },
+            {
+                "id": "candidate-action",
+                "candidate_ip": "203.0.113.40",
+                "score": 90,
+                "severity": "CRITICAL",
+                "last_seen": now.isoformat(),
+            },
+            {
+                "id": "candidate-done",
+                "candidate_ip": "203.0.113.50",
+                "score": 80,
+                "severity": "HIGH",
+                "last_seen": (now - timedelta(minutes=3)).isoformat(),
+            },
+        ],
+    )
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    for candidate_id, verdict in (
+        ("candidate-in-review", "UNDER_REVIEW"),
+        ("candidate-action", "CONFIRMED_C2"),
+        ("candidate-done", "FALSE_POSITIVE"),
+    ):
+        response = client.post(
+            f"/api/v1/candidates/{candidate_id}/verdicts",
+            json={"verdict": verdict, "confidence": "HIGH", "note": "analyst decision"},
+        )
+        assert response.status_code == 200, response.text
+
+    dashboard = client.get("/api/v1/dashboard").json()
+
+    assert [item["id"] for item in dashboard["priority_candidates"]] == [
+        "candidate-action",
+        "candidate-in-review",
+        "candidate-new",
+        "candidate-old",
+    ]
+    assert dashboard["candidates"]["needs_review"] == 2
+    assert dashboard["candidates"]["in_review"] == 1
+    assert dashboard["candidates"]["action_required"] == 1
+    assert dashboard["candidates"]["action_in_progress"] == 0
+    assert dashboard["candidates"]["action_completed"] == 0
+    assert dashboard["candidates"]["false_positive"] == 1
+    assert dashboard["candidates"]["done"] == 1
+
+
+def test_dashboard_hides_completed_responses_but_keeps_required_and_in_progress_work() -> None:
+    now = datetime.now(UTC)
+    repository = MemoryRepository()
+    repository.jobs["job-1"] = {"id": "job-1", "name": "Response queue"}
+    repository.save_candidates(
+        "job-1",
+        [
+            {
+                "id": "required",
+                "candidate_ip": "203.0.113.10",
+                "score": 90,
+                "severity": "CRITICAL",
+                "last_seen": now.isoformat(),
+            },
+            {
+                "id": "working",
+                "candidate_ip": "203.0.113.20",
+                "score": 80,
+                "severity": "HIGH",
+                "last_seen": (now - timedelta(minutes=1)).isoformat(),
+            },
+            {
+                "id": "completed",
+                "candidate_ip": "203.0.113.30",
+                "score": 70,
+                "severity": "HIGH",
+                "last_seen": (now - timedelta(minutes=2)).isoformat(),
+            },
+        ],
+    )
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    for candidate_id in ("required", "working", "completed"):
+        client.post(
+            f"/api/v1/candidates/{candidate_id}/verdicts",
+            json={"verdict": "CONFIRMED_C2", "confidence": "HIGH", "note": "confirmed"},
+        )
+    client.post(
+        "/api/v1/candidates/working/actions",
+        json={"status": "IN_PROGRESS", "note": "isolating host"},
+    )
+    client.post(
+        "/api/v1/candidates/completed/actions",
+        json={"status": "COMPLETED", "note": "blocked and isolated"},
+    )
+
+    dashboard = client.get("/api/v1/dashboard").json()
+
+    assert [item["id"] for item in dashboard["priority_candidates"]] == ["required", "working"]
+    assert dashboard["candidates"]["action_required"] == 1
+    assert dashboard["candidates"]["action_in_progress"] == 1
+    assert dashboard["candidates"]["action_completed"] == 1
 
 
 def test_dashboard_attention_preserves_each_operational_category() -> None:

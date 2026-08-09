@@ -566,6 +566,13 @@ class CandidateVerdictCreate(BaseModel):
     note: str = Field(min_length=1, max_length=5000)
 
 
+class CandidateActionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str = Field(pattern=r"^(IN_PROGRESS|COMPLETED)$")
+    note: str = Field(min_length=1, max_length=5000)
+
+
 class MispExportCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
