@@ -26,6 +26,8 @@
 
 AI Run과 assessment는 기존 Analysis Job/Candidate와 별도 저장 객체다. terminal AI Run은 immutable이며 모델/validator/Queue 장애는 원본 Analysis Job을 변경하지 않는다. 기능 기본값은 비활성이다.
 
+High-Recall 생성 후보는 허용된 Candidate 필드와 sanitize된 factor metrics만 AI Run snapshot에 보존한다. 원본 Flow, payload sample, raw packet은 snapshot에 포함하지 않는다.
+
 ## 재현성과 저장
 
 - Bundle hash는 파생 metadata를 제외하고 key를 정렬한 canonical JSON의 SHA-256이다.

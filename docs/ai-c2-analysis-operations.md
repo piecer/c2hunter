@@ -26,6 +26,13 @@ AI worker는 `c2hunter:ai:jobs`만 소비하며 기존 `c2hunter:analysis:jobs`�
 - schema/evidence validator 실패는 AI Run만 `FAILED/MODEL_OUTPUT_INVALID`로 만든다.
 - Queue 재전달은 terminal Run 불변성과 assessment ID upsert로 중복 결과를 만들지 않는다.
 
+## High-Recall prefilter
+
+- prefilter는 기존 detector score를 수정하지 않는 결정론적 보조 rank다.
+- `ai-prefilter-v1` factor와 score는 AI Run candidate snapshot에만 저장한다.
+- common DNS/NTP, bulk transfer, trusted peer penalty는 LLM 호출 전에 적용된다.
+- Flow가 없으면 기존 Candidate만 사용하고, 기존 Candidate가 없어도 적합한 external peer가 있으면 AI Run을 생성할 수 있다.
+
 ## 확인
 
 ```bash
@@ -59,4 +66,4 @@ SQLite도 같은 이름의 두 테이블과 index를 제거한다. 감사 이벤
 
 ## 현재 제한
 
-Milestone 1은 deterministic FakeGateway만 배치한다. Ollama/OpenAI-compatible local gateway, SPL/MISP draft, low-score universe 및 advanced protocol context는 후속 Phase에서 추가한다.
+현재는 deterministic FakeGateway를 사용한다. Ollama/OpenAI-compatible local gateway와 SPL/MISP draft는 후속 Phase에서 추가한다.

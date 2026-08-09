@@ -222,6 +222,51 @@ def test_service_persists_evidence_bundle_hash_and_job_flow_context() -> None:
     )
 
 
+def test_service_analyzes_prefilter_candidate_without_mutating_deterministic_candidates() -> None:
+    repository = MemoryRepository()
+    job = completed_job()
+    job.update(
+        {
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "flow_records": [
+                {
+                    "sensor_id": "sensor-a",
+                    "timestamp": f"2026-08-09T00:0{index}:00+00:00",
+                    "source_ip": "10.0.0.2",
+                    "destination_ip": "203.0.113.77",
+                    "source_port": 50000,
+                    "destination_port": 8443,
+                    "protocol": "TCP",
+                    "direction": "OUTBOUND",
+                    "packet_count": 1,
+                    "total_bytes": 128,
+                    "payload_hash": "cluster-fixture",
+                }
+                for index in range(6)
+            ],
+        }
+    )
+    repository.jobs["job-1"] = job
+    service = AIAnalysisService(repository, FakeGateway())
+
+    run, created = service.create_and_execute(
+        analysis_job_id="job-1",
+        idempotency_key="phase-3-prefilter",
+        candidate_limit=5,
+        created_by="analyst",
+    )
+
+    assert created is True
+    assert run["status"] == AIAnalysisState.COMPLETED
+    assert run["candidate_snapshots"][0]["candidate_ip"] == "203.0.113.77"
+    assert run["candidate_snapshots"][0]["source"] == "AI_PREFILTER"
+    assert run["candidate_snapshots"][0]["prefilter_score"] > 0
+    assert repository.get_candidates("job-1") == []
+    assessment = repository.list_ai_assessments(run["id"])[0]
+    assert assessment["external_ip"] == "203.0.113.77"
+
+
 def test_fake_gateway_returns_schema_valid_output_with_supplied_evidence_ids() -> None:
     bundle = build_evidence_bundle(candidate())
 

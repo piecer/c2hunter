@@ -2,7 +2,7 @@
 
 ## Current phase
 
-Phase 2 완료 — bounded Evidence Builder
+Phase 3 완료 — High-Recall Candidate Generator
 
 ## Completed
 
@@ -33,6 +33,15 @@ Phase 2 완료 — bounded Evidence Builder
 - 파생 metadata를 제외한 canonical JSON에 SHA-256을 적용하며 같은 입력과 다른 dict key 순서는 같은 hash를 생성한다.
 - 64 KiB 이하 Bundle은 Assessment JSONB에 inline 저장하고 bundle hash와 byte/token metadata를 함께 보존한다. 향후 상한을 넘는 artifact는 MinIO object storage 정책으로 확장한다.
 
+### Phase 3
+
+- 완료된 Job의 전체 external peer universe를 기존 Candidate와 독립적으로 집계한다.
+- single-host beacon, payload cluster, synchronized cluster, robust volume anomaly를 가산하고 common service, high volume, trusted peer를 감점한다.
+- 모든 factor는 이름, 가감점, 설명, metrics를 보존하며 `ai-prefilter-v1` 버전과 0~100 score를 생성한다.
+- 기존 Candidate와 생성 후보를 결정론적으로 병합하고 상위 N개를 AI Run의 bounded candidate snapshot에 저장한다.
+- 생성 후보는 기존 Candidate repository를 변경하지 않으며 worker Queue에는 계속 Run ID만 전달한다.
+- AI-A~AI-J fixture와 31-peer recall fixture에서 알려진 beacon peer가 top 20에 포함되는 것을 검증한다.
+
 ## Verification
 
 2026-08-09 실제 실행 결과:
@@ -52,10 +61,9 @@ Phase 2 완료 — bounded Evidence Builder
 
 아래 작업은 명세의 후속 단계이며 Milestone 1 범위에 포함되지 않는다.
 
-1. High-Recall Candidate Generator와 AI-A~AI-J fixture
-2. Ollama/OpenAI-compatible local model adapter, JSON repair 1회, timeout/retry/circuit breaker
-3. Splunk SPL/MISP artifact 생성과 재생성
-4. analyst feedback, calibration materialization, drift observability
-5. 보존 기간 cleanup과 대규모 성능/부하 검증
+1. Ollama/OpenAI-compatible local model adapter, JSON repair 1회, timeout/retry/circuit breaker
+2. Splunk SPL/MISP artifact 생성과 재생성
+3. analyst feedback, calibration materialization, drift observability
+4. 보존 기간 cleanup과 대규모 성능/부하 검증
 
 각 후속 milestone도 schema/fixture부터 RED → GREEN → REFACTOR 순으로 진행한다.

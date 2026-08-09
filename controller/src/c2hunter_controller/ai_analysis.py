@@ -5,10 +5,13 @@ import json
 import math
 import uuid
 from collections import Counter
-from datetime import UTC, datetime
+from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal, Protocol
 
+from c2hunter_analysis.ai_candidates import generate_high_recall_candidates
+from c2hunter_analysis.domain import AnalysisContext, Flow
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 
@@ -94,6 +97,8 @@ class EvidenceCandidate(BaseModel):
     candidate_id: str
     external_ip: str
     existing_c2hunter_score: float = Field(ge=0, le=100)
+    prefilter_score: float = Field(default=0, ge=0, le=100)
+    prefilter_score_version: str | None = None
     severity: str | None = None
     internal_hosts: list[str] = Field(default_factory=list, max_length=50)
     protocols: list[str] = Field(default_factory=list, max_length=20)
@@ -419,6 +424,8 @@ def build_evidence_bundle(
             candidate_id=str(candidate.get("id", "")),
             external_ip=str(candidate.get("candidate_ip", "")),
             existing_c2hunter_score=float(candidate.get("score", 0)),
+            prefilter_score=float(candidate.get("prefilter_score", 0)),
+            prefilter_score_version=candidate.get("prefilter_score_version"),
             severity=candidate.get("severity"),
             internal_hosts=[
                 str(item)
@@ -456,6 +463,174 @@ def validate_assessment_evidence(
         raise AIAnalysisError(f"unknown evidence IDs: {', '.join(unknown)}")
     if assessment.candidate.verdict != "INCONCLUSIVE" and not assessment.supporting_factors:
         raise AIAnalysisError("non-inconclusive assessment requires supporting evidence")
+
+
+def _analysis_context_from_job(job: dict[str, Any]) -> AnalysisContext | None:
+    flows: list[Flow] = []
+    for stored in job.get("flow_records", []):
+        if not isinstance(stored, dict) or not stored.get("timestamp"):
+            continue
+        try:
+            timestamp = stored["timestamp"]
+            if isinstance(timestamp, str):
+                timestamp = datetime.fromisoformat(timestamp)
+            flows.append(
+                Flow(
+                    sensor_id=str(stored.get("sensor_id") or "unknown"),
+                    timestamp=timestamp,
+                    source_ip=str(stored["source_ip"]),
+                    destination_ip=str(stored["destination_ip"]),
+                    source_port=stored.get("source_port"),
+                    destination_port=stored.get("destination_port"),
+                    protocol=str(stored.get("protocol") or "UNKNOWN"),
+                    direction=str(stored.get("direction") or "UNKNOWN"),
+                    packet_count=int(stored.get("packet_count") or 1),
+                    total_bytes=int(stored.get("total_bytes") or 0),
+                    payload_hash=stored.get("payload_hash"),
+                    payload_prefix_hash=stored.get("payload_prefix_hash"),
+                    payload_length=stored.get("payload_length"),
+                    payload_entropy=stored.get("payload_entropy"),
+                    payload_printable_ratio=stored.get("payload_printable_ratio"),
+                    payload_simhash=stored.get("payload_simhash"),
+                    payload_feature_version=stored.get("payload_feature_version"),
+                    tls_fingerprint=stored.get("tls_fingerprint"),
+                    certificate_fingerprint=stored.get("certificate_fingerprint"),
+                    domain=stored.get("domain"),
+                    packet_sizes=tuple(stored.get("packet_sizes") or ()),
+                    duration_seconds=float(stored.get("duration_seconds") or 0),
+                    last_payload_hash=stored.get("last_payload_hash"),
+                    tcp_flags=stored.get("tcp_flags"),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not flows:
+        return None
+    timestamps = [flow.timestamp for flow in flows]
+    return AnalysisContext(
+        dataset_id=str(job.get("dataset_id") or job.get("id") or "unknown"),
+        start=min(timestamps),
+        end=max(timestamps) + timedelta(microseconds=1),
+        flows=flows,
+        selected_sensors=tuple(str(item) for item in job.get("sensor_ids", [])),
+        internal_cidrs=tuple(
+            str(item)
+            for item in job.get(
+                "internal_networks",
+                ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"),
+            )
+        ),
+    )
+
+
+def _prefilter_candidate_dicts(job: dict[str, Any]) -> list[dict[str, Any]]:
+    context = _analysis_context_from_job(job)
+    if context is None:
+        return []
+    generated: list[dict[str, Any]] = []
+    for candidate in generate_high_recall_candidates(context):
+        evidence = [
+            {
+                "type": f"AI_PREFILTER_{factor.name}",
+                "description": factor.explanation,
+                "contribution": factor.points,
+                "metrics": factor.metrics,
+            }
+            for factor in candidate.factors
+        ]
+        generated.append(
+            {
+                "id": "ai-prefilter-"
+                + hashlib.sha256(
+                    f"{job.get('id', '')}:{candidate.candidate_ip}".encode()
+                ).hexdigest()[:16],
+                "candidate_ip": candidate.candidate_ip,
+                "score": 0,
+                "prefilter_score": candidate.prefilter_score,
+                "prefilter_score_version": candidate.score_version,
+                "severity": (
+                    "HIGH"
+                    if candidate.prefilter_score >= 70
+                    else "MEDIUM"
+                    if candidate.prefilter_score >= 40
+                    else "LOW"
+                ),
+                "internal_hosts": list(candidate.internal_hosts),
+                "protocols": list(candidate.protocols),
+                "ports": list(candidate.ports),
+                "first_seen": candidate.first_seen.isoformat(),
+                "last_seen": candidate.last_seen.isoformat(),
+                "evidence": evidence,
+                "prefilter_factors": [asdict(factor) for factor in candidate.factors],
+                "source": "AI_PREFILTER",
+            }
+        )
+    return generated
+
+
+def _candidate_snapshot(candidate: dict[str, Any]) -> dict[str, Any]:
+    snapshot = {
+        key: candidate.get(key)
+        for key in (
+            "id",
+            "candidate_ip",
+            "score",
+            "prefilter_score",
+            "prefilter_score_version",
+            "severity",
+            "internal_hosts",
+            "hosts",
+            "protocols",
+            "ports",
+            "first_seen",
+            "last_seen",
+            "source",
+            "prefilter_factors",
+        )
+        if candidate.get(key) is not None
+    }
+    safe_evidence: list[dict[str, Any]] = []
+    for item in candidate.get("evidence", [])[:50]:
+        if not isinstance(item, dict):
+            continue
+        safe_evidence.append(
+            {
+                "type": str(item.get("type") or item.get("detector") or "UNKNOWN")[:100],
+                "description": str(item.get("description") or "Detector evidence")[:2048],
+                "contribution": item.get("contribution"),
+                "metrics": _safe_metrics(item.get("metrics", {})),
+            }
+        )
+    snapshot["evidence"] = safe_evidence
+    return snapshot
+
+
+def _ranked_candidate_snapshots(
+    job: dict[str, Any], existing: list[dict[str, Any]], limit: int
+) -> list[dict[str, Any]]:
+    generated = _prefilter_candidate_dicts(job)
+    generated_by_ip = {str(item["candidate_ip"]): item for item in generated}
+    merged: list[dict[str, Any]] = []
+    for item in existing:
+        combined = dict(item)
+        match = generated_by_ip.pop(str(item.get("candidate_ip", "")), None)
+        if match is not None:
+            combined["prefilter_score"] = match["prefilter_score"]
+            combined["prefilter_score_version"] = match["prefilter_score_version"]
+            combined["prefilter_factors"] = match["prefilter_factors"]
+            combined["evidence"] = [
+                *list(combined.get("evidence", [])),
+                *list(match.get("evidence", [])),
+            ][:50]
+        merged.append(_candidate_snapshot(combined))
+    merged.extend(_candidate_snapshot(item) for item in generated_by_ip.values())
+    return sorted(
+        merged,
+        key=lambda item: (
+            -(0.55 * float(item.get("score", 0)) + 0.25 * float(item.get("prefilter_score", 0))),
+            str(item.get("candidate_ip", "")),
+        ),
+    )[:limit]
 
 
 class FakeGateway:
@@ -522,11 +697,11 @@ class AIAnalysisService:
             raise AIAnalysisError("analysis job must be completed before AI analysis")
         if not 1 <= candidate_limit <= 5:
             raise AIAnalysisError("candidate_limit must be between 1 and 5")
-        candidates = sorted(
+        candidates = _ranked_candidate_snapshots(
+            job,
             self.repository.get_candidates(analysis_job_id),
-            key=lambda item: float(item.get("score", 0)),
-            reverse=True,
-        )[:candidate_limit]
+            candidate_limit,
+        )
         if not candidates:
             raise AIAnalysisError("analysis job has no candidates")
         created_at = _now()
@@ -539,6 +714,7 @@ class AIAnalysisService:
             "progress_percent": 0,
             "candidate_limit": candidate_limit,
             "candidate_ids": [str(item.get("id")) for item in candidates],
+            "candidate_snapshots": candidates,
             "provider": self.gateway.provider,
             "model_name": self.gateway.model,
             "prompt_name": "candidate_system",
@@ -592,9 +768,14 @@ class AIAnalysisService:
             return run
         try:
             run = self._transition(run, AIAnalysisState.PREPARING, "building evidence bundles")
+            snapshots = run.get("candidate_snapshots")
+            candidate_source = (
+                snapshots
+                if isinstance(snapshots, list)
+                else self.repository.get_candidates(run["analysis_job_id"])
+            )
             candidates_by_id = {
-                str(item.get("id")): item
-                for item in self.repository.get_candidates(run["analysis_job_id"])
+                str(item.get("id")): item for item in candidate_source if isinstance(item, dict)
             }
             selected = [
                 candidates_by_id[item] for item in run["candidate_ids"] if item in candidates_by_id
@@ -620,6 +801,8 @@ class AIAnalysisService:
                         "candidate_id": bundle.candidate.candidate_id,
                         "external_ip": bundle.candidate.external_ip,
                         "existing_c2hunter_score": bundle.candidate.existing_c2hunter_score,
+                        "prefilter_score": bundle.candidate.prefilter_score,
+                        "prefilter_score_version": bundle.candidate.prefilter_score_version,
                         "assessment": assessment.model_dump(mode="json"),
                         "evidence_bundle": bundle.model_dump(mode="json", by_alias=True),
                         "evidence_bundle_hash": (
