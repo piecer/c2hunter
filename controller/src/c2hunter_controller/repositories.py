@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+_AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
+
 
 class Repository(Protocol):
     """PostgreSQL adapter가 구현해야 하는 제어 영역 경계."""
@@ -223,9 +225,44 @@ class MemoryRepository:
 
     def delete_job(self, job_id: str) -> bool:
         with self._lock:
+            if any(
+                run.get("analysis_job_id") == job_id
+                and run.get("status") not in _AI_TERMINAL_STATUSES
+                for run in self.ai_runs.values()
+            ):
+                return False
             job = self.jobs.pop(job_id, None)
             if job is None:
                 return False
+            run_ids = {
+                run_id
+                for run_id, run in self.ai_runs.items()
+                if run.get("analysis_job_id") == job_id
+            }
+            assessment_ids = {
+                assessment_id
+                for assessment_id, assessment in self.ai_assessments.items()
+                if assessment.get("ai_run_id") in run_ids
+            }
+            for feedback_id in [
+                feedback_id
+                for feedback_id, feedback in self.ai_feedback.items()
+                if feedback.get("assessment_id") in assessment_ids
+            ]:
+                self.ai_feedback.pop(feedback_id, None)
+            for artifact_id in [
+                artifact_id
+                for artifact_id, artifact in self.ai_artifacts.items()
+                if artifact.get("assessment_id") in assessment_ids
+            ]:
+                self.ai_artifacts.pop(artifact_id, None)
+            for assessment_id in assessment_ids:
+                self.ai_assessments.pop(assessment_id, None)
+            for run_id in run_ids:
+                self.ai_runs.pop(run_id, None)
+            for key, run_id in list(self.ai_run_idempotency_keys.items()):
+                if run_id in run_ids:
+                    self.ai_run_idempotency_keys.pop(key, None)
             self.idempotency_keys.pop(str(job["idempotency_key"]), None)
             self.candidates.pop(job_id, None)
             self.job_captures.pop(job_id, None)
@@ -891,10 +928,47 @@ class SQLiteRepository:
         return [json.loads(row[0]) for row in rows]
 
     def delete_job(self, job_id: str) -> bool:
-        with self._lock:
+        with self._lock, self.connection:
             job = self.get_job(job_id)
             if job is None:
                 return False
+            run_rows = self.connection.execute(
+                "SELECT run_id,data FROM ai_analysis_runs WHERE analysis_job_id=?", (job_id,)
+            ).fetchall()
+            if any(
+                json.loads(str(row[1])).get("status") not in _AI_TERMINAL_STATUSES
+                for row in run_rows
+            ):
+                return False
+            run_ids = [str(row[0]) for row in run_rows]
+            assessment_ids: list[str] = []
+            if run_ids:
+                placeholders = ",".join("?" for _ in run_ids)
+                assessment_rows = self.connection.execute(
+                    f"SELECT assessment_id FROM ai_candidate_assessments "
+                    f"WHERE ai_run_id IN ({placeholders})",
+                    run_ids,
+                ).fetchall()
+                assessment_ids = [str(row[0]) for row in assessment_rows]
+            if assessment_ids:
+                placeholders = ",".join("?" for _ in assessment_ids)
+                self.connection.execute(
+                    f"DELETE FROM ai_feedback WHERE assessment_id IN ({placeholders})",
+                    assessment_ids,
+                )
+                self.connection.execute(
+                    f"DELETE FROM ai_generated_artifacts WHERE assessment_id IN ({placeholders})",
+                    assessment_ids,
+                )
+            if run_ids:
+                placeholders = ",".join("?" for _ in run_ids)
+                self.connection.execute(
+                    f"DELETE FROM ai_candidate_assessments WHERE ai_run_id IN ({placeholders})",
+                    run_ids,
+                )
+            self.connection.execute(
+                "DELETE FROM ai_analysis_runs WHERE analysis_job_id=?", (job_id,)
+            )
             export_rows = self.connection.execute(
                 "SELECT id FROM objects WHERE kind='export' AND json_extract(data, '$.job_id')=?",
                 (job_id,),

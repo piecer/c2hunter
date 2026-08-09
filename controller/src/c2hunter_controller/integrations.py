@@ -6,14 +6,18 @@ kept in settings and are never included in returned provider data or errors.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from datetime import UTC, datetime
 from ipaddress import ip_address
 from typing import Any, Protocol, cast
+
+import httpx
 
 
 class IntegrationError(Exception):
@@ -84,6 +88,61 @@ class JsonHttpClient:
         try:
             parsed = json.loads(payload or b"{}")
         except json.JSONDecodeError as exc:
+            raise IntegrationError("http", "external service returned invalid JSON") from exc
+        if not isinstance(parsed, dict):
+            raise IntegrationError("http", "external service returned an invalid response")
+        return cast(dict[str, Any], parsed)
+
+
+class CancellableJsonHttpClient(JsonHttpClient):
+    """AI transport that closes an in-flight request when cancellation is observed."""
+
+    def request_cancellable(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        body: dict[str, Any] | None = None,
+        should_cancel: Callable[[], bool],
+    ) -> dict[str, Any]:
+        async def perform() -> httpx.Response:
+            async with httpx.AsyncClient(
+                timeout=self.timeout_seconds,
+                verify=self.context,
+            ) as client:
+                task = asyncio.create_task(client.request(method, url, headers=headers, json=body))
+                while not task.done():
+                    if should_cancel():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                        raise InterruptedError("external service request cancelled")
+                    await asyncio.sleep(0.05)
+                return await task
+
+        try:
+            response = asyncio.run(perform())
+            response.raise_for_status()
+        except InterruptedError:
+            raise
+        except httpx.HTTPStatusError as exc:
+            retry_after = exc.response.headers.get("Retry-After")
+            raise IntegrationError(
+                "http",
+                f"external service returned HTTP {exc.response.status_code}",
+                http_status=exc.response.status_code,
+                retry_after=retry_after,
+            ) from exc
+        except (httpx.HTTPError, TimeoutError, OSError) as exc:
+            raise IntegrationError("http", "external service request failed") from exc
+        if len(response.content) > 2 * 1024 * 1024:
+            raise IntegrationError("http", "external service response exceeded 2 MiB")
+        try:
+            parsed = response.json()
+        except ValueError as exc:
             raise IntegrationError("http", "external service returned invalid JSON") from exc
         if not isinstance(parsed, dict):
             raise IntegrationError("http", "external service returned an invalid response")

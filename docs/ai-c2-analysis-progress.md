@@ -2,7 +2,7 @@
 
 ## Current phase
 
-Phase 5 완료 — Validated Splunk/MISP Artifacts
+Phase 7 완료 — 평가 및 운영 안정화
 
 ## Completed
 
@@ -61,34 +61,34 @@ Phase 5 완료 — Validated Splunk/MISP Artifacts
 - list/detail/regenerate/approve/reject API를 추가했으며 review는 외부 publish/deploy 없이 terminal 상태와 감사 이벤트만 저장한다.
 - Analysis UI에 raw JSON 대신 SPL code preview와 MISP publish 상태/IOC/attribute count 및 approve/reject를 구조화해 표시한다.
 
+### Phase 6
+
+- AI Run candidate limit, review-priority 정렬, AI verdict/analyst-confirmed verdict 분리 UI를 구현했다.
+- append-only feedback ledger를 Memory/SQLite/PostgreSQL에 저장하고 VIEWER 읽기, ANALYST/ADMIN 쓰기 권한을 적용했다.
+- feedback 작성과 history 표시를 Vitest 및 Playwright analyst workflow로 검증했다.
+
+### Phase 7
+
+- AI-A~AI-J Flow fixture를 candidate generation → Evidence Builder → FakeGateway → strict validation → artifact pipeline으로 실행해 Recall/Precision@20, rank/reduction, verdict/calibration/safety, stage/resource/token을 계산한다.
+- `make test-ai`, `make evaluate-ai`, `make benchmark-ai` 명령과 JSON/Markdown report를 추가했다.
+- provider/model/config/prompt/output-schema/bundle hash exact key를 사용하는 strict-validation 후 bounded LRU assessment cache를 추가했다.
+- Controller enqueue/waiting/feedback과 Worker inference/processing/failure/schema-invalid를 의미별로 분리한 Prometheus scrape path를 추가했다.
+- Analysis Job 삭제 시 active AI Run을 거부하고 terminal Run의 feedback → artifact → assessment → run을 Memory/SQLite/PostgreSQL transaction에서 cascade한다.
+- AI table backup/restore 검증과 report 안전성 절차를 운영 문서에 추가했다.
+
 ## Verification
 
 2026-08-09 실제 실행 결과:
 
-- AI/backend targeted tests: 19 passed (Phase 2 최신 targeted suite)
-- controller/analysis mypy: passed
-- web unit test: passed
-- `make lint`: passed
-- `make test`: passed
-- `make build`: passed
-- Playwright E2E: 7 passed (AI 실행 → Job 판정 → Candidate 판정 포함)
-- `docker compose --env-file .env --profile ai config --quiet`: passed
-- `docker compose --env-file .env --profile ai build ai-worker`: passed
+- `make test-ai`: 59 passed
+- `make lint`: Ruff, formatting, mypy, Go vet, ESLint passed
+- `make test`: controller/analysis 355 passed, storage integration 1 skipped; worker 12 passed; Web 64 passed
+- `make build`: Python compile, Go/Web build, sensor tarball, Controller/Worker/Web Docker build passed
+- `make test-e2e`: Playwright 7 passed
+- `make evaluate-ai`: baseline precision 0.6, recall 1.0, F1 0.75; conservative precision 0.6667, recall 1.0, F1 0.8
+- `make benchmark-ai`: 100 iterations, 1,000 case evaluations, p50 20.52 ms, p95 21.61 ms, peak traced memory 13,344,640 bytes
 - `git diff --check`: passed
 
 ## Remaining milestones
 
-Phase 6까지 구현됐다.
-
-- AI Run candidate limit, 진행 상태, review-priority 정렬
-- AI verdict와 analyst-confirmed verdict를 분리한 assessment UI
-- append-only analyst feedback ledger 및 Memory/SQLite/PostgreSQL 영속화
-- VIEWER 읽기, ANALYST/ADMIN 피드백 작성 권한
-- Playwright fixture 기반 analyst workflow 검증
-
-아래 작업은 Phase 7 범위다.
-
-1. calibration materialization과 drift observability
-2. 보존 기간 cleanup과 대규모 성능/부하 검증
-
-각 후속 milestone도 schema/fixture부터 RED → GREEN → REFACTOR 순으로 진행한다.
+Phase 0~7 실행 계약을 완료했다. 실제 운영 model profile 변경은 새 평가 report, analyst feedback calibration 검토, capacity benchmark, rollback 기준을 함께 승인한 뒤 수행한다.

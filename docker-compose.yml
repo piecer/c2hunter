@@ -96,6 +96,8 @@ services:
       C2HUNTER_AI_MODEL_TEMPERATURE: "${C2HUNTER_AI_MODEL_TEMPERATURE:-0.1}"
       C2HUNTER_AI_MODEL_CONTEXT_TOKENS: "${C2HUNTER_AI_MODEL_CONTEXT_TOKENS:-16384}"
       C2HUNTER_AI_MODEL_MAX_OUTPUT_TOKENS: "${C2HUNTER_AI_MODEL_MAX_OUTPUT_TOKENS:-4096}"
+      C2HUNTER_AI_METRICS_PORT: "${C2HUNTER_AI_METRICS_PORT:-9102}"
+    expose: ["9102"]
     extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, minio: { condition: service_healthy } }
     healthcheck: { test: [CMD, python, -m, c2hunter_controller.ai_worker, healthcheck, --max-age, "30"], interval: 15s, timeout: 5s, retries: 5 }

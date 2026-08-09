@@ -12,6 +12,8 @@ class AIAnalysisTaskQueue(Protocol):
 
     def enqueue(self, run_id: str) -> None: ...
 
+    def depth(self) -> int: ...
+
 
 class InlineAIAnalysisTaskQueue:
     """Deterministic test queue that executes the same worker task boundary inline."""
@@ -25,6 +27,9 @@ class InlineAIAnalysisTaskQueue:
     def enqueue(self, run_id: str) -> None:
         self.execute(run_id)
 
+    def depth(self) -> int:
+        return 0
+
 
 class MemoryAIAnalysisTaskQueue:
     def __init__(self) -> None:
@@ -36,6 +41,9 @@ class MemoryAIAnalysisTaskQueue:
     def enqueue(self, run_id: str) -> None:
         if run_id not in self.run_ids:
             self.run_ids.append(run_id)
+
+    def depth(self) -> int:
+        return len(self.run_ids)
 
 
 class RedisAIAnalysisTaskQueue:
@@ -54,6 +62,9 @@ class RedisAIAnalysisTaskQueue:
     def enqueue(self, run_id: str) -> None:
         envelope = json.dumps({"ai_run_id": run_id}, separators=(",", ":"))
         self.client.lpush(self.queue_key, envelope)
+
+    def depth(self) -> int:
+        return cast(int, self.client.llen(self.queue_key))
 
 
 class RedisAIAnalysisWorkerQueue:
@@ -113,6 +124,12 @@ class RedisAIAnalysisWorkerQueue:
             )
         return len(expired)
 
+    def depth(self) -> tuple[int, int]:
+        return (
+            cast(int, self.client.llen(self.queue_key)),
+            cast(int, self.client.llen(self.processing_key)),
+        )
+
 
 class MemoryAIAnalysisWorkerQueue:
     def __init__(self, messages: list[dict[str, str]] | None = None) -> None:
@@ -128,3 +145,6 @@ class MemoryAIAnalysisWorkerQueue:
 
     def recover(self) -> int:
         return 0
+
+    def depth(self) -> tuple[int, int]:
+        return len(self.messages), 0

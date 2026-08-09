@@ -75,6 +75,10 @@ def test_health_readiness_metrics_and_structured_validation_error() -> None:
     metrics = api.get("/api/v1/metrics")
     assert metrics.status_code == 200
     assert "c2hunter_api_requests_total" in metrics.text
+    assert "c2hunter_ai_enqueue_duration_seconds" in metrics.text
+    assert "c2hunter_ai_queue_waiting_depth" in metrics.text
+    assert "c2hunter_ai_enqueue_failures_total" in metrics.text
+    assert "c2hunter_ai_feedback_total" in metrics.text
     error = api.post("/api/v1/sensors/register", json={})
     assert error.status_code == 401
     assert error.json()["error"]["code"] == "SENSOR_TOKEN_REQUIRED"

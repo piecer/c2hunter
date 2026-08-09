@@ -5,10 +5,14 @@ import json
 import os
 import signal
 import tempfile
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
-from typing import Protocol
+from time import perf_counter
+from typing import Any, Protocol
+
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, start_http_server
 
 from .ai_analysis import AIAnalysisService
 from .ai_gateway import create_model_gateway
@@ -24,6 +28,76 @@ class WorkerQueue(Protocol):
 
     def recover(self) -> int: ...
 
+    def depth(self) -> tuple[int, int]: ...
+
+
+class AIWorkerMetrics:
+    def __init__(self, *, provider: str, model: str) -> None:
+        self.provider = provider
+        self.model = model
+        self.registry = CollectorRegistry()
+        self.inference_duration = Histogram(
+            "c2hunter_ai_inference_duration_seconds",
+            "AI worker Run execution duration",
+            ["provider", "model", "status"],
+            buckets=(0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120),
+            registry=self.registry,
+        )
+        self.failures = Counter(
+            "c2hunter_ai_failures_total",
+            "AI worker Run failures",
+            ["reason"],
+            registry=self.registry,
+        )
+        self.schema_invalid = Counter(
+            "c2hunter_ai_schema_invalid_total",
+            "AI outputs rejected by schema or evidence validation",
+            registry=self.registry,
+        )
+        self.waiting_depth = Gauge(
+            "c2hunter_ai_queue_waiting_depth",
+            "AI Runs waiting in the worker queue",
+            registry=self.registry,
+        )
+        self.processing_depth = Gauge(
+            "c2hunter_ai_queue_processing_depth",
+            "AI Runs claimed and awaiting acknowledgement",
+            registry=self.registry,
+        )
+
+    @staticmethod
+    def _safe(operation: Callable[[], None]) -> None:
+        try:
+            operation()
+        except Exception:
+            # Telemetry must never alter Run state or queue acknowledgement.
+            pass
+
+    def observe_execution(self, duration: float, run: dict[str, Any]) -> None:
+        status = str(run.get("status") or "UNKNOWN")
+        error_code = str(run.get("error_code") or "AI_ANALYSIS_FAILED")
+        self._safe(
+            lambda: self.inference_duration.labels(
+                provider=self.provider, model=self.model, status=status
+            ).observe(duration)
+        )
+        if status == "FAILED":
+            self._safe(lambda: self.failures.labels(reason=error_code).inc())
+            if error_code == "MODEL_OUTPUT_INVALID":
+                self._safe(self.schema_invalid.inc)
+
+    def observe_exception(self, duration: float, exc: Exception) -> None:
+        self._safe(
+            lambda: self.inference_duration.labels(
+                provider=self.provider, model=self.model, status="EXCEPTION"
+            ).observe(duration)
+        )
+        self._safe(lambda: self.failures.labels(reason=type(exc).__name__).inc())
+
+    def set_queue_depth(self, waiting: int, processing: int) -> None:
+        self._safe(lambda: self.waiting_depth.set(waiting))
+        self._safe(lambda: self.processing_depth.set(processing))
+
 
 class AIAnalysisWorker:
     def __init__(
@@ -32,38 +106,58 @@ class AIAnalysisWorker:
         service: AIAnalysisService,
         *,
         health_path: Path | None = None,
+        metrics: AIWorkerMetrics | None = None,
     ) -> None:
         self.queue = queue
         self.service = service
         self.health_path = health_path
+        gateway = getattr(service, "gateway", None)
+        self.metrics = metrics or AIWorkerMetrics(
+            provider=str(getattr(gateway, "provider", "unknown")),
+            model=str(getattr(gateway, "model", "unknown")),
+        )
         self.processed_runs = 0
         self.last_error: str | None = None
 
     def run_once(self, timeout: int = 1) -> bool:
+        self._update_queue_depth()
         message = self.queue.claim(timeout)
         if message is None:
             self._write_health("RUNNING")
             return False
+        self._update_queue_depth()
         receipt = message.get("receipt", "")
+        started = perf_counter()
         try:
             if not receipt:
                 raise ValueError("AI queue receipt is required")
-            self.service.execute(message["ai_run_id"])
+            run = self.service.execute(message["ai_run_id"])
+            self.metrics.observe_execution(perf_counter() - started, run)
             self.queue.ack(receipt)
             self.processed_runs += 1
             self.last_error = None
             self._write_health("RUNNING")
             return True
         except Exception as exc:
+            self.metrics.observe_exception(perf_counter() - started, exc)
             self.last_error = str(exc)
             self._write_health("DEGRADED")
             return False
+        finally:
+            self._update_queue_depth()
 
     def run(self, stopped: Event) -> None:
         self._write_health("RUNNING")
         while not stopped.is_set():
             self.run_once(timeout=1)
         self._write_health("STOPPED")
+
+    def _update_queue_depth(self) -> None:
+        try:
+            waiting, processing = self.queue.depth()
+        except Exception:
+            return
+        self.metrics.set_queue_depth(waiting, processing)
 
     def _write_health(self, status: str) -> None:
         if self.health_path is None:
@@ -142,6 +236,11 @@ def main() -> int:
         settings.redis_url,
         visibility_timeout=settings.queue_visibility_timeout_seconds,
     )
+    metrics = AIWorkerMetrics(
+        provider=settings.ai_model_provider,
+        model=settings.ai_model_name,
+    )
+    start_http_server(settings.ai_metrics_port, registry=metrics.registry)
     stopped = Event()
 
     def stop(_signum: int, _frame: object) -> None:
@@ -149,7 +248,7 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    AIAnalysisWorker(queue, service, health_path=health_path).run(stopped)
+    AIAnalysisWorker(queue, service, health_path=health_path, metrics=metrics).run(stopped)
     return 0
 
 

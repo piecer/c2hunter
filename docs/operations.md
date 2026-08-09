@@ -52,9 +52,13 @@ curl -fsS http://localhost:8000/api/v1/metrics \
   | grep 'c2hunter_api_request_duration_seconds\|c2hunter_api_requests_total'
 ```
 
+Controller AI observability is exposed in the API registry as `c2hunter_ai_enqueue_duration_seconds`, `c2hunter_ai_queue_waiting_depth`, `c2hunter_ai_enqueue_failures_total`, and `c2hunter_ai_feedback_total`. Model execution, processing depth, and validation failures are exported separately by the AI worker as described below. Alert on sustained queue growth, schema-invalid output, failures, or p95 latency regression rather than a single event.
+
 ## Disk and retention
 
 Defaults are raw PCAP 7 days, Flow 30, results 180, audit 365, and heartbeat detail 30. Set organization policy before capture. Monitor Docker volume and sensor spool filesystems with byte and inode thresholds. PCAP is opt-in; narrow BPF and shorter capture/rotation reduce risk. Cleanup must be paged and audited. An expired PCAP changes availability; it must not delete candidate evidence.
+
+AI Run, Assessment, generated draft, and analyst-feedback ledgers follow the parent Analysis Job result-retention period. Job deletion cascades these records in Memory, SQLite, and PostgreSQL, deleting feedback and artifacts before assessments and runs. Feedback remains append-only while the parent job exists; never delete individual feedback rows to rewrite analyst history.
 
 Offline PCAP upload defaults to 500 MiB and 2,000,000 packets. The bundled web proxy accepts the same size, streams request bodies to the Controller, and allows up to 10 minutes for upload processing. Configure any external reverse proxy with a matching or larger request-body limit and timeout. Tune `C2HUNTER_PCAP_UPLOAD_MAX_BYTES` and `C2HUNTER_PCAP_UPLOAD_MAX_PACKETS` below available Controller/Worker memory, PostgreSQL I/O, and MinIO capacity. The original upload is retained once in MinIO, normalized flow records are stored separately from job metadata, and Redis carries only a job reference. Raw packet bytes are reconstructed from the retained object only for an explicit export. Use Analysis history for metadata correction; use reanalysis for detector changes. Only terminal jobs can be manually deleted, and manual deletion intentionally cascades to candidates, the retained source capture, and generated exports.
 
@@ -96,9 +100,21 @@ docker compose --env-file .env exec -T clickhouse clickhouse-client --query 'BAC
 
 Replicate MinIO buckets with versioning/object-lock policy where appropriate and save object inventory/checksums. Redis is not authoritative, but queue loss can interrupt work; drain or quiesce jobs before maintenance. Store configuration and CA/revocation metadata separately—never private keys in ordinary backups without dedicated key controls.
 
+The PostgreSQL dump includes `ai_analysis_runs`, `ai_candidate_assessments`, `ai_generated_artifacts`, and `ai_feedback`; verify all four tables are present in the archive catalog before declaring an AI-capable backup complete. No model credential or raw packet/payload belongs in these tables or evaluation reports.
+
 ## Restore drill
 
 Restore into an isolated environment using the same pinned versions. Restore PostgreSQL, ClickHouse, and MinIO, reconcile object references/checksums, start Redis, then Controller and Worker. Verify `/ready`, sensor records, one historical result, PCAP access authorization, and audit continuity. Record RPO/RTO and test quarterly. Do not overwrite production to test a restore.
+
+For AI restore verification, select one completed Run and confirm its Assessment bundle hash, generated draft revisions, and analyst-feedback order. Run `make test-ai` and `make evaluate-ai`; compare the generated profile metrics with the pre-backup report without sending restored evidence to an external model.
+
+## AI evaluation and model-profile operation
+
+`make evaluate-ai` executes the fixed AI-A–AI-J Flow fixture through candidate generation, Evidence Builder, deterministic FakeGateway, strict output/evidence validation, and artifact generation. It reports Recall@20, Precision@20, malicious ranks, reduction ratio, verdict quality, Brier calibration, citation/safety metrics, stage latency, and actual bundle token estimates. `make benchmark-ai` repeats the same pipeline and records total/stage latency, CPU time, peak traced memory, candidate metrics, and token totals. Reports contain labels and aggregate metadata only, never raw PCAP, packet, or payload bytes.
+
+The local gateway cache is bounded LRU and keyed by provider, model, non-secret endpoint/model configuration hash, prompt hash, output-schema hash, and canonical Evidence Bundle hash. Cached values are schema/evidence validated again before use, and cancellation is checked before return. Restarting the worker safely clears this optimization cache.
+
+Controller metrics at `/api/v1/metrics` expose enqueue latency/failure, waiting depth, and analyst-feedback totals. The AI worker exposes actual Run execution latency, model/validation failures, schema-invalid totals, and waiting/processing depth on the internal `ai-worker:9102/metrics` endpoint (`C2HUNTER_AI_METRICS_PORT`). Configure Prometheus to scrape both endpoints; do not interpret Controller enqueue latency as model inference latency.
 
 ## Failure recovery
 

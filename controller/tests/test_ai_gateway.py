@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from c2hunter_controller.ai_analysis import AIAnalysisError, FakeGateway, build_evidence_bundle
+from c2hunter_controller.ai_evaluation import BoundedAssessmentCache
 from c2hunter_controller.ai_gateway import (
     AIAnalysisCancelled,
     OllamaGateway,
@@ -31,6 +32,26 @@ class FakeHttpClient:
         if isinstance(response, Exception):
             raise response
         return response
+
+
+class FakeCancellableHttpClient(FakeHttpClient):
+    def __init__(self) -> None:
+        super().__init__([])
+        self.cancellable_requests = 0
+
+    def request_cancellable(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        body: dict[str, Any] | None = None,
+        should_cancel: Any,
+    ) -> dict[str, Any]:
+        # The first gateway check permits dispatch; this transport check cancels in flight.
+        self.cancellable_requests += 1
+        assert should_cancel() is True
+        raise InterruptedError("external service request cancelled")
 
 
 def source_candidate() -> dict[str, object]:
@@ -135,6 +156,25 @@ def test_gateway_retries_timeout_and_supports_cancellation() -> None:
         )
 
 
+def test_gateway_propagates_cancellation_to_in_flight_http_transport() -> None:
+    http = FakeCancellableHttpClient()
+    gateway = OllamaGateway(
+        base_url="http://ollama:11434",
+        model="qwen-local",
+        http_client=http,
+        retries=0,
+    )
+    cancellation_checks = iter([False, False, False, True])
+
+    with pytest.raises(AIAnalysisCancelled, match="during the model request"):
+        gateway.assess_cancellable(
+            build_evidence_bundle(source_candidate()),
+            should_cancel=lambda: next(cancellation_checks),
+        )
+
+    assert http.cancellable_requests == 1
+
+
 def test_gateway_rejects_schema_invalid_output_after_one_repair() -> None:
     invalid = json.dumps({"candidate": {"external_ip": "203.0.113.9"}})
     http = FakeHttpClient(
@@ -153,3 +193,104 @@ def test_gateway_rejects_schema_invalid_output_after_one_repair() -> None:
     with pytest.raises(AIAnalysisError, match="invalid structured output"):
         gateway.assess(build_evidence_bundle(source_candidate()))
     assert len(http.requests) == 2
+
+
+def test_gateway_caches_only_exact_model_prompt_and_bundle_hash() -> None:
+    http = FakeHttpClient(
+        [
+            {"message": {"content": json.dumps(valid_assessment())}},
+            {"message": {"content": json.dumps(valid_assessment())}},
+        ]
+    )
+    gateway = OllamaGateway(
+        base_url="http://ollama:11434",
+        model="qwen-local",
+        http_client=http,
+        retries=0,
+    )
+    bundle = build_evidence_bundle(source_candidate())
+
+    first = gateway.assess(bundle)
+    second = gateway.assess(bundle)
+    changed = source_candidate()
+    changed["score"] = 73
+    gateway.assess(build_evidence_bundle(changed))
+
+    assert second == first
+    assert len(http.requests) == 2
+
+
+def test_gateway_cache_identity_includes_model_configuration() -> None:
+    cache = BoundedAssessmentCache()
+    first_http = FakeHttpClient([{"message": {"content": json.dumps(valid_assessment())}}])
+    changed_http = FakeHttpClient([{"message": {"content": json.dumps(valid_assessment())}}])
+    first = OllamaGateway(
+        base_url="http://ollama:11434",
+        model="qwen-local",
+        temperature=0.1,
+        http_client=first_http,
+        assessment_cache=cache,
+        retries=0,
+    )
+    changed = OllamaGateway(
+        base_url="http://ollama:11434",
+        model="qwen-local",
+        temperature=0.2,
+        http_client=changed_http,
+        assessment_cache=cache,
+        retries=0,
+    )
+    same_http = FakeHttpClient([])
+    same = OllamaGateway(
+        base_url="http://ollama:11434",
+        model="qwen-local",
+        temperature=0.1,
+        http_client=same_http,
+        assessment_cache=cache,
+        retries=0,
+    )
+    bundle = build_evidence_bundle(source_candidate())
+
+    first.assess(bundle)
+    changed.assess(bundle)
+    same.assess(bundle)
+
+    assert len(first_http.requests) == 1
+    assert len(changed_http.requests) == 1
+    assert same_http.requests == []
+
+
+def test_gateway_cancellation_wins_over_cache_hit_and_completed_provider_response() -> None:
+    cache_http = FakeHttpClient([{"message": {"content": json.dumps(valid_assessment())}}])
+    cached_gateway = OllamaGateway(
+        base_url="http://ollama:11434",
+        model="qwen-local",
+        http_client=cache_http,
+        retries=0,
+    )
+    bundle = build_evidence_bundle(source_candidate())
+    cached_gateway.assess(bundle)
+    cache_checks = iter([False, True])
+
+    with pytest.raises(AIAnalysisCancelled):
+        cached_gateway.assess_cancellable(bundle, should_cancel=lambda: next(cache_checks))
+
+    response_http = FakeHttpClient(
+        [
+            {"message": {"content": json.dumps(valid_assessment())}},
+            {"message": {"content": json.dumps(valid_assessment())}},
+        ]
+    )
+    response_gateway = OllamaGateway(
+        base_url="http://ollama:11434",
+        model="qwen-local",
+        http_client=response_http,
+        retries=0,
+    )
+    response_checks = iter([False, False, False, True])
+
+    with pytest.raises(AIAnalysisCancelled):
+        response_gateway.assess_cancellable(bundle, should_cancel=lambda: next(response_checks))
+    response_gateway.assess(bundle)
+
+    assert len(response_http.requests) == 2

@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     ai_model_temperature: float = Field(default=0.1, ge=0, le=1)
     ai_model_context_tokens: int = Field(default=16384, ge=8192, le=262144)
     ai_model_max_output_tokens: int = Field(default=4096, ge=512, le=16384)
+    ai_metrics_port: int = Field(default=9102, ge=1024, le=65535)
     virustotal_api_key: SecretStr = SecretStr("")
     abuseipdb_api_key: SecretStr = SecretStr("")
     threat_intel_timeout_seconds: float = Field(default=10.0, gt=0, le=30)

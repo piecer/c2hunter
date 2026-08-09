@@ -6,7 +6,9 @@ import json
 import secrets
 import threading
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from typing import Annotated, Any, Literal, cast
 
 from c2hunter_analysis.domain import AllowlistEntry
@@ -18,6 +20,7 @@ from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
     Counter,
+    Gauge,
     Histogram,
     generate_latest,
 )
@@ -678,6 +681,45 @@ def create_app(
     latency = Histogram(
         "c2hunter_api_request_duration_seconds", "API request latency", ["path"], registry=registry
     )
+    ai_enqueue_latency = Histogram(
+        "c2hunter_ai_enqueue_duration_seconds",
+        "Controller AI Run enqueue duration",
+        ["provider"],
+        buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
+        registry=registry,
+    )
+    ai_queue_waiting_depth = Gauge(
+        "c2hunter_ai_queue_waiting_depth",
+        "AI Runs waiting for a worker",
+        registry=registry,
+    )
+    ai_enqueue_failures = Counter(
+        "c2hunter_ai_enqueue_failures_total",
+        "Controller AI enqueue failures",
+        ["reason"],
+        registry=registry,
+    )
+    ai_feedback = Counter(
+        "c2hunter_ai_feedback_total",
+        "Immutable analyst feedback records",
+        ["verdict"],
+        registry=registry,
+    )
+    ai_queue_waiting_depth.set(0)
+
+    def safe_ai_metric(operation: Callable[[], None]) -> None:
+        try:
+            operation()
+        except Exception:
+            # Telemetry must not alter a persisted Run, feedback record, or original exception.
+            pass
+
+    app.state.ai_metrics = {
+        "enqueue_latency": ai_enqueue_latency,
+        "queue_waiting_depth": ai_queue_waiting_depth,
+        "enqueue_failures": ai_enqueue_failures,
+        "feedback": ai_feedback,
+    }
 
     @app.middleware("http")
     async def security(request: Request, call_next: Any) -> Response:
@@ -2024,7 +2066,26 @@ def create_app(
         if not created:
             response.status_code = 200
         else:
-            ai_tasks.enqueue(run["id"])
+            started = perf_counter()
+            try:
+                ai_tasks.enqueue(run["id"])
+            except Exception as exc:
+                reason = type(exc).__name__
+                safe_ai_metric(lambda: ai_enqueue_failures.labels(reason=reason).inc())
+                raise
+            finally:
+                waiting_depth: int | None
+                try:
+                    waiting_depth = ai_tasks.depth()
+                except Exception:
+                    waiting_depth = None
+                if waiting_depth is not None:
+                    safe_ai_metric(lambda: ai_queue_waiting_depth.set(waiting_depth))
+                safe_ai_metric(
+                    lambda: ai_enqueue_latency.labels(provider=config.ai_model_provider).observe(
+                        perf_counter() - started
+                    )
+                )
             stored_run = repo.get_ai_run(run["id"])
             if stored_run is None:
                 raise ApiError(
@@ -2123,6 +2184,7 @@ def create_app(
                 "created_by": created_by,
             },
         )
+        safe_ai_metric(lambda: ai_feedback.labels(verdict=payload.verdict).inc())
         return feedback
 
     @app.get("/api/v1/ai-assessments/{assessment_id}/evidence-bundle")
@@ -2551,6 +2613,12 @@ def create_app(
         }:
             raise ApiError(409, "JOB_NOT_TERMINAL", "진행 중인 분석 작업은 삭제할 수 없습니다")
         if not repo.delete_job(job_id):
+            if repo.get_job_summary(job_id) is not None:
+                raise ApiError(
+                    409,
+                    "AI_RUN_ACTIVE",
+                    "진행 중인 AI 분석 Run이 있는 작업은 삭제할 수 없습니다",
+                )
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
         return Response(status_code=204)
 

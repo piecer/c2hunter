@@ -53,6 +53,19 @@ def api() -> tuple[TestClient, MemoryRepository]:
     return TestClient(app), repository
 
 
+class InvalidGateway:
+    provider = "invalid-test"
+    model = "invalid-test"
+
+    def assess(self, bundle: object) -> dict[str, object]:
+        return {}
+
+
+class DepthUnavailableQueue(MemoryAIAnalysisTaskQueue):
+    def depth(self) -> int:
+        raise RuntimeError("metrics backend unavailable")
+
+
 def test_ai_run_api_completes_lists_and_exposes_validated_assessment() -> None:
     client, repository = api()
 
@@ -91,6 +104,27 @@ def test_ai_run_api_completes_lists_and_exposes_validated_assessment() -> None:
     ]
 
 
+def test_ai_failed_inline_run_returns_persisted_terminal_state() -> None:
+    repository = MemoryRepository()
+    repository.jobs["job-1"] = completed_job()
+    repository.save_candidates("job-1", [candidate()])
+    client = TestClient(
+        create_app(
+            Settings(environment="test", ai_analysis_enabled=True),
+            repository,
+            ai_gateway=InvalidGateway(),
+        )
+    )
+
+    response = client.post(
+        "/api/v1/analysis-jobs/job-1/ai-runs",
+        json={"idempotency_key": "invalid-output", "candidate_limit": 1},
+    )
+    assert response.status_code == 201
+    assert response.json()["status"] == "FAILED"
+    assert response.json()["error_code"] == "MODEL_OUTPUT_INVALID"
+
+
 def test_ai_run_api_rejects_non_completed_jobs_and_disabled_feature() -> None:
     client, repository = api()
     repository.jobs["job-1"]["status"] = "RUNNING"
@@ -127,6 +161,26 @@ def test_ai_run_cancel_is_idempotent_for_terminal_run() -> None:
     assert first.json()["status"] == second.json()["status"] == "COMPLETED"
 
 
+def test_analysis_job_delete_refuses_active_ai_run() -> None:
+    client, repository = api()
+    run, _created = repository.create_ai_run(
+        {
+            "id": "run-active",
+            "analysis_job_id": "job-1",
+            "idempotency_key": "active-delete",
+            "created_at": "2026-08-09T00:02:00+00:00",
+            "status": "ANALYZING",
+        }
+    )
+
+    response = client.delete("/api/v1/analysis-jobs/job-1")
+
+    assert run["status"] == "ANALYZING"
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "AI_RUN_ACTIVE"
+    assert repository.get_job("job-1") is not None
+
+
 def test_ai_run_api_enqueues_reference_without_model_payload() -> None:
     repository = MemoryRepository()
     repository.jobs["job-1"] = completed_job()
@@ -144,6 +198,38 @@ def test_ai_run_api_enqueues_reference_without_model_payload() -> None:
     response = client.post(
         "/api/v1/analysis-jobs/job-1/ai-runs",
         json={"idempotency_key": "queued", "candidate_limit": 5},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "QUEUED"
+    assert queue.run_ids == [response.json()["id"]]
+    metrics = client.get("/api/v1/metrics").text
+    assert "c2hunter_ai_queue_waiting_depth 1.0" in metrics
+
+
+def test_ai_metrics_failure_does_not_fail_enqueue(
+    monkeypatch: object,
+) -> None:
+    repository = MemoryRepository()
+    repository.jobs["job-1"] = completed_job()
+    repository.save_candidates("job-1", [candidate()])
+    queue = DepthUnavailableQueue()
+    application = create_app(
+        Settings(environment="test", ai_analysis_enabled=True),
+        repository,
+        ai_gateway=FakeGateway(),
+        ai_task_queue=queue,
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        application.state.ai_metrics["enqueue_latency"],
+        "labels",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("metrics failure")),
+    )
+    client = TestClient(application)
+
+    response = client.post(
+        "/api/v1/analysis-jobs/job-1/ai-runs",
+        json={"idempotency_key": "depth-unavailable", "candidate_limit": 1},
     )
 
     assert response.status_code == 201

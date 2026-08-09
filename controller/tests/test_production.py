@@ -116,6 +116,56 @@ class PresetConnection(FakeConnection):
         self.rolled_back = True
 
 
+class DeleteJobCursor(FakeCursor):
+    def execute(self, query: str, params: tuple | None = None) -> None:
+        super().execute(query, params)
+        self._last_row = (
+            ({"id": "job-1", "idempotency_key": "job-key"},)
+            if "kind='job' AND id=%s FOR UPDATE" in query
+            else None
+        )
+        if "data->>'status' FROM ai_analysis_runs" in query:
+            self._rows = [("COMPLETED",)]
+        else:
+            self._rows = [("exports/job-1.zip",)] if "data->>'object_key'" in query else []
+
+
+class DeleteJobConnection(FakeConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.commit_count = 0
+
+    def cursor(self) -> DeleteJobCursor:
+        return DeleteJobCursor(self)
+
+    def commit(self) -> None:
+        self.commit_count += 1
+
+
+class FailingDeleteJobCursor(DeleteJobCursor):
+    def execute(self, query: str, params: tuple | None = None) -> None:
+        if "DELETE FROM ai_generated_artifacts" in query:
+            raise RuntimeError("forced PostgreSQL retention failure")
+        super().execute(query, params)
+
+
+class FailingDeleteJobConnection(DeleteJobConnection):
+    def cursor(self) -> FailingDeleteJobCursor:
+        return FailingDeleteJobCursor(self)
+
+
+class ActiveDeleteJobCursor(DeleteJobCursor):
+    def execute(self, query: str, params: tuple | None = None) -> None:
+        super().execute(query, params)
+        if "data->>'status' FROM ai_analysis_runs" in query:
+            self._rows = [("ANALYZING",)]
+
+
+class ActiveDeleteJobConnection(DeleteJobConnection):
+    def cursor(self) -> ActiveDeleteJobCursor:
+        return ActiveDeleteJobCursor(self)
+
+
 def test_connection_initialization_is_thread_safe(monkeypatch: Any) -> None:
     first_connect_started = threading.Event()
     second_connect_started = threading.Event()
@@ -182,6 +232,73 @@ def test_failed_connection_initialization_closes_connection_and_can_retry(monkey
 
     assert failed_connection.closed
     assert repository.connection is successful_connection
+
+
+def test_delete_job_cascades_ai_ledgers_before_run(monkeypatch: Any) -> None:
+    connection = DeleteJobConnection()
+    deleted: list[str] = []
+    blob_store = cast(
+        MinioBlobStore,
+        SimpleNamespace(delete=lambda object_key: deleted.append(object_key)),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg",
+        SimpleNamespace(connect=lambda *args, **kwargs: connection),
+    )
+    repository = PostgresRepository("postgresql://test", blob_store)
+    _ = repository.connection
+    connection.queries.clear()
+
+    assert repository.delete_job("job-1") is True
+
+    sql = "\n".join(connection.queries)
+    assert "DELETE FROM ai_feedback" in sql
+    assert "DELETE FROM ai_generated_artifacts" in sql
+    assert "DELETE FROM ai_candidate_assessments" in sql
+    assert "DELETE FROM ai_analysis_runs" in sql
+    assert sql.index("DELETE FROM ai_feedback") < sql.index("DELETE FROM ai_analysis_runs")
+    assert connection.commit_count >= 2
+    assert deleted == ["exports/job-1.zip", "captures/job-1.pcap"]
+
+
+def test_delete_job_refuses_active_postgresql_ai_run(monkeypatch: Any) -> None:
+    connection = ActiveDeleteJobConnection()
+    deleted: list[str] = []
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg",
+        SimpleNamespace(connect=lambda *args, **kwargs: connection),
+    )
+    repository = PostgresRepository(
+        "postgresql://test",
+        cast(MinioBlobStore, SimpleNamespace(delete=deleted.append)),
+    )
+    _ = repository.connection
+    connection.queries.clear()
+
+    assert repository.delete_job("job-1") is False
+    assert not any(query.startswith("DELETE") for query in connection.queries)
+    assert deleted == []
+
+
+def test_delete_job_rolls_back_postgresql_transaction_on_ai_cascade_failure(
+    monkeypatch: Any,
+) -> None:
+    connection = FailingDeleteJobConnection()
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg",
+        SimpleNamespace(connect=lambda *args, **kwargs: connection),
+    )
+    repository = PostgresRepository("postgresql://test", cast(MinioBlobStore, SimpleNamespace()))
+    _ = repository.connection
+    connection.rolled_back = False
+
+    with pytest.raises(RuntimeError, match="forced PostgreSQL retention failure"):
+        repository.delete_job("job-1")
+
+    assert connection.rolled_back
 
 
 def test_job_metadata_write_excludes_immutable_flow_payload(monkeypatch: Any) -> None:

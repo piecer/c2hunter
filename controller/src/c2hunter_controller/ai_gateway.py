@@ -7,7 +7,8 @@ from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
-from .integrations import IntegrationError, JsonHttpClient
+from .ai_evaluation import AssessmentCacheIdentity, BoundedAssessmentCache
+from .integrations import CancellableJsonHttpClient, IntegrationError
 
 PROMPT_NAME = "candidate_system"
 PROMPT_VERSION = "1.0"
@@ -59,6 +60,7 @@ class StructuredLocalGateway:
         context_tokens: int = 16384,
         max_output_tokens: int = 4096,
         http_client: JsonHttpTransport | None = None,
+        assessment_cache: BoundedAssessmentCache | None = None,
     ) -> None:
         if retries not in {0, 1, 2, 3}:
             raise ValueError("retries must be between 0 and 3")
@@ -69,7 +71,8 @@ class StructuredLocalGateway:
         self.temperature = temperature
         self.context_tokens = context_tokens
         self.max_output_tokens = max_output_tokens
-        self.http = http_client or JsonHttpClient(timeout_seconds)
+        self.http = http_client or CancellableJsonHttpClient(timeout_seconds)
+        self.assessment_cache = assessment_cache or BoundedAssessmentCache()
         self.prompt_name = PROMPT_NAME
         self.prompt_version = PROMPT_VERSION
         self.prompt_hash = PROMPT_HASH
@@ -90,12 +93,47 @@ class StructuredLocalGateway:
             validate_assessment_evidence,
         )
 
+        if should_cancel():
+            raise AIAnalysisCancelled("AI analysis was cancelled before the model request")
+        bundle_json = canonical_bundle_json(bundle)
+        bundle_hash = hashlib.sha256(bundle_json.encode()).hexdigest()
         schema = CandidateAssessment.model_json_schema()
+        model_config = json.dumps(
+            {
+                "base_url": self.base_url,
+                "context_tokens": self.context_tokens,
+                "max_output_tokens": self.max_output_tokens,
+                "temperature": self.temperature,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        identity = AssessmentCacheIdentity(
+            provider=self.provider,
+            model=self.model,
+            model_config_hash=hashlib.sha256(model_config.encode()).hexdigest(),
+            prompt_hash=self.prompt_hash,
+            output_schema_hash=hashlib.sha256(
+                json.dumps(schema, separators=(",", ":"), sort_keys=True).encode()
+            ).hexdigest(),
+        )
+        cached = self.assessment_cache.get(identity, bundle_hash)
+        if cached is not None:
+            if should_cancel():
+                raise AIAnalysisCancelled("AI analysis was cancelled before cached output return")
+            cached_assessment = CandidateAssessment.model_validate(cached)
+            validate_assessment_evidence(cached_assessment, bundle)
+            if should_cancel():
+                raise AIAnalysisCancelled(
+                    "AI analysis was cancelled during cached output validation"
+                )
+            return cast(dict[str, Any], cached_assessment.model_dump(mode="json"))
+
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": f"Candidate evidence bundle JSON:\n{canonical_bundle_json(bundle)}",
+                "content": f"Candidate evidence bundle JSON:\n{bundle_json}",
             },
         ]
         last_error = ""
@@ -103,11 +141,17 @@ class StructuredLocalGateway:
             if should_cancel():
                 raise AIAnalysisCancelled("AI analysis was cancelled before the model request")
             raw = self._complete(messages, schema, should_cancel)
+            if should_cancel():
+                raise AIAnalysisCancelled("AI analysis was cancelled during the model request")
             try:
                 parsed = self._parse_content(raw)
                 assessment = CandidateAssessment.model_validate(parsed)
                 validate_assessment_evidence(assessment, bundle)
-                return cast(dict[str, Any], assessment.model_dump(mode="json"))
+                if should_cancel():
+                    raise AIAnalysisCancelled("AI analysis was cancelled during output validation")
+                result = cast(dict[str, Any], assessment.model_dump(mode="json"))
+                self.assessment_cache.put(identity, bundle_hash, result)
+                return result
             except (
                 AIAnalysisError,
                 ValidationError,
@@ -143,8 +187,12 @@ class StructuredLocalGateway:
             if should_cancel():
                 raise AIAnalysisCancelled("AI analysis was cancelled before the model request")
             try:
-                response = self._request_completion(messages, schema)
+                response = self._request_completion(messages, schema, should_cancel)
                 return self._extract_content(response)
+            except InterruptedError as exc:
+                raise AIAnalysisCancelled(
+                    "AI analysis was cancelled during the model request"
+                ) from exc
             except TimeoutError as exc:
                 last_error = exc
             except (IntegrationError, OSError) as exc:
@@ -166,9 +214,35 @@ class StructuredLocalGateway:
         return cast(dict[str, Any], parsed)
 
     def _request_completion(
-        self, messages: list[dict[str, str]], schema: dict[str, Any]
+        self,
+        messages: list[dict[str, str]],
+        schema: dict[str, Any],
+        should_cancel: Callable[[], bool],
     ) -> dict[str, Any]:
         raise NotImplementedError
+
+    def _request_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        body: dict[str, Any] | None = None,
+        should_cancel: Callable[[], bool],
+    ) -> dict[str, Any]:
+        request_cancellable = getattr(self.http, "request_cancellable", None)
+        if callable(request_cancellable):
+            return cast(
+                dict[str, Any],
+                request_cancellable(
+                    method,
+                    url,
+                    headers=headers,
+                    body=body,
+                    should_cancel=should_cancel,
+                ),
+            )
+        return self.http.request(method, url, headers=headers, body=body)
 
     def _extract_content(self, response: dict[str, Any]) -> str:
         raise NotImplementedError
@@ -198,11 +272,14 @@ class OllamaGateway(StructuredLocalGateway):
     provider = "ollama"
 
     def _request_completion(
-        self, messages: list[dict[str, str]], schema: dict[str, Any]
+        self,
+        messages: list[dict[str, str]],
+        schema: dict[str, Any],
+        should_cancel: Callable[[], bool],
     ) -> dict[str, Any]:
         normalized_schema = _ollama_schema(schema)
         serialized_schema = json.dumps(normalized_schema, separators=(",", ":"), sort_keys=True)
-        return self.http.request(
+        return self._request_json(
             "POST",
             f"{self.base_url}/api/chat",
             headers={"Content-Type": "application/json"},
@@ -226,6 +303,7 @@ class OllamaGateway(StructuredLocalGateway):
                     "num_predict": self.max_output_tokens,
                 },
             },
+            should_cancel=should_cancel,
         )
 
     def _extract_content(self, response: dict[str, Any]) -> str:
@@ -256,9 +334,12 @@ class OpenAICompatibleGateway(StructuredLocalGateway):
         return headers
 
     def _request_completion(
-        self, messages: list[dict[str, str]], schema: dict[str, Any]
+        self,
+        messages: list[dict[str, str]],
+        schema: dict[str, Any],
+        should_cancel: Callable[[], bool],
     ) -> dict[str, Any]:
-        return self.http.request(
+        return self._request_json(
             "POST",
             f"{self.base_url}/chat/completions",
             headers=self._headers,
@@ -276,6 +357,7 @@ class OpenAICompatibleGateway(StructuredLocalGateway):
                     },
                 },
             },
+            should_cancel=should_cancel,
         )
 
     def _extract_content(self, response: dict[str, Any]) -> str:

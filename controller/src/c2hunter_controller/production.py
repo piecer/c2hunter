@@ -3,9 +3,13 @@ from __future__ import annotations
 import io
 import json
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
+
+_AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 
 
 class MinioBlobStore:
@@ -65,6 +69,14 @@ class PostgresRepository:
         self._connection: Any = None
         self.blob_store = blob_store
         self._lock = threading.RLock()
+
+    @contextmanager
+    def _rollback_on_error(self) -> Iterator[None]:
+        try:
+            yield
+        except Exception:
+            self.connection.rollback()
+            raise
 
     @property
     def connection(self) -> Any:
@@ -618,7 +630,7 @@ class PostgresRepository:
         return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
 
     def delete_job(self, job_id: str) -> bool:
-        with self._lock, self.connection.cursor() as cursor:
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
             cursor.execute(
                 "SELECT data FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
                 (job_id,),
@@ -628,11 +640,38 @@ class PostgresRepository:
                 self.connection.commit()
                 return False
             cursor.execute(
+                "SELECT data->>'status' FROM ai_analysis_runs WHERE analysis_job_id=%s FOR UPDATE",
+                (job_id,),
+            )
+            if any(str(item[0]) not in _AI_TERMINAL_STATUSES for item in cursor.fetchall()):
+                self.connection.commit()
+                return False
+            cursor.execute(
                 "SELECT data->>'object_key' FROM controller_objects "
                 "WHERE kind='export' AND data->>'job_id'=%s",
                 (job_id,),
             )
             object_keys = [str(item[0]) for item in cursor.fetchall() if item[0]]
+            cursor.execute(
+                "DELETE FROM ai_feedback WHERE assessment_id IN "
+                "(SELECT assessment_id FROM ai_candidate_assessments "
+                "WHERE ai_run_id IN "
+                "(SELECT run_id FROM ai_analysis_runs WHERE analysis_job_id=%s))",
+                (job_id,),
+            )
+            cursor.execute(
+                "DELETE FROM ai_generated_artifacts WHERE assessment_id IN "
+                "(SELECT assessment_id FROM ai_candidate_assessments "
+                "WHERE ai_run_id IN "
+                "(SELECT run_id FROM ai_analysis_runs WHERE analysis_job_id=%s))",
+                (job_id,),
+            )
+            cursor.execute(
+                "DELETE FROM ai_candidate_assessments WHERE ai_run_id IN "
+                "(SELECT run_id FROM ai_analysis_runs WHERE analysis_job_id=%s)",
+                (job_id,),
+            )
+            cursor.execute("DELETE FROM ai_analysis_runs WHERE analysis_job_id=%s", (job_id,))
             cursor.execute(
                 "DELETE FROM controller_objects WHERE kind='export' AND data->>'job_id'=%s",
                 (job_id,),

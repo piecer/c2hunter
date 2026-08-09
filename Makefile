@@ -7,7 +7,7 @@ RUFF := $(VENV)/bin/ruff
 MYPY := $(VENV)/bin/mypy
 COMPOSE := docker compose --env-file .env
 
-.PHONY: setup lint test test-unit test-integration test-e2e build sensor-agent up down generate-test-pcaps benchmark-1m clean
+.PHONY: setup lint test test-unit test-integration test-e2e test-ai evaluate-ai benchmark-ai build sensor-agent up down generate-test-pcaps benchmark-1m clean
 
 setup:
 	@test -f .env || cp .env.example .env
@@ -60,6 +60,18 @@ test-integration:
 test-e2e:
 	npm --prefix web exec playwright install chromium
 	npm --prefix web run test:e2e
+
+test-ai:
+	$(PYTEST) -q controller/tests/test_ai_*.py
+
+evaluate-ai:
+	$(VENV)/bin/python -m c2hunter_controller.ai_evaluation evaluate \
+		--json artifacts/ai-evaluation-report.json \
+		--markdown artifacts/ai-evaluation-report.md
+
+benchmark-ai:
+	$(VENV)/bin/python -m c2hunter_controller.ai_evaluation benchmark \
+		--json artifacts/ai-benchmark-report.json --iterations 100
 
 generate-test-pcaps:
 	$(VENV)/bin/python tools/traffic-generator/generate.py --output testdata/generated --seed 20260720

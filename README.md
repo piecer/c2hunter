@@ -123,6 +123,9 @@ make test                 # unit + core integration
 make test-unit
 make test-integration
 make test-e2e             # deterministic Playwright API route fixture
+make test-ai              # AI unit/contract/retention regression suite
+make evaluate-ai          # AI-A–AI-J quality/safety/profile reports
+make benchmark-ai         # deterministic evaluation latency/token benchmark
 make generate-test-pcaps  # Scenario A–G, fixed seed
 make benchmark-1m         # 1,000,000 events, bounded chunks
 ```
@@ -131,7 +134,7 @@ Playwright fixtures exist only under `web/e2e`; production bundles contain no fa
 
 ## Required commands
 
-`make setup`, `build`, `up`, `down`, `lint`, `test`, `test-unit`, `test-integration`, `test-e2e`, `generate-test-pcaps`, `benchmark-1m`, and `clean` are the supported command contract.
+`make setup`, `build`, `up`, `down`, `lint`, `test`, `test-unit`, `test-integration`, `test-e2e`, `test-ai`, `evaluate-ai`, `benchmark-ai`, `generate-test-pcaps`, `benchmark-1m`, and `clean` are the supported command contract.
 
 ## Known limitations
 
