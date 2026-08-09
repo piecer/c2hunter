@@ -14,6 +14,8 @@ from c2hunter_analysis.ai_candidates import generate_high_recall_candidates
 from c2hunter_analysis.domain import AnalysisContext, Flow
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from .ai_gateway import AIAnalysisCancelled
+
 
 class AIAnalysisError(ValueError):
     """Raised when an AI run violates its deterministic safety contract."""
@@ -637,6 +639,10 @@ class FakeGateway:
     provider = "fake"
     model = "c2hunter-fixture-v1"
 
+    @staticmethod
+    def ready() -> bool:
+        return True
+
     def assess(self, bundle: CandidateEvidenceBundle) -> dict[str, Any]:
         primary = bundle.evidence[0]
         return {
@@ -717,11 +723,17 @@ class AIAnalysisService:
             "candidate_snapshots": candidates,
             "provider": self.gateway.provider,
             "model_name": self.gateway.model,
-            "prompt_name": "candidate_system",
-            "prompt_version": "1.0",
-            "prompt_hash": hashlib.sha256(
-                b"C2Hunter defensive candidate assessment prompt v1.0"
-            ).hexdigest(),
+            "prompt_name": str(getattr(self.gateway, "prompt_name", "candidate_system")),
+            "prompt_version": str(getattr(self.gateway, "prompt_version", "1.0")),
+            "prompt_hash": str(
+                getattr(
+                    self.gateway,
+                    "prompt_hash",
+                    hashlib.sha256(
+                        b"C2Hunter defensive candidate assessment prompt v1.0"
+                    ).hexdigest(),
+                )
+            ),
             "input_schema_version": "1.0",
             "output_schema_version": "1.0",
             "created_by": created_by,
@@ -788,7 +800,17 @@ class AIAnalysisService:
             bundles = [build_evidence_bundle(item, job=job) for item in selected]
             run = self._transition(run, AIAnalysisState.ANALYZING, "calling model gateway")
             for bundle in bundles:
-                response = self.gateway.assess(bundle)
+                cancellable = getattr(self.gateway, "assess_cancellable", None)
+                if callable(cancellable):
+                    response = cancellable(
+                        bundle,
+                        should_cancel=lambda: (
+                            (latest := self.repository.get_ai_run(run_id)) is not None
+                            and latest.get("status") == AIAnalysisState.CANCELLED
+                        ),
+                    )
+                else:
+                    response = self.gateway.assess(bundle)
                 run = self._transition(run, AIAnalysisState.VALIDATING, "validating model output")
                 assessment = CandidateAssessment.model_validate(response)
                 validate_assessment_evidence(assessment, bundle)
@@ -816,6 +838,11 @@ class AIAnalysisService:
                         run, AIAnalysisState.ANALYZING, "analyzing next candidate"
                     )
             return self._transition(run, AIAnalysisState.COMPLETED, "all assessments validated")
+        except AIAnalysisCancelled:
+            latest = self.repository.get_ai_run(run_id)
+            if latest is not None and latest.get("status") == AIAnalysisState.CANCELLED:
+                return latest
+            return self._transition(run, AIAnalysisState.CANCELLED, "model request cancelled")
         except TimeoutError as exc:
             run["error_code"] = "MODEL_TIMEOUT"
             run["error_message"] = str(exc)[:500]

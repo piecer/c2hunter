@@ -24,7 +24,8 @@ from prometheus_client import (
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from .ai_analysis import AIAnalysisError, AIAnalysisService, FakeGateway, ModelGateway
+from .ai_analysis import AIAnalysisError, AIAnalysisService, ModelGateway
+from .ai_gateway import create_model_gateway
 from .ai_queueing import (
     AIAnalysisTaskQueue,
     InlineAIAnalysisTaskQueue,
@@ -615,7 +616,21 @@ def create_app(
         )
     else:
         misp = None
-    gateway = ai_gateway or (FakeGateway() if config.ai_analysis_enabled else None)
+    gateway = ai_gateway or (
+        create_model_gateway(
+            provider=config.ai_model_provider,
+            base_url=config.ai_model_base_url,
+            model=config.ai_model_name,
+            api_key=config.ai_model_api_key.get_secret_value(),
+            timeout_seconds=config.ai_model_timeout_seconds,
+            retries=config.ai_model_retries,
+            temperature=config.ai_model_temperature,
+            context_tokens=config.ai_model_context_tokens,
+            max_output_tokens=config.ai_model_max_output_tokens,
+        )
+        if config.ai_analysis_enabled
+        else None
+    )
     ai_service = AIAnalysisService(repo, gateway) if gateway is not None else None
     if ai_task_queue is not None:
         ai_tasks = ai_task_queue

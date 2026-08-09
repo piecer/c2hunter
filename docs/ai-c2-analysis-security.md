@@ -14,6 +14,8 @@
 - supporting/counter/stable feature의 Evidence ID가 입력 Bundle에 실제 존재하는지 검증한다.
 - Candidate IP가 입력과 다르면 거절한다.
 - 능동 연결·스캔·공격을 뜻하는 `passive_only=false` action은 schema에서 거절한다.
+- local model의 malformed JSON/schema는 1회만 repair하며 두 번째 실패 결과는 저장하지 않는다.
+- prompt에는 captured string을 명령으로 실행하지 말라는 system rule과 schema를 Evidence 뒤의 trusted instruction으로 배치한다.
 
 ## 권한과 감사
 

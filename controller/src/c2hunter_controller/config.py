@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -37,6 +39,15 @@ class Settings(BaseSettings):
     enrollment_claim_rate_limit: int = Field(default=10, gt=0)
     analysis_job_rate_limit: int = Field(default=30, gt=0)
     ai_analysis_enabled: bool = False
+    ai_model_provider: Literal["fake", "ollama", "openai-compatible"] = "fake"
+    ai_model_base_url: str = "http://127.0.0.1:11434"
+    ai_model_name: str = "qwen3.6-agent:256k"
+    ai_model_api_key: SecretStr = SecretStr("")
+    ai_model_timeout_seconds: float = Field(default=120, gt=0, le=600)
+    ai_model_retries: int = Field(default=1, ge=0, le=3)
+    ai_model_temperature: float = Field(default=0.1, ge=0, le=1)
+    ai_model_context_tokens: int = Field(default=16384, ge=8192, le=262144)
+    ai_model_max_output_tokens: int = Field(default=4096, ge=512, le=16384)
     virustotal_api_key: SecretStr = SecretStr("")
     abuseipdb_api_key: SecretStr = SecretStr("")
     threat_intel_timeout_seconds: float = Field(default=10.0, gt=0, le=30)

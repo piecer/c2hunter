@@ -2,7 +2,7 @@
 
 ## Current phase
 
-Phase 3 완료 — High-Recall Candidate Generator
+Phase 4 완료 — Local LLM Gateway
 
 ## Completed
 
@@ -42,6 +42,16 @@ Phase 3 완료 — High-Recall Candidate Generator
 - 생성 후보는 기존 Candidate repository를 변경하지 않으며 worker Queue에는 계속 Run ID만 전달한다.
 - AI-A~AI-J fixture와 31-peer recall fixture에서 알려진 beacon peer가 top 20에 포함되는 것을 검증한다.
 
+### Phase 4
+
+- 공통 gateway interface에 Ollama와 OpenAI-compatible provider를 구현하고 `fake`를 기본값으로 유지한다.
+- prompt name/version/SHA-256, input/output schema version과 실제 provider/model을 AI Run에 snapshot한다.
+- timeout과 transient retry, repository 상태 callback 기반 cancellation, model readiness를 구현했다.
+- 모델 응답은 Pydantic schema, Candidate IP, Evidence ID, passive-only safety validator를 통과해야 저장한다.
+- malformed JSON/schema는 원 오류를 bounded repair instruction으로 전달해 정확히 1회만 복구한다.
+- OpenAI-compatible provider는 native `json_schema` response format을 사용한다. Ollama는 현재 backend의 complex grammar/output-budget 제약 때문에 normalized schema를 마지막 trusted prompt로 전달하고 JSON mode 후 동일 validator를 적용한다.
+- 로컬 `qwen3.6-agent:256k` live smoke에서 후보 1개가 `INCONCLUSIVE`, confidence 0.3, `E-C2H-001` 근거로 검증됐다.
+
 ## Verification
 
 2026-08-09 실제 실행 결과:
@@ -61,9 +71,8 @@ Phase 3 완료 — High-Recall Candidate Generator
 
 아래 작업은 명세의 후속 단계이며 Milestone 1 범위에 포함되지 않는다.
 
-1. Ollama/OpenAI-compatible local model adapter, JSON repair 1회, timeout/retry/circuit breaker
-2. Splunk SPL/MISP artifact 생성과 재생성
-3. analyst feedback, calibration materialization, drift observability
-4. 보존 기간 cleanup과 대규모 성능/부하 검증
+1. Splunk SPL/MISP artifact 생성과 재생성
+2. analyst feedback, calibration materialization, drift observability
+3. 보존 기간 cleanup과 대규모 성능/부하 검증
 
 각 후속 milestone도 schema/fixture부터 RED → GREEN → REFACTOR 순으로 진행한다.

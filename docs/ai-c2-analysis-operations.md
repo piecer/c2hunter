@@ -7,6 +7,10 @@
 ```bash
 # AI Run API를 활성화한다.
 C2HUNTER_AI_ANALYSIS_ENABLED=true
+# 실제 로컬 Ollama를 사용한다. fake는 deterministic test 기본값이다.
+C2HUNTER_AI_MODEL_PROVIDER=ollama
+C2HUNTER_AI_MODEL_BASE_URL=http://host.docker.internal:11434
+C2HUNTER_AI_MODEL_NAME=qwen3.6-agent:256k
 ```
 
 AI worker profile과 전체 서비스를 시작한다.
@@ -18,12 +22,16 @@ docker compose --env-file .env --profile ai up -d --build
 
 AI worker는 `c2hunter:ai:jobs`만 소비하며 기존 `c2hunter:analysis:jobs`를 사용하지 않는다. 메시지는 Run ID만 포함한다. Worker는 DB snapshot을 읽고 terminal Run이면 그대로 ack하므로 재전달에 멱등적이다. processing list와 lease 만료 복구를 사용한다.
 
+AI worker는 시작 시 provider의 model 목록을 조회해 readiness를 확인한다. 모델이 없거나 endpoint가 닫혀 있으면 Queue를 소비하기 전에 종료한다. OpenAI-compatible endpoint는 필요할 때 `C2HUNTER_AI_MODEL_API_KEY`를 secret manager로 주입한다.
+
 ## 장애 격리
 
 - `C2HUNTER_AI_ANALYSIS_ENABLED=false`로 Controller의 AI Run 생성을 즉시 중지할 수 있다.
 - AI worker 중지/장애는 기존 Analysis Job 상태와 Candidate를 바꾸지 않는다.
 - 모델 timeout은 AI Run만 `FAILED/MODEL_TIMEOUT`으로 만든다.
 - schema/evidence validator 실패는 AI Run만 `FAILED/MODEL_OUTPUT_INVALID`로 만든다.
+- HTTP timeout은 설정된 횟수만 재시도한 뒤 AI Run만 `FAILED/MODEL_TIMEOUT`으로 만든다.
+- 실행 중 취소는 gateway retry/repair 경계에서 repository의 최신 `CANCELLED` 상태를 확인한다.
 - Queue 재전달은 terminal Run 불변성과 assessment ID upsert로 중복 결과를 만들지 않는다.
 
 ## High-Recall prefilter
@@ -66,4 +74,4 @@ SQLite도 같은 이름의 두 테이블과 index를 제거한다. 감사 이벤
 
 ## 현재 제한
 
-현재는 deterministic FakeGateway를 사용한다. Ollama/OpenAI-compatible local gateway와 SPL/MISP draft는 후속 Phase에서 추가한다.
+Ollama structured grammar는 backend/model 조합에 따라 복잡한 schema와 큰 output budget을 동시에 거부할 수 있다. 현재 Ollama adapter는 normalized schema를 마지막 trusted instruction으로 전달하고 JSON mode 출력에 동일한 strict validator를 적용한다. OpenAI-compatible adapter는 native `json_schema`를 사용한다. SPL/MISP draft는 후속 Phase에서 추가한다.

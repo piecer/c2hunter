@@ -10,7 +10,8 @@ from pathlib import Path
 from threading import Event
 from typing import Protocol
 
-from .ai_analysis import AIAnalysisService, FakeGateway
+from .ai_analysis import AIAnalysisService
+from .ai_gateway import create_model_gateway
 from .ai_queueing import RedisAIAnalysisWorkerQueue
 from .config import Settings
 from .production import MinioBlobStore, PostgresRepository
@@ -120,7 +121,23 @@ def main() -> int:
             settings.s3_bucket,
         ),
     )
-    service = AIAnalysisService(repository, FakeGateway())
+    gateway = create_model_gateway(
+        provider=settings.ai_model_provider,
+        base_url=settings.ai_model_base_url,
+        model=settings.ai_model_name,
+        api_key=settings.ai_model_api_key.get_secret_value(),
+        timeout_seconds=settings.ai_model_timeout_seconds,
+        retries=settings.ai_model_retries,
+        temperature=settings.ai_model_temperature,
+        context_tokens=settings.ai_model_context_tokens,
+        max_output_tokens=settings.ai_model_max_output_tokens,
+    )
+    if not gateway.ready():
+        raise RuntimeError(
+            f"AI model is not ready: provider={settings.ai_model_provider} "
+            f"model={settings.ai_model_name}"
+        )
+    service = AIAnalysisService(repository, gateway)
     queue = RedisAIAnalysisWorkerQueue(
         settings.redis_url,
         visibility_timeout=settings.queue_visibility_timeout_seconds,
