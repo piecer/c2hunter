@@ -2,7 +2,7 @@
 
 ## Current phase
 
-Milestone 1 완료 — FakeGateway 기반 안전한 수직 슬라이스
+Phase 2 완료 — bounded Evidence Builder
 
 ## Completed
 
@@ -24,11 +24,20 @@ Milestone 1 완료 — FakeGateway 기반 안전한 수직 슬라이스
 - Analysis 상세와 Candidate 상세에 실행, 상태, 진행률, verdict, confidence, 근거 ID 카드 UI를 구현했다.
 - Compose `ai` profile, 기본 비활성 feature flag, API/운영/보안 문서를 추가했다.
 
+### Phase 2
+
+- Job 전체 Flow와 Candidate peer 관련 Flow를 분리 집계해 packet/byte/time/direction/protocol 요약을 생성한다.
+- 누락 timestamp, unknown direction 비율, 제외된 payload 필드, 실패 Sensor와 clock warning을 data quality snapshot으로 보존한다.
+- Candidate Flow의 domain, TLS/certificate fingerprint, TCP flag를 bounded protocol context로 변환한다.
+- raw packet/payload는 Bundle에 포함하지 않고, UTF-8 byte 기반 보수적 estimator와 결정론적 reducer로 8,192 token 목표 상한을 지킨다.
+- 파생 metadata를 제외한 canonical JSON에 SHA-256을 적용하며 같은 입력과 다른 dict key 순서는 같은 hash를 생성한다.
+- 64 KiB 이하 Bundle은 Assessment JSONB에 inline 저장하고 bundle hash와 byte/token metadata를 함께 보존한다. 향후 상한을 넘는 artifact는 MinIO object storage 정책으로 확장한다.
+
 ## Verification
 
 2026-08-09 실제 실행 결과:
 
-- AI/backend targeted tests: 33 passed
+- AI/backend targeted tests: 19 passed (Phase 2 최신 targeted suite)
 - controller/analysis mypy: passed
 - web unit test: passed
 - `make lint`: passed
@@ -43,11 +52,10 @@ Milestone 1 완료 — FakeGateway 기반 안전한 수직 슬라이스
 
 아래 작업은 명세의 후속 단계이며 Milestone 1 범위에 포함되지 않는다.
 
-1. Ollama/OpenAI-compatible local model adapter, JSON repair 1회, timeout/retry/circuit breaker
-2. 시계열 feature 확장과 Job-level sequence assessment
-3. fingerprint graph와 campaign clustering
-4. confidence calibration dataset/metrics/guardrail promotion
-5. analyst feedback, calibration materialization, drift observability
-6. 보존 기간 cleanup과 대규모 성능/부하 검증
+1. High-Recall Candidate Generator와 AI-A~AI-J fixture
+2. Ollama/OpenAI-compatible local model adapter, JSON repair 1회, timeout/retry/circuit breaker
+3. Splunk SPL/MISP artifact 생성과 재생성
+4. analyst feedback, calibration materialization, drift observability
+5. 보존 기간 cleanup과 대규모 성능/부하 검증
 
 각 후속 milestone도 schema/fixture부터 RED → GREEN → REFACTOR 순으로 진행한다.
