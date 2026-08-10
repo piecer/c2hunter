@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import socket
+import ssl
+import urllib.error
+import urllib.request
 from typing import Any
 
 import pytest
@@ -79,6 +83,36 @@ class StubHttpClient(JsonHttpClient):
         if self.invalid_misp:
             return {"message": "validation failed"}
         return {"Attribute": {"id": "9001", "event_id": "42", "value": "203.0.113.44"}}
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_message"),
+    [
+        (
+            ssl.SSLCertVerificationError(1, "certificate verify failed"),
+            "external service TLS certificate verification failed",
+        ),
+        (
+            socket.gaierror(-2, "name or service not known"),
+            "external service DNS resolution failed",
+        ),
+        (ConnectionRefusedError(), "external service connection refused"),
+        (TimeoutError(), "external service request timed out"),
+        (OSError(), "external service request failed"),
+    ],
+)
+def test_json_http_client_sanitizes_transport_failure_messages(
+    monkeypatch: pytest.MonkeyPatch,
+    reason: OSError,
+    expected_message: str,
+) -> None:
+    def fail_request(*args: object, **kwargs: object) -> None:
+        raise urllib.error.URLError(reason)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_request)
+
+    with pytest.raises(IntegrationError, match=f"^{expected_message}$"):
+        JsonHttpClient().request("GET", "https://example.test/data")
 
 
 def test_threat_intel_service_normalizes_both_providers_without_exposing_keys() -> None:
