@@ -74,7 +74,7 @@ const detectorDefinitions = [
   ['protocol_similarity', '프로토콜 유사성', '여러 호스트가 공유하는 프로토콜·페이로드 특성'],
   ['multi_sensor_context', '다중 센서 관측', '여러 센서에서 독립적으로 관측된 외부 대상'],
   ['ml_population_anomaly', '모집단 이상', '동일 분석의 다른 후보와 비교해 이례적인 통신 특성'],
-  ['tcp_session_quality', 'TCP 세션 품질', 'RST 비율 또는 SYN/ACK 이상으로 인한 세션 품질 저하 지표'],
+  ['tcp_session_quality', 'TCP 세션 품질', '내부 SYN 시작 또는 실제 ACK 기반 세션 성립을 확인'],
 ] as const;
 const detectorLabels = Object.fromEntries(detectorDefinitions.map(([name, label]) => [name, `${label} 탐지기`])) as Record<string, string>;
 const evidenceLabels: Record<string, string> = {
@@ -92,6 +92,10 @@ const evidenceLabels: Record<string, string> = {
   TCP_SESSION_QUALITY: 'TCP 세션 품질',
 };
 const metricLabels: Record<string, string> = {
+  outbound_initiated_connections: '내부 시작 연결 수',
+  established_connections: '성립된 연결 수',
+  qualified_tcp_connections: '검증된 TCP 연결 수',
+  scan_suppressed_connections: '스캔 억제 연결 수',
   action: '처리 방식', affected_hosts: '영향 호스트', analyst_confirmed: '분석가 확인', anomaly_score: '이상 점수', attack_target: '공격 대상', autocorrelation: '자기상관', available_feature_count: '사용 가능 특성 수', average_packets: '평균 패킷 수', baseline_population: '기준 모집단', cdn_cloud: 'CDN·클라우드 여부', coefficient_of_variation: '변동계수', command_size: '명령 크기', comparable_features: '비교 가능 특성', comparisons: '비교 결과', connections: '연결 수', connections_per_host: '호스트당 연결 수', destination_stability: '목적지 안정성', directional_feature_count: '방향별 특성 수', directional_z_score: '방향별 Z 점수', directional_z_scores: '방향별 Z 점수 목록', distinct_domains: '고유 도메인 수', distinct_hosts: '고유 호스트 수', distinct_sensors: '고유 센서 수', domain_diversity: '도메인 다양성', domain_diversity_ratio: '도메인 다양성 비율', dominant_feature_ratio: '주요 특성 비율', dominant_port: '주요 포트', dominant_port_ratio: '주요 포트 비율', duration_seconds: '지속 시간(초)', entropy_difference: '엔트로피 차이', entropy_tolerance: '엔트로피 허용치', event_count: '이벤트 수', feature: '특성', feature_vector: '특성 벡터', feature_z_floor: '특성 Z 점수 하한', fingerprint_ratio: '지문 일치 비율', fingerprint_stability: '지문 안정성', flow_payload_hashes: '흐름 페이로드 해시', increase_ratio: '증가 비율', independent_hosts: '독립 호스트 수', interval_cv: '통신 간격 변동계수', jitter_ratio: '지터 비율', length_difference: '길이 차이', length_tolerance: '길이 허용치', match_mode: '일치 방식', matched_flow_count: '일치 흐름 수', matched_payload_hash: '일치 페이로드 해시', matched_payload_position: '일치 페이로드 위치', matching_hosts: '일치 호스트 수', minimum_feature_population: '최소 특성 모집단', non_well_known_ratio: '비표준 포트 비율', observation_count: '관측 수', observed_flow_count: '관측 흐름 수', observed_spread: '관측 분산', payload_hash: '페이로드 해시', payload_stability: '페이로드 안정성', period_seconds: '주기(초)', population_size: '모집단 크기', port_stability: '포트 안정성', prefix_match: '접두부 일치', public_dns_ntp: '공용 DNS·NTP 여부', rarity: '희소도', raw_z_scores: '원시 Z 점수', repetition_count: '반복 횟수', sample_count: '표본 수', service_port: '서비스 포트', service_ports: '서비스 포트 목록', signature_id: '서명 ID', signature_name: '서명 이름', signature_version: '서명 버전', simhash_distance: 'SimHash 거리', simhash_max_distance: 'SimHash 최대 거리', size_coefficient_of_variation: '크기 변동계수', size_cv: '크기 변동계수', size_similarity: '크기 유사도', synchronized_hosts: '동기화 호스트 수', target_port: '대상 포트', target_protocol: '대상 프로토콜', timestamp_tolerance_seconds: '시각 허용 범위(초)', top_contributing_features: '주요 기여 특성', well_known_port_max: '표준 포트 상한', window_seconds: '관측 구간(초)', z_threshold: 'Z 점수 임계값',
 };
 

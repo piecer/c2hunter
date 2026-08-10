@@ -3,47 +3,18 @@ from __future__ import annotations
 import math
 import statistics
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 
 from .domain import AnalysisContext, Detector, Evidence, Flow
 from .payload_features import simhash_hamming_distance
-
-
-def _tcp_quality_gate(
-    candidate_ip: str,
-    flows: Sequence[Flow],
-    threshold: float = 1.0,
-) -> bool:
-    quality_issues = 0
-    total_tcp_flows = 0
-    for flow in flows:
-        if flow.destination_ip != candidate_ip and flow.source_ip != candidate_ip:
-            continue
-        tcp = getattr(flow, "tcp_flags", None)
-        if not tcp:
-            continue
-        if not isinstance(tcp, Mapping):
-            continue
-        syn_count = tcp.get("syn", 0)
-        ack_count = tcp.get("ack", 0)
-        rst_count = tcp.get("rst", 0)
-        is_valid = all(
-            isinstance(v, int | float) and not isinstance(v, bool)
-            for v in (syn_count, ack_count, rst_count)
-        )
-        if not is_valid:
-            continue
-        total_tcp_flows += 1
-        packet_count = max(1, flow.packet_count)
-        rst_ratio = rst_count / packet_count
-        if rst_ratio > 0.2:
-            quality_issues += 1
-    if total_tcp_flows == 0:
-        return True
-    bad_ratio = quality_issues / total_tcp_flows
-    return bad_ratio < min(0.5, 1.0 / max(threshold, 1.0))
+from .tcp_sessions import (
+    qualified_candidate_groups,
+    qualified_tcp_flow_ids,
+    scan_suppressed_keys,
+    tcp_profiles,
+)
 
 
 def _candidate_host(context: AnalysisContext, flow: Flow) -> tuple[str, str] | None:
@@ -63,12 +34,7 @@ def _candidate_host(context: AnalysisContext, flow: Flow) -> tuple[str, str] | N
 
 
 def _groups(context: AnalysisContext) -> dict[str, list[tuple[str, Flow]]]:
-    grouped: dict[str, list[tuple[str, Flow]]] = defaultdict(list)
-    for flow in context.scoped_flows():
-        role = _candidate_host(context, flow)
-        if role:
-            grouped[role[0]].append((role[1], flow))
-    return grouped
+    return qualified_candidate_groups(context)
 
 
 def _service_port(context: AnalysisContext, flow: Flow) -> int | None:
@@ -181,11 +147,6 @@ class CommonDestinationDetector:
             if trusted_cdn_suffix is not None:
                 metrics["trusted_cdn_suffix"] = trusted_cdn_suffix
             contribution = min(20.0, 10 + 10 * min(1.0, len(hosts) / minimum))
-            tcp_threshold = float(
-                context.parameters.get("tcp_session_quality_low_threshold", 1.0),
-            )
-            if not _tcp_quality_gate(candidate, context.flows, tcp_threshold):
-                continue
             result.append(
                 _base_evidence(
                     candidate,
@@ -325,11 +286,6 @@ class PeriodicBeaconDetector:
                 "matching_hosts": len(matching),
                 "distinct_sensors": len({flow.sensor_id for _, flow in selected}),
             }
-            tcp_threshold = float(
-                context.parameters.get("tcp_session_quality_low_threshold", 1.0),
-            )
-            if not _tcp_quality_gate(candidate, context.flows, tcp_threshold):
-                continue
             result.append(
                 _base_evidence(
                     candidate,
@@ -386,11 +342,6 @@ class SingleHostCompositeBeaconDetector:
                 "average_packets": average_packets,
                 "distinct_sensors": len({flow.sensor_id for _, flow in rows}),
             }
-            tcp_threshold = float(
-                context.parameters.get("tcp_session_quality_low_threshold", 1.0),
-            )
-            if not _tcp_quality_gate(candidate, context.flows, tcp_threshold):
-                continue
             result.append(
                 _base_evidence(
                     candidate,
@@ -640,9 +591,12 @@ class CommandAttackDetector:
     def analyze(self, context: AnalysisContext) -> list[Evidence]:
         minimum = int(context.parameters.get("minimum_distinct_clients", 3))
         all_flows = context.scoped_flows()
+        qualified_tcp = qualified_tcp_flow_ids(context)
         inbound: dict[str, list[tuple[str, Flow]]] = defaultdict(list)
         for flow in all_flows:
             if flow.direction.upper() == "INBOUND":
+                if flow.protocol.upper() == "TCP" and id(flow) not in qualified_tcp:
+                    continue
                 inbound[flow.source_ip].append((flow.destination_ip, flow))
         result: list[Evidence] = []
         for candidate, commands in inbound.items():
@@ -1044,56 +998,63 @@ class MultiSensorDetector:
 
 @dataclass(frozen=True)
 class TCPSessionQualityDetector:
+    """Add connection-state context only to candidates supported by another detector."""
+
     name: str = "tcp_session_quality"
     version: str = "1.0.0"
 
     def analyze(self, context: AnalysisContext) -> list[Evidence]:
-        threshold = float(context.parameters.get("tcp_session_quality_low_threshold", 1.0))
+        if not bool(context.parameters.get("tcp_session_gating_enabled", True)):
+            return []
+        initiated_points = max(
+            0.0,
+            min(15.0, float(context.parameters.get("tcp_outbound_initiated_contribution", 5))),
+        )
+        established_points = max(
+            0.0,
+            min(15.0, float(context.parameters.get("tcp_established_contribution", 10))),
+        )
+        _raw, profiles = tcp_profiles(context)
         result: list[Evidence] = []
-        for candidate, rows in _groups(context).items():
-            tcp_flows: list[tuple[str, Flow]] = []
-            quality_issues = []
-            for host, flow in rows:
-                tcp = getattr(flow, "tcp_flags", None)
-                if not tcp:
-                    continue
-                if not isinstance(tcp, Mapping):
-                    continue
-                syn_count = tcp.get("syn", 0)
-                ack_count = tcp.get("ack", 0)
-                rst_count = tcp.get("rst", 0)
-                is_valid = all(
-                    isinstance(v, int | float) and not isinstance(v, bool)
-                    for v in (syn_count, ack_count, rst_count)
-                )
-                if not is_valid:
-                    continue
-                packet_count = max(1, flow.packet_count)
-                tcp_flows.append((host, flow))
-                if rst_count / packet_count > 0.2:
-                    quality_issues.append((host, flow))
-            if len(tcp_flows) < 2:
+        for candidate, connections in profiles.items():
+            suppressed = scan_suppressed_keys(context, connections)
+            qualified = [
+                profile
+                for key, profile in connections.items()
+                if key not in suppressed and profile.metadata_available and profile.qualified
+            ]
+            if not qualified:
                 continue
-            bad_ratio = len(quality_issues) / len(tcp_flows)
-            if bad_ratio >= min(0.5, 1.0 / max(threshold, 1.0)) and len(quality_issues) >= 1:
-                metrics = {
-                    "tcp_flows": len(tcp_flows),
-                    "quality_issue_count": len(quality_issues),
-                    "bad_ratio": round(bad_ratio, 4),
-                    "threshold": threshold,
-                    "sample_count": len(rows),
-                }
-                result.append(
-                    _base_evidence(
-                        candidate,
-                        "TCP_SESSION_QUALITY",
-                        self.name,
-                        min(8.0, 2 + 6 * min(1.0, bad_ratio)),
-                        rows,
-                        metrics,
-                        "RST 비율 또는 SYN/ACK 이상으로 인한 세션 품질 저하",
-                    )
+            initiated = sum(profile.internally_initiated for profile in qualified)
+            established = sum(profile.established for profile in qualified)
+            contribution = min(
+                15.0,
+                (initiated_points if initiated else 0.0)
+                + (established_points if established else 0.0),
+            )
+            if contribution <= 0:
+                continue
+            rows = [row for profile in qualified for row in profile.rows]
+            result.append(
+                _base_evidence(
+                    candidate,
+                    "TCP_SESSION_QUALITY",
+                    self.name,
+                    contribution,
+                    rows,
+                    {
+                        "outbound_initiated_connections": initiated,
+                        "established_connections": established,
+                        "qualified_tcp_connections": len(qualified),
+                        "scan_suppressed_connections": sum(
+                            profile.scan_like or key in suppressed
+                            for key, profile in connections.items()
+                        ),
+                        "sample_count": len(rows),
+                    },
+                    "내부 SYN 시작 또는 양방향 ACK/Payload로 TCP 세션 신뢰도 확인",
                 )
+            )
         return result
 
 
@@ -1117,19 +1078,26 @@ def run_detectors(
     context: AnalysisContext, detectors: Iterable[Detector] = DEFAULT_DETECTORS
 ) -> list[Evidence]:
     primary: list[Evidence] = []
+    tcp_enrichment: list[Evidence] = []
     anomaly: list[Evidence] = []
     for detector in detectors:
         produced = detector.analyze(context)
         if detector.name == "ml_population_anomaly":
             anomaly.extend(produced)
+        elif detector.name == "tcp_session_quality":
+            tcp_enrichment.extend(produced)
         else:
             primary.extend(produced)
+
+    supported_candidates = {evidence.candidate_ip for evidence in primary}
+    tcp_enrichment = [
+        evidence for evidence in tcp_enrichment if evidence.candidate_ip in supported_candidates
+    ]
 
     # Safe default: population anomaly enriches candidates supported by another
     # detector. Standalone anomaly-only hunting must be enabled explicitly.
     if anomaly and not bool(context.parameters.get("ml_anomaly_allow_standalone", False)):
-        supported_candidates = {evidence.candidate_ip for evidence in primary}
         anomaly = [
             evidence for evidence in anomaly if evidence.candidate_ip in supported_candidates
         ]
-    return primary + anomaly
+    return primary + tcp_enrichment + anomaly

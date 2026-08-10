@@ -34,6 +34,14 @@ class Flow:
     duration_seconds: float = 0.0
     last_payload_hash: str | None = None
     tcp_flags: Mapping[str, int] | None = None
+    tcp_flags_observed: bool = False
+    tcp_syn_count: int = 0
+    tcp_ack_count: int = 0
+    tcp_rst_count: int = 0
+    tcp_syn_only_count: int = 0
+    tcp_syn_ack_count: int = 0
+    tcp_ack_only_count: int = 0
+    bidirectional: bool = False
 
 
 @dataclass(frozen=True)

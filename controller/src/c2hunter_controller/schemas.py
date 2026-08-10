@@ -260,6 +260,14 @@ class AnalysisParameters(BaseModel):
     high_volume_tcp_session_bytes_threshold: int = Field(default=50 * 1024 * 1024, ge=0)
     high_volume_tcp_session_packet_threshold: int = Field(default=100000, ge=0)
     high_volume_tcp_session_score_cap: int = Field(default=20, ge=0, le=100)
+    tcp_session_gating_enabled: bool = True
+    tcp_allow_legacy_without_flags: bool = True
+    tcp_outbound_initiated_contribution: int = Field(default=5, ge=0, le=15)
+    tcp_established_contribution: int = Field(default=10, ge=0, le=15)
+    tcp_scan_suppression_enabled: bool = True
+    tcp_scan_min_targets: int = Field(default=8, ge=2, le=100000)
+    tcp_scan_probe_max_packets: int = Field(default=4, ge=1, le=100)
+    tcp_scan_probe_ratio: float = Field(default=0.8, ge=0, le=1)
     detector_weights: dict[str, float] = Field(
         default_factory=lambda: dict(DEFAULT_DETECTOR_WEIGHTS)
     )
@@ -336,7 +344,35 @@ class FlowRecord(BaseModel):
     certificate_fingerprint: str | None = None
     domain: str | None = None
     packet_sizes: tuple[int, ...] = ()
+    tcp_flags_observed: bool = False
+    tcp_syn_count: int = Field(default=0, ge=0)
+    tcp_ack_count: int = Field(default=0, ge=0)
+    tcp_rst_count: int = Field(default=0, ge=0)
+    tcp_syn_only_count: int = Field(default=0, ge=0)
+    tcp_syn_ack_count: int = Field(default=0, ge=0)
+    tcp_ack_only_count: int = Field(default=0, ge=0)
+    bidirectional: bool = False
     raw_packet_hex: str | None = Field(default=None, pattern=r"^(?:[0-9a-fA-F]{2})+$")
+
+    @model_validator(mode="after")
+    def valid_tcp_flag_metadata(self) -> FlowRecord:
+        counters = (
+            self.tcp_syn_count,
+            self.tcp_ack_count,
+            self.tcp_rst_count,
+            self.tcp_syn_only_count,
+            self.tcp_syn_ack_count,
+            self.tcp_ack_only_count,
+        )
+        if not self.tcp_flags_observed and any(counters):
+            raise ValueError("TCP flag counters require tcp_flags_observed")
+        if self.tcp_flags_observed and self.protocol.upper() != "TCP":
+            raise ValueError("tcp_flags_observed is valid only for TCP records")
+        if self.tcp_syn_only_count + self.tcp_syn_ack_count > self.tcp_syn_count:
+            raise ValueError("TCP SYN combination counters exceed tcp_syn_count")
+        if self.tcp_syn_ack_count + self.tcp_ack_only_count > self.tcp_ack_count:
+            raise ValueError("TCP ACK combination counters exceed tcp_ack_count")
+        return self
 
 
 class FlowBatchCreate(BaseModel):

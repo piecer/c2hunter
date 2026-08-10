@@ -24,6 +24,14 @@ type FlowRecord struct {
 	PacketCount            uint64    `json:"packet_count"`
 	TotalBytes             uint64    `json:"total_bytes"`
 	TcpFlags               *TcpFlags `json:"tcp_flags,omitempty"`
+	TCPFlagsObserved       bool      `json:"tcp_flags_observed,omitempty"`
+	TCPSYNCount            uint64    `json:"tcp_syn_count,omitempty"`
+	TCPACKCount            uint64    `json:"tcp_ack_count,omitempty"`
+	TCPRSTCount            uint64    `json:"tcp_rst_count,omitempty"`
+	TCPSYNOnlyCount        uint64    `json:"tcp_syn_only_count,omitempty"`
+	TCPSYNACKCount         uint64    `json:"tcp_syn_ack_count,omitempty"`
+	TCPACKOnlyCount        uint64    `json:"tcp_ack_only_count,omitempty"`
+	Bidirectional          bool      `json:"bidirectional,omitempty"`
 	PayloadHash            string    `json:"payload_hash,omitempty"`
 	LastPayloadHash        string    `json:"last_payload_hash,omitempty"`
 	PayloadPrefixHash      string    `json:"payload_prefix_hash,omitempty"`
@@ -103,7 +111,15 @@ func fromRecord(record flow.Record) FlowRecord {
 		SourcePort: record.Key.SourcePort, DestinationPort: record.Key.DestinationPort,
 		Protocol: protocolName(record.Key.Protocol), Direction: record.Key.Direction.String(),
 		PacketCount: record.PacketCount, TotalBytes: record.TotalBytes,
-		PayloadHash: record.FirstPayloadHash, LastPayloadHash: record.LastPayloadHash,
+		TCPFlagsObserved: record.TCPFlagsObserved,
+		TCPSYNCount:      record.TCPFlags.SYN,
+		TCPACKCount:      record.TCPFlags.ACK,
+		TCPRSTCount:      record.TCPFlags.RST,
+		TCPSYNOnlyCount:  record.TCPSYNOnlyCount,
+		TCPSYNACKCount:   record.TCPSYNACKCount,
+		TCPACKOnlyCount:  record.TCPACKOnlyCount,
+		Bidirectional:    record.Bidirectional,
+		PayloadHash:      record.FirstPayloadHash, LastPayloadHash: record.LastPayloadHash,
 		PayloadPrefixHash: record.PayloadPrefixHash, PayloadSampleHex: record.PayloadSampleHex,
 		PayloadSimHash:        record.PayloadSimHash,
 		PayloadFeatureVersion: record.PayloadFeatureVersion,

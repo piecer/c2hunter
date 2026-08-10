@@ -13,6 +13,15 @@ _TCP_COUNTER_FIELDS = (
     "tcp_flags.cwr",
 )
 
+_TCP_SESSION_COUNTER_FIELDS = (
+    "tcp_syn_count",
+    "tcp_ack_count",
+    "tcp_rst_count",
+    "tcp_syn_only_count",
+    "tcp_syn_ack_count",
+    "tcp_ack_only_count",
+)
+
 
 def _positive_int(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -83,9 +92,15 @@ def limit_flow_records(
         # Clear TCP counters when packet boundaries are uncertain.
         tcp_flags = item.get("tcp_flags")
         if isinstance(tcp_flags, dict):
+            tcp_flags = dict(tcp_flags)
+            item["tcp_flags"] = tcp_flags
             for key in tuple(tcp_flags):
                 if f"tcp_flags.{key}" in _TCP_COUNTER_FIELDS:
                     del tcp_flags[key]
+        if item.get("tcp_flags_observed"):
+            for field in _TCP_SESSION_COUNTER_FIELDS:
+                item[field] = 0
+            item["bidirectional"] = False
         retained.append(item)
         retained_packets += remaining
         remaining = 0

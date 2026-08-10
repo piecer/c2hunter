@@ -360,6 +360,23 @@ def _decode_packet(
         record.update(features.as_dict())
     if tcp_flags:
         record["tcp_flags"] = tcp_flags
+    if protocol == "TCP":
+        flags = tcp_flags or {}
+        syn = int(flags.get("syn", 0))
+        ack = int(flags.get("ack", 0))
+        rst = int(flags.get("rst", 0))
+        record.update(
+            {
+                "tcp_flags_observed": True,
+                "tcp_syn_count": syn,
+                "tcp_ack_count": ack,
+                "tcp_rst_count": rst,
+                "tcp_syn_only_count": int(bool(syn and not ack and not rst)),
+                "tcp_syn_ack_count": int(bool(syn and ack and not rst)),
+                "tcp_ack_only_count": int(bool(ack and not syn and not rst)),
+                "bidirectional": False,
+            }
+        )
     if retain_payload_sample_bytes and payload:
         record["payload_sample_hex"] = payload[:retain_payload_sample_bytes].hex()
     if retain_packet_bytes:

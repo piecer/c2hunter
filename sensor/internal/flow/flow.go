@@ -29,6 +29,9 @@ type Record struct {
 	MinPacketSize, MaxPacketSize       uint32
 	AvgPacketSize                      float64
 	TCPFlags                           FlagCounts
+	TCPFlagsObserved                   bool
+	TCPSYNOnlyCount, TCPSYNACKCount    uint64
+	TCPACKOnlyCount                    uint64
 	SYNACKRatio                        *float64 `json:"syn_ack_ratio,omitempty"`
 	RSTRatio                           *float64 `json:"rst_ratio,omitempty"`
 	ConnectionCount                    *uint64  `json:"connection_count,omitempty"`
@@ -123,6 +126,7 @@ func (a *Aggregator) AddWithMetadata(p packet.Packet, protocolMetadata metadata.
 		r.LastPayloadHash = features.Hash
 	}
 	addFlags(&r.TCPFlags, p.TCPFlags)
+	trackTCPFlagCombinations(r, p)
 	if protocolMetadata.Kind != "" {
 		r.ProtocolMetadata = protocolMetadata
 	}
@@ -198,6 +202,24 @@ func addFlags(c *FlagCounts, f packet.TCPFlags) {
 	}
 	if f.CWR {
 		c.CWR++
+	}
+}
+
+func trackTCPFlagCombinations(record *Record, p packet.Packet) {
+	if p.Protocol != packet.TCP {
+		return
+	}
+	record.TCPFlagsObserved = true
+	switch {
+	case p.TCPFlags.SYN && p.TCPFlags.ACK && !p.TCPFlags.RST:
+		record.TCPSYNACKCount++
+	case p.TCPFlags.SYN && !p.TCPFlags.ACK && !p.TCPFlags.RST:
+		record.TCPSYNOnlyCount++
+	case p.TCPFlags.ACK && !p.TCPFlags.SYN && !p.TCPFlags.RST:
+		// FIN/PSH + ACK packets are valid post-handshake traffic. RST+ACK is
+		// intentionally excluded so a closed-port response cannot look like
+		// an established session.
+		record.TCPACKOnlyCount++
 	}
 }
 

@@ -21,7 +21,8 @@ class Detector:
 4. **시계 보정**: heartbeat offset을 관찰 timestamp에 적용하고 기본 ±2초 tolerance를 사용한다. offset >2초 센서는 `DEGRADED`, 증거와 결과에 경고/신뢰도 저하를 표시한다.
 5. **중복 제거**: 5-tuple, IP ID, TCP seq, payload length/hash, timestamp bucket으로 canonical packet을 정한다. sensor observation은 별도 집합으로 보존한다.
 6. **후보 universe**: 내부↔외부 Flow의 외부 IP를 후보로 만든다. internal/allowlist 명시 제외 대상은 suppression 통계만 남긴다.
-7. **time bucket/feature**: 외부 IP·내부 host·sensor·protocol/port별 count/bytes/size/fingerprint 시계열을 bounded bucket으로 집계한다.
+7. **TCP 세션 gate**: TCP는 내부 endpoint의 `SYN && !ACK` 시작 또는 handshake/양방향 ACK·Payload로 성립한 세션만 일반 detector 입력에 포함한다. inbound SYN/ACK/NULL scan과 RST 응답만 존재하는 연결은 후보 입력에서 제외한다. 외부가 시작한 짧은 no-payload full-connect가 다수 내부 host로 확산되면 connect scan으로 추가 억제한다. 구버전 Flow처럼 TCP flag metadata가 없는 기록은 기본적으로 호환 모드로 유지한다.
+8. **time bucket/feature**: 외부 IP·내부 host·sensor·protocol/port별 count/bytes/size/fingerprint 시계열을 bounded bucket으로 집계한다.
 
 ## 3. Detector
 
@@ -35,6 +36,18 @@ class Detector:
 - DNS/NTP/CDN/cloud/업무 서버는 후처리 감점 또는 제외한다.
 
 Evidence metrics: distinct hosts, connections, sensors, duration, connections/host, dominant port ratio, fingerprint ratio.
+
+### 3.1.1 TCP_SESSION_QUALITY (최대 15, 단독 후보 생성 금지)
+
+TCP flag를 단순 ACK 총계가 아니라 `SYN-only`, `SYN+ACK`, `ACK without SYN/RST`로 나눠 저장한다.
+
+- 내부→외부 `SYN && !ACK`: 내부에서 시작한 연결로 최대 5점
+- `SYN → SYN+ACK → ACK`, 양방향 ACK 또는 양방향 Payload/ACK: 성립 세션으로 최대 10점
+- `RST+ACK`는 ACK-only로 세지 않는다.
+- 외부→다수 내부 host의 SYN-only 흐름과 내부 RST 응답만 존재하면 scanning으로 제외한다.
+- 외부 시작 세션이 ACK까지 완료돼도 payload 없이 4 packet 이하로 끝나는 연결이 기본 8개 이상 내부 host에 80% 이상 확산되면 full-connect scan으로 억제한다.
+
+이 evidence는 다른 detector가 이미 지지하는 Candidate에만 결합하며 정상 outbound TCP 연결 자체로 후보를 만들지 않는다.
 
 ### 3.2 PERIODIC_BEACON (최대 15)
 
@@ -132,6 +145,7 @@ anomaly-only Candidate까지 생성하려면 `ml_anomaly_allow_standalone=true`�
 | Evidence | 최대 |
 |---|---:|
 | COMMON_DESTINATION | 20 |
+| TCP_SESSION_QUALITY | 15 |
 | PERIODIC_BEACON | 15 |
 | SINGLE_HOST_BEACON | 35 |
 | ANALYST_PAYLOAD_SIGNATURE | 80 |
