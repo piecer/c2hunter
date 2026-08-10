@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import ssl
 import urllib.error
 import urllib.parse
@@ -36,6 +37,19 @@ class IntegrationError(Exception):
         self.message = message
         self.http_status = http_status
         self.retry_after = retry_after
+
+
+def _transport_failure_message(exc: BaseException) -> str:
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return "external service TLS certificate verification failed"
+    if isinstance(reason, socket.gaierror):
+        return "external service DNS resolution failed"
+    if isinstance(reason, ConnectionRefusedError):
+        return "external service connection refused"
+    if isinstance(reason, TimeoutError):
+        return "external service request timed out"
+    return "external service request failed"
 
 
 class ThreatIntelLookup(Protocol):
@@ -84,7 +98,7 @@ class JsonHttpClient:
                 retry_after=retry_after,
             ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise IntegrationError("http", "external service request failed") from exc
+            raise IntegrationError("http", _transport_failure_message(exc)) from exc
         try:
             parsed = json.loads(payload or b"{}")
         except json.JSONDecodeError as exc:

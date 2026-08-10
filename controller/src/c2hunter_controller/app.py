@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 import threading
 import uuid
@@ -107,6 +108,8 @@ from .security import (
     required_role,
 )
 from .storage import ClickHouseFlowStore, FlowStore, MemoryFlowStore
+
+logger = logging.getLogger(__name__)
 
 
 class ApiError(Exception):
@@ -243,13 +246,53 @@ def _find_candidate(
     return None
 
 
+_VALID_CANDIDATE_VERDICTS = {"CONFIRMED_C2", "FALSE_POSITIVE", "UNDER_REVIEW"}
+_VALID_CANDIDATE_CONFIDENCES = {"CONFIRMED", "HIGH", "MEDIUM", "LOW"}
+
+
+def _valid_candidate_decision(decision: object) -> bool:
+    if not isinstance(decision, dict):
+        return False
+    required_string_fields = (
+        "id",
+        "candidate_id",
+        "verdict",
+        "confidence",
+        "note",
+        "created_by",
+        "created_at",
+    )
+    if not all(
+        isinstance(decision.get(field), str) and bool(decision.get(field))
+        for field in required_string_fields
+    ):
+        return False
+    try:
+        created_at = datetime.fromisoformat(decision["created_at"])
+    except ValueError:
+        return False
+    return (
+        decision["verdict"] in _VALID_CANDIDATE_VERDICTS
+        and decision["confidence"] in _VALID_CANDIDATE_CONFIDENCES
+        and created_at.utcoffset() is not None
+    )
+
+
 def _candidate_workflow_index(
     repo: Repository, candidate_id: str | None = None
 ) -> dict[str, dict[str, Any]]:
     workflow: dict[str, dict[str, Any]] = {}
-    decisions = sorted(
-        repo.list_candidate_decisions(candidate_id), key=lambda item: str(item["created_at"])
-    )
+    decisions: list[dict[str, Any]] = []
+    for decision in repo.list_candidate_decisions(candidate_id):
+        if not _valid_candidate_decision(decision):
+            logger.warning(
+                "Ignoring malformed candidate decision id=%r candidate_id=%r",
+                decision.get("id") if isinstance(decision, dict) else None,
+                decision.get("candidate_id") if isinstance(decision, dict) else None,
+            )
+            continue
+        decisions.append(decision)
+    decisions.sort(key=lambda item: item["created_at"])
     for decision in decisions:
         entry = workflow.setdefault(str(decision["candidate_id"]), {})
         entry.setdefault("verdict_history", []).append(decision)
@@ -3056,6 +3099,15 @@ def create_app(
                     payload.comment,
                 )
             except IntegrationError as exc:
+                logger.exception(
+                    "MISP export failed candidate_id=%s candidate_ip=%s event_id=%s "
+                    "provider=%s http_status=%s",
+                    candidate_id,
+                    candidate["candidate_ip"],
+                    event_id,
+                    exc.provider,
+                    exc.http_status,
+                )
                 failed = {**base_record, "status": "FAILED", "error": exc.message}
                 repo.save_candidate_misp_action(failed)
                 raise ApiError(502, "MISP_EXPORT_FAILED", exc.message) from exc

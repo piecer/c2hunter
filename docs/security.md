@@ -56,7 +56,8 @@ and checks revocation status (`app.py:665-678`). Sensors do not map to VIEWER/AN
 
 POST `/api/v1/auth/dev-login` is a local-convenience endpoint (`app.py:631-656`).
 When `C2HUNTER_DEV_LOGIN_ENABLED=true`, it mints a short-lived in-memory session with
-fixed `ADMIN` role and configurable TTL (`dev_token_ttl_seconds`, 1~3600 초, 기본 900 초).
+fixed `ADMIN` role and configurable TTL (`C2HUNTER_DEV_TOKEN_TTL_SECONDS`,
+1~86400 초, 기본 28800 초/8시간).
 The response includes `access_token`, `token_type: bearer`, `expires_in`, `username`,
 `role: ADMIN`, and a `limitations` disclaimer. Disabled environments return HTTP 404
 (not 403) to avoid fingerprinting. Sessions live only in process memory — they expire on

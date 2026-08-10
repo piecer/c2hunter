@@ -692,9 +692,10 @@ function CandidateEnrichmentPanel({ candidate, onUpdated }: { candidate: Candida
   const actionHistory = candidate.action_history ?? [];
   const mispExports = candidate.misp_exports ?? [];
   const errors = [verdictMutation.error, actionMutation.error, threatIntelMutation.error, mispMutation.error].filter(Boolean) as Error[];
-  const currentVerdictLabel = candidate.current_verdict?.verdict === 'CONFIRMED_C2' ? '확정 C2' : candidate.current_verdict?.verdict === 'FALSE_POSITIVE' ? '오탐' : '검토 중';
+  const currentVerdict = typeof candidate.current_verdict?.verdict === 'string' ? candidate.current_verdict.verdict : '';
+  const currentVerdictLabel = currentVerdict === 'CONFIRMED_C2' ? '확정 C2' : currentVerdict === 'FALSE_POSITIVE' ? '오탐' : '검토 중';
   return <section className="panel compact candidate-enrichment" aria-labelledby="candidate-validation-title">
-    <div className="section-heading"><div><p className="eyebrow">ANALYST WORKFLOW</p><h2 id="candidate-validation-title">판정 및 외부 검증</h2></div>{candidate.current_verdict && <span className={`badge verdict-${candidate.current_verdict.verdict.toLowerCase()}`}>{currentVerdictLabel}</span>}</div>
+    <div className="section-heading"><div><p className="eyebrow">ANALYST WORKFLOW</p><h2 id="candidate-validation-title">판정 및 외부 검증</h2></div>{currentVerdict && <span className={`badge verdict-${currentVerdict.toLowerCase()}`}>{currentVerdictLabel}</span>}</div>
     <div className="grid compact">
       <form className="subpanel" onSubmit={event => { event.preventDefault(); verdictMutation.mutate(); }}>
         <h3>Analyst verdict</h3>
@@ -709,7 +710,7 @@ function CandidateEnrichmentPanel({ candidate, onUpdated }: { candidate: Candida
         {threatIntel && <><p className="muted">최근 조회 {fmt(threatIntel.fetched_at)}</p><div className="ti-grid">{Object.entries(threatIntel.providers).map(([provider, result]) => <article key={provider} className="ti-card"><strong>{provider === 'virustotal' ? 'VirusTotal' : provider === 'abuseipdb' ? 'AbuseIPDB' : provider}</strong>{result.status === 'NOT_CONFIGURED' ? <p className="muted">Provider API 키 미설정</p> : result.status !== 'OK' ? <p className="error-text">{result.error ?? 'Provider lookup failed'}{result.retry_after ? ` · ${result.retry_after}초 후 재시도` : ''}</p> : provider === 'virustotal' ? <dl><dt>악성</dt><dd>악성 {result.malicious ?? 0}</dd><dt>의심</dt><dd>{result.suspicious ?? 0}</dd><dt>평판</dt><dd>{result.reputation ?? 0}</dd></dl> : <dl><dt>Abuse 신뢰도</dt><dd>Abuse 신뢰도 {result.abuse_confidence_score ?? 0}%</dd><dt>신고 수</dt><dd>{result.total_reports ?? 0}</dd><dt>국가</dt><dd>{result.country_code ?? 'Unknown'}</dd></dl>}</article>)}</div></>}
       </div>
     </div>
-    {candidate.current_verdict?.verdict === 'CONFIRMED_C2' && <section className="subpanel candidate-action-panel" aria-labelledby="candidate-action-title">
+    {currentVerdict === 'CONFIRMED_C2' && <section className="subpanel candidate-action-panel" aria-labelledby="candidate-action-title">
       <div className="section-heading"><div><h3 id="candidate-action-title">후속 대응 조치</h3><p className="muted">판정은 확정 C2로 보존하고 실제 차단·격리 결과를 별도로 기록합니다.</p></div><CandidateWorkflowBadge candidate={candidate} /></div>
       {candidate.action_status !== 'COMPLETED' && <><label>조치 내용<textarea required minLength={1} maxLength={5000} value={actionNote} onChange={event => setActionNote(event.target.value)} placeholder="격리, 차단, 티켓 처리 등 실제 대응 내용을 기록하세요" /></label><div className="row-actions">{candidate.action_status !== 'IN_PROGRESS' && <button type="button" className="secondary" disabled={!actionNote.trim() || actionMutation.isPending} onClick={() => actionMutation.mutate('IN_PROGRESS')}>조치 시작</button>}<button type="button" disabled={!actionNote.trim() || actionMutation.isPending} onClick={() => actionMutation.mutate('COMPLETED')}>조치 완료</button></div></>}
       {candidate.current_action?.completed_at && <p className="muted">완료 시각 {fmt(candidate.current_action.completed_at)} · {candidate.current_action.created_by}</p>}
@@ -721,10 +722,10 @@ function CandidateEnrichmentPanel({ candidate, onUpdated }: { candidate: Candida
         <h3>MISP event integration</h3>
         <p className="muted">Only analyst-confirmed C2 candidates can be exported as an <code>ip-src</code> attribute by an administrator. Repeated exports to the same event are deduplicated.</p>
         <label>MISP event ID<input maxLength={100} pattern="[A-Za-z0-9-]+" value={eventId} onChange={event => setEventId(event.target.value)} placeholder="서버 기본 Event 사용" /></label>
-        <button disabled={candidate.current_verdict?.verdict !== 'CONFIRMED_C2' || mispMutation.isPending}>{mispMutation.isPending ? '전송 중…' : 'MISP로 전송'}</button>
-        {candidate.current_verdict?.verdict !== 'CONFIRMED_C2' && <p className="muted">Record a Confirmed C2 verdict before exporting.</p>}
+        <button disabled={currentVerdict !== 'CONFIRMED_C2' || mispMutation.isPending}>{mispMutation.isPending ? '전송 중…' : 'MISP로 전송'}</button>
+        {currentVerdict !== 'CONFIRMED_C2' && <p className="muted">Record a Confirmed C2 verdict before exporting.</p>}
       </form>
-      <div className="subpanel"><h3>Decision and export history</h3>{verdictHistory.length === 0 && mispExports.length === 0 ? <p className="muted">No analyst decisions or MISP exports have been recorded.</p> : <ul className="history-list">{[...verdictHistory].reverse().map(item => <li key={item.id ?? `${item.verdict}-${item.created_at}`}><strong>{item.verdict.replaceAll('_', ' ')}</strong><span>{item.confidence} · {fmt(item.created_at)} · {item.created_by}</span><p>{item.note}</p></li>)}{[...mispExports].reverse().map(item => <li key={item.id ?? `${item.event_id}-${item.created_at}`}><strong>MISP {item.status}</strong><span>Event {item.event_id} · {fmt(item.created_at)} · {item.created_by}</span>{item.error && <p className="error-text">{item.error}</p>}</li>)}</ul>}</div>
+      <div className="subpanel"><h3>Decision and export history</h3>{verdictHistory.length === 0 && mispExports.length === 0 ? <p className="muted">No analyst decisions or MISP exports have been recorded.</p> : <ul className="history-list">{[...verdictHistory].reverse().map(item => <li key={item.id ?? `${String(item.verdict)}-${item.created_at}`}><strong>{typeof item.verdict === 'string' ? item.verdict.replace(/_/g, ' ') : 'Invalid verdict data'}</strong><span>{item.confidence} · {fmt(item.created_at)} · {item.created_by}</span><p>{item.note}</p></li>)}{[...mispExports].reverse().map(item => <li key={item.id ?? `${item.event_id}-${item.created_at}`}><strong>MISP {item.status}</strong><span>Event {item.event_id} · {fmt(item.created_at)} · {item.created_by}</span>{item.error && <p className="error-text">{item.error}</p>}</li>)}</ul>}</div>
     </div>
     {errors.length > 0 && <p role="alert" className="error-text">{errors.map(error => error.message).join(', ')}</p>}
     {notice && <p role="status">{notice}</p>}

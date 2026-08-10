@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     # This only enables the explicitly limited development token minting endpoint.
     # Production deployments should use pre-hashed static tokens or a future OIDC integration.
     dev_login_enabled: bool = False
-    dev_token_ttl_seconds: int = Field(default=900, gt=0, le=3600)
+    dev_token_ttl_seconds: int = Field(default=28_800, gt=0, le=86_400)
     api_auth_required: bool | None = None
     viewer_token_sha256: str = Field(default="", pattern=r"^(?:|[0-9a-f]{64})$")
     analyst_token_sha256: str = Field(default="", pattern=r"^(?:|[0-9a-f]{64})$")

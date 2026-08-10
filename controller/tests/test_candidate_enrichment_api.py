@@ -114,6 +114,54 @@ def test_candidate_verdict_history_is_persisted_without_mutating_detection_outpu
     assert repository.list_candidate_decisions("candidate-1") == body["verdict_history"]
 
 
+def test_malformed_legacy_candidate_verdict_is_ignored_in_public_workflow() -> None:
+    client, repository, _, _ = _client()
+    repository.save_candidate_decision(
+        {
+            "id": "legacy-bad-verdict",
+            "candidate_id": "candidate-1",
+            "job_id": "job-1",
+            "candidate_ip": "203.0.113.44",
+            "verdict": {"verdict": "CONFIRMED_C2"},
+            "confidence": "HIGH",
+            "note": "legacy malformed record",
+            "created_by": "legacy",
+            "created_at": "2026-08-08T00:00:00+00:00",
+        }
+    )
+    repository.candidate_decisions["legacy-missing-id"] = {
+        "candidate_id": "candidate-1",
+        "job_id": "job-1",
+        "candidate_ip": "203.0.113.44",
+        "verdict": "CONFIRMED_C2",
+        "confidence": "HIGH",
+        "note": "legacy record without an id",
+        "created_by": "legacy",
+        "created_at": "2026-08-09T00:00:00+00:00",
+    }
+    repository.save_candidate_decision(
+        {
+            "id": "legacy-invalid-created-at",
+            "candidate_id": "candidate-1",
+            "job_id": "job-1",
+            "candidate_ip": "203.0.113.44",
+            "verdict": "CONFIRMED_C2",
+            "confidence": "HIGH",
+            "note": "legacy record with an invalid timestamp",
+            "created_by": "legacy",
+            "created_at": "not-a-timestamp",
+        }
+    )
+
+    response = client.get("/api/v1/candidates/candidate-1")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body.get("verdict_history", []) == []
+    assert "current_verdict" not in body
+    assert body["workflow_status"] == "NEEDS_REVIEW"
+
+
 def test_confirmed_candidate_action_progress_and_completion_are_audited() -> None:
     client, repository, _, _ = _client()
     confirmed = client.post(

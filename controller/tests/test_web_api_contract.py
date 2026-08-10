@@ -39,7 +39,7 @@ def test_development_login_is_disabled_by_default_and_explicit_when_enabled() ->
     second = enabled.post("/api/v1/auth/dev-login", json={"username": "analyst"})
     assert first.status_code == 200
     assert first.json()["token_type"] == "bearer"
-    assert first.json()["expires_in"] > 0
+    assert first.json()["expires_in"] == 28_800
     assert first.json()["access_token"] != second.json()["access_token"]
     assert "development" in first.json()["limitations"].lower()
 
