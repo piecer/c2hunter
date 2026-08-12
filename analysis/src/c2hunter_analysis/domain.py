@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from ipaddress import ip_address, ip_network
 from typing import Any, Protocol
 
@@ -172,11 +172,21 @@ class AllowlistEntry:
     def from_mapping(cls, stored: Mapping[str, Any]) -> AllowlistEntry:
         expires_at = stored.get("expires_at")
         if isinstance(expires_at, str):
-            normalized_expires_at = datetime.fromisoformat(expires_at) if expires_at else None
+            try:
+                normalized_expires_at = datetime.fromisoformat(expires_at) if expires_at else None
+            except ValueError:
+                normalized_expires_at = datetime.min.replace(tzinfo=UTC)
         elif isinstance(expires_at, datetime):
             normalized_expires_at = expires_at
-        else:
+        elif expires_at is None:
             normalized_expires_at = None
+        else:
+            normalized_expires_at = datetime.min.replace(tzinfo=UTC)
+        if normalized_expires_at is not None:
+            if normalized_expires_at.utcoffset() is None:
+                normalized_expires_at = datetime.min.replace(tzinfo=UTC)
+            else:
+                normalized_expires_at = normalized_expires_at.astimezone(UTC)
         return cls(
             type=str(stored["type"]),
             value=str(stored["value"]),
@@ -186,7 +196,8 @@ class AllowlistEntry:
         )
 
     def is_active(self, now: datetime) -> bool:
-        return self.enabled and (self.expires_at is None or self.expires_at > now)
+        normalized_now = now.replace(tzinfo=UTC) if now.utcoffset() is None else now.astimezone(UTC)
+        return self.enabled and (self.expires_at is None or self.expires_at > normalized_now)
 
     def matches(self, candidate_ip: str, evidence: Sequence[Evidence], now: datetime) -> bool:
         return self.matches_metrics(candidate_ip, [item.metrics for item in evidence], now)

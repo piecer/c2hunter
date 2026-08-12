@@ -371,21 +371,27 @@ Content-Type: application/vnd.tcpdump.pcap    // raw PCAP data
 | Method | Path | Status | 설명 |
 |--------|------|--------|------|
 | `GET` | `/api/v1/allowlist` | 200 | 현재 allowlist 조회 |
-| `POST` | `/api/v1/allowlist` | 201 | 항목 추가 (IP/CIDR/fingerprint) |
+| `POST` | `/api/v1/allowlist` | 201 | 항목 추가 (IP/CIDR/domain/fingerprint/trusted service) |
 | `DELETE` | `/api/v1/allowlist/{entry_id}` | 204 | 항목 삭제 |
 
 **Request body (`AllowlistCreate`)**:
 
 ```jsonc
 {
-  "ip": null,                  // 특정 IP ( CIDR또는 fingerprint와 exclusive )
-  "cidr": null,               // CIDR 범위
-  "domain": null,              // 도메인 패턴
-  "payload_fingerprint_sha256": null,  // payload SHA-256
-  "fingerprint_algorithm": "SHA-256",
-  "description": ""            // 이유/설명
+  "type": "IP",
+  "value": "203.0.113.10",
+  "description": "Temporary trusted infrastructure",
+  "expires_at": "2026-08-20T01:30:00Z",
+  "enabled": true
 }
 ```
+
+`type`은 `IP`, `CIDR`, `DOMAIN_SUFFIX`, `TLS_FINGERPRINT`,
+`CERT_FINGERPRINT`, `TRUSTED_DNS`, `TRUSTED_NTP` 중 하나다. `expires_at`은 생략할 수
+있지만, 지정할 때는 반드시 미래의 ISO 8601 절대 시각이어야 하며 `Z` 또는 UTC offset을
+포함해야 한다. 예를 들어 `2026-08-20T10:30:00+09:00`은 저장·응답 시
+`2026-08-20T01:30:00Z`에 해당하는 UTC 시각으로 정규화된다. timezone 없는
+`2026-08-20T10:30`, 날짜만 있는 값, 이미 만료된 시각은 `422`로 거부된다.
 
 ---
 

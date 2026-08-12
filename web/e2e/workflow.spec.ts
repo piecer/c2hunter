@@ -55,7 +55,12 @@ test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', 
   await page.getByRole('link', { name: 'Allowlist' }).click();
   await page.getByLabel('Value').fill('203.0.113.10');
   await page.getByLabel('Description').fill('Reviewed trusted infrastructure');
+  await page.getByLabel('Expires at').fill('2099-08-13T09:30');
+  const allowlistRequest = page.waitForRequest(request => request.url().endsWith('/api/v1/allowlist') && request.method() === 'POST');
   await page.getByRole('button', { name: 'Add entry' }).click();
+  const postedAllowlist = (await allowlistRequest).postDataJSON();
+  const expectedExpiration = await page.evaluate(() => new Date(2099, 7, 13, 9, 30).toISOString());
+  expect(postedAllowlist.expires_at).toBe(expectedExpiration);
   await expect(page.getByText('203.0.113.10')).toBeVisible();
   await page.getByRole('button', { name: 'Delete 203.0.113.10' }).click();
   await expect(page.getByText('No allowlist entries')).toBeVisible();

@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from c2hunter_analysis.domain import (
     AllowlistEntry,
     AnalysisContext,
@@ -172,6 +174,55 @@ def test_allowlist_suppresses_matching_ip_and_cidr() -> None:
     evidence = [Evidence("203.0.113.9", "COMMON_DESTINATION", "common", "1", 10, 10, "x")]
     entries = [AllowlistEntry("CIDR", "203.0.113.0/24", "test network")]
     assert score_candidates(evidence, allowlist=entries) == []
+
+
+def test_allowlist_legacy_naive_expiration_is_inactive() -> None:
+    entry = AllowlistEntry.from_mapping(
+        {
+            "type": "IP",
+            "value": "203.0.113.9",
+            "description": "legacy",
+            "expires_at": "2026-07-20T01:00:00",
+        }
+    )
+
+    assert entry.is_active(datetime(2026, 7, 20, 0, 59, tzinfo=UTC)) is False
+
+
+@pytest.mark.parametrize(
+    "expires_at",
+    [
+        "07/20/2026 01:00",
+        4_089_758_200,
+        {"timestamp": "2099-08-13T09:30:00Z"},
+        ["2099-08-13T09:30:00Z"],
+    ],
+)
+def test_allowlist_malformed_legacy_expiration_is_inactive(expires_at: object) -> None:
+    entry = AllowlistEntry.from_mapping(
+        {
+            "type": "IP",
+            "value": "203.0.113.9",
+            "description": "malformed legacy",
+            "expires_at": expires_at,
+        }
+    )
+
+    assert entry.is_active(NOW) is False
+
+
+@pytest.mark.parametrize("expires_at", [None, ""])
+def test_allowlist_missing_legacy_expiration_remains_active(expires_at: object) -> None:
+    entry = AllowlistEntry.from_mapping(
+        {
+            "type": "IP",
+            "value": "203.0.113.9",
+            "description": "no expiration",
+            "expires_at": expires_at,
+        }
+    )
+
+    assert entry.is_active(NOW) is True
 
 
 def test_score_applies_single_host_and_low_sample_penalties() -> None:

@@ -790,6 +790,29 @@ describe('C2Hunter UI', () => {
     });
   });
 
+  it('converts an allowlist local expiration to an absolute UTC instant', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/v1/allowlist' && init?.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'allow-utc' }), { status: 201, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404, headers: { 'content-type': 'application/json' } });
+    });
+    renderAt('/allowlist');
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+
+    await user.type(screen.getByLabelText('Value'), '203.0.113.10');
+    await user.type(screen.getByLabelText('Description'), 'Temporary exception');
+    await user.type(screen.getByLabelText('Expires at'), '2099-08-13T09:30');
+    await user.click(screen.getByRole('button', { name: 'Add entry' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/allowlist', expect.objectContaining({ method: 'POST' })));
+    const call = fetchMock.mock.calls.find(([url, init]) => url === '/api/v1/allowlist' && init?.method === 'POST');
+    const body = JSON.parse(String(call?.[1]?.body));
+    expect(body.expires_at).toBe(new Date(2099, 7, 13, 9, 30).toISOString());
+  });
+
   it('sends the Controller cancel request body', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);

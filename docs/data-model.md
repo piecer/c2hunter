@@ -80,7 +80,7 @@ Payload 원문과 미리보기는 라벨, signature, job snapshot, 감사 로그
 
 ### 2.6 Allowlist
 
-`allowlist_entries`: id, type(`IP/CIDR/DOMAIN_SUFFIX/TLS_FINGERPRINT/CERT_FINGERPRINT`), normalized value, description, expires_at, enabled, creator, created/updated time. IP/CIDR 명시 match는 후보 제외, 다른 공용/업무 인프라 정책은 score adjustment로 처리한다. `allowlist_suppression_stats`에 run, entry, match count, candidate IP hash/reference, timestamp를 남겨 제외 결과도 감사 가능하게 한다.
+`allowlist_entries`: id, type(`IP/CIDR/DOMAIN_SUFFIX/TLS_FINGERPRINT/CERT_FINGERPRINT/TRUSTED_DNS/TRUSTED_NTP`), normalized value, description, expires_at, enabled, creator, created/updated time. `expires_at`은 nullable이지만 지정 시 timezone을 포함한 미래 ISO 8601 시각만 허용하고 UTC로 정규화한다. IP/CIDR 명시 match는 후보 제외, 다른 공용/업무 인프라 정책은 score adjustment로 처리한다. `allowlist_suppression_stats`에 run, entry, match count, candidate IP hash/reference, timestamp를 남겨 제외 결과도 감사 가능하게 한다.
 
 ### 2.7 PCAP/object
 

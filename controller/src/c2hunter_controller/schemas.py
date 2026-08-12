@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from ipaddress import ip_address, ip_network
 from typing import Any, Literal
@@ -545,6 +545,15 @@ class AllowlistCreate(BaseModel):
     expires_at: datetime | None = None
     enabled: bool = True
 
+    @field_validator("expires_at", mode="before")
+    @classmethod
+    def expiration_is_iso_string(cls, value: object) -> object:
+        if value is not None and not isinstance(value, str):
+            raise ValueError("expires_at must be an ISO 8601 string")
+        if isinstance(value, str) and "T" not in value.upper():
+            raise ValueError("expires_at must be an ISO 8601 datetime string")
+        return value
+
     @model_validator(mode="after")
     def normalize(self) -> AllowlistCreate:
         if self.type in {"IP", "TRUSTED_DNS", "TRUSTED_NTP"}:
@@ -555,6 +564,12 @@ class AllowlistCreate(BaseModel):
             self.value = self.value.lower().strip().lstrip(".").rstrip(".")
         else:
             self.value = self.value.lower().strip()
+        if self.expires_at is not None:
+            if self.expires_at.utcoffset() is None:
+                raise ValueError("expires_at must include a timezone offset or Z")
+            self.expires_at = self.expires_at.astimezone(UTC)
+            if self.expires_at <= datetime.now(UTC):
+                raise ValueError("expires_at must be in the future")
         return self
 
 

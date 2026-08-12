@@ -1,5 +1,5 @@
 import struct
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -74,6 +74,78 @@ def test_allowlist_crud_normalizes_and_suppresses_calculated_candidate() -> None
     job = client.post("/api/v1/analysis-jobs", json=job_payload()).json()
     assert client.get(f"/api/v1/analysis-jobs/{job['id']}/candidates").json()["total"] == 0
     assert client.delete(f"/api/v1/allowlist/{entry.json()['id']}").status_code == 204
+
+
+def test_allowlist_expiration_requires_timezone_and_is_stored_as_utc() -> None:
+    client = configured_client()
+    future = datetime.now(UTC) + timedelta(days=1)
+    offset_expiration = future.astimezone(tz=timezone(timedelta(hours=9))).isoformat()
+
+    missing_timezone = client.post(
+        "/api/v1/allowlist",
+        json={
+            "type": "IP",
+            "value": "203.0.113.10",
+            "description": "timezone required",
+            "expires_at": future.replace(tzinfo=None).isoformat(),
+        },
+    )
+    created = client.post(
+        "/api/v1/allowlist",
+        json={
+            "type": "IP",
+            "value": "203.0.113.11",
+            "description": "normalized expiration",
+            "expires_at": offset_expiration,
+        },
+    )
+
+    assert missing_timezone.status_code == 422
+    assert created.status_code == 201
+    stored_expiration = datetime.fromisoformat(created.json()["expires_at"])
+    assert stored_expiration.tzinfo == UTC
+    assert stored_expiration == future
+
+
+@pytest.mark.parametrize(
+    "expires_at",
+    [
+        "2099-08-13T09:30",
+        "2099-08-13",
+        "4089758200",
+        4_089_758_200,
+    ],
+)
+def test_allowlist_rejects_expiration_without_iso_timezone(expires_at: object) -> None:
+    client = configured_client()
+
+    response = client.post(
+        "/api/v1/allowlist",
+        json={
+            "type": "IP",
+            "value": "203.0.113.13",
+            "description": "invalid expiration format",
+            "expires_at": expires_at,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_allowlist_rejects_expiration_that_is_not_in_the_future() -> None:
+    client = configured_client()
+
+    response = client.post(
+        "/api/v1/allowlist",
+        json={
+            "type": "IP",
+            "value": "203.0.113.12",
+            "description": "already expired",
+            "expires_at": (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_allowlist_suppresses_existing_candidate_but_preserves_audit_record() -> None:

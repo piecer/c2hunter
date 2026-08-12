@@ -10,6 +10,10 @@ type Page<T> = { items: T[]; page?: number; page_size?: number; total?: number; 
 type List<T> = Page<T> | T[];
 const items = <T,>(value?: List<T>) => Array.isArray(value) ? value : value?.items ?? [];
 const fmt = (value?: string) => value ? new Date(value).toLocaleString() : 'Not reported';
+const localDateTimeValue = (value: Date) => {
+  const local = new Date(value.getTime() - value.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+};
 const formatBytes = (value?: number) => {
   if (value === undefined) return 'Unknown size';
   if (value < 1024) return `${value} B`;
@@ -1026,7 +1030,8 @@ function Allowlist() {
     event.preventDefault();
     const form = event.currentTarget;
     const body: Record<string, FormDataEntryValue | boolean> = Object.fromEntries(new FormData(form).entries());
-    if (!body.expires_at) delete body.expires_at;
+    if (body.expires_at) body.expires_at = new Date(String(body.expires_at)).toISOString();
+    else delete body.expires_at;
     body.enabled = true;
     add.mutate(body, { onSuccess: () => form.reset() });
   };
@@ -1040,7 +1045,7 @@ function Allowlist() {
       <label>Type<select name="type"><option value="IP">IP — fully suppress</option><option value="CIDR">CIDR — fully suppress</option><option value="DOMAIN_SUFFIX">Domain suffix — fully suppress</option><option value="TLS_FINGERPRINT">TLS fingerprint — fully suppress</option><option value="CERT_FINGERPRINT">Certificate fingerprint — fully suppress</option><option value="TRUSTED_DNS">Trusted DNS — UDP/53 score adjustment</option><option value="TRUSTED_NTP">Trusted NTP — UDP/123 score adjustment</option></select></label>
       <label>Value<input name="value" required /></label>
       <label>Description<input name="description" required /></label>
-      <label>Expires at<input name="expires_at" type="datetime-local" /></label>
+      <label>Expires at<input name="expires_at" type="datetime-local" min={localDateTimeValue(new Date())} /></label>
       <button disabled={add.isPending}>{add.isPending ? 'Adding…' : 'Add entry'}</button>
       {add.error && <p role="alert" className="error-text">{add.error.message}</p>}
     </form>
