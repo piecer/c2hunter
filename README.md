@@ -1,160 +1,594 @@
+<div align="center">
+
 # C2Hunter
 
-C2Hunter is a defensive platform for correlating traffic observed by multiple Linux sensors and explaining likely DDoS botnet C2 candidates. It never connects to candidates, decrypts TLS, scans the Internet, or reproduces attacks.
+### Hunt unknown C2 infrastructure from behavior — not just known IOCs.
 
-## Architecture
+**C2Hunter is an open-source network threat hunting platform that correlates live sensor traffic and offline PCAPs to detect, rank, and explain likely command-and-control infrastructure.**
+
+[![CI](https://github.com/piecer/c2hunter/actions/workflows/ci.yml/badge.svg)](https://github.com/piecer/c2hunter/actions/workflows/ci.yml)
+[![GitHub stars](https://img.shields.io/github/stars/piecer/c2hunter?style=flat-square)](https://github.com/piecer/c2hunter/stargazers)
+[![GitHub last commit](https://img.shields.io/github/last-commit/piecer/c2hunter?style=flat-square)](https://github.com/piecer/c2hunter/commits/master)
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)
+![Go](https://img.shields.io/badge/Go-1.25-00ADD8?style=flat-square&logo=go&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white)
+
+<br />
+
+<img src="docs/assets/c2hunter-demo.gif" alt="C2Hunter workflow demo" width="100%" />
+
+<br />
+
+**Live traffic · PCAP/PCAPNG · Multi-sensor correlation · Explainable scoring · Analyst-guided payload signatures · Optional local AI analysis**
+
+[Quick Start](#quick-start) · [How It Works](#how-it-works) · [Detection Signals](#detection-signals) · [Architecture](#architecture) · [Documentation](#documentation)
+
+</div>
+
+---
+
+## Why C2Hunter?
+
+Traditional network detection is strongest when you already know what to look for: an IOC, signature, domain, IP, or protocol pattern.
+
+C2Hunter is built for the harder question:
+
+> **What if the C2 infrastructure is not known yet?**
+
+Instead of treating each connection in isolation, C2Hunter looks for **behavior shared across hosts, time, payload characteristics, and independent sensors**.
 
 ```text
-External Linux Sensor Agents -- outbound token-authenticated HTTPS --> Controller API --> PostgreSQL
-                                                                    |  |-------> ClickHouse (flows)
-Browser --> React UI ------------------------------------------------|  |-------> MinIO (PCAP)
-                                                                    +--Redis--> Analysis worker
+                        Traditional IOC detection
+
+        Known IP / Domain / Signature
+                    │
+                    ▼
+                 Match rule
+                    │
+                    ▼
+                   Alert
+
+
+                         C2Hunter
+
+               Unknown destinations
+                    │
+                    ▼
+              Network behavior
+                    │
+          ┌─────────┼─────────┐
+          ▼         ▼         ▼
+      Host       Time      Payload
+   correlation  patterns   features
+          │         │         │
+          └─────────┼─────────┘
+                    ▼
+             Evidence scoring
+                    │
+                    ▼
+              C2 candidates
+                    │
+                    ▼
+              Analyst review
 ```
 
-The control plane, flow store, object store, and queue are intentionally separate. Flow/packet tooling processes bounded chunks. See [architecture](docs/architecture.md), [data model](docs/data-model.md), [detection logic](docs/detection-logic.md), and [custom detectors](docs/custom-detectors.md).
+C2Hunter is designed for **defensive analysis**. It does not connect to candidate C2 servers, scan the Internet, decrypt TLS, replay malware commands, or reproduce attacks.
 
-## Requirements
+---
 
-- 중앙 서버: Linux 또는 WSL2, Docker Engine 27+와 Compose v2.30+
-- 외부 Sensor: systemd가 있는 Linux, AF_PACKET 지원 커널, 중앙 서버로의 outbound HTTPS
-- Python 3.12, Go 1.25.12, Node.js 22.14.0 and npm 10+
-- Development: 4 CPU, 8 GiB RAM, 20 GiB free disk
-- Reference benchmark: 8 vCPU, 16 GiB RAM, NVMe
+## What You Get
 
-Dependencies and images are pinned in `pyproject.toml`, `go.mod`, `web/package-lock.json`, Dockerfiles, and `docker-compose.yml`.
+| Capability | What it does |
+|---|---|
+| **Multi-host correlation** | Finds external destinations shared by multiple internal hosts instead of judging a single flow alone. |
+| **Periodic beacon detection** | Detects stable recurring communication patterns commonly associated with beaconing. |
+| **Synchronized communication** | Identifies groups of hosts contacting the same destination at similar times. |
+| **Multi-sensor context** | Correlates independent observations collected by distributed Linux sensors. |
+| **Offline PCAP analysis** | Runs PCAP and PCAPNG files through the same normalization, detector, allowlist, and scoring pipeline. |
+| **Explainable evidence** | Shows which detectors contributed to a candidate score and why. |
+| **Human-guided detection** | Lets an analyst confirm a C2 flow and create a versioned payload signature for future analyses. |
+| **Local AI analysis** | Optionally explains supporting/counter evidence and drafts Splunk hunting/detection queries and MISP data for analyst review. |
+| **REST API** | Integrates with SIEM, SOAR, scripts, and other defensive workflows. |
+| **PCAP evidence export** | Exports bounded candidate-related traffic for deeper investigation. |
 
-## Quick start
+---
+
+## How It Works
+
+```mermaid
+flowchart LR
+    S1[Linux Sensor A] -->|HTTPS| C[Controller API]
+    S2[Linux Sensor B] -->|HTTPS| C
+    S3[Linux Sensor N] -->|HTTPS| C
+    P[PCAP / PCAPNG] --> C
+
+    C --> PG[(PostgreSQL)]
+    C --> CH[(ClickHouse)]
+    C --> M[(MinIO)]
+    C --> R[(Redis)]
+
+    R --> W[Analysis Worker]
+    CH --> W
+    M --> W
+
+    W --> D[Behavior Detectors]
+    D --> E[Evidence + Score]
+    E --> K[C2 Candidates]
+    K --> A[Analyst Review]
+
+    A -->|C2 flow| PS[Payload Signature]
+    PS --> D
+
+    K --> AI[Optional Local AI]
+    AI --> X[Explanation]
+    AI --> SPL[Splunk Draft]
+    AI --> MI[MISP Draft]
+
+    C --> UI[React Investigation UI]
+    K --> UI
+```
+
+The analysis pipeline is deliberately evidence-first:
+
+```text
+Packets
+  ↓
+Normalized flows
+  ↓
+Behavior / statistical detectors
+  ↓
+Evidence contributions
+  ↓
+Adjustments / allowlists
+  ↓
+Candidate score
+  ↓
+Analyst review
+```
+
+A score is a **review-priority signal**, not an attribution verdict.
+
+---
+
+## Detection Signals
+
+C2Hunter can combine multiple independent signals instead of relying on one indicator.
+
+| Signal | What C2Hunter looks for |
+|---|---|
+| **Common destination** | Multiple internal hosts contacting the same external destination |
+| **Non-well-known port** | Repeated external communication over unusual service ports |
+| **Periodic beacon** | Stable recurring intervals across repeated communication |
+| **Single-host composite beacon** | Persistent low-volume beacon behavior from one host |
+| **Synchronized communication** | Multiple hosts communicating within similar time windows |
+| **Command → attack correlation** | Suspicious activity following likely command communication |
+| **Persistence / rarity** | Long-lived communication with otherwise uncommon destinations |
+| **Protocol / payload similarity** | Shared protocol and payload characteristics across hosts |
+| **Multi-sensor context** | Independent observation from more than one sensor |
+| **Analyst payload signature** | Exact or guarded structural match against analyst-confirmed payload features |
+| **Population anomaly** | Candidate behavior that is unusual relative to other traffic in the same analysis |
+| **TCP session quality** | Session-establishment evidence used to reduce low-quality TCP signals |
+
+### Severity
+
+| Score | Severity |
+|---:|---|
+| `80–100` | **CRITICAL** |
+| `60–79` | **HIGH** |
+| `40–59` | **MEDIUM** |
+| `0–39` | **LOW** |
+
+Review the evidence, affected internal hosts, independent sensor observations, timing, warnings, and packet context before escalation.
+
+---
+
+## Human-Guided Payload Detection
+
+C2Hunter can turn analyst knowledge into reusable detection evidence.
+
+```mermaid
+sequenceDiagram
+    participant A as Analyst
+    participant UI as C2Hunter
+    participant F as Flow
+    participant S as Payload Signature
+    participant N as Future Analysis
+
+    A->>UI: Review candidate / search flows
+    UI->>F: Preview bounded payload
+    A->>F: Mark C2 or BENIGN
+    A->>UI: Create signature from confirmed C2 flow
+    UI->>S: Store versioned non-secret features
+    N->>S: Compare future flows
+    S-->>N: Exact or guarded structural match
+    N-->>A: Explainable evidence for review
+```
+
+Payload matching can use features such as:
+
+- payload SHA-256
+- prefix hash
+- payload length
+- entropy
+- printable ratio
+- SimHash
+
+**Exact matches are high-confidence evidence. Structural similarity remains review-oriented.**
+
+Completed analysis results stay immutable; reanalysis applies the current signature set to an existing dataset.
+
+---
+
+## Optional Local AI Analysis
+
+C2Hunter's deterministic detectors remain the source of candidate evidence. The optional local LLM layer sits **after** that evidence pipeline.
+
+It can help an analyst:
+
+1. prioritize candidates,
+2. explain supporting evidence,
+3. explain counter-evidence and missing context,
+4. propose additional verification steps,
+5. draft Splunk hunting / scheduled-detection SPL,
+6. draft MISP data for review.
+
+```text
+C2Hunter evidence bundle
+        ↓
+Local LLM
+        ↓
+┌──────────────────────────────┐
+│ Candidate explanation        │
+│ Supporting / counter factors │
+│ Missing information          │
+│ Verification guidance        │
+│ Splunk SPL draft             │
+│ MISP draft                   │
+└──────────────────────────────┘
+        ↓
+Human approval
+```
+
+The AI layer is not allowed to auto-block traffic or automatically publish MISP data. A model failure must not break the underlying deterministic C2 analysis.
+
+---
+
+## Quick Start
+
+### Requirements
+
+Central server:
+
+- Linux or WSL2
+- Docker Engine `27+`
+- Docker Compose `v2.30+`
+- Python `3.12`
+- Go `1.25.12`
+- Node.js `22.14.0`
+- npm `10+`
+
+Suggested development host:
+
+- 4 CPU
+- 8 GiB RAM
+- 20 GiB free disk
+
+Reference benchmark host:
+
+- 8 vCPU
+- 16 GiB RAM
+- NVMe storage
+
+### Start C2Hunter
 
 ```bash
+git clone https://github.com/piecer/c2hunter.git
+cd c2hunter
+
 cp .env.example .env
 # Replace every change-me value in .env
+
 make setup
 make up
-curl http://localhost:8000/api/v1/health
-open http://localhost:8080
 ```
 
-`C2HUNTER_DEV_LOGIN_ENABLED=true` permits the **Development login** UI only for local use. The
-Controller now validates its short-lived token and grants it `ADMIN`, but the session is in-memory and
-does not provide OIDC, MFA, refresh, or multi-process sharing. Set it to `false` outside an isolated
-workstation. `make down` stops services without deleting volumes.
-
-The REST API can be used from external clients (SIEM, SOAR, scripts). See the [external API reference](docs/external-api-reference.md) for endpoints, request/response schemas, and code examples. The live OpenAPI spec is available at `http://localhost:8000/docs` (Swagger UI) or by downloading `http://localhost:8000/openapi.json`.
-
-Human API authentication is fail-closed by default. For a non-development deployment, configure one
-or more SHA-256 token digests by role and deliver the original random token to the intended client over
-a separate secret channel:
+Verify the controller:
 
 ```bash
-# Generate a token once; store the plaintext only in an approved secret manager.
-TOKEN="$(openssl rand -base64 32)"
-# Put this digest in C2HUNTER_ADMIN_TOKEN_SHA256, not the plaintext token.
-printf '%s' "$TOKEN" | sha256sum
+curl http://localhost:8000/api/v1/health
 ```
 
-`VIEWER` can read, `ANALYST` can run investigations and manage findings, and `ADMIN` additionally
-manages sensors and detector settings. Static tokens are a minimum deployment control, not a substitute
-for individual OIDC/MFA identities. Keep the Controller private behind HTTPS ingress.
+Open the UI:
 
-## 외부 Sensor 설치와 인터페이스 방향
+```text
+http://localhost:8080
+```
 
-Sensor는 중앙 Docker Compose에 포함되지 않는다. 각 Linux 시스템에 독립 Agent로 설치하며, 모든 연결은 Sensor에서 Controller 방향으로 시작한다.
+> `C2HUNTER_DEV_LOGIN_ENABLED=true` is for isolated local development only. Do not expose the development login or Controller directly to the Internet.
 
-1. Web UI의 **External sensors → Enroll sensor**에서 Sensor 이름을 입력한다.
-2. 인터페이스 행을 추가하고 각 인터페이스에 `INBOUND`, `OUTBOUND`, `BIDIRECTIONAL`, `UNKNOWN`, BPF, 활성 여부를 설정한다. 예를 들어 한 장비의 `ens2f0`은 `INBOUND`, `ens2f1`은 `OUTBOUND`로 설정할 수 있다.
-3. 생성 직후 한 번만 표시되는 enrollment token과 설치 명령을 안전하게 복사한다.
-4. 중앙 빌드 시스템에서 tarball을 만들고 외부 Sensor로 전송한다.
+---
+
+## Analyze a PCAP
+
+C2Hunter accepts classic PCAP and PCAPNG captures.
+
+From the UI:
+
+```text
+Analysis history
+    ↓
+Upload PCAP
+    ↓
+Configure internal CIDRs
+    ↓
+Run analysis
+    ↓
+Review ranked candidates
+    ↓
+Inspect evidence / flows / PCAP
+```
+
+The default upload limits are:
+
+- `500 MiB`
+- `2,000,000` timestamped packets
+
+Supported link types include Ethernet, raw IP, Linux cooked v1/v2, and loopback.
+
+The binary API is available under:
+
+```text
+POST /api/v1/pcap-analysis-jobs
+```
+
+See [External API Reference](docs/external-api-reference.md) for request parameters and examples.
+
+---
+
+## Deploy External Sensors
+
+Sensors run as independent Linux agents outside the central Docker Compose stack.
+
+Build the sensor:
 
 ```bash
 make sensor-agent
+```
+
+Install it on the sensor host:
+
+```bash
 tar -xzf artifacts/c2hunter-sensor-dev-linux-amd64.tar.gz
 cd c2hunter-sensor
+
 sudo ./install-sensor.sh \
   --controller-url https://c2hunter.example.com \
   --enrollment-token '<ONE_TIME_TOKEN>'
+
 sudo systemctl start c2hunter-sensor
 sudo systemctl status c2hunter-sensor
 ```
 
-Agent는 one-time token을 장기 Sensor credential로 교환해 mode `0600` state file에 저장하고, 중앙의 versioned desired configuration을 주기적으로 가져온다. 각 enabled 인터페이스는 독립 AF_PACKET→Flow→spool→upload pipeline으로 동작하므로 한 인터페이스 오류가 다른 인터페이스를 중단하지 않는다. 오류 시 Sensor는 `DEGRADED`와 인터페이스별 error/counter를 보고한다.
+Each capture interface can be configured as:
 
-installer는 전용 non-root 사용자와 systemd hardening을 적용하고 binary에 `CAP_NET_RAW`/`CAP_NET_ADMIN`만 부여한다. root로 Agent를 직접 실행하지 않는다. 방향을 추론할 근거가 부족하면 `UNKNOWN`을 사용한다.
+- `INBOUND`
+- `OUTBOUND`
+- `BIDIRECTIONAL`
+- `UNKNOWN`
 
-## Run an analysis
+The agent uses an independent AF_PACKET → Flow → spool → upload pipeline for each enabled interface, so an error on one interface does not need to stop all capture sources.
 
-Log in, choose **New analysis**, select sensors, live/historical mode, duration, packet limit, directions, BPF, PCAP opt-in, profile, minimum score, and minimum host count. The equivalent API prefix is `/api/v1`; OpenAPI is at `http://localhost:8000/docs`.
+The installer creates a dedicated non-root user and limits packet-capture privileges to the required Linux capabilities.
 
-Jobs move through `CREATED → WAITING_FOR_SENSOR → CAPTURING → UPLOADING → INGESTING → ANALYZING` and then a terminal status. Cancellation is available from the progress page. Reanalysis creates a new run against the original immutable dataset.
+---
 
-### Analysis history and offline PCAP
+## Analysis Lifecycle
 
-**Analysis history** lists sensor and uploaded-capture investigations together. An analyst can change only the display name and analyst note; source packets, time range, detector settings, evidence, and scores remain immutable. Terminal jobs (`COMPLETED`, `PARTIALLY_COMPLETED`, `FAILED`, or `CANCELLED`) can be deleted after confirmation. Deleting a job also removes its candidates and generated PCAP exports.
+Jobs move through a visible state machine:
 
-**Upload PCAP** accepts a classic PCAP or PCAPNG file and runs it through the same flow normalization, detectors, allowlist, and scoring path. Configure internal CIDRs so packet direction can be derived; ambiguous traffic remains `UNKNOWN`. Ethernet, raw IP, Linux cooked v1/v2, and loopback link types are supported. The defaults are 500 MiB and 2,000,000 timestamped packets and can be changed with `C2HUNTER_PCAP_UPLOAD_MAX_BYTES` and `C2HUNTER_PCAP_UPLOAD_MAX_PACKETS`.
+```text
+CREATED
+   ↓
+WAITING_FOR_SENSOR
+   ↓
+CAPTURING
+   ↓
+UPLOADING
+   ↓
+INGESTING
+   ↓
+ANALYZING
+   ↓
+COMPLETED / PARTIALLY_COMPLETED / FAILED / CANCELLED
+```
 
-The binary API is `POST /api/v1/pcap-analysis-jobs` with the file as the request body and analysis metadata as documented query parameters. It accepts `application/vnd.tcpdump.pcap`, `application/x-pcap`, `application/x-pcapng`, or `application/octet-stream`.
+Reanalysis creates a new run against the original immutable dataset rather than silently rewriting completed results.
 
-## Interpret results
+---
 
-Scores are `LOW 0–39`, `MEDIUM 40–59`, `HIGH 60–79`, and `CRITICAL 80–100`. A score is not an attribution verdict. Review evidence contributions, internal hosts, independent sensor observations, clock/loss warnings, command-to-attack timeline, and PCAP before escalation. DNS/NTP/CDN and allowlist matches reduce or suppress candidates.
+## Architecture
 
-Candidate detail supports asynchronous filtered PCAP export. Download URLs are expected to be authorized, audited, short-lived, and server-named.
+C2Hunter separates capture, control, flow storage, object storage, queueing, and analysis.
 
-### Analyst-guided Payload detection
+```text
+External Linux Sensors
+        │
+        │ outbound authenticated HTTPS
+        ▼
+┌──────────────────────────┐
+│      Controller API      │◄──────── Browser / REST clients
+└────────────┬─────────────┘
+             │
+     ┌───────┼───────────┬───────────┐
+     ▼       ▼           ▼           ▼
+PostgreSQL ClickHouse    MinIO      Redis
+ metadata    flows       PCAP       queue
+                                      │
+                                      ▼
+                               Analysis Worker
+                                      │
+                                      ▼
+                         Detectors + Evidence + AI
+```
 
-Candidate detail lists its source flows, while Analysis detail can search every flow even when no
-detector produced a candidate. An analyst can explicitly preview at most 256 bytes from a retained
-PCAP, record an append-only `C2` or `BENIGN` verdict, and optionally create a versioned Payload
-signature from a C2 flow. New analyses snapshot enabled signatures and detect either an exact Payload
-SHA-256 match or a guarded structural match using prefix hash, length, entropy, and SimHash. Exact
-matches are high-confidence alerts; structural matches are monitor-only until reviewed.
+The default Compose topology contains:
 
-Use **Payload signatures** to edit thresholds or enable/disable a signature. Completed results never
-change in place; create a reanalysis to apply current signatures to existing evidence. The workflow,
-match rules, privacy boundary, acceptance criteria, and implementation phases are defined in the
-[technical specification](docs/human-guided-detection.md) and
-[development plan](docs/human-guided-detection-plan.md).
+- Controller
+- Analysis Worker
+- React Web UI
+- PostgreSQL
+- Redis
+- ClickHouse
+- MinIO
 
-## Tests and fixtures
+It is a single-host development topology, not a production HA deployment.
+
+---
+
+## Security Boundaries
+
+C2Hunter is designed as a defensive analysis platform.
+
+It intentionally does **not**:
+
+- connect to suspected C2 servers,
+- actively scan Internet hosts,
+- replay botnet or malware commands,
+- decrypt TLS,
+- automatically block traffic based on AI output,
+- automatically publish MISP events based only on AI output.
+
+For non-development deployments, keep the Controller private behind HTTPS ingress and configure role-based API token digests.
+
+Roles:
+
+| Role | Capability |
+|---|---|
+| `VIEWER` | Read |
+| `ANALYST` | Investigations and finding management |
+| `ADMIN` | Analyst capabilities plus sensor / detector management |
+
+Static role tokens are a minimum deployment control, not a substitute for production identity, OIDC, MFA, or centralized session management.
+
+---
+
+## REST API
+
+The API prefix is:
+
+```text
+/api/v1
+```
+
+Swagger UI:
+
+```text
+http://localhost:8000/docs
+```
+
+OpenAPI document:
+
+```text
+http://localhost:8000/openapi.json
+```
+
+C2Hunter can be integrated with SIEM, SOAR, scripts, and defensive research pipelines.
+
+See the [External API Reference](docs/external-api-reference.md).
+
+---
+
+## Testing
 
 ```bash
 make lint
-make test                 # unit + core integration
+make test
 make test-unit
 make test-integration
-make test-e2e             # deterministic Playwright API route fixture
-make test-ai              # AI unit/contract/retention regression suite
-make evaluate-ai          # AI-A–AI-J quality/safety/profile reports
-make benchmark-ai         # deterministic evaluation latency/token benchmark
-make generate-test-pcaps  # Scenario A–G, fixed seed
-make benchmark-1m         # 1,000,000 events, bounded chunks
+make test-e2e
+
+make test-ai
+make evaluate-ai
+make benchmark-ai
+
+make generate-test-pcaps
+make benchmark-1m
 ```
 
-Playwright fixtures exist only under `web/e2e`; production bundles contain no fake C2 result. Generator output is in `testdata/generated`; benchmark JSON/Markdown is in `artifacts/`.
+The repository includes deterministic browser fixtures and generated PCAP scenarios for repeatable testing.
 
-## Required commands
+---
 
-`make setup`, `build`, `up`, `down`, `lint`, `test`, `test-unit`, `test-integration`, `test-e2e`, `test-ai`, `evaluate-ai`, `benchmark-ai`, `generate-test-pcaps`, `benchmark-1m`, and `clean` are the supported command contract.
+## Documentation
 
-## Known limitations
+| Document | Purpose |
+|---|---|
+| [Architecture](docs/architecture.md) | Components, trust boundaries, and data flow |
+| [Data Model](docs/data-model.md) | Core entities and stored data |
+| [Detection Logic](docs/detection-logic.md) | Detector behavior and scoring |
+| [Detection Adjustment Guidance](docs/detection-adjustment-guidance.md) | Tuning and detection guidance |
+| [Custom Detectors](docs/custom-detectors.md) | Extending detection logic |
+| [Human-Guided Detection](docs/human-guided-detection.md) | Analyst labels and payload signatures |
+| [External API Reference](docs/external-api-reference.md) | REST integration |
+| [Deployment](docs/deployment.md) | Deployment configuration |
+| [Operations](docs/operations.md) | Operations and troubleshooting |
+| [Security](docs/security.md) | Security assumptions and boundaries |
+| [Dashboard Overview](docs/dashboard-overview.md) | Dashboard interpretation |
+| [Local AI System](AI_C2_ANALYSIS_SYSTEM.md) | Evidence-first local AI architecture |
 
-- Production OIDC/MFA, per-user session revocation, and distributed rate limiting are not implemented.
-  Static role tokens must be rotated externally; development sessions and request counters are local to
-  one Controller process. Do not expose the Controller directly to the Internet.
-- MVP uses rule/statistical evidence, not ML or attribution.
-- TLS payloads are not decrypted; payload retention is disabled by default.
-- Compose는 Controller, Worker, Web, PostgreSQL, Redis, ClickHouse, MinIO만 실행하는 단일 호스트 개발 토폴로지이며 production HA 구성이 아니다.
-- The deterministic browser fixture validates UI behavior without a backend; it does not validate server authorization.
-- AF_PACKET availability and packet-drop goals depend on host kernel, NIC, mirror quality, and privileges.
-- Offline upload retains the original PCAP object for explicit preview/export; set conservative upload limits and retention for sensitive or high-volume captures.
+---
 
-## Troubleshooting
+## Known Limitations
 
-- `docker compose ... variable is required`: create `.env` and replace all required values.
-- Unhealthy service: `docker compose ps` then `docker compose logs <service>`.
-- UI cannot reach API: check `curl localhost:8000/api/v1/health` and the `web` proxy logs.
-- Sensor missing: verify outbound DNS/TCP, certificate identity/expiry, NTP, and explicit interface direction.
-- Drops/spool growth: inspect sensor heartbeat, disk capacity, BPF selectivity, batch size, and Controller readiness.
-- Port conflict: change `CONTROLLER_PORT` or `WEB_PORT` in `.env`.
+- Production OIDC/MFA and per-user distributed session management are not implemented.
+- The default Compose deployment is not HA.
+- TLS payloads are not decrypted.
+- Payload retention is disabled by default.
+- Packet-loss characteristics depend on the host kernel, NIC, mirror quality, capture filters, and privileges.
+- A C2Hunter score is evidence for prioritization, not proof of malicious attribution.
 
-See [deployment](docs/deployment.md), [operations](docs/operations.md), and [security](docs/security.md).
+---
+
+## Contributing
+
+Issues, reproducible PCAP scenarios, detector ideas, documentation improvements, and pull requests are welcome.
+
+Useful contributions include:
+
+- additional C2 behavioral detectors,
+- false-positive reduction,
+- protocol parsers,
+- PCAP fixtures,
+- performance benchmarks,
+- SIEM/SOAR integrations,
+- analyst workflow improvements.
+
+If you found a bug, please include the analysis mode, relevant configuration, and a minimal reproducible capture or synthetic fixture when possible.
+
+---
+
+## Support the Project
+
+If C2Hunter is useful for your threat-hunting, malware-analysis, SOC, or network-security work:
+
+**⭐ Star the repository** — it helps other defenders discover the project.
+
+You can also help by opening an issue with:
+
+- a detection idea,
+- a false-positive case,
+- a reproducible PCAP scenario,
+- a deployment report,
+- or an integration you would like to see.
+
+---
+
+<div align="center">
+
+### C2Hunter
+
+**Behavior → Evidence → Candidate → Analyst**
+
+Built for defensive network threat hunting.
+
+</div>
