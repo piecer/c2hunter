@@ -78,6 +78,7 @@ from .schemas import (
     CandidateActionCreate,
     CandidateUpdate,
     CandidateVerdictCreate,
+    CaptureParameters,
     DetectorWeightPresetCreate,
     DetectorWeightPresetUpdate,
     DevLoginRequest,
@@ -2737,6 +2738,27 @@ def create_app(
         source = repo.get_job(job_id)
         if source is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
+        source_capture = source.get("capture", {})
+        if not isinstance(source_capture, dict):
+            raise ApiError(
+                409,
+                "REANALYSIS_SOURCE_INVALID",
+                "저장된 분석 작업의 capture 설정이 올바르지 않습니다",
+            )
+        try:
+            capture_parameters = CaptureParameters.model_validate(
+                {
+                    field: source_capture[field]
+                    for field in CaptureParameters.model_fields
+                    if field in source_capture
+                }
+            ).model_dump(mode="json")
+        except ValidationError as exc:
+            raise ApiError(
+                409,
+                "REANALYSIS_SOURCE_INVALID",
+                "저장된 분석 작업의 capture 설정이 올바르지 않습니다",
+            ) from exc
         parameters = dict(source["analysis"])
         for field in ("minimum_candidate_score", "minimum_distinct_clients"):
             value = getattr(payload, field)
@@ -2752,7 +2774,7 @@ def create_app(
                 "mode": "REANALYSIS",
                 "start_time": source["start_time"],
                 "end_time": source["end_time"],
-                "capture": source["capture"],
+                "capture": capture_parameters,
                 "analysis": parameters,
                 "internal_networks": source["internal_networks"],
                 "flow_records": source["flow_records"],

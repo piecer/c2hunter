@@ -216,7 +216,8 @@ def test_inline_analysis_uses_the_allowlist_snapshot_captured_with_the_job() -> 
 
 
 def test_cancel_is_idempotent_and_reanalysis_reuses_dataset_not_results() -> None:
-    client = api()
+    repository = MemoryRepository()
+    client = api(repository)
     waiting = client.post("/api/v1/analysis-jobs", json=payload(key="wait")).json()
     cancelled = client.post(
         f"/api/v1/analysis-jobs/{waiting['id']}/cancel", json={"reason": "operator"}
@@ -229,6 +230,12 @@ def test_cancel_is_idempotent_and_reanalysis_reuses_dataset_not_results() -> Non
     completed = client.post(
         "/api/v1/analysis-jobs", json=payload(flows=synthetic_flows(), key="done")
     ).json()
+    source = repository.get_job(completed["id"])
+    assert source is not None
+    source["capture"]["requested_end_time"] = (START + timedelta(minutes=10)).isoformat()
+    source["capture"]["future_runtime_field"] = "ignored"
+    repository.save_job_metadata(source)
+
     rerun = client.post(
         f"/api/v1/analysis-jobs/{completed['id']}/reanalyze",
         json={
@@ -241,8 +248,32 @@ def test_cancel_is_idempotent_and_reanalysis_reuses_dataset_not_results() -> Non
     assert rerun.json()["id"] != completed["id"]
     assert rerun.json()["dataset_id"] == completed["dataset_id"]
     assert rerun.json()["parent_job_id"] == completed["id"]
+    assert rerun.json()["capture"]["max_packets"] == 10000
+    assert "requested_end_time" not in rerun.json()["capture"]
+    assert "future_runtime_field" not in rerun.json()["capture"]
     assert rerun.json()["analysis"]["detector_weights"]["common_destination"] == 0.25
     assert rerun.json()["analysis"]["detector_weights"]["periodic_beacon"] == 1.0
+
+
+@pytest.mark.parametrize("invalid_capture", ["invalid", {"max_packets": -1}])
+def test_reanalysis_rejects_invalid_stored_capture(invalid_capture: object) -> None:
+    repository = MemoryRepository()
+    client = api(repository)
+    completed = client.post(
+        "/api/v1/analysis-jobs", json=payload(flows=synthetic_flows(), key="invalid-source")
+    ).json()
+    source = repository.get_job(completed["id"])
+    assert source is not None
+    source["capture"] = invalid_capture
+    repository.save_job_metadata(source)
+
+    response = client.post(
+        f"/api/v1/analysis-jobs/{completed['id']}/reanalyze",
+        json={"idempotency_key": "invalid-source-rerun"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "REANALYSIS_SOURCE_INVALID"
 
 
 def test_detector_weight_presets_enforce_single_default_and_apply_to_new_jobs() -> None:
