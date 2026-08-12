@@ -8,6 +8,7 @@ import secrets
 import threading
 import uuid
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Annotated, Any, Literal, cast
@@ -758,6 +759,18 @@ def create_app(
     app.state.ai_analysis_queue = ai_tasks
     candidate_action_lock = threading.Lock()
     misp_export_lock = threading.Lock()
+    enrichment_executor = ThreadPoolExecutor(
+        max_workers=config.candidate_auto_enrichment_workers,
+        thread_name_prefix="candidate-ti",
+    )
+    enrichment_futures: set[Future[Any]] = set()
+    enrichment_lock = threading.Lock()
+    enrichment_repository_lock = threading.Lock()
+    enrichment_repositories: list[PostgresRepository] = []
+    enrichment_repository_local = threading.local()
+    enrichment_capacity = threading.BoundedSemaphore(
+        config.candidate_auto_enrichment_queue_capacity
+    )
     sessions = SessionStore()
     authenticator = TokenAuthenticator(
         sessions,
@@ -1727,6 +1740,189 @@ def create_app(
         enqueue_worker_job(job)
         return saved
 
+    def enrich_candidate(
+        job_id: str,
+        candidate: dict[str, Any],
+        *,
+        origin: Literal["AUTO", "MANUAL"],
+        pending_record: dict[str, Any] | None = None,
+        persistence_repository: Repository | None = None,
+    ) -> dict[str, Any]:
+        target_repository = persistence_repository or repo
+        candidate_id = str(candidate["id"])
+        candidate_ip = str(candidate["candidate_ip"])
+        base_record = pending_record or {
+            "id": str(uuid.uuid4()),
+            "candidate_id": candidate_id,
+            "job_id": job_id,
+            "candidate_ip": candidate_ip,
+            "origin": origin,
+            "status": "PENDING",
+            "fetched_at": datetime.now(UTC).isoformat(),
+            "providers": {},
+            "summary": {},
+        }
+        target_repository.save_candidate_ti_lookup(base_record)
+        providers: dict[str, dict[str, Any]] = {}
+        summary: dict[str, Any] = {}
+        try:
+            if threat_intel is not None:
+                result = threat_intel.lookup_ip(candidate_ip)
+                raw_providers = result.get("providers", {})
+                if isinstance(raw_providers, dict):
+                    providers.update(
+                        {
+                            str(name): cast(dict[str, Any], value)
+                            for name, value in raw_providers.items()
+                            if isinstance(value, dict)
+                        }
+                    )
+                raw_summary = result.get("summary", {})
+                if isinstance(raw_summary, dict):
+                    summary.update(raw_summary)
+            if misp is not None:
+                try:
+                    providers["misp"] = misp.lookup_ip(candidate_ip)
+                except IntegrationError as exc:
+                    providers["misp"] = {
+                        "status": "ERROR",
+                        "provider": exc.provider,
+                        "error": exc.message,
+                    }
+            summary["misp_attribute_count"] = int(
+                providers.get("misp", {}).get("attribute_count", 0) or 0
+            )
+            summary["misp_event_count"] = int(providers.get("misp", {}).get("event_count", 0) or 0)
+            failed = any(
+                provider.get("status") in {"ERROR", "AUTH_ERROR", "RATE_LIMITED"}
+                for provider in providers.values()
+            )
+            completed = {
+                **base_record,
+                "status": "PARTIAL" if failed else "COMPLETED",
+                "fetched_at": datetime.now(UTC).isoformat(),
+                "providers": providers,
+                "summary": summary,
+            }
+        except IntegrationError as exc:
+            completed = {
+                **base_record,
+                "status": "FAILED",
+                "fetched_at": datetime.now(UTC).isoformat(),
+                "providers": {
+                    exc.provider: {
+                        "status": "ERROR",
+                        "provider": exc.provider,
+                        "error": exc.message,
+                    }
+                },
+                "summary": summary,
+            }
+        except Exception:
+            logger.exception(
+                "Unexpected candidate enrichment failure candidate_id=%s candidate_ip=%s origin=%s",
+                candidate_id,
+                candidate_ip,
+                origin,
+            )
+            completed = {
+                **base_record,
+                "status": "FAILED",
+                "fetched_at": datetime.now(UTC).isoformat(),
+                "providers": {
+                    "internal": {
+                        "status": "ERROR",
+                        "error": "candidate enrichment failed",
+                    }
+                },
+                "summary": summary,
+            }
+        target_repository.save_candidate_ti_lookup(completed)
+        return completed
+
+    def automatic_enrichment_repository() -> Repository:
+        if not isinstance(repo, PostgresRepository):
+            return repo
+        worker_repository = getattr(enrichment_repository_local, "repository", None)
+        if isinstance(worker_repository, PostgresRepository):
+            return worker_repository
+        worker_repository = repo.for_background_worker()
+        enrichment_repository_local.repository = worker_repository
+        with enrichment_repository_lock:
+            enrichment_repositories.append(worker_repository)
+        return worker_repository
+
+    def run_automatic_enrichment(
+        job_id: str,
+        candidate: dict[str, Any],
+        pending_record: dict[str, Any],
+    ) -> dict[str, Any]:
+        return enrich_candidate(
+            job_id,
+            candidate,
+            origin="AUTO",
+            pending_record=pending_record,
+            persistence_repository=automatic_enrichment_repository(),
+        )
+
+    def schedule_candidate_enrichment(job_id: str, candidates: list[dict[str, Any]]) -> None:
+        if (threat_intel is None and misp is None) or config.candidate_auto_enrichment_limit == 0:
+            return
+        selected = sorted(candidates, key=lambda item: int(item.get("score", 0)), reverse=True)[
+            : config.candidate_auto_enrichment_limit
+        ]
+        for candidate in selected:
+            pending_record = {
+                "id": str(uuid.uuid4()),
+                "candidate_id": str(candidate["id"]),
+                "job_id": job_id,
+                "candidate_ip": str(candidate["candidate_ip"]),
+                "origin": "AUTO",
+                "status": "PENDING",
+                "fetched_at": datetime.now(UTC).isoformat(),
+                "providers": {},
+                "summary": {},
+            }
+            repo.save_candidate_ti_lookup(pending_record)
+            if not enrichment_capacity.acquire(blocking=False):
+                repo.save_candidate_ti_lookup(
+                    {
+                        **pending_record,
+                        "status": "FAILED",
+                        "providers": {
+                            "internal": {
+                                "status": "ERROR",
+                                "error": "automatic enrichment queue capacity exceeded",
+                            }
+                        },
+                    }
+                )
+                continue
+            future = enrichment_executor.submit(
+                run_automatic_enrichment,
+                job_id,
+                candidate,
+                pending_record,
+            )
+            with enrichment_lock:
+                enrichment_futures.add(future)
+
+            def discard_completed(completed: Future[Any]) -> None:
+                enrichment_capacity.release()
+                with enrichment_lock:
+                    enrichment_futures.discard(completed)
+
+            future.add_done_callback(discard_completed)
+
+    def wait_for_candidate_enrichment() -> None:
+        with enrichment_lock:
+            pending = set(enrichment_futures)
+        if pending:
+            wait(pending)
+
+    app.state.schedule_candidate_enrichment = schedule_candidate_enrichment
+    app.state.wait_for_candidate_enrichment = wait_for_candidate_enrichment
+
     def persist_claimed_result(result: dict[str, Any]) -> None:
         receipt = str(result.get("receipt", ""))
         job = repo.get_job_summary(str(result.get("job_id", "")))
@@ -1746,6 +1942,7 @@ def create_app(
             for candidate in candidates:
                 candidate.setdefault("id", str(uuid.uuid4()))
             repo.save_candidates(job["id"], candidates)
+            schedule_candidate_enrichment(str(job["id"]), candidates)
             job["candidate_count"] = len(candidates)
             machine.transition(job, JobState.COMPLETED, "worker result persisted")
         else:
@@ -1809,6 +2006,10 @@ def create_app(
     @app.on_event("shutdown")
     def stop_result_consumer() -> None:
         result_stop.set()
+        enrichment_executor.shutdown(wait=True, cancel_futures=False)
+        with enrichment_repository_lock:
+            for worker_repository in enrichment_repositories:
+                worker_repository.close()
 
     def execute_analysis(job: dict[str, Any]) -> dict[str, Any]:
         apply_job_packet_limit(job)
@@ -1822,6 +2023,7 @@ def create_app(
             machine.transition(job, state, reason)
         candidates = calculate(job, job.get("allowlist", []))
         repo.save_candidates(job["id"], candidates)
+        schedule_candidate_enrichment(str(job["id"]), candidates)
         job["candidate_count"] = len(candidates)
         job["flow_count"] = len(job.get("flow_records", []))
         job["packet_count"] = sum(
@@ -3041,30 +3243,17 @@ def create_app(
 
     @app.post("/api/v1/candidates/{candidate_id}/threat-intelligence/lookups")
     def lookup_candidate_threat_intelligence(candidate_id: str) -> dict[str, Any]:
-        if threat_intel is None:
+        if threat_intel is None and misp is None:
             raise ApiError(
                 503,
                 "THREAT_INTELLIGENCE_NOT_CONFIGURED",
-                "VirusTotal 또는 AbuseIPDB API 키가 설정되지 않았습니다",
+                "VirusTotal, AbuseIPDB 또는 MISP 연동이 설정되지 않았습니다",
             )
         found = _find_candidate(repo, candidate_id)
         if found is None:
             raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
         job, candidate = found
-        try:
-            result = threat_intel.lookup_ip(str(candidate["candidate_ip"]))
-        except IntegrationError as exc:
-            raise ApiError(502, "THREAT_INTELLIGENCE_FAILED", exc.message) from exc
-        repo.save_candidate_ti_lookup(
-            {
-                "id": str(uuid.uuid4()),
-                "candidate_id": candidate_id,
-                "job_id": str(job["id"]),
-                "candidate_ip": str(candidate["candidate_ip"]),
-                **result,
-            }
-        )
-        return result
+        return enrich_candidate(str(job["id"]), candidate, origin="MANUAL")
 
     @app.post("/api/v1/candidates/{candidate_id}/misp-exports")
     def export_candidate_to_misp(

@@ -80,6 +80,23 @@ class StubHttpClient(JsonHttpClient):
                     "isWhitelisted": False,
                 }
             }
+        if url.endswith("/attributes/restSearch"):
+            return {
+                "response": {
+                    "Attribute": [
+                        {
+                            "id": "77",
+                            "event_id": "42",
+                            "type": "ip-src",
+                            "value": "203.0.113.44",
+                            "category": "Network activity",
+                            "to_ids": True,
+                            "timestamp": "1700000000",
+                            "comment": "known C2",
+                        }
+                    ]
+                }
+            }
         if self.invalid_misp:
             return {"message": "validation failed"}
         return {"Attribute": {"id": "9001", "event_id": "42", "value": "203.0.113.44"}}
@@ -187,6 +204,28 @@ def test_misp_client_posts_ip_src_attribute_to_selected_event() -> None:
         "comment": "confirmed by analyst",
     }
     assert result == {"attribute_id": "9001", "event_id": "42", "value": "203.0.113.44"}
+
+
+def test_misp_client_searches_existing_ip_attributes_without_exposing_key() -> None:
+    http = StubHttpClient()
+    client = MispClient("https://misp.example/api", "misp-secret", http_client=http)
+
+    result = client.lookup_ip("203.0.113.44")
+
+    request = http.requests[0]
+    assert request["method"] == "POST"
+    assert request["url"] == "https://misp.example/api/attributes/restSearch"
+    assert request["body"] == {
+        "returnFormat": "json",
+        "type": ["ip-src", "ip-dst"],
+        "value": "203.0.113.44",
+        "limit": 100,
+    }
+    assert result["status"] == "OK"
+    assert result["attribute_count"] == 1
+    assert result["event_count"] == 1
+    assert result["matches"][0]["event_id"] == "42"
+    assert "misp-secret" not in str(result)
 
 
 def test_misp_client_rejects_non_http_base_url() -> None:

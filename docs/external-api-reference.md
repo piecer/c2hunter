@@ -1,5 +1,31 @@
 # 외부 API 참조 (External API Reference)
 
+## Candidate 자동 위협 인텔리전스
+
+분석 결과에 Candidate가 저장되면 Controller는 구성된 외부 공급자를 점수 상위 순으로 자동
+조회한다. `C2HUNTER_CANDIDATE_AUTO_ENRICHMENT_LIMIT`은 작업별 최대 후보 수이며 `0`이면
+자동 조회를 끈다. 조회는 worker 수와 전역 in-flight queue capacity가 제한된 executor에서
+실행되므로 외부 서비스 실패, timeout, backlog가 분석 작업의 `COMPLETED` 전이를 막지 않는다.
+용량을 초과한 조회는 민감한 내부 정보 없이 `FAILED` resource로 기록된다.
+
+Candidate의 `threat_intelligence`는 최신 조회 resource이며 detector 결과와 분리된다.
+
+- `origin`: `AUTO` 또는 `MANUAL`
+- `status`: `PENDING`, `COMPLETED`, `PARTIAL`, `FAILED`
+- `providers`: `virustotal`, `abuseipdb`, `misp`의 공급자별 상태와 정규화 결과
+- `summary`: VirusTotal 통계, AbuseIPDB confidence, MISP 검색 응답 최대 100건 내 attribute/event 개수
+- `fetched_at`: 조회 시작 또는 완료 시각
+
+`POST /api/v1/candidates/{candidate_id}/threat-intelligence/lookups`는 구성된 모든 공급자를
+다시 조회해 `origin=MANUAL`인 새 resource를 저장한다. 일부 공급자가 실패하면 성공 결과를
+버리지 않고 `PARTIAL`로 반환한다. 모든 연동이 비활성화된 경우 503
+`THREAT_INTELLIGENCE_NOT_CONFIGURED`를 반환한다.
+
+외부 TI 결과는 분석가 판정의 보조 근거다. 시스템은 결과만으로 Candidate를 자동 Confirm하지
+않는다. `POST /api/v1/candidates/{candidate_id}/verdicts`의 `CONFIRMED_C2` 판정과
+`POST /api/v1/candidates/{candidate_id}/misp-exports`의 MISP 쓰기는 기존 RBAC와 명시적 사용자
+동작을 계속 요구한다.
+
 C2Hunter Controller는 REST API를 제공하며, OpenAPI spec은 `http://localhost:8000/openapi.json` 또는 Swagger UI `http://localhost:8000/docs`에서 확인할 수 있다.
 
 ## 인증

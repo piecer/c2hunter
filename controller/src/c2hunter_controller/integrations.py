@@ -1,7 +1,7 @@
 """Outbound threat-intelligence and MISP integrations.
 
-The controller only performs operator-triggered lookups and exports. API keys are
-kept in settings and are never included in returned provider data or errors.
+The controller performs bounded automatic or operator-triggered lookups and only
+operator-triggered exports. API keys are never returned in provider data or errors.
 """
 
 from __future__ import annotations
@@ -57,6 +57,8 @@ class ThreatIntelLookup(Protocol):
 
 
 class MispPublisher(Protocol):
+    def lookup_ip(self, ip_address: str) -> dict[str, Any]: ...
+
     def add_ip_attribute(self, event_id: str, ip_address: str, comment: str) -> dict[str, Any]: ...
 
 
@@ -271,7 +273,7 @@ class ThreatIntelService:
 
 
 class MispClient:
-    """Publish confirmed candidate IPs as MISP ip-src attributes."""
+    """Search candidate IPs and publish confirmed IPs as MISP attributes."""
 
     def __init__(
         self,
@@ -286,6 +288,50 @@ class MispClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.http = http_client or JsonHttpClient()
+
+    def lookup_ip(self, ip_address: str) -> dict[str, Any]:
+        normalized_ip = str(ip_address_value(ip_address))
+        payload = self.http.request(
+            "POST",
+            f"{self.base_url}/attributes/restSearch",
+            headers={
+                "Authorization": self.api_key,
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            body={
+                "returnFormat": "json",
+                "type": ["ip-src", "ip-dst"],
+                "value": normalized_ip,
+                "limit": 100,
+            },
+        )
+        response = payload.get("response")
+        container = _mapping(response) if isinstance(response, dict) else payload
+        raw_attributes = container.get("Attribute", [])
+        attributes = raw_attributes if isinstance(raw_attributes, list) else []
+        matches = []
+        for item in attributes[:100]:
+            attribute = _mapping(item)
+            if str(attribute.get("value", "")) != normalized_ip:
+                continue
+            matches.append(
+                {
+                    "attribute_id": str(attribute.get("id", "")),
+                    "event_id": str(attribute.get("event_id", "")),
+                    "type": str(attribute.get("type", "")),
+                    "category": str(attribute.get("category", "")),
+                    "to_ids": bool(attribute.get("to_ids", False)),
+                    "timestamp": attribute.get("timestamp"),
+                    "comment": str(attribute.get("comment", "")),
+                }
+            )
+        return {
+            "status": "OK",
+            "attribute_count": len(matches),
+            "event_count": len({item["event_id"] for item in matches if item["event_id"]}),
+            "matches": matches,
+        }
 
     def add_ip_attribute(self, event_id: str, ip_address: str, comment: str) -> dict[str, Any]:
         normalized_ip = str(ip_address_value(ip_address))

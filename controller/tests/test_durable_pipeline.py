@@ -223,6 +223,19 @@ def test_live_job_waits_for_capture_end_before_enqueuing_analysis() -> None:
 
 
 def test_controller_persists_worker_result_before_ack() -> None:
+    class ThreatIntelStub:
+        def __init__(self) -> None:
+            self.lookups: list[str] = []
+
+        def lookup_ip(self, ip_address: str) -> dict[str, Any]:
+            self.lookups.append(ip_address)
+            return {
+                "ip_address": ip_address,
+                "providers": {"virustotal": {"status": "OK", "malicious": 4}},
+                "summary": {"malicious": 4},
+            }
+
+    threat_intel = ThreatIntelStub()
     store = MemoryFlowStore()
     queue = QueueStub()
     repository = MemoryRepository()
@@ -231,6 +244,7 @@ def test_controller_persists_worker_result_before_ack() -> None:
         repository,
         flow_store=store,
         queue=queue,
+        threat_intel_service=threat_intel,
     )
     client = TestClient(app)
     register_sensor(client)
@@ -250,8 +264,12 @@ def test_controller_persists_worker_result_before_ack() -> None:
     )
 
     assert app.state.process_results_once() is True
+    app.state.wait_for_candidate_enrichment()
     assert repository.get_job(job["id"])["status"] == "COMPLETED"  # type: ignore[index]
     assert repository.get_candidates(job["id"])[0]["candidate_ip"] == "203.0.113.1"
+    candidate_id = repository.get_candidates(job["id"])[0]["id"]
+    assert repository.list_candidate_ti_lookups(candidate_id)[-1]["status"] == "COMPLETED"
+    assert threat_intel.lookups == ["203.0.113.1"]
     assert queue.acked == ["result-receipt"]
 
 

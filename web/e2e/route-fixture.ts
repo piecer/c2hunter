@@ -7,7 +7,22 @@ async function fulfill(route: Route, body: unknown, status = 200) { await route.
 
 export async function installApiFixture(page: Page) {
   let allowlist: Array<{ id: string; type: string; value: string; description: string }> = [];
-  let currentCandidate: typeof candidate & Record<string, unknown> = { ...candidate, workflow_status: 'NEEDS_REVIEW', action_status: 'NOT_REQUIRED' };
+  let currentCandidate: typeof candidate & Record<string, unknown> = {
+    ...candidate,
+    workflow_status: 'NEEDS_REVIEW',
+    action_status: 'NOT_REQUIRED',
+    threat_intelligence: {
+      status: 'COMPLETED',
+      origin: 'AUTO',
+      fetched_at: '2026-07-20T10:09:00Z',
+      summary: { malicious: 8, suspicious: 2, harmless: 12, abuse_confidence_score: 91, misp_event_count: 1 },
+      providers: {
+        virustotal: { status: 'OK', malicious: 8, suspicious: 2, harmless: 12, reputation: -20 },
+        abuseipdb: { status: 'OK', abuse_confidence_score: 91, total_reports: 13, country_code: 'US' },
+        misp: { status: 'OK', attribute_count: 2, event_count: 1, matches: [{ event_id: '42' }] },
+      },
+    },
+  };
   let aiRuns: Array<Record<string, unknown>> = [];
   const aiAssessment = {
     id: 'assessment-1',

@@ -60,6 +60,27 @@ class FakeConnection:
         self.closed = True
 
 
+def test_background_worker_repository_uses_an_independent_connection_boundary() -> None:
+    blob_store = cast(MinioBlobStore, object())
+    repository = PostgresRepository("postgresql://controller", blob_store)
+    worker_repository = repository.for_background_worker()
+    primary_connection = FakeConnection()
+    worker_connection = FakeConnection()
+    repository._connection = primary_connection
+    worker_repository._connection = worker_connection
+
+    assert worker_repository is not repository
+    assert worker_repository.database_url == repository.database_url
+    assert worker_repository.connection is worker_connection
+    assert repository.connection is primary_connection
+
+    worker_repository.close()
+    worker_repository.close()
+
+    assert worker_connection.closed is True
+    assert primary_connection.closed is False
+
+
 class FailingHeartbeatCursor(FakeCursor):
     def execute(self, query: str, params: tuple | None = None) -> None:
         super().execute(query, params)

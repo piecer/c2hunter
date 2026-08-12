@@ -70,6 +70,8 @@ test('administrator validates a candidate with TI and exports it to MISP', async
   await page.goto('/candidates/candidate-1');
 
   await expect(page.getByRole('heading', { name: '판정 및 외부 검증' })).toBeVisible();
+  await expect(page.getByText('자동 조회 완료')).toBeVisible();
+  await expect(page.getByText('MISP 이벤트 1개')).toBeVisible();
   await expect(page.getByRole('button', { name: 'MISP로 전송' })).toBeDisabled();
   await page.getByLabel('Candidate verdict').selectOption('CONFIRMED_C2');
   await page.getByLabel('Verdict confidence').selectOption('HIGH');
@@ -86,7 +88,7 @@ test('administrator validates a candidate with TI and exports it to MISP', async
   await page.getByRole('button', { name: '조치 완료' }).click();
   await expect(page.locator('.workflow-badge', { hasText: '조치 완료' })).toBeVisible();
 
-  await page.getByRole('button', { name: '외부 TI 조회' }).click();
+  await page.getByRole('button', { name: '외부 TI 다시 조회' }).click();
   await expect(page.getByText('악성 8')).toBeVisible();
   await expect(page.getByText('Abuse 신뢰도 91%')).toBeVisible();
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -36,7 +37,17 @@ class FakeThreatIntelService:
 class FakeMispClient:
     def __init__(self) -> None:
         self.exports: list[tuple[str, str, str]] = []
+        self.lookups: list[str] = []
         self.fail = False
+
+    def lookup_ip(self, ip_address: str) -> dict[str, Any]:
+        self.lookups.append(ip_address)
+        return {
+            "status": "OK",
+            "attribute_count": 2,
+            "event_count": 1,
+            "matches": [{"attribute_id": "77", "event_id": "42", "type": "ip-src"}],
+        }
 
     def add_ip_attribute(self, event_id: str, ip_address: str, comment: str) -> dict[str, Any]:
         if self.fail:
@@ -298,17 +309,116 @@ def test_candidate_list_filters_response_workflow_independently_from_verdict() -
 
 
 def test_candidate_threat_intelligence_lookup_is_persisted() -> None:
-    client, repository, threat_intel, _ = _client()
+    client, repository, threat_intel, misp = _client()
 
     response = client.post("/api/v1/candidates/candidate-1/threat-intelligence/lookups")
 
     assert response.status_code == 200
     assert response.json()["summary"]["abuse_confidence_score"] == 85
     assert threat_intel.lookups == ["203.0.113.44"]
+    assert misp.lookups == ["203.0.113.44"]
+    assert response.json()["providers"]["misp"]["attribute_count"] == 2
+    assert response.json()["summary"]["misp_event_count"] == 1
+    assert response.json()["origin"] == "MANUAL"
     detector_candidate = repository.get_candidates("job-1")[0]
     assert "threat_intelligence" not in detector_candidate
     stored = repository.list_candidate_ti_lookups("candidate-1")[0]
     assert stored["providers"]["virustotal"]["malicious"] == 7
+
+
+def test_new_candidates_are_automatically_enriched_when_integrations_are_configured() -> None:
+    repository = MemoryRepository()
+    threat_intel = FakeThreatIntelService()
+    misp = FakeMispClient()
+    app = create_app(
+        Settings(environment="test", candidate_auto_enrichment_limit=1),
+        repository,
+        threat_intel_service=threat_intel,
+        misp_client=misp,
+    )
+    repository.jobs["job-1"] = {"id": "job-1", "name": "automatic enrichment"}
+    candidates = [
+        {"id": "candidate-high", "candidate_ip": "203.0.113.44", "score": 90},
+        {"id": "candidate-low", "candidate_ip": "203.0.113.45", "score": 60},
+    ]
+    repository.save_candidates("job-1", candidates)
+
+    app.state.schedule_candidate_enrichment("job-1", candidates)
+    app.state.wait_for_candidate_enrichment()
+
+    assert threat_intel.lookups == ["203.0.113.44"]
+    assert misp.lookups == ["203.0.113.44"]
+    stored = repository.list_candidate_ti_lookups("candidate-high")[-1]
+    assert stored["status"] == "COMPLETED"
+    assert stored["origin"] == "AUTO"
+    assert stored["providers"]["misp"]["event_count"] == 1
+    assert repository.list_candidate_ti_lookups("candidate-low") == []
+
+
+def test_automatic_enrichment_records_unexpected_provider_failure() -> None:
+    class BrokenThreatIntelService:
+        def lookup_ip(self, ip_address: str) -> dict[str, Any]:
+            del ip_address
+            raise RuntimeError("provider implementation bug with sensitive details")
+
+    repository = MemoryRepository()
+    app = create_app(
+        Settings(environment="test"),
+        repository,
+        threat_intel_service=BrokenThreatIntelService(),
+    )
+    candidate = {"id": "candidate-broken", "candidate_ip": "203.0.113.44", "score": 90}
+    repository.save_candidates("job-broken", [candidate])
+
+    app.state.schedule_candidate_enrichment("job-broken", [candidate])
+    app.state.wait_for_candidate_enrichment()
+
+    stored = repository.list_candidate_ti_lookups("candidate-broken")[-1]
+    assert stored["status"] == "FAILED"
+    assert stored["providers"]["internal"]["error"] == "candidate enrichment failed"
+    assert "sensitive details" not in str(stored)
+
+
+def test_automatic_enrichment_queue_capacity_does_not_block_analysis() -> None:
+    class BlockingThreatIntelService:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def lookup_ip(self, ip_address: str) -> dict[str, Any]:
+            self.started.set()
+            assert self.release.wait(timeout=5)
+            return {"ip_address": ip_address, "providers": {}, "summary": {}}
+
+    repository = MemoryRepository()
+    threat_intel = BlockingThreatIntelService()
+    app = create_app(
+        Settings(
+            environment="test",
+            candidate_auto_enrichment_limit=2,
+            candidate_auto_enrichment_workers=1,
+            candidate_auto_enrichment_queue_capacity=1,
+        ),
+        repository,
+        threat_intel_service=threat_intel,
+    )
+    candidates = [
+        {"id": "candidate-first", "candidate_ip": "203.0.113.44", "score": 90},
+        {"id": "candidate-overflow", "candidate_ip": "203.0.113.45", "score": 80},
+    ]
+    repository.save_candidates("job-capacity", candidates)
+
+    app.state.schedule_candidate_enrichment("job-capacity", candidates)
+
+    assert threat_intel.started.wait(timeout=1)
+    overflow = repository.list_candidate_ti_lookups("candidate-overflow")[-1]
+    assert overflow["status"] == "FAILED"
+    assert overflow["providers"]["internal"]["error"] == (
+        "automatic enrichment queue capacity exceeded"
+    )
+    threat_intel.release.set()
+    app.state.wait_for_candidate_enrichment()
+    assert repository.list_candidate_ti_lookups("candidate-first")[-1]["status"] == "COMPLETED"
 
 
 def test_misp_export_requires_confirmed_candidate() -> None:

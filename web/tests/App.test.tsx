@@ -484,7 +484,18 @@ describe('C2Hunter UI', () => {
 
   it('records verdicts, looks up TI, and exports confirmed candidates to MISP', async () => {
     const original = responses['/api/v1/candidates/candidate-1'] as Record<string, unknown>;
-    let candidate = { ...original };
+    const automaticThreatIntelligence = {
+      status: 'COMPLETED',
+      origin: 'AUTO',
+      fetched_at: '2026-07-20T10:59:00Z',
+      summary: { malicious: 8, suspicious: 2, harmless: 12, abuse_confidence_score: 91, misp_event_count: 1 },
+      providers: {
+        virustotal: { status: 'OK', malicious: 8, suspicious: 2, harmless: 12, reputation: -20 },
+        abuseipdb: { status: 'OK', abuse_confidence_score: 91, total_reports: 13, country_code: 'US', isp: 'Example ISP' },
+        misp: { status: 'OK', attribute_count: 2, event_count: 1, matches: [{ event_id: '42' }] },
+      },
+    };
+    let candidate: Record<string, unknown> = { ...original, threat_intelligence: automaticThreatIntelligence };
     let actionSequence = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
@@ -518,6 +529,9 @@ describe('C2Hunter UI', () => {
     const user = userEvent.setup();
 
     expect(await screen.findByRole('heading', { name: '판정 및 외부 검증' })).toBeInTheDocument();
+    expect(screen.getByText('자동 조회 완료')).toBeInTheDocument();
+    expect(screen.getByText('MISP 이벤트 1개')).toBeInTheDocument();
+    expect(screen.getByText(/외부 평판은 판단 근거이며 자동 확정하지 않습니다/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'MISP로 전송' })).toBeDisabled();
     await user.selectOptions(screen.getByLabelText('Candidate verdict'), 'CONFIRMED_C2');
     await user.selectOptions(screen.getByLabelText('Verdict confidence'), 'HIGH');
@@ -534,7 +548,7 @@ describe('C2Hunter UI', () => {
     await user.click(screen.getByRole('button', { name: '조치 완료' }));
     await waitFor(() => expect(screen.getByText('조치 완료', { selector: '.workflow-badge' })).toBeInTheDocument());
 
-    await user.click(screen.getByRole('button', { name: '외부 TI 조회' }));
+    await user.click(screen.getByRole('button', { name: '외부 TI 다시 조회' }));
     expect(await screen.findByText('악성 8')).toBeInTheDocument();
     expect(screen.getByText('Abuse 신뢰도 91%')).toBeInTheDocument();
 

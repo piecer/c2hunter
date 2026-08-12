@@ -54,12 +54,18 @@ Values marked "SHA-256" must be 64-character lowercase hex digests — never pla
 
 ### Candidate 외부 검증 및 MISP 연동
 
-Candidate 상세 화면에서 분석가가 판정을 기록하고, VirusTotal/AbuseIPDB를 조회하며,
-`CONFIRMED_C2` 판정 후 MISP Event에 `ip-src` attribute를 전송할 수 있다. 외부 조회와
-전송은 비용·rate limit·오전송을 막기 위해 자동 실행하지 않고 분석가의 명시적 동작으로만
-수행된다. 판정 이력, TI 조회, MISP 전송 성공·실패 이력은 detector Candidate JSON과 분리된
-감사 resource로 보존되고 Candidate 조회 시 합성된다. `FALSE_POSITIVE` 판정은 detector 결과를
-숨기거나 Allowlist에 자동 등록하지 않으며, 영구 억제는 별도 Allowlist 작업으로 수행한다.
+Candidate가 생성되면 점수 상위 N개를 대상으로 구성된 VirusTotal, AbuseIPDB, MISP
+attribute 검색을 bounded worker에서 자동 실행한다. 외부 서비스 지연·rate limit·부분 장애는
+분석 완료를 막지 않으며 공급자별 상태와 성공 결과를 함께 보존한다. Candidate 상세 화면은
+자동/수동 조회 여부, 최근 조회 시각, 공급자별 근거를 판정 폼 옆에 표시한다. 분석가는 필요하면
+같은 화면에서 최신 정보로 다시 조회할 수 있다.
+
+외부 평판은 detector의 네트워크 행위 근거를 보강할 뿐 Candidate를 자동으로
+`CONFIRMED_C2` 또는 `FALSE_POSITIVE`로 판정하지 않는다. 판정은 ANALYST의 명시적 동작이며,
+MISP Event에 `ip-src` attribute를 쓰는 작업도 `CONFIRMED_C2` 판정 후 ADMIN이 명시적으로
+실행해야 한다. 판정 이력, TI 조회, MISP 전송 성공·실패 이력은 detector Candidate JSON과
+분리된 감사 resource로 보존되고 Candidate 조회 시 합성된다. `FALSE_POSITIVE` 판정은 detector
+결과를 숨기거나 Allowlist에 자동 등록하지 않으며, 영구 억제는 별도 Allowlist 작업으로 수행한다.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -67,13 +73,18 @@ Candidate 상세 화면에서 분석가가 판정을 기록하고, VirusTotal/Ab
 | `C2HUNTER_ABUSEIPDB_API_KEY` | *(empty)* | AbuseIPDB v2 API key; empty disables provider |
 | `C2HUNTER_THREAT_INTEL_TIMEOUT_SECONDS` | `10` | Provider request timeout, 1–30 seconds |
 | `C2HUNTER_ABUSEIPDB_MAX_AGE_DAYS` | `90` | AbuseIPDB report lookback, 1–365 days |
-| `C2HUNTER_MISP_URL` | *(empty)* | MISP base URL; empty disables export |
+| `C2HUNTER_CANDIDATE_AUTO_ENRICHMENT_LIMIT` | `20` | Automatically enrich the highest-scoring N candidates per job; `0` disables automatic lookup |
+| `C2HUNTER_CANDIDATE_AUTO_ENRICHMENT_WORKERS` | `4` | Bounded automatic lookup worker count, 1–16 |
+| `C2HUNTER_CANDIDATE_AUTO_ENRICHMENT_QUEUE_CAPACITY` | `200` | Global automatic lookups allowed in flight; overflow is recorded as failed without blocking analysis |
+| `C2HUNTER_MISP_URL` | *(empty)* | MISP base URL; empty disables lookup and export |
 | `C2HUNTER_MISP_API_KEY` | *(empty)* | MISP automation/API key |
 | `C2HUNTER_MISP_DEFAULT_EVENT_ID` | *(empty)* | Optional default Event ID; UI input overrides it |
 | `C2HUNTER_MISP_VERIFY_TLS` | `true` | Verify the MISP server certificate |
 
 운영 환경에서는 API 키를 `.env`, 이미지, Git에 저장하지 말고 secret manager에서 주입한다.
-MISP 계정은 대상 Event에 attribute를 추가할 수 있는 최소 권한만 부여한다. MISP 전송은
+외부 API quota에 맞게 자동 조회 제한과 worker 수를 조정하고, 자동 조회를 원하지 않으면
+`C2HUNTER_CANDIDATE_AUTO_ENRICHMENT_LIMIT=0`으로 설정한다. MISP 계정은 attribute 검색과
+대상 Event에 attribute를 추가할 수 있는 최소 권한만 부여한다. MISP 전송은
 동일 Candidate IP/Event 조합의 성공 이력을 확인해 중복 호출을 막으며, false-positive 또는
 미판정 Candidate는 전송할 수 없다. 판정과 TI 조회는 ANALYST 이상, MISP 전송은 ADMIN만
 호출할 수 있다. `C2HUNTER_MISP_VERIFY_TLS=false`는 신뢰 가능한 격리

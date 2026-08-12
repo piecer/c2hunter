@@ -192,6 +192,15 @@ class PostgresRepository:
             self._connection = connection
             return connection
 
+    def close(self) -> None:
+        with self._lock:
+            if self._connection is not None and not self._connection.closed:
+                self._connection.close()
+            self._connection = None
+
+    def for_background_worker(self) -> PostgresRepository:
+        return PostgresRepository(self.database_url, self.blob_store)
+
     @staticmethod
     def _sanitize_json_value(value: Any) -> Any:
         """Make arbitrary control-plane values safe for PostgreSQL text/jsonb."""

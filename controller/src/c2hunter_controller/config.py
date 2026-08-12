@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     abuseipdb_api_key: SecretStr = SecretStr("")
     threat_intel_timeout_seconds: float = Field(default=10.0, gt=0, le=30)
     abuseipdb_max_age_days: int = Field(default=90, ge=1, le=365)
+    candidate_auto_enrichment_limit: int = Field(default=20, ge=0, le=200)
+    candidate_auto_enrichment_workers: int = Field(default=4, ge=1, le=16)
+    candidate_auto_enrichment_queue_capacity: int = Field(default=200, ge=1, le=2000)
     misp_url: str = ""
     misp_api_key: SecretStr = SecretStr("")
     misp_verify_tls: bool = True
