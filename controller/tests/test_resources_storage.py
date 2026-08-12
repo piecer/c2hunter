@@ -107,6 +107,60 @@ def test_allowlist_expiration_requires_timezone_and_is_stored_as_utc() -> None:
     assert stored_expiration == future
 
 
+def test_allowlist_accepts_utc_z_and_null_expirations() -> None:
+    client = configured_client()
+    future = (datetime.now(UTC) + timedelta(days=1)).replace(microsecond=0)
+
+    utc_expiration = client.post(
+        "/api/v1/allowlist",
+        json={
+            "type": "IP",
+            "value": "203.0.113.14",
+            "description": "UTC expiration",
+            "expires_at": future.isoformat().replace("+00:00", "Z"),
+        },
+    )
+    no_expiration = client.post(
+        "/api/v1/allowlist",
+        json={
+            "type": "IP",
+            "value": "203.0.113.15",
+            "description": "no expiration",
+            "expires_at": None,
+        },
+    )
+
+    assert utc_expiration.status_code == 201
+    assert utc_expiration.json()["expires_at"] == future.isoformat().replace("+00:00", "Z")
+    assert no_expiration.status_code == 201
+    assert no_expiration.json()["expires_at"] is None
+
+
+def test_sqlite_allowlist_expiration_survives_reopen_as_utc(tmp_path: Path) -> None:
+    path = tmp_path / "allowlist.sqlite3"
+    repository = SQLiteRepository(path)
+    expiration = "2099-08-13T00:30:00Z"
+    repository.save_allowlist(
+        {
+            "id": "allowlist-utc",
+            "type": "IP",
+            "value": "203.0.113.16",
+            "description": "persistent expiration",
+            "expires_at": expiration,
+            "enabled": True,
+        }
+    )
+    repository.connection.close()
+
+    reopened = SQLiteRepository(path)
+    try:
+        stored = reopened.list_allowlist()
+    finally:
+        reopened.connection.close()
+
+    assert stored[0]["expires_at"] == expiration
+
+
 @pytest.mark.parametrize(
     "expires_at",
     [

@@ -176,6 +176,17 @@ def test_allowlist_suppresses_matching_ip_and_cidr() -> None:
     assert score_candidates(evidence, allowlist=entries) == []
 
 
+def test_allowlist_is_inactive_at_exact_expiration_instant() -> None:
+    entry = AllowlistEntry(
+        "IP",
+        "203.0.113.9",
+        "expires exactly now",
+        expires_at=NOW,
+    )
+
+    assert entry.is_active(NOW) is False
+
+
 def test_allowlist_legacy_naive_expiration_is_inactive() -> None:
     entry = AllowlistEntry.from_mapping(
         {
