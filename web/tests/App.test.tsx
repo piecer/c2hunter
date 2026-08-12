@@ -567,6 +567,33 @@ describe('C2Hunter UI', () => {
     expect(JSON.parse(String(mispCall?.[1]?.body))).toEqual({ event_id: '42' });
   });
 
+  it.each([
+    ['PARTIAL', '자동 조회 부분 완료'],
+    ['FAILED', '자동 조회 실패'],
+  ])('shows the automatic TI %s state without reporting success', async (status, label) => {
+    const original = responses['/api/v1/candidates/candidate-1'] as Record<string, unknown>;
+    const candidate = {
+      ...original,
+      threat_intelligence: {
+        status,
+        origin: 'AUTO',
+        fetched_at: '2026-07-20T10:59:00Z',
+        summary: { malicious: 0, suspicious: 0, harmless: 0, abuse_confidence_score: 0 },
+        providers: { virustotal: { status: 'ERROR', error: 'provider unavailable' } },
+      },
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/api/v1/candidates/candidate-1') return new Response(JSON.stringify(candidate), { status: 200 });
+      return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404 });
+    });
+
+    renderAt('/candidates/candidate-1', fetchMock);
+
+    expect(await screen.findByText(label)).toBeInTheDocument();
+    expect(screen.queryByText('자동 조회 완료')).not.toBeInTheDocument();
+  });
+
   it('requires confirmation before permanently deleting a candidate', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);

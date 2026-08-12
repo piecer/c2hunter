@@ -308,8 +308,12 @@ class MispClient:
         )
         response = payload.get("response")
         container = _mapping(response) if isinstance(response, dict) else payload
-        raw_attributes = container.get("Attribute", [])
-        attributes = raw_attributes if isinstance(raw_attributes, list) else []
+        raw_attributes = container.get("Attribute")
+        if any(key in payload for key in ("error", "errors", "message")) or not isinstance(
+            raw_attributes, list
+        ):
+            raise IntegrationError("misp", "MISP search response was invalid")
+        attributes = raw_attributes
         matches = []
         for item in attributes[:100]:
             attribute = _mapping(item)

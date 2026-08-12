@@ -479,10 +479,12 @@ class MemoryRepository:
             return deepcopy(lookup)
 
     def list_candidate_ti_lookups(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
-        values = self.candidate_ti_lookups.values()
-        selected = [
-            item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
-        ]
+        with self._lock:
+            selected = [
+                deepcopy(item)
+                for item in self.candidate_ti_lookups.values()
+                if candidate_id is None or item["candidate_id"] == candidate_id
+            ]
         return sorted(deepcopy(selected), key=lambda item: str(item["fetched_at"]))
 
     def save_candidate_misp_action(self, action: dict[str, Any]) -> dict[str, Any]:
@@ -789,15 +791,17 @@ class SQLiteRepository:
         return deepcopy(value)
 
     def _get(self, kind: str, object_id: str) -> dict[str, Any] | None:
-        row = self.connection.execute(
-            "SELECT data FROM objects WHERE kind=? AND id=?", (kind, object_id)
-        ).fetchone()
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT data FROM objects WHERE kind=? AND id=?", (kind, object_id)
+            ).fetchone()
         return json.loads(row[0]) if row else None
 
     def _list(self, kind: str) -> list[dict[str, Any]]:
-        rows = self.connection.execute(
-            "SELECT data FROM objects WHERE kind=? ORDER BY rowid", (kind,)
-        ).fetchall()
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT data FROM objects WHERE kind=? ORDER BY rowid", (kind,)
+            ).fetchall()
         return [json.loads(row[0]) for row in rows]
 
     def _migrate_embedded_job_flows(self) -> None:

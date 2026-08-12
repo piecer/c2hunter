@@ -421,6 +421,24 @@ def test_automatic_enrichment_queue_capacity_does_not_block_analysis() -> None:
     assert repository.list_candidate_ti_lookups("candidate-first")[-1]["status"] == "COMPLETED"
 
 
+def test_automatic_enrichment_after_shutdown_is_skipped_without_raising() -> None:
+    repository = MemoryRepository()
+    app = create_app(
+        Settings(environment="test"),
+        repository,
+        threat_intel_service=FakeThreatIntelService(),
+    )
+    candidate = {"id": "candidate-shutdown", "candidate_ip": "203.0.113.44", "score": 90}
+    repository.save_candidates("job-shutdown", [candidate])
+
+    app.router.on_shutdown[-1]()
+    app.state.schedule_candidate_enrichment("job-shutdown", [candidate])
+
+    stored = repository.list_candidate_ti_lookups("candidate-shutdown")[-1]
+    assert stored["status"] == "FAILED"
+    assert stored["providers"]["internal"]["error"] == "automatic enrichment is shutting down"
+
+
 def test_misp_export_requires_confirmed_candidate() -> None:
     client, _, _, misp = _client()
 

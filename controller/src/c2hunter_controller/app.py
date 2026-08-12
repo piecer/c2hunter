@@ -765,6 +765,8 @@ def create_app(
     )
     enrichment_futures: set[Future[Any]] = set()
     enrichment_lock = threading.Lock()
+    enrichment_lifecycle_lock = threading.Lock()
+    enrichment_stopping = threading.Event()
     enrichment_repository_lock = threading.Lock()
     enrichment_repositories: list[PostgresRepository] = []
     enrichment_repository_local = threading.local()
@@ -1898,12 +1900,28 @@ def create_app(
                     }
                 )
                 continue
-            future = enrichment_executor.submit(
-                run_automatic_enrichment,
-                job_id,
-                candidate,
-                pending_record,
-            )
+            with enrichment_lifecycle_lock:
+                if enrichment_stopping.is_set():
+                    enrichment_capacity.release()
+                    repo.save_candidate_ti_lookup(
+                        {
+                            **pending_record,
+                            "status": "FAILED",
+                            "providers": {
+                                "internal": {
+                                    "status": "ERROR",
+                                    "error": "automatic enrichment is shutting down",
+                                }
+                            },
+                        }
+                    )
+                    continue
+                future = enrichment_executor.submit(
+                    run_automatic_enrichment,
+                    job_id,
+                    candidate,
+                    pending_record,
+                )
             with enrichment_lock:
                 enrichment_futures.add(future)
 
@@ -1987,6 +2005,7 @@ def create_app(
 
     app.state.process_due_live_jobs_once = process_due_live_jobs_once
     result_stop = threading.Event()
+    result_consumer_thread: threading.Thread | None = None
 
     def consume_results() -> None:
         while not result_stop.is_set():
@@ -2000,12 +2019,18 @@ def create_app(
 
     @app.on_event("startup")
     def start_result_consumer() -> None:
+        nonlocal result_consumer_thread
         if config.environment != "test":
-            threading.Thread(target=consume_results, daemon=True).start()
+            result_consumer_thread = threading.Thread(target=consume_results, daemon=True)
+            result_consumer_thread.start()
 
     @app.on_event("shutdown")
     def stop_result_consumer() -> None:
+        with enrichment_lifecycle_lock:
+            enrichment_stopping.set()
         result_stop.set()
+        if result_consumer_thread is not None:
+            result_consumer_thread.join()
         enrichment_executor.shutdown(wait=True, cancel_futures=False)
         with enrichment_repository_lock:
             for worker_repository in enrichment_repositories:

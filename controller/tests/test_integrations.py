@@ -81,6 +81,8 @@ class StubHttpClient(JsonHttpClient):
                 }
             }
         if url.endswith("/attributes/restSearch"):
+            if self.invalid_misp:
+                return {"message": "validation failed"}
             return {
                 "response": {
                     "Attribute": [
@@ -226,6 +228,14 @@ def test_misp_client_searches_existing_ip_attributes_without_exposing_key() -> N
     assert result["event_count"] == 1
     assert result["matches"][0]["event_id"] == "42"
     assert "misp-secret" not in str(result)
+
+
+def test_misp_client_rejects_http_200_error_payload_for_lookup() -> None:
+    http = StubHttpClient(invalid_misp=True)
+    client = MispClient("https://misp.example", "misp-secret", http_client=http)
+
+    with pytest.raises(IntegrationError, match="MISP search response was invalid"):
+        client.lookup_ip("203.0.113.44")
 
 
 def test_misp_client_rejects_non_http_base_url() -> None:

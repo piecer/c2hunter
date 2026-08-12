@@ -1,8 +1,57 @@
 """Candidate workflow resource persistence tests."""
 
+import threading
 from pathlib import Path
 
-from c2hunter_controller.repositories import SQLiteRepository
+import pytest
+
+from c2hunter_controller.repositories import MemoryRepository, SQLiteRepository
+
+
+@pytest.mark.parametrize("repository_kind", ["memory", "sqlite"])
+def test_candidate_ti_lookup_supports_concurrent_reads_and_writes(
+    tmp_path: Path, repository_kind: str
+) -> None:
+    repository = (
+        MemoryRepository()
+        if repository_kind == "memory"
+        else SQLiteRepository(tmp_path / "concurrent.db")
+    )
+    errors: list[Exception] = []
+    start = threading.Barrier(2)
+
+    def write_lookups() -> None:
+        try:
+            start.wait()
+            for index in range(100):
+                repository.save_candidate_ti_lookup(
+                    {
+                        "id": f"lookup-{index}",
+                        "candidate_id": "candidate-1",
+                        "fetched_at": f"2026-08-08T00:00:{index:02d}+00:00",
+                        "providers": {},
+                    }
+                )
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    def read_lookups() -> None:
+        try:
+            start.wait()
+            for _ in range(100):
+                repository.list_candidate_ti_lookups("candidate-1")
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    writer = threading.Thread(target=write_lookups)
+    reader = threading.Thread(target=read_lookups)
+    writer.start()
+    reader.start()
+    writer.join()
+    reader.join()
+
+    assert errors == []
+    assert len(repository.list_candidate_ti_lookups("candidate-1")) == 100
 
 
 def test_sqlite_candidate_workflow_resources_survive_reopen(tmp_path: Path) -> None:
