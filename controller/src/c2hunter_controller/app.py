@@ -340,6 +340,7 @@ def _sort_candidate_list(items: list[dict[str, Any]], sort: str) -> None:
     descending = sort.startswith("-")
     field = sort.removeprefix("-")
     if field == "ti_priority":
+        items.sort(key=lambda item: str(item.get("id", "")))
         items.sort(key=_candidate_ti_priority, reverse=descending)
         return
     if field not in {"score", "candidate_ip", "first_seen", "last_seen", "severity"}:

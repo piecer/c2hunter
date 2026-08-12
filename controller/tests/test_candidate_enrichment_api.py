@@ -478,6 +478,37 @@ def test_candidate_list_exposes_compact_ti_assessment_and_supports_triage() -> N
     assert client.get("/api/v1/candidates?ti_filter=INVALID").status_code == 422
 
 
+def test_candidate_ti_priority_uses_a_deterministic_id_tiebreaker() -> None:
+    client, repository, _, _ = _client()
+    repository.save_candidates(
+        "job-1",
+        [
+            {
+                "id": "candidate-z",
+                "candidate_ip": "203.0.113.20",
+                "score": 50,
+                "severity": "MEDIUM",
+                "last_seen": "2026-08-08T00:00:00Z",
+            },
+            {
+                "id": "candidate-a",
+                "candidate_ip": "203.0.113.21",
+                "score": 50,
+                "severity": "MEDIUM",
+                "last_seen": "2026-08-08T00:00:00Z",
+            },
+        ],
+    )
+
+    global_items = client.get("/api/v1/candidates?sort=-ti_priority&page_size=1").json()
+    job_items = client.get(
+        "/api/v1/analysis-jobs/job-1/candidates?sort=-ti_priority&page_size=1"
+    ).json()
+
+    assert [item["id"] for item in global_items["items"]] == ["candidate-a"]
+    assert [item["id"] for item in job_items["items"]] == ["candidate-a"]
+
+
 def test_candidate_threat_intelligence_lookup_is_persisted() -> None:
     client, repository, threat_intel, misp = _client()
 

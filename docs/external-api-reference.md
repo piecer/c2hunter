@@ -27,9 +27,10 @@ Candidate 목록 endpoint인 `GET /api/v1/candidates`와
   `misp_event_count`: 목록 triage용 핵심 수치
 - `fetched_at`: 최신 조회 시각
 
-전역 목록은 `ti_filter=POSITIVE|MISP_MATCH|INCOMPLETE`를 지원한다.
+두 Candidate 목록 endpoint 모두 `ti_filter=POSITIVE|MISP_MATCH|INCOMPLETE`를 지원한다.
 `sort=-ti_priority`는 MISP event 일치, 양성 provider 수, VirusTotal 악성/의심 수,
-AbuseIPDB confidence, detector score, 최근 관측 순서의 설명 가능한 tuple로 정렬한다.
+AbuseIPDB confidence, detector score, 최근 관측 순서의 설명 가능한 tuple로 정렬하고,
+완전 동률이면 Candidate ID 오름차순으로 고정한다.
 별도의 합산 위험 점수를 생성하거나 detector `score`를 변경하지 않는다. 기존 `score` 정렬은
 문자열이 아니라 숫자값으로 수행한다.
 
@@ -384,7 +385,14 @@ Content-Type: application/vnd.tcpdump.pcap    // raw PCAP data
 | `GET` | `/api/v1/analysis-jobs/{job_id}/candidates` | 200 | 특정 분석의 후보 |
 | `GET` | `/api/v1/analysis-jobs/{job_id}/candidates/{id}` | 200 | 분석 기반 candidate |
 
-**Filter**: `?status=active&min_score=40&severity=HIGH&candidate_ip=203.0.113.50`
+**Candidate 목록 query parameters**:
+
+- 공통: `page`, `page_size`, `severity`, `verdict`, `workflow_status`, `minimum_score`,
+  `include_suppressed`, `sort`, `ti_filter`
+- `sort`: `score`, `candidate_ip`, `first_seen`, `last_seen`, `severity`, `ti_priority`에
+  `-` prefix를 붙이면 내림차순
+- `ti_filter`: `POSITIVE`, `MISP_MATCH`, `INCOMPLETE`
+- 예: `?minimum_score=40&severity=HIGH&workflow_status=NEEDS_REVIEW&ti_filter=POSITIVE&sort=-ti_priority`
 
 ---
 
