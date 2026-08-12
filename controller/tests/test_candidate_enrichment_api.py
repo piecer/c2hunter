@@ -441,6 +441,29 @@ def test_candidate_list_exposes_compact_ti_assessment_and_supports_triage() -> N
     assert vt_only["ti_assessment"]["configured_providers"] == 1
     assert vt_only["ti_assessment"]["successful_providers"] == 1
     assert vt_only["ti_assessment"]["signal"] == "NO_SIGNAL"
+    repository.save_candidate_ti_lookup(
+        {
+            "id": "lookup-none-configured",
+            "candidate_id": "candidate-vt-only",
+            "status": "COMPLETED",
+            "origin": "AUTO",
+            "fetched_at": "2026-08-08T00:14:00Z",
+            "summary": {},
+            "providers": {
+                "virustotal": {"status": "NOT_CONFIGURED"},
+                "abuseipdb": {"status": "NOT_CONFIGURED"},
+                "misp": {"status": "NOT_CONFIGURED"},
+            },
+        }
+    )
+    no_provider = next(
+        item
+        for item in client.get("/api/v1/candidates").json()["items"]
+        if item["id"] == "candidate-vt-only"
+    )
+    assert no_provider["ti_assessment"]["configured_providers"] == 0
+    assert no_provider["ti_assessment"]["successful_providers"] == 0
+    assert no_provider["ti_assessment"]["signal"] == "UNKNOWN"
     positive = client.get("/api/v1/candidates?ti_filter=POSITIVE").json()["items"]
     assert [item["id"] for item in positive] == [
         "candidate-multi",

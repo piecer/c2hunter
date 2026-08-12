@@ -285,7 +285,9 @@ def _candidate_ti_assessment(candidate: dict[str, Any]) -> dict[str, Any]:
     positive_providers = sum((malicious + suspicious > 0, abuse_score > 0, misp_events > 0))
     status = str(lookup.get("status") or "FAILED").upper()
     signal = "POSITIVE" if positive_providers else "NO_SIGNAL"
-    if status in {"PENDING", "PARTIAL", "FAILED"}:
+    if not configured_provider_map:
+        signal = "UNKNOWN"
+    elif status in {"PENDING", "PARTIAL", "FAILED"}:
         signal = "INCOMPLETE"
     return {
         "status": status,
