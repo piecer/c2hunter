@@ -813,6 +813,40 @@ describe('C2Hunter UI', () => {
     expect(body.expires_at).toBe(new Date(2099, 7, 13, 9, 30).toISOString());
   });
 
+  it('uses the next local minute as the minimum allowlist expiration', () => {
+    vi.useFakeTimers();
+    const now = new Date(2026, 7, 13, 9, 30, 40);
+    vi.setSystemTime(now);
+    try {
+      renderAt('/allowlist');
+
+      const expected = new Date(now);
+      expected.setSeconds(0, 0);
+      expected.setMinutes(expected.getMinutes() + 1);
+      const local = new Date(expected.getTime() - expected.getTimezoneOffset() * 60_000);
+      expect(screen.getByLabelText('Expires at')).toHaveAttribute('min', local.toISOString().slice(0, 16));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not submit an allowlist expiration that is no longer in the future', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404, headers: { 'content-type': 'application/json' } });
+    });
+    renderAt('/allowlist');
+    vi.stubGlobal('fetch', fetchMock);
+
+    fireEvent.change(screen.getByLabelText('Value'), { target: { value: '203.0.113.17' } });
+    fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Expired while open' } });
+    fireEvent.change(screen.getByLabelText('Expires at'), { target: { value: '2020-01-01T00:00' } });
+    fireEvent.submit(screen.getByRole('button', { name: 'Add entry' }).closest('form')!);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Expiration must be in the future');
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/v1/allowlist', expect.objectContaining({ method: 'POST' }));
+  });
+
   it('sends the Controller cancel request body', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);

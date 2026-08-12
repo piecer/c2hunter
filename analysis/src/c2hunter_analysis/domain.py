@@ -173,7 +173,7 @@ class AllowlistEntry:
         expires_at = stored.get("expires_at")
         if isinstance(expires_at, str):
             try:
-                normalized_expires_at = datetime.fromisoformat(expires_at) if expires_at else None
+                normalized_expires_at = datetime.fromisoformat(expires_at)
             except ValueError:
                 normalized_expires_at = datetime.min.replace(tzinfo=UTC)
         elif isinstance(expires_at, datetime):

@@ -14,6 +14,12 @@ const localDateTimeValue = (value: Date) => {
   const local = new Date(value.getTime() - value.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 16);
 };
+const nextLocalMinuteValue = (value: Date) => {
+  const nextMinute = new Date(value);
+  nextMinute.setSeconds(0, 0);
+  nextMinute.setMinutes(nextMinute.getMinutes() + 1);
+  return localDateTimeValue(nextMinute);
+};
 const formatBytes = (value?: number) => {
   if (value === undefined) return 'Unknown size';
   if (value < 1024) return `${value} B`;
@@ -1023,6 +1029,7 @@ function PayloadSignatureRow({ signature }: { signature: PayloadSignature }) {
 
 function Allowlist() {
   const client = useQueryClient();
+  const [validationError, setValidationError] = useState<string>();
   const q = useQuery<List<AllowEntry>, Error>({ queryKey: ['allowlist'], queryFn: () => api.get('/allowlist') });
   const add = useMutation({ mutationFn: (body: unknown) => api.post('/allowlist', body), onSuccess: () => client.invalidateQueries({ queryKey: ['allowlist'] }) });
   const remove = useMutation({ mutationFn: (id: string) => api.delete(`/allowlist/${id}`), onSuccess: () => client.invalidateQueries({ queryKey: ['allowlist'] }) });
@@ -1030,8 +1037,20 @@ function Allowlist() {
     event.preventDefault();
     const form = event.currentTarget;
     const body: Record<string, FormDataEntryValue | boolean> = Object.fromEntries(new FormData(form).entries());
-    if (body.expires_at) body.expires_at = new Date(String(body.expires_at)).toISOString();
-    else delete body.expires_at;
+    setValidationError(undefined);
+    if (body.expires_at) {
+      const localExpiration = String(body.expires_at);
+      const expiration = new Date(localExpiration);
+      if (Number.isNaN(expiration.getTime()) || localDateTimeValue(expiration) !== localExpiration) {
+        setValidationError('Expiration is not a valid local date and time');
+        return;
+      }
+      if (expiration <= new Date()) {
+        setValidationError('Expiration must be in the future');
+        return;
+      }
+      body.expires_at = expiration.toISOString();
+    } else delete body.expires_at;
     body.enabled = true;
     add.mutate(body, { onSuccess: () => form.reset() });
   };
@@ -1045,8 +1064,9 @@ function Allowlist() {
       <label>Type<select name="type"><option value="IP">IP — fully suppress</option><option value="CIDR">CIDR — fully suppress</option><option value="DOMAIN_SUFFIX">Domain suffix — fully suppress</option><option value="TLS_FINGERPRINT">TLS fingerprint — fully suppress</option><option value="CERT_FINGERPRINT">Certificate fingerprint — fully suppress</option><option value="TRUSTED_DNS">Trusted DNS — UDP/53 score adjustment</option><option value="TRUSTED_NTP">Trusted NTP — UDP/123 score adjustment</option></select></label>
       <label>Value<input name="value" required /></label>
       <label>Description<input name="description" required /></label>
-      <label>Expires at<input name="expires_at" type="datetime-local" min={localDateTimeValue(new Date())} /></label>
+      <label>Expires at<input name="expires_at" type="datetime-local" min={nextLocalMinuteValue(new Date())} /></label>
       <button disabled={add.isPending}>{add.isPending ? 'Adding…' : 'Add entry'}</button>
+      {validationError && <p role="alert" className="error-text">{validationError}</p>}
       {add.error && <p role="alert" className="error-text">{add.error.message}</p>}
     </form>
     <AsyncState query={q}>{data => items(data).length ? <ul className="entries">{items(data).map(entry => <li key={entry.id}><code>{entry.type}</code><strong>{entry.value}</strong><span>{entry.description}</span>{entry.expires_at && <small>Expires {fmt(entry.expires_at)}</small>}<button className="danger" aria-label={`Delete ${entry.value}`} onClick={() => remove.mutate(entry.id)}>Delete</button></li>)}</ul> : <div className="state">No allowlist entries</div>}</AsyncState>

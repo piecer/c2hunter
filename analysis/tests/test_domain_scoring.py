@@ -203,6 +203,7 @@ def test_allowlist_legacy_naive_expiration_is_inactive() -> None:
 @pytest.mark.parametrize(
     "expires_at",
     [
+        "",
         "07/20/2026 01:00",
         4_089_758_200,
         {"timestamp": "2099-08-13T09:30:00Z"},
@@ -222,14 +223,13 @@ def test_allowlist_malformed_legacy_expiration_is_inactive(expires_at: object) -
     assert entry.is_active(NOW) is False
 
 
-@pytest.mark.parametrize("expires_at", [None, ""])
-def test_allowlist_missing_legacy_expiration_remains_active(expires_at: object) -> None:
+def test_allowlist_missing_legacy_expiration_remains_active() -> None:
     entry = AllowlistEntry.from_mapping(
         {
             "type": "IP",
             "value": "203.0.113.9",
             "description": "no expiration",
-            "expires_at": expires_at,
+            "expires_at": None,
         }
     )
 
