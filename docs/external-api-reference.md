@@ -16,6 +16,28 @@ Candidate의 `threat_intelligence`는 최신 조회 resource이며 detector 결�
 - `summary`: VirusTotal 통계, AbuseIPDB confidence, MISP 검색 응답 최대 100건 내 attribute/event 개수
 - `fetched_at`: 조회 시작 또는 완료 시각
 
+Candidate 목록 endpoint인 `GET /api/v1/candidates`와
+`GET /api/v1/analysis-jobs/{job_id}/candidates`는 기존 `threat_intelligence`와 함께 목록용
+`ti_assessment` projection을 반환한다. UI 목록은 다음 compact projection만 표시한다.
+
+- `status`: `NOT_CHECKED`, `PENDING`, `COMPLETED`, `PARTIAL`, `FAILED`
+- `signal`: `UNKNOWN`, `INCOMPLETE`, `NO_SIGNAL`, `POSITIVE`
+- `configured_providers`, `successful_providers`, `positive_providers`: provider coverage
+- `virustotal_malicious`, `virustotal_suspicious`, `abuse_confidence_score`,
+  `misp_event_count`: 목록 triage용 핵심 수치
+- `fetched_at`: 최신 조회 시각
+
+전역 목록은 `ti_filter=POSITIVE|MISP_MATCH|INCOMPLETE`를 지원한다.
+`sort=-ti_priority`는 MISP event 일치, 양성 provider 수, VirusTotal 악성/의심 수,
+AbuseIPDB confidence, detector score, 최근 관측 순서의 설명 가능한 tuple로 정렬한다.
+별도의 합산 위험 점수를 생성하거나 detector `score`를 변경하지 않는다. 기존 `score` 정렬은
+문자열이 아니라 숫자값으로 수행한다.
+
+`NO_SIGNAL`은 조회가 완료됐지만 알려진 외부 신호가 없다는 뜻이며 안전 또는 benign 판정이
+아니다. `INCOMPLETE`, `PENDING`, `PARTIAL`, `FAILED`는 낮은 위험이 아니라 정보 부족이다.
+전체 provider 응답과 오류 문맥은 API 호환성을 위해 목록과 Candidate 상세 endpoint의
+`threat_intelligence`에 유지되지만, UI에서는 Candidate 상세에서만 펼쳐 표시한다.
+
 `POST /api/v1/candidates/{candidate_id}/threat-intelligence/lookups`는 구성된 모든 공급자를
 다시 조회해 `origin=MANUAL`인 새 resource를 저장한다. 일부 공급자가 실패하면 성공 결과를
 버리지 않고 `PARTIAL`로 반환한다. 모든 연동이 비활성화된 경우 503

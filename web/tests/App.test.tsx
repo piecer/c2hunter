@@ -27,7 +27,7 @@ const responses: Record<string, unknown> = {
   '/api/v1/sensors': { items: [{ sensor_id: 'sensor-a', name: 'Sensor A', status: 'ONLINE', last_heartbeat: '2026-07-20T10:00:00Z', interfaces: [{ name: 'eth0', direction: 'INBOUND' }], version: '0.1.0', cpu_percent: 10, memory_percent: 20, disk_percent: 30, received_packets: 1000, dropped_packets: 2 }, { sensor_id: 'sensor-b', name: 'Sensor B', status: 'ONLINE', interfaces: [{ name: 'eth1', direction: 'OUTBOUND' }] }] },
   '/api/v1/analysis-jobs/job-1': { id: 'job-1', dataset_id: 'dataset-1', name: 'Investigation', status: 'ANALYZING', sensor_ids: ['sensor-a'], internal_networks: ['10.0.0.0/8'], capture: { max_packets: 2000, directions: ['OUTBOUND'] }, analysis: { profile: 'ddos_botnet', minimum_candidate_score: 60 }, transitions: [{ to_status: 'CREATED', occurred_at: '2026-07-20T10:00:00Z', reason: 'analysis requested' }], packet_count: 100, flow_count: 50, candidate_count: 1 },
   '/api/v1/analysis-jobs/job-1/candidates?page_size=200': { items: [{ id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', hosts: ['10.0.0.5'], sensors: ['sensor-a'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', contribution: 15, description: 'Periodic traffic' }] }] },
-  '/api/v1/candidates': { items: [{ id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', workflow_status: 'NEEDS_REVIEW', action_status: 'NOT_REQUIRED', hosts: ['10.0.0.5'], sensors: ['sensor-a'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', contribution: 15, description: 'Periodic traffic' }] }], workflow_counts: { needs_review: 1, in_review: 2, action_required: 3, action_in_progress: 4, action_completed: 5, false_positive: 6, done: 11 } },
+  '/api/v1/candidates': { items: [{ id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', workflow_status: 'NEEDS_REVIEW', action_status: 'NOT_REQUIRED', hosts: ['10.0.0.5'], sensors: ['sensor-a'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', contribution: 15, description: 'Periodic traffic' }], ti_assessment: { status: 'COMPLETED', signal: 'POSITIVE', configured_providers: 3, successful_providers: 3, positive_providers: 3, virustotal_malicious: 8, virustotal_suspicious: 2, abuse_confidence_score: 91, misp_event_count: 1, fetched_at: '2026-07-20T10:09:00Z' } }], workflow_counts: { needs_review: 1, in_review: 2, action_required: 3, action_in_progress: 4, action_completed: 5, false_positive: 6, done: 11 } },
   '/api/v1/candidates/candidate-1': { id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', hosts: ['10.0.0.5'], sensors: ['sensor-a'], protocols: ['TCP'], ports: [443], domains: ['c2.example'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', flow_count: 5, packet_count: 20, byte_count: 2048, traffic_buckets: [{ start: '2026-07-20T10:00:00Z', flows: 5, packets: 20, bytes: 2048 }], evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', version: '1.0.0', raw_score: 15, contribution: 15, confidence: 0.9, description: 'Periodic traffic', hosts: ['10.0.0.5'], sensors: ['sensor-a'], metrics: { sample_count: 7, period_seconds: 30 } }], adjustments: [{ kind: 'SINGLE_HOST', points: -20, explanation: 'Single internal host observed' }] },
   '/api/v1/analysis-jobs/job-1/flows?candidate_ip=203.0.113.9&page=1&page_size=50': { items: [{ flow_id: '0123456789abcdef01234567', job_id: 'job-1', sensor_id: 'sensor-a', timestamp: '2026-07-20T10:00:00Z', source_ip: '10.0.0.5', destination_ip: '203.0.113.9', source_port: 51000, destination_port: 443, internal_ip: '10.0.0.5', external_ip: '203.0.113.9', service_port: 443, protocol: 'TCP', direction: 'OUTBOUND', packet_count: 2, total_bytes: 128, payload_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_prefix_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_length: 6, payload_entropy: 2.585, payload_printable_ratio: 1, payload_simhash: 'e627bf19152d67b3', payload_feature_version: '1', has_payload: true, current_label: null }], page: 1, page_size: 50, total: 1 },
   '/api/v1/analysis-jobs/job-1/flows/0123456789abcdef01234567/payload-preview': { flow_id: '0123456789abcdef01234567', payload_hex: '626561636f6e', payload_ascii: 'beacon', sample_bytes: 6, payload_length: 6, truncated: false, payload_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887' },
@@ -110,6 +110,11 @@ describe('C2Hunter UI', () => {
     expect(screen.getByRole('link', { name: '203.0.113.9' })).toBeInTheDocument();
     expect(screen.getByText('Unknown')).toBeInTheDocument();
     expect(screen.getByText('주기적 비콘')).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'External TI' })).toBeInTheDocument();
+    expect(screen.getByText('MISP 1')).toBeInTheDocument();
+    expect(screen.getByText('VT 8/2')).toBeInTheDocument();
+    expect(screen.getByText('Abuse 91%')).toBeInTheDocument();
+    expect(screen.getByText('3/3 조회 · 3개 양성')).toBeInTheDocument();
   });
 
   it('shows the dashboard review queue newest first', async () => {
@@ -161,14 +166,64 @@ describe('C2Hunter UI', () => {
     await user.selectOptions(screen.getByLabelText('처리 상태'), 'ACTION_COMPLETED');
     await user.clear(screen.getByLabelText('Minimum score'));
     await user.type(screen.getByLabelText('Minimum score'), '70');
+    await user.selectOptions(screen.getByLabelText('External TI'), 'MISP_MATCH');
     await user.click(screen.getByLabelText('Include suppressed candidates'));
-    await user.selectOptions(screen.getByLabelText('Sort candidates'), 'candidate_ip');
+    await user.selectOptions(screen.getByLabelText('Sort candidates'), '-ti_priority');
     await user.click(screen.getByRole('button', { name: 'Apply filters' }));
 
-    expect(fetchMock).toHaveBeenCalledWith('/api/v1/candidates?page=1&page_size=50&minimum_score=70&sort=candidate_ip&severity=HIGH&workflow_status=ACTION_COMPLETED&include_suppressed=true', expect.anything());
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/candidates?page=1&page_size=50&minimum_score=70&sort=-ti_priority&severity=HIGH&workflow_status=ACTION_COMPLETED&ti_filter=MISP_MATCH&include_suppressed=true', expect.anything());
     await user.click(screen.getByRole('button', { name: 'Next candidates' }));
     expect(await screen.findByRole('link', { name: '198.51.100.7' })).toBeInTheDocument();
     expect(screen.getByText('Candidates 51–51 of 51')).toBeInTheDocument();
+  });
+
+  it.each([
+    ['INCOMPLETE', '정보 부족'],
+    ['UNKNOWN', '미조회'],
+    ['NO_SIGNAL', '외부 신호 없음'],
+  ])('distinguishes candidate TI %s without calling it benign', async (signal, label) => {
+    const candidate = {
+      ...(responses['/api/v1/candidates'] as { items: Record<string, unknown>[] }).items[0],
+      ti_assessment: {
+        status: signal === 'UNKNOWN' ? 'NOT_CHECKED' : signal === 'INCOMPLETE' ? 'PARTIAL' : 'COMPLETED',
+        signal,
+        configured_providers: signal === 'UNKNOWN' ? 0 : 3,
+        successful_providers: signal === 'INCOMPLETE' ? 1 : signal === 'UNKNOWN' ? 0 : 3,
+        positive_providers: 0,
+        virustotal_malicious: 0,
+        virustotal_suspicious: 0,
+        abuse_confidence_score: 0,
+        misp_event_count: 0,
+      },
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ items: [candidate] }), { status: 200 }));
+    renderAt('/candidates', fetchMock);
+
+    expect(await screen.findByText(label)).toBeInTheDocument();
+    expect(screen.queryByText(/benign/i)).not.toBeInTheDocument();
+  });
+
+  it('keeps positive evidence visible when TI coverage is incomplete', async () => {
+    const candidate = {
+      ...(responses['/api/v1/candidates'] as { items: Record<string, unknown>[] }).items[0],
+      ti_assessment: {
+        status: 'PARTIAL',
+        signal: 'INCOMPLETE',
+        configured_providers: 3,
+        successful_providers: 2,
+        positive_providers: 1,
+        virustotal_malicious: 4,
+        virustotal_suspicious: 1,
+        abuse_confidence_score: 0,
+        misp_event_count: 0,
+      },
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ items: [candidate] }), { status: 200 }));
+    renderAt('/candidates', fetchMock);
+
+    expect(await screen.findByText('정보 부족')).toBeInTheDocument();
+    expect(screen.getByText('VT 4/1')).toBeInTheDocument();
+    expect(screen.getByText('2/3 조회 · 1개 양성')).toBeInTheDocument();
   });
 
   it('marks the current navigation destination', async () => {

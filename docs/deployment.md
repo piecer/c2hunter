@@ -81,6 +81,11 @@ MISP Event에 `ip-src` attribute를 쓰는 작업도 `CONFIRMED_C2` 판정 후 A
 | `C2HUNTER_MISP_DEFAULT_EVENT_ID` | *(empty)* | Optional default Event ID; UI input overrides it |
 | `C2HUNTER_MISP_VERIFY_TLS` | `true` | Verify the MISP server certificate |
 
+Candidate 목록은 자동 조회 결과를 compact External TI 요약으로 표시한다. MISP 일치,
+VirusTotal 악성/의심 수, AbuseIPDB confidence, provider coverage를 detector score와 분리해서
+보여준다. `외부 신호 없음`은 안전 판정이 아니며, 조회 중·부분 완료·실패는 정보 부족으로
+처리한다. 외부 TI 우선 정렬도 자동 verdict 또는 자동 Confirm을 수행하지 않는다.
+
 운영 환경에서는 API 키를 `.env`, 이미지, Git에 저장하지 말고 secret manager에서 주입한다.
 외부 API quota에 맞게 자동 조회 제한과 worker 수를 조정하고, 자동 조회를 원하지 않으면
 `C2HUNTER_CANDIDATE_AUTO_ENRICHMENT_LIMIT=0`으로 설정한다. MISP 계정은 attribute 검색과

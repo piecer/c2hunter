@@ -11,6 +11,18 @@ export async function installApiFixture(page: Page) {
     ...candidate,
     workflow_status: 'NEEDS_REVIEW',
     action_status: 'NOT_REQUIRED',
+    ti_assessment: {
+      status: 'COMPLETED',
+      signal: 'POSITIVE',
+      configured_providers: 3,
+      successful_providers: 3,
+      positive_providers: 3,
+      virustotal_malicious: 8,
+      virustotal_suspicious: 2,
+      abuse_confidence_score: 91,
+      misp_event_count: 1,
+      fetched_at: '2026-07-20T10:09:00Z',
+    },
     threat_intelligence: {
       status: 'COMPLETED',
       origin: 'AUTO',

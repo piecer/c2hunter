@@ -24,6 +24,21 @@ test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', 
   await expect(page.getByText('Cancellation requested')).toBeVisible();
 
   await page.getByRole('link', { name: 'Candidates' }).click();
+  await expect(page.getByRole('columnheader', { name: 'External TI' })).toBeVisible();
+  await expect(page.getByText('MISP 1')).toBeVisible();
+  await expect(page.getByText('VT 8/2')).toBeVisible();
+  await expect(page.getByText('Abuse 91%')).toBeVisible();
+  await expect(page.getByText('3/3 조회 · 3개 양성')).toBeVisible();
+  await page.getByLabel('External TI').selectOption('MISP_MATCH');
+  await page.getByLabel('Sort candidates').selectOption('-ti_priority');
+  const filteredCandidates = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname.endsWith('/api/v1/candidates')
+      && url.searchParams.get('ti_filter') === 'MISP_MATCH'
+      && url.searchParams.get('sort') === '-ti_priority';
+  });
+  await page.getByRole('button', { name: 'Apply filters' }).click();
+  await filteredCandidates;
   await page.getByRole('link', { name: '203.0.113.10' }).click();
   await expect(page.getByRole('img', { name: 'Traffic over time' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '탐지 근거' })).toBeVisible();

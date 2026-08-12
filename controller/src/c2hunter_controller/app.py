@@ -236,6 +236,118 @@ def _public_candidate(
     }
 
 
+def _integer(value: object) -> int:
+    if not isinstance(value, str | int | float | bool):
+        return 0
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _candidate_ti_assessment(candidate: dict[str, Any]) -> dict[str, Any]:
+    lookup = candidate.get("threat_intelligence")
+    if not isinstance(lookup, dict):
+        return {
+            "status": "NOT_CHECKED",
+            "signal": "UNKNOWN",
+            "configured_providers": 0,
+            "successful_providers": 0,
+            "positive_providers": 0,
+            "virustotal_malicious": 0,
+            "virustotal_suspicious": 0,
+            "abuse_confidence_score": 0,
+            "misp_event_count": 0,
+            "fetched_at": None,
+        }
+    providers = lookup.get("providers")
+    provider_map = providers if isinstance(providers, dict) else {}
+    configured_provider_map = {
+        name: provider
+        for name, provider in provider_map.items()
+        if isinstance(provider, dict)
+        and str(provider.get("status", "")).upper() != "NOT_CONFIGURED"
+    }
+    summary = lookup.get("summary")
+    summary_map = summary if isinstance(summary, dict) else {}
+    raw_vt = provider_map.get("virustotal")
+    vt = raw_vt if isinstance(raw_vt, dict) else {}
+    raw_abuse = provider_map.get("abuseipdb")
+    abuse = raw_abuse if isinstance(raw_abuse, dict) else {}
+    raw_misp = provider_map.get("misp")
+    misp = raw_misp if isinstance(raw_misp, dict) else {}
+    malicious = _integer(vt.get("malicious", summary_map.get("malicious")))
+    suspicious = _integer(vt.get("suspicious", summary_map.get("suspicious")))
+    abuse_score = _integer(
+        abuse.get("abuse_confidence_score", summary_map.get("abuse_confidence_score"))
+    )
+    misp_events = _integer(misp.get("event_count", summary_map.get("misp_event_count")))
+    positive_providers = sum((malicious + suspicious > 0, abuse_score > 0, misp_events > 0))
+    status = str(lookup.get("status") or "FAILED").upper()
+    signal = "POSITIVE" if positive_providers else "NO_SIGNAL"
+    if status in {"PENDING", "PARTIAL", "FAILED"}:
+        signal = "INCOMPLETE"
+    return {
+        "status": status,
+        "signal": signal,
+        "configured_providers": len(configured_provider_map),
+        "successful_providers": sum(
+            isinstance(provider, dict) and str(provider.get("status", "")).upper() == "OK"
+            for provider in configured_provider_map.values()
+        ),
+        "positive_providers": positive_providers,
+        "virustotal_malicious": malicious,
+        "virustotal_suspicious": suspicious,
+        "abuse_confidence_score": abuse_score,
+        "misp_event_count": misp_events,
+        "fetched_at": lookup.get("fetched_at"),
+    }
+
+
+def _candidate_list_projection(candidate: dict[str, Any]) -> dict[str, Any]:
+    result = dict(candidate)
+    result["ti_assessment"] = _candidate_ti_assessment(candidate)
+    return result
+
+
+def _candidate_ti_priority(candidate: dict[str, Any]) -> tuple[int, int, int, int, float, str]:
+    assessment = candidate["ti_assessment"]
+    return (
+        int(assessment["misp_event_count"] > 0),
+        int(assessment["positive_providers"]),
+        int(assessment["virustotal_malicious"]) + int(assessment["virustotal_suspicious"]),
+        int(assessment["abuse_confidence_score"]),
+        float(candidate.get("score", 0) or 0),
+        str(candidate.get("last_seen", "")),
+    )
+
+
+def _filter_candidate_ti(
+    items: list[dict[str, Any]], ti_filter: str | None
+) -> list[dict[str, Any]]:
+    if ti_filter == "POSITIVE":
+        return [item for item in items if item["ti_assessment"]["positive_providers"] > 0]
+    if ti_filter == "MISP_MATCH":
+        return [item for item in items if item["ti_assessment"]["misp_event_count"] > 0]
+    if ti_filter == "INCOMPLETE":
+        return [item for item in items if item["ti_assessment"]["signal"] == "INCOMPLETE"]
+    return items
+
+
+def _sort_candidate_list(items: list[dict[str, Any]], sort: str) -> None:
+    descending = sort.startswith("-")
+    field = sort.removeprefix("-")
+    if field == "ti_priority":
+        items.sort(key=_candidate_ti_priority, reverse=descending)
+        return
+    if field not in {"score", "candidate_ip", "first_seen", "last_seen", "severity"}:
+        raise ApiError(422, "INVALID_SORT", "허용되지 않은 정렬 필드")
+    if field == "score":
+        items.sort(key=lambda item: float(item.get(field, 0) or 0), reverse=descending)
+    else:
+        items.sort(key=lambda item: str(item.get(field, "")), reverse=descending)
+
+
 def _find_candidate(
     repo: Repository, candidate_id: str
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
@@ -3046,6 +3158,9 @@ def create_app(
                 pattern=r"^(NEEDS_REVIEW|IN_REVIEW|ACTION_REQUIRED|ACTION_IN_PROGRESS|ACTION_COMPLETED|FALSE_POSITIVE)$"
             ),
         ] = None,
+        ti_filter: Annotated[
+            str | None, Query(pattern=r"^(POSITIVE|MISP_MATCH|INCOMPLETE)$")
+        ] = None,
         minimum_score: int = Query(0, ge=0, le=100),
         include_suppressed: bool = False,
         sort: str = "-score",
@@ -3055,7 +3170,9 @@ def create_app(
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
         workflow = _candidate_workflow_index(repo)
         items = [
-            _public_candidate(_with_candidate_workflow(item, workflow), job)
+            _candidate_list_projection(
+                _public_candidate(_with_candidate_workflow(item, workflow), job)
+            )
             for item in repo.get_candidates(job_id)
             if item["score"] >= minimum_score
             and (
@@ -3069,11 +3186,8 @@ def create_app(
             items = [item for item in items if _candidate_verdict(item) == verdict]
         if workflow_status:
             items = [item for item in items if _candidate_workflow_status(item) == workflow_status]
-        descending = sort.startswith("-")
-        field = sort.removeprefix("-")
-        if field not in {"score", "candidate_ip", "first_seen", "last_seen", "severity"}:
-            raise ApiError(422, "INVALID_SORT", "허용되지 않은 정렬 필드")
-        items.sort(key=lambda item: str(item.get(field, "")), reverse=descending)
+        items = _filter_candidate_ti(items, ti_filter)
+        _sort_candidate_list(items, sort)
         response = _page(items, page, page_size)
         response["workflow_counts"] = workflow_counts
         return response
@@ -3110,6 +3224,9 @@ def create_app(
                 pattern=r"^(NEEDS_REVIEW|IN_REVIEW|ACTION_REQUIRED|ACTION_IN_PROGRESS|ACTION_COMPLETED|FALSE_POSITIVE)$"
             ),
         ] = None,
+        ti_filter: Annotated[
+            str | None, Query(pattern=r"^(POSITIVE|MISP_MATCH|INCOMPLETE)$")
+        ] = None,
         minimum_score: int = Query(0, ge=0, le=100),
         include_suppressed: bool = False,
         sort: str = "-score",
@@ -3122,7 +3239,9 @@ def create_app(
             if job is None:
                 continue
             items.extend(
-                _public_candidate(_with_candidate_workflow(candidate, workflow), job)
+                _candidate_list_projection(
+                    _public_candidate(_with_candidate_workflow(candidate, workflow), job)
+                )
                 for candidate in candidates
                 if candidate["score"] >= minimum_score
                 and (
@@ -3138,11 +3257,8 @@ def create_app(
             items = [item for item in items if _candidate_verdict(item) == verdict]
         if workflow_status:
             items = [item for item in items if _candidate_workflow_status(item) == workflow_status]
-        descending = sort.startswith("-")
-        field = sort.removeprefix("-")
-        if field not in {"score", "candidate_ip", "first_seen", "last_seen", "severity"}:
-            raise ApiError(422, "INVALID_SORT", "허용되지 않은 정렬 필드")
-        items.sort(key=lambda item: str(item.get(field, "")), reverse=descending)
+        items = _filter_candidate_ti(items, ti_filter)
+        _sort_candidate_list(items, sort)
         response = _page(items, page, page_size)
         response["workflow_counts"] = workflow_counts
         return response

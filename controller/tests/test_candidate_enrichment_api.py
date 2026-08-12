@@ -308,6 +308,153 @@ def test_candidate_list_filters_response_workflow_independently_from_verdict() -
     assert client.get("/api/v1/candidates?workflow_status=INVALID").status_code == 422
 
 
+def test_candidate_list_exposes_compact_ti_assessment_and_supports_triage() -> None:
+    client, repository, _, _ = _client()
+    repository.save_candidates(
+        "job-1",
+        [
+            {
+                "id": "candidate-misp",
+                "candidate_ip": "203.0.113.10",
+                "score": 80,
+                "severity": "HIGH",
+                "last_seen": "2026-08-08T00:04:00Z",
+            },
+            {
+                "id": "candidate-multi",
+                "candidate_ip": "203.0.113.11",
+                "score": 95,
+                "severity": "CRITICAL",
+                "last_seen": "2026-08-08T00:03:00Z",
+            },
+            {
+                "id": "candidate-incomplete",
+                "candidate_ip": "203.0.113.12",
+                "score": 100,
+                "severity": "CRITICAL",
+                "last_seen": "2026-08-08T00:02:00Z",
+            },
+            {
+                "id": "candidate-unchecked",
+                "candidate_ip": "203.0.113.13",
+                "score": 9,
+                "severity": "LOW",
+                "last_seen": "2026-08-08T00:01:00Z",
+            },
+            {
+                "id": "candidate-vt-only",
+                "candidate_ip": "203.0.113.14",
+                "score": 8,
+                "severity": "LOW",
+                "last_seen": "2026-08-08T00:00:00Z",
+            },
+        ],
+    )
+    for lookup in [
+        {
+            "id": "lookup-misp",
+            "candidate_id": "candidate-misp",
+            "status": "COMPLETED",
+            "origin": "AUTO",
+            "fetched_at": "2026-08-08T00:10:00Z",
+            "summary": {"malicious": 1, "suspicious": 0, "misp_event_count": 2},
+            "providers": {
+                "virustotal": {"status": "OK", "malicious": 1, "suspicious": 0},
+                "abuseipdb": {"status": "OK", "abuse_confidence_score": 0},
+                "misp": {"status": "OK", "event_count": 2, "matches": [{"event_id": "42"}]},
+            },
+        },
+        {
+            "id": "lookup-multi",
+            "candidate_id": "candidate-multi",
+            "status": "COMPLETED",
+            "origin": "AUTO",
+            "fetched_at": "2026-08-08T00:11:00Z",
+            "summary": {"malicious": 7, "suspicious": 2, "abuse_confidence_score": 85},
+            "providers": {
+                "virustotal": {"status": "OK", "malicious": 7, "suspicious": 2},
+                "abuseipdb": {"status": "OK", "abuse_confidence_score": 85},
+                "misp": {"status": "OK", "event_count": 0, "matches": []},
+            },
+        },
+        {
+            "id": "lookup-incomplete",
+            "candidate_id": "candidate-incomplete",
+            "status": "PARTIAL",
+            "origin": "AUTO",
+            "fetched_at": "2026-08-08T00:12:00Z",
+            "summary": {},
+            "providers": {
+                "virustotal": {"status": "ERROR", "error": "provider unavailable"},
+                "abuseipdb": {"status": "OK", "abuse_confidence_score": 0},
+            },
+        },
+        {
+            "id": "lookup-vt-only",
+            "candidate_id": "candidate-vt-only",
+            "status": "COMPLETED",
+            "origin": "AUTO",
+            "fetched_at": "2026-08-08T00:13:00Z",
+            "summary": {},
+            "providers": {
+                "virustotal": {"status": "OK", "malicious": 0, "suspicious": 0},
+                "abuseipdb": {"status": "NOT_CONFIGURED"},
+                "misp": {"status": "NOT_CONFIGURED"},
+            },
+        },
+    ]:
+        repository.save_candidate_ti_lookup(lookup)
+
+    response = client.get("/api/v1/candidates?sort=-ti_priority")
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert [item["id"] for item in items] == [
+        "candidate-misp",
+        "candidate-multi",
+        "candidate-incomplete",
+        "candidate-unchecked",
+        "candidate-vt-only",
+    ]
+    assessment = items[0]["ti_assessment"]
+    assert assessment == {
+        "status": "COMPLETED",
+        "signal": "POSITIVE",
+        "configured_providers": 3,
+        "successful_providers": 3,
+        "positive_providers": 2,
+        "virustotal_malicious": 1,
+        "virustotal_suspicious": 0,
+        "abuse_confidence_score": 0,
+        "misp_event_count": 2,
+        "fetched_at": "2026-08-08T00:10:00Z",
+    }
+    assert "matches" not in str(assessment)
+    job_items = client.get("/api/v1/analysis-jobs/job-1/candidates").json()["items"]
+    job_misp = next(item for item in job_items if item["id"] == "candidate-misp")
+    assert job_misp["ti_assessment"] == assessment
+    assert job_misp["threat_intelligence"]["providers"]["misp"]["matches"] == [{"event_id": "42"}]
+    detail = client.get("/api/v1/candidates/candidate-misp").json()
+    assert detail["threat_intelligence"]["providers"]["misp"]["matches"] == [{"event_id": "42"}]
+    assert "ti_assessment" not in detail
+    vt_only = next(item for item in items if item["id"] == "candidate-vt-only")
+    assert vt_only["ti_assessment"]["configured_providers"] == 1
+    assert vt_only["ti_assessment"]["successful_providers"] == 1
+    assert vt_only["ti_assessment"]["signal"] == "NO_SIGNAL"
+    positive = client.get("/api/v1/candidates?ti_filter=POSITIVE").json()["items"]
+    assert [item["id"] for item in positive] == [
+        "candidate-multi",
+        "candidate-misp",
+    ]
+    misp_matches = client.get("/api/v1/candidates?ti_filter=MISP_MATCH").json()["items"]
+    assert [item["id"] for item in misp_matches] == ["candidate-misp"]
+    incomplete = client.get("/api/v1/candidates?ti_filter=INCOMPLETE").json()["items"]
+    assert [item["id"] for item in incomplete] == ["candidate-incomplete"]
+    score_order = client.get("/api/v1/candidates?sort=-score").json()["items"]
+    assert [item["score"] for item in score_order] == [100, 95, 80, 9, 8]
+    assert client.get("/api/v1/candidates?ti_filter=INVALID").status_code == 422
+
+
 def test_candidate_threat_intelligence_lookup_is_persisted() -> None:
     client, repository, threat_intel, misp = _client()
 
