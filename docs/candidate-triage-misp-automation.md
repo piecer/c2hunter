@@ -358,6 +358,14 @@ Candidate 상세 JSON을 합성하고, bulk operation은 200개 ID를 한 번에
 - `CTM-020`: 글로벌 Candidate 목록은 전체 Job Candidate JSON을 애플리케이션 메모리에서 전량
   스캔하지 않고 서버 측 필터·정렬·pagination을 수행한다.
 
+구현 상태 메모:
+
+- score, severity, suppressed 여부와 일반 정렬을 사용하는 기본 Candidates 큐는 정규화 테이블에서
+  `COUNT`, `ORDER BY`, `LIMIT`, `OFFSET`을 수행한다.
+- verdict, workflow, TI 파생 필터와 `ti_priority` 정렬은 정확한 결과를 유지하기 위해 현재 이력
+  projection을 애플리케이션에서 결합한다. `CTM-020`을 완전히 종료하려면 decision/action/TI 최신 상태를
+  후보 검색 projection에 트랜잭션으로 동기화하고 세 adapter의 page query에 같은 필터를 추가해야 한다.
+
 ## 13. 테스트 계획
 
 ### Controller

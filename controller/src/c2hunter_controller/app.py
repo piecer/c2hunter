@@ -3527,8 +3527,53 @@ def create_app(
         include_suppressed: bool = False,
         sort: str = "-score",
     ) -> dict[str, Any]:
+        sort_field = sort.removeprefix("-")
+        if sort_field not in {
+            "score",
+            "candidate_ip",
+            "first_seen",
+            "last_seen",
+            "severity",
+            "ti_priority",
+        }:
+            raise ApiError(422, "INVALID_SORT", "허용되지 않은 정렬 필드")
         jobs = {str(job["id"]): job for job in repo.list_jobs()}
         workflow = _candidate_workflow_index(repo)
+        derived_filter = verdict is not None or workflow_status is not None or ti_filter is not None
+        database_sort = sort_field != "ti_priority"
+        if not derived_filter and database_sort:
+            candidate_rows, total = repo.query_candidate_page(
+                minimum_score=minimum_score,
+                severity=severity,
+                include_suppressed=include_suppressed,
+                sort=sort,
+                page=page,
+                page_size=page_size,
+            )
+            page_items = [
+                _candidate_list_projection(
+                    _public_candidate(_with_candidate_workflow(candidate, workflow), jobs[job_id])
+                )
+                for job_id, candidate in candidate_rows
+                if job_id in jobs
+            ]
+            refs = repo.query_candidate_refs(
+                minimum_score=minimum_score,
+                severity=severity,
+                include_suppressed=include_suppressed,
+            )
+            count_items = [
+                _with_candidate_workflow({"id": candidate_id, "excluded": excluded}, workflow)
+                for candidate_id, excluded in refs
+            ]
+            return {
+                "items": page_items,
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": max(1, (total + page_size - 1) // page_size),
+                "workflow_counts": _candidate_workflow_counts(count_items),
+            }
         items: list[dict[str, Any]] = []
         candidate_rows = repo.query_candidates(
             minimum_score=minimum_score,

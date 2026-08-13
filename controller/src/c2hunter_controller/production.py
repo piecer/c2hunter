@@ -207,8 +207,14 @@ class PostgresRepository:
                           FROM job_candidates AS legacy
                           CROSS JOIN LATERAL jsonb_array_elements(legacy.data)
                             WITH ORDINALITY AS entry(candidate,ordinality)
+                          WHERE candidate ? 'id'
                           ON CONFLICT(candidate_id) DO NOTHING;
-                        DELETE FROM job_candidates;
+                        DELETE FROM job_candidates AS legacy
+                          WHERE jsonb_array_length(legacy.data)=(
+                            SELECT COUNT(*)
+                            FROM candidate_records AS record
+                            WHERE record.job_id=legacy.job_id
+                          );
                         """
                     )
                 connection.commit()
@@ -825,6 +831,79 @@ class PostgresRepository:
             (str(row[0]), row[1] if isinstance(row[1], dict) else json.loads(row[1]))
             for row in rows
         ]
+
+    @staticmethod
+    def _candidate_query_parts(
+        minimum_score: int, severity: str | None, include_suppressed: bool
+    ) -> tuple[list[str], list[Any]]:
+        clauses = ["score >= %s"]
+        parameters: list[Any] = [minimum_score]
+        if severity is not None:
+            clauses.append("severity = %s")
+            parameters.append(severity)
+        if not include_suppressed:
+            clauses.append("excluded = false")
+        return clauses, parameters
+
+    def query_candidate_page(
+        self,
+        *,
+        minimum_score: int,
+        severity: str | None,
+        include_suppressed: bool,
+        sort: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[tuple[str, dict[str, Any]]], int]:
+        clauses, parameters = self._candidate_query_parts(
+            minimum_score, severity, include_suppressed
+        )
+        field = sort.removeprefix("-")
+        direction = "DESC" if sort.startswith("-") else "ASC"
+        columns = {
+            "score": "score",
+            "severity": "severity",
+            "candidate_ip": "data->>'candidate_ip'",
+            "first_seen": "data->>'first_seen'",
+            "last_seen": "data->>'last_seen'",
+        }
+        order_column = columns[field]
+        where = " AND ".join(clauses)
+        with self.connection.cursor() as cursor:
+            cursor.execute(f"SELECT COUNT(*) FROM candidate_records WHERE {where}", parameters)
+            total_row = cursor.fetchone()
+            cursor.execute(
+                f"SELECT job_id,data FROM candidate_records WHERE {where} "
+                f"ORDER BY {order_column} {direction},candidate_id ASC LIMIT %s OFFSET %s",
+                [*parameters, page_size, (page - 1) * page_size],
+            )
+            rows = cursor.fetchall()
+            self.connection.commit()
+        total = int(total_row[0]) if total_row is not None else 0
+        return [
+            (str(row[0]), row[1] if isinstance(row[1], dict) else json.loads(row[1]))
+            for row in rows
+        ], total
+
+    def query_candidate_refs(
+        self,
+        *,
+        minimum_score: int,
+        severity: str | None,
+        include_suppressed: bool,
+    ) -> list[tuple[str, bool]]:
+        clauses, parameters = self._candidate_query_parts(
+            minimum_score, severity, include_suppressed
+        )
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT candidate_id,excluded FROM candidate_records WHERE "
+                + " AND ".join(clauses),
+                parameters,
+            )
+            rows = cursor.fetchall()
+            self.connection.commit()
+        return [(str(row[0]), bool(row[1])) for row in rows]
 
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         connection = self.connection

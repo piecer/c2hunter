@@ -43,6 +43,23 @@ class Repository(Protocol):
         severity: str | None = None,
         include_suppressed: bool = False,
     ) -> list[tuple[str, dict[str, Any]]]: ...
+    def query_candidate_page(
+        self,
+        *,
+        minimum_score: int,
+        severity: str | None,
+        include_suppressed: bool,
+        sort: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[tuple[str, dict[str, Any]]], int]: ...
+    def query_candidate_refs(
+        self,
+        *,
+        minimum_score: int,
+        severity: str | None,
+        include_suppressed: bool,
+    ) -> list[tuple[str, bool]]: ...
     def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]: ...
     def get_integration_settings(self) -> dict[str, Any] | None: ...
     def save_integration_settings(
@@ -329,6 +346,51 @@ class MemoryRepository:
             if int(candidate.get("score", 0)) >= minimum_score
             and (severity is None or candidate.get("severity") == severity)
             and (include_suppressed or not candidate.get("excluded", False))
+        ]
+
+    def query_candidate_page(
+        self,
+        *,
+        minimum_score: int,
+        severity: str | None,
+        include_suppressed: bool,
+        sort: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[tuple[str, dict[str, Any]]], int]:
+        rows = self.query_candidates(
+            minimum_score=minimum_score,
+            severity=severity,
+            include_suppressed=include_suppressed,
+        )
+        descending = sort.startswith("-")
+        field = sort.removeprefix("-")
+        if field == "score":
+            rows.sort(
+                key=lambda row: (float(row[1].get(field, 0) or 0), str(row[1]["id"])),
+                reverse=descending,
+            )
+        else:
+            rows.sort(
+                key=lambda row: (str(row[1].get(field, "")), str(row[1]["id"])), reverse=descending
+            )
+        start = (page - 1) * page_size
+        return rows[start : start + page_size], len(rows)
+
+    def query_candidate_refs(
+        self,
+        *,
+        minimum_score: int,
+        severity: str | None,
+        include_suppressed: bool,
+    ) -> list[tuple[str, bool]]:
+        return [
+            (str(candidate["id"]), bool(candidate.get("excluded", False)))
+            for _, candidate in self.query_candidates(
+                minimum_score=minimum_score,
+                severity=severity,
+                include_suppressed=include_suppressed,
+            )
         ]
 
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -777,6 +839,9 @@ class SQLiteRepository:
               candidate_id TEXT PRIMARY KEY,
               job_id TEXT NOT NULL,
               position INTEGER NOT NULL,
+              score INTEGER NOT NULL DEFAULT 0,
+              severity TEXT NOT NULL DEFAULT '',
+              excluded INTEGER NOT NULL DEFAULT 0,
               data TEXT NOT NULL,
               UNIQUE(job_id,position)
             );
@@ -839,6 +904,25 @@ class SQLiteRepository:
               segment_id TEXT PRIMARY KEY, content BLOB NOT NULL
             );
         """)
+        candidate_columns = {
+            str(row[1]) for row in self.connection.execute("PRAGMA table_info(candidate_records)")
+        }
+        for column, definition in {
+            "score": "INTEGER NOT NULL DEFAULT 0",
+            "severity": "TEXT NOT NULL DEFAULT ''",
+            "excluded": "INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            if column not in candidate_columns:
+                self.connection.execute(
+                    f"ALTER TABLE candidate_records ADD COLUMN {column} {definition}"
+                )
+        self.connection.execute(
+            "UPDATE candidate_records SET "
+            "score=CAST(COALESCE(json_extract(data,'$.score'),0) AS INTEGER),"
+            "severity=COALESCE(json_extract(data,'$.severity'),''),"
+            "excluded=CAST(COALESCE(json_extract(data,'$.excluded'),0) AS INTEGER)"
+        )
+        self.connection.commit()
         self._migrate_embedded_job_flows()
         self._migrate_embedded_job_signatures()
         self._migrate_legacy_candidates()
@@ -858,12 +942,16 @@ class SQLiteRepository:
                     candidates = json.loads(raw_data)
                     for position, candidate in enumerate(candidates):
                         self.connection.execute(
-                            "INSERT INTO candidate_records(candidate_id,job_id,position,data) "
-                            "VALUES(?,?,?,?) ON CONFLICT(candidate_id) DO NOTHING",
+                            "INSERT INTO candidate_records("
+                            "candidate_id,job_id,position,score,severity,excluded,data"
+                            ") VALUES(?,?,?,?,?,?,?) ON CONFLICT(candidate_id) DO NOTHING",
                             (
                                 str(candidate["id"]),
                                 str(job_id),
                                 position,
+                                int(candidate.get("score", 0)),
+                                str(candidate.get("severity", "")),
+                                int(bool(candidate.get("excluded", False))),
                                 self._serialize(candidate),
                             ),
                         )
@@ -1128,10 +1216,19 @@ class SQLiteRepository:
                 self.connection.execute("BEGIN IMMEDIATE")
                 self.connection.execute("DELETE FROM candidate_records WHERE job_id=?", (job_id,))
                 self.connection.executemany(
-                    "INSERT INTO candidate_records(candidate_id,job_id,position,data) "
-                    "VALUES(?,?,?,?)",
+                    "INSERT INTO candidate_records("
+                    "candidate_id,job_id,position,score,severity,excluded,data"
+                    ") VALUES(?,?,?,?,?,?,?)",
                     [
-                        (str(candidate["id"]), job_id, position, self._serialize(candidate))
+                        (
+                            str(candidate["id"]),
+                            job_id,
+                            position,
+                            int(candidate.get("score", 0)),
+                            str(candidate.get("severity", "")),
+                            int(bool(candidate.get("excluded", False))),
+                            self._serialize(candidate),
+                        )
                         for position, candidate in enumerate(candidates)
                     ],
                 )
@@ -1171,6 +1268,71 @@ class SQLiteRepository:
             parameters,
         ).fetchall()
         return [(str(row[0]), json.loads(row[1])) for row in rows]
+
+    @staticmethod
+    def _candidate_query_parts(
+        minimum_score: int, severity: str | None, include_suppressed: bool
+    ) -> tuple[list[str], list[Any]]:
+        clauses = ["score>=?"]
+        parameters: list[Any] = [minimum_score]
+        if severity is not None:
+            clauses.append("severity=?")
+            parameters.append(severity)
+        if not include_suppressed:
+            clauses.append("excluded=0")
+        return clauses, parameters
+
+    def query_candidate_page(
+        self,
+        *,
+        minimum_score: int,
+        severity: str | None,
+        include_suppressed: bool,
+        sort: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[tuple[str, dict[str, Any]]], int]:
+        clauses, parameters = self._candidate_query_parts(
+            minimum_score, severity, include_suppressed
+        )
+        field = sort.removeprefix("-")
+        direction = "DESC" if sort.startswith("-") else "ASC"
+        columns = {
+            "score": "score",
+            "severity": "severity",
+            "candidate_ip": "json_extract(data,'$.candidate_ip')",
+            "first_seen": "json_extract(data,'$.first_seen')",
+            "last_seen": "json_extract(data,'$.last_seen')",
+        }
+        order_column = columns[field]
+        where = " AND ".join(clauses)
+        total = int(
+            self.connection.execute(
+                f"SELECT COUNT(*) FROM candidate_records WHERE {where}", parameters
+            ).fetchone()[0]
+        )
+        rows = self.connection.execute(
+            f"SELECT job_id,data FROM candidate_records WHERE {where} "
+            f"ORDER BY {order_column} {direction},candidate_id ASC LIMIT ? OFFSET ?",
+            [*parameters, page_size, (page - 1) * page_size],
+        ).fetchall()
+        return [(str(row[0]), json.loads(row[1])) for row in rows], total
+
+    def query_candidate_refs(
+        self,
+        *,
+        minimum_score: int,
+        severity: str | None,
+        include_suppressed: bool,
+    ) -> list[tuple[str, bool]]:
+        clauses, parameters = self._candidate_query_parts(
+            minimum_score, severity, include_suppressed
+        )
+        rows = self.connection.execute(
+            "SELECT candidate_id,excluded FROM candidate_records WHERE " + " AND ".join(clauses),
+            parameters,
+        ).fetchall()
+        return [(str(row[0]), bool(row[1])) for row in rows]
 
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         with self._lock:
@@ -1419,8 +1581,15 @@ class SQLiteRepository:
             updated.update(deepcopy(updates_copy))
             updated["updated_at"] = datetime.now(UTC).isoformat()
             self.connection.execute(
-                "UPDATE candidate_records SET data=? WHERE candidate_id=?",
-                (self._serialize(updated), candidate_id),
+                "UPDATE candidate_records SET score=?,severity=?,excluded=?,data=? "
+                "WHERE candidate_id=?",
+                (
+                    int(updated.get("score", 0)),
+                    str(updated.get("severity", "")),
+                    int(bool(updated.get("excluded", False))),
+                    self._serialize(updated),
+                    candidate_id,
+                ),
             )
             self.connection.commit()
             return deepcopy(updated)

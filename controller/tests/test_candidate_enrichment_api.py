@@ -453,6 +453,35 @@ def test_candidate_list_filters_current_verdict_and_keeps_false_positives_manage
     assert client.get("/api/v1/candidates?verdict=INVALID").status_code == 422
 
 
+def test_default_candidate_list_uses_repository_page_query() -> None:
+    repository = MemoryRepository()
+    repository.jobs["job-1"] = {"id": "job-1", "name": "server page"}
+    repository.save_candidates(
+        "job-1",
+        [
+            {"id": "candidate-low", "candidate_ip": "203.0.113.45", "score": 10},
+            {"id": "candidate-high", "candidate_ip": "203.0.113.44", "score": 90},
+        ],
+    )
+    page_queries = 0
+    original_page_query = repository.query_candidate_page
+
+    def page_query(**kwargs: Any) -> tuple[list[tuple[str, dict[str, Any]]], int]:
+        nonlocal page_queries
+        page_queries += 1
+        return original_page_query(**kwargs)
+
+    repository.query_candidate_page = page_query  # type: ignore[method-assign]
+    client = TestClient(create_app(Settings(environment="test"), repository))
+
+    response = client.get("/api/v1/candidates?page_size=1&sort=-score")
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 2
+    assert [item["id"] for item in response.json()["items"]] == ["candidate-high"]
+    assert page_queries == 1
+
+
 def test_candidate_list_filters_response_workflow_independently_from_verdict() -> None:
     client, _, _, _ = _client()
     client.post(

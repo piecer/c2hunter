@@ -228,6 +228,11 @@ def test_connection_initialization_is_thread_safe(monkeypatch: Any) -> None:
     assert connection_count == 1
     schema = "\n".join(first.result().queries)
     assert "CREATE TABLE IF NOT EXISTS job_flow_records" in schema
+    assert "CREATE TABLE IF NOT EXISTS candidate_records" in schema
+    assert "WHERE candidate ? 'id'" in schema
+    assert "DELETE FROM job_candidates AS legacy" in schema
+    assert "record.job_id=legacy.job_id" in schema
+    assert "DELETE FROM job_candidates;" not in schema
     assert "CREATE TABLE IF NOT EXISTS job_flow_record_chunks" in schema
     assert "CREATE TABLE IF NOT EXISTS job_payload_signatures" in schema
     assert "CREATE TABLE IF NOT EXISTS ai_feedback" in schema

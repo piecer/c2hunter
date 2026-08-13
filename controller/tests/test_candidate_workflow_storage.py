@@ -88,6 +88,30 @@ def test_candidate_query_prefilters_normalized_rows(tmp_path: Path, repository_k
     ]
 
 
+def test_sqlite_candidate_page_sorts_and_paginates_in_repository(tmp_path: Path) -> None:
+    repository = SQLiteRepository(tmp_path / "controller.db")
+    repository.save_candidates(
+        "job-1",
+        [
+            _candidate("candidate-low", 10),
+            _candidate("candidate-high", 90),
+            _candidate("candidate-middle", 50),
+        ],
+    )
+
+    rows, total = repository.query_candidate_page(
+        minimum_score=0,
+        severity=None,
+        include_suppressed=False,
+        sort="-score",
+        page=2,
+        page_size=1,
+    )
+
+    assert total == 3
+    assert rows == [("job-1", _candidate("candidate-middle", 50))]
+
+
 def test_sqlite_candidate_misp_action_claim_is_atomic(tmp_path: Path) -> None:
     repository = SQLiteRepository(tmp_path / "controller.db")
     action = {
