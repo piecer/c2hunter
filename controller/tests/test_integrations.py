@@ -209,6 +209,22 @@ def test_serialized_request_gate_does_not_start_after_delay_and_cancel_race() ->
     assert not operation_called.is_set()
 
 
+def test_serialized_request_gate_supports_nested_run() -> None:
+    gate = SerializedRequestGate(lambda: 0.0)
+    finished = threading.Event()
+    results: list[str] = []
+
+    def run_nested() -> None:
+        results.append(gate.run(lambda: gate.run(lambda: "completed")))
+        finished.set()
+
+    worker = threading.Thread(target=run_nested, daemon=True)
+    worker.start()
+
+    assert finished.wait(timeout=1)
+    assert results == ["completed"]
+
+
 @pytest.mark.parametrize(
     ("reason", "expected_message"),
     [

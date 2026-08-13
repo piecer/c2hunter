@@ -58,7 +58,7 @@ class SerializedRequestGate:
         self._cancelled = threading.Event()
         self._wait = wait or self._cancelled.wait
         self._lock = threading.RLock()
-        self._start_lock = threading.Lock()
+        self._start_lock = threading.RLock()
         self._last_completed_at: float | None = None
 
     def run(self, operation: Callable[[], T]) -> T:
