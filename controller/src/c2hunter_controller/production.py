@@ -100,6 +100,20 @@ class PostgresRepository:
                         CREATE TABLE IF NOT EXISTS job_candidates (
                           job_id text PRIMARY KEY, data jsonb NOT NULL
                         );
+                        CREATE TABLE IF NOT EXISTS candidate_records (
+                          candidate_id text PRIMARY KEY,
+                          job_id text NOT NULL,
+                          position integer NOT NULL,
+                          score integer NOT NULL DEFAULT 0,
+                          severity text NOT NULL DEFAULT '',
+                          excluded boolean NOT NULL DEFAULT false,
+                          data jsonb NOT NULL,
+                          UNIQUE(job_id,position)
+                        );
+                        CREATE INDEX IF NOT EXISTS candidate_records_job_position
+                          ON candidate_records(job_id,position);
+                        CREATE INDEX IF NOT EXISTS candidate_records_triage
+                          ON candidate_records(excluded,severity,score DESC,candidate_id);
                         CREATE TABLE IF NOT EXISTS ai_analysis_runs (
                           run_id text PRIMARY KEY,
                           analysis_job_id text NOT NULL,
@@ -183,6 +197,18 @@ class PostgresRepository:
                         UPDATE controller_objects
                           SET data=data-'payload_signatures'
                           WHERE kind='job' AND data ? 'payload_signatures';
+                        INSERT INTO candidate_records(
+                          candidate_id,job_id,position,score,severity,excluded,data
+                        )
+                          SELECT candidate->>'id',legacy.job_id,entry.ordinality-1,
+                                 COALESCE((candidate->>'score')::integer,0),
+                                 COALESCE(candidate->>'severity',''),
+                                 COALESCE((candidate->>'excluded')::boolean,false),candidate
+                          FROM job_candidates AS legacy
+                          CROSS JOIN LATERAL jsonb_array_elements(legacy.data)
+                            WITH ORDINALITY AS entry(candidate,ordinality)
+                          ON CONFLICT(candidate_id) DO NOTHING;
+                        DELETE FROM job_candidates;
                         """
                     )
                 connection.commit()
@@ -686,6 +712,7 @@ class PostgresRepository:
                 (job_id,),
             )
             cursor.execute("DELETE FROM job_candidates WHERE job_id=%s", (job_id,))
+            cursor.execute("DELETE FROM candidate_records WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM job_flow_record_chunks WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM job_flow_records WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM job_payload_signatures WHERE job_id=%s", (job_id,))
@@ -720,23 +747,84 @@ class PostgresRepository:
             return None
 
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None:
-        with self._lock, self.connection.cursor() as cursor:
-            cursor.execute(
-                "INSERT INTO job_candidates(job_id,data) VALUES(%s,%s::jsonb) "
-                "ON CONFLICT(job_id) DO UPDATE SET data=excluded.data",
-                (job_id, self._json(candidates)),
-            )
-            self._audit("candidates", job_id, candidates)
-            self.connection.commit()
+        connection = self.connection
+        with self._lock:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("DELETE FROM candidate_records WHERE job_id=%s", (job_id,))
+                    cursor.executemany(
+                        "INSERT INTO candidate_records("
+                        "candidate_id,job_id,position,score,severity,excluded,data"
+                        ") VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                        [
+                            (
+                                str(candidate["id"]),
+                                job_id,
+                                position,
+                                int(candidate.get("score", 0)),
+                                str(candidate.get("severity", "")),
+                                bool(candidate.get("excluded", False)),
+                                self._json(candidate),
+                            )
+                            for position, candidate in enumerate(candidates)
+                        ],
+                    )
+                    cursor.execute(
+                        "INSERT INTO audit_events(kind,object_id,occurred_at,data) "
+                        "VALUES('candidates',%s,%s,%s::jsonb)",
+                        (job_id, datetime.now(UTC), self._json(candidates)),
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]:
         with self.connection.cursor() as cursor:
-            cursor.execute("SELECT data FROM job_candidates WHERE job_id=%s", (job_id,))
+            cursor.execute(
+                "SELECT data FROM candidate_records WHERE job_id=%s ORDER BY position", (job_id,)
+            )
+            rows = cursor.fetchall()
+            self.connection.commit()
+        return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
+
+    def get_candidate(self, candidate_id: str) -> tuple[str, dict[str, Any]] | None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT job_id,data FROM candidate_records WHERE candidate_id=%s", (candidate_id,)
+            )
             row = cursor.fetchone()
             self.connection.commit()
-        if not row:
-            return []
-        return row[0] if isinstance(row[0], list) else json.loads(row[0])
+        if row is None:
+            return None
+        data = row[1] if isinstance(row[1], dict) else json.loads(row[1])
+        return str(row[0]), data
+
+    def query_candidates(
+        self,
+        *,
+        minimum_score: int = 0,
+        severity: str | None = None,
+        include_suppressed: bool = False,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        clauses = ["score >= %s"]
+        parameters: list[Any] = [minimum_score]
+        if severity is not None:
+            clauses.append("severity = %s")
+            parameters.append(severity)
+        if not include_suppressed:
+            clauses.append("excluded = false")
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT job_id,data FROM candidate_records WHERE " + " AND ".join(clauses),
+                parameters,
+            )
+            rows = cursor.fetchall()
+            self.connection.commit()
+        return [
+            (str(row[0]), row[1] if isinstance(row[1], dict) else json.loads(row[1]))
+            for row in rows
+        ]
 
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         connection = self.connection
@@ -967,13 +1055,49 @@ class PostgresRepository:
 
     def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]:
         with self.connection.cursor() as cursor:
-            cursor.execute("SELECT job_id,data FROM job_candidates")
+            cursor.execute("SELECT job_id,data FROM candidate_records ORDER BY job_id,position")
             rows = cursor.fetchall()
             self.connection.commit()
-        return {
-            str(job_id): data if isinstance(data, list) else json.loads(data)
-            for job_id, data in rows
-        }
+        result: dict[str, list[dict[str, Any]]] = {}
+        for job_id, data in rows:
+            result.setdefault(str(job_id), []).append(
+                data if isinstance(data, dict) else json.loads(data)
+            )
+        return result
+
+    def get_integration_settings(self) -> dict[str, Any] | None:
+        return self._get("integration_settings", "global")
+
+    def save_integration_settings(
+        self, settings: dict[str, Any], expected_version: int
+    ) -> tuple[dict[str, Any] | None, str]:
+        connection = self.connection
+        with self._lock:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT data FROM controller_objects "
+                        "WHERE kind='integration_settings' AND id='global' FOR UPDATE"
+                    )
+                    row = cursor.fetchone()
+                    value = row[0] if row else None
+                    current = (
+                        value if isinstance(value, dict) else json.loads(value) if value else None
+                    )
+                    if int((current or {}).get("version", 0)) != expected_version:
+                        connection.commit()
+                        return current, "CONFLICT"
+                    cursor.execute(
+                        "INSERT INTO controller_objects(kind,id,data) "
+                        "VALUES('integration_settings','global',%s::jsonb) "
+                        "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                        (self._json(settings),),
+                    )
+                connection.commit()
+                return deepcopy(settings), "OK"
+            except Exception:
+                connection.rollback()
+                raise
 
     def save_candidate_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
         return self._put("candidate-decision", decision["id"], decision)
@@ -1005,6 +1129,24 @@ class PostgresRepository:
     def save_candidate_misp_action(self, action: dict[str, Any]) -> dict[str, Any]:
         return self._put("candidate-misp-action", action["id"], action)
 
+    def claim_candidate_misp_action(self, action: dict[str, Any]) -> bool:
+        connection = self.connection
+        with self._lock:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "INSERT INTO controller_objects(kind,id,data) "
+                        "VALUES('candidate-misp-action',%s,%s::jsonb) "
+                        "ON CONFLICT(kind,id) DO NOTHING",
+                        (action["id"], self._json(action)),
+                    )
+                    claimed = cursor.rowcount > 0
+                connection.commit()
+                return claimed
+            except Exception:
+                connection.rollback()
+                raise
+
     def list_candidate_misp_actions(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
         values = self._list("candidate-misp-action")
         return [
@@ -1013,83 +1155,67 @@ class PostgresRepository:
 
     def update_candidate(self, candidate_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
         """Update a candidate by ID across all jobs."""
-        from copy import deepcopy as dp
-
-        with self._lock, self.connection.cursor() as cursor:
-            for row in cursor.execute("SELECT job_id,data FROM job_candidates"):
-                job_id = row[0]
-                data = row[1]
-                candidates_list = data if isinstance(data, list) else json.loads(data)
-
-                found_index = None
-                updated_candidate = None
-
-                for i, candidate in enumerate(candidates_list):
-                    if candidate.get("id") == candidate_id:
-                        from datetime import UTC as utc_sync
-                        from datetime import datetime as dt_datetime
-
-                        updates_copy = dp(updates)
-                        updated = dp(candidate)
-
-                        if "score_adjustment" in updates_copy:
-                            old_score = updated.get("score", 0)
-                            adj = updates_copy.pop("score_adjustment")
-                            updated["score"] = max(0, min(100, old_score + adj))
-
-                        if "exclude_reason" in updates_copy:
-                            updated["excluded"] = True
-                            updated["exclude_reason"] = updates_copy.pop("exclude_reason")
-
-                        for key, value in updates_copy.items():
-                            if isinstance(value, str | int | float | bool):
-                                updated[key] = value
-                            else:
-                                try:
-                                    from copy import deepcopy as dp2
-
-                                    updated[key] = dp2(value)
-                                except Exception:
-                                    updated[key] = value
-
-                        updated["updated_at"] = dt_datetime.now(utc_sync).isoformat()
-
-                        candidates_list[i] = updated
-                        found_index = i
-                        updated_candidate = dp(updated)
-                        break
-
-                if found_index is not None and updated_candidate is not None:
-                    cursor.execute("DELETE FROM job_candidates WHERE job_id=%s", (job_id,))
+        connection = self.connection
+        with self._lock:
+            try:
+                with connection.cursor() as cursor:
                     cursor.execute(
-                        "INSERT INTO job_candidates(job_id,data) VALUES(%s,%s::jsonb)",
-                        (job_id, self._json(candidates_list)),
+                        "SELECT data FROM candidate_records WHERE candidate_id=%s FOR UPDATE",
+                        (candidate_id,),
                     )
-                    self.connection.commit()
-                    return updated_candidate
-        return None
+                    row = cursor.fetchone()
+                    if row is None:
+                        connection.commit()
+                        return None
+                    value = row[0]
+                    updated = value if isinstance(value, dict) else json.loads(value)
+                    updated = deepcopy(updated)
+                    updates_copy = deepcopy(updates)
+                    if "score_adjustment" in updates_copy:
+                        adjustment = updates_copy.pop("score_adjustment")
+                        updated["score"] = max(
+                            0, min(100, int(updated.get("score", 0)) + int(adjustment))
+                        )
+                    if "exclude_reason" in updates_copy:
+                        updated["excluded"] = True
+                        updated["exclude_reason"] = updates_copy.pop("exclude_reason")
+                    updated.update(updates_copy)
+                    updated["updated_at"] = datetime.now(UTC).isoformat()
+                    cursor.execute(
+                        "UPDATE candidate_records SET "
+                        "score=%s,severity=%s,excluded=%s,data=%s::jsonb "
+                        "WHERE candidate_id=%s",
+                        (
+                            int(updated.get("score", 0)),
+                            str(updated.get("severity", "")),
+                            bool(updated.get("excluded", False)),
+                            self._json(updated),
+                            candidate_id,
+                        ),
+                    )
+                connection.commit()
+                return deepcopy(updated)
+            except Exception:
+                connection.rollback()
+                raise
 
     def delete_candidate(self, candidate_id: str) -> bool:
         """Delete a candidate by ID across all jobs."""
-
-        with self._lock, self.connection.cursor() as cursor:
-            for row in list(cursor.execute("SELECT job_id,data FROM job_candidates")):
-                job_id = row[0]
-                data = row[1]
-                candidates_list = data if isinstance(data, list) else json.loads(data)
-
-                original_len = len(candidates_list)
-                filtered = [c for c in candidates_list if c.get("id") != candidate_id]
-
-                if len(filtered) < original_len:
-                    cursor.execute("DELETE FROM job_candidates WHERE job_id=%s", (job_id,))
+        connection = self.connection
+        with self._lock:
+            try:
+                with connection.cursor() as cursor:
                     cursor.execute(
-                        "INSERT INTO job_candidates(job_id,data) VALUES(%s,%s::jsonb)",
-                        (job_id, self._json(filtered)),
+                        "DELETE FROM candidate_records WHERE candidate_id=%s "
+                        "RETURNING candidate_id",
+                        (candidate_id,),
                     )
-                    self.connection.commit()
-                    return True
-        return False
+                    deleted = cursor.fetchone() is not None
+                connection.commit()
+                return deleted
+            except Exception:
+                connection.rollback()
+                raise
 
     def save_flow_label(self, label: dict[str, Any]) -> dict[str, Any]:
         return self._put("flow_label", label["id"], label)

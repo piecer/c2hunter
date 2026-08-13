@@ -636,6 +636,71 @@ class MispExportCreate(BaseModel):
     comment: str = Field(default="C2Hunter confirmed C2 candidate", min_length=1, max_length=1000)
 
 
+class IntegrationSettingsUpdate(BaseModel):
+    """WebUI에서 관리하는 비밀이 아닌 외부 연동 운영 정책."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=0)
+    virustotal_enabled: bool
+    abuseipdb_enabled: bool
+    misp_enabled: bool
+    misp_url: str = Field(default="", max_length=2048)
+    misp_verify_tls: bool = True
+    threat_intel_timeout_seconds: float = Field(gt=0, le=30)
+    abuseipdb_max_age_days: int = Field(ge=1, le=365)
+    abuseipdb_positive_threshold: int = Field(ge=0, le=100)
+    candidate_auto_enrichment_enabled: bool
+    candidate_auto_enrichment_limit: int = Field(ge=0, le=200)
+    candidate_auto_enrichment_workers: int = Field(ge=1, le=16)
+    candidate_auto_enrichment_queue_capacity: int = Field(ge=1, le=2000)
+    management_event_id: str = Field(default="", max_length=100, pattern=r"^(?:|[A-Za-z0-9-]+)$")
+    management_auto_register: bool = False
+    immediate_action_event_id: str = Field(
+        default="", max_length=100, pattern=r"^(?:|[A-Za-z0-9-]+)$"
+    )
+    immediate_action_auto_register: bool = False
+    immediate_action_min_positive_providers: int = Field(default=2, ge=2, le=3)
+
+    @model_validator(mode="after")
+    def validate_misp_automation(self) -> IntegrationSettingsUpdate:
+        if (
+            self.management_event_id
+            and self.immediate_action_event_id
+            and self.management_event_id == self.immediate_action_event_id
+        ):
+            raise ValueError("management and immediate-action MISP events must differ")
+        if self.management_auto_register and not self.management_event_id:
+            raise ValueError(
+                "management_event_id is required when automatic registration is enabled"
+            )
+        if self.immediate_action_auto_register and not self.immediate_action_event_id:
+            raise ValueError(
+                "immediate_action_event_id is required when automatic registration is enabled"
+            )
+        return self
+
+
+class CandidateBulkOperationCreate(BaseModel):
+    """목록에서 선택한 Candidate에 적용할 제한된 일괄 판정 명령."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_ids: list[str] = Field(min_length=1, max_length=200)
+    command: str = Field(pattern=r"^(UNDER_REVIEW|CONFIRMED_C2|FALSE_POSITIVE)$")
+    confidence: str = Field(default="MEDIUM", pattern=r"^(CONFIRMED|HIGH|MEDIUM|LOW)$")
+    note: str = Field(min_length=1, max_length=5000)
+
+    @field_validator("candidate_ids")
+    @classmethod
+    def unique_candidate_ids(cls, value: list[str]) -> list[str]:
+        if any(not candidate_id or len(candidate_id) > 200 for candidate_id in value):
+            raise ValueError("candidate IDs must be between 1 and 200 characters")
+        if len(set(value)) != len(value):
+            raise ValueError("candidate IDs must be unique")
+        return value
+
+
 class CandidateResponse(BaseModel):
     """후보 단일 조회 응답 스키마."""
 

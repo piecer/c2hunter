@@ -35,7 +35,19 @@ class Repository(Protocol):
     def get_job_capture(self, job_id: str) -> bytes | None: ...
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None: ...
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]: ...
+    def get_candidate(self, candidate_id: str) -> tuple[str, dict[str, Any]] | None: ...
+    def query_candidates(
+        self,
+        *,
+        minimum_score: int = 0,
+        severity: str | None = None,
+        include_suppressed: bool = False,
+    ) -> list[tuple[str, dict[str, Any]]]: ...
     def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]: ...
+    def get_integration_settings(self) -> dict[str, Any] | None: ...
+    def save_integration_settings(
+        self, settings: dict[str, Any], expected_version: int
+    ) -> tuple[dict[str, Any] | None, str]: ...
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]: ...
     def save_ai_run(self, run: dict[str, Any]) -> dict[str, Any]: ...
     def get_ai_run(self, run_id: str) -> dict[str, Any] | None: ...
@@ -62,6 +74,7 @@ class Repository(Protocol):
         self, candidate_id: str | None = None
     ) -> list[dict[str, Any]]: ...
     def save_candidate_misp_action(self, action: dict[str, Any]) -> dict[str, Any]: ...
+    def claim_candidate_misp_action(self, action: dict[str, Any]) -> bool: ...
     def list_candidate_misp_actions(
         self, candidate_id: str | None = None
     ) -> list[dict[str, Any]]: ...
@@ -121,6 +134,7 @@ class MemoryRepository:
         self.candidate_actions: dict[str, dict[str, Any]] = {}
         self.candidate_ti_lookups: dict[str, dict[str, Any]] = {}
         self.candidate_misp_actions: dict[str, dict[str, Any]] = {}
+        self.integration_settings: dict[str, Any] | None = None
         self.job_captures: dict[str, bytes] = {}
         self.flow_labels: dict[str, dict[str, Any]] = {}
         self.payload_signatures: dict[str, dict[str, Any]] = {}
@@ -294,6 +308,29 @@ class MemoryRepository:
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]:
         return deepcopy(self.candidates.get(job_id, []))
 
+    def get_candidate(self, candidate_id: str) -> tuple[str, dict[str, Any]] | None:
+        for job_id, candidates in self.candidates.items():
+            candidate = next((item for item in candidates if item.get("id") == candidate_id), None)
+            if candidate is not None:
+                return job_id, deepcopy(candidate)
+        return None
+
+    def query_candidates(
+        self,
+        *,
+        minimum_score: int = 0,
+        severity: str | None = None,
+        include_suppressed: bool = False,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        return [
+            (job_id, deepcopy(candidate))
+            for job_id, candidates in self.candidates.items()
+            for candidate in candidates
+            if int(candidate.get("score", 0)) >= minimum_score
+            and (severity is None or candidate.get("severity") == severity)
+            and (include_suppressed or not candidate.get("excluded", False))
+        ]
+
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         key = (run["analysis_job_id"], run["idempotency_key"])
         with self._lock:
@@ -449,6 +486,20 @@ class MemoryRepository:
     def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]:
         return deepcopy(self.candidates)
 
+    def get_integration_settings(self) -> dict[str, Any] | None:
+        with self._lock:
+            return deepcopy(self.integration_settings)
+
+    def save_integration_settings(
+        self, settings: dict[str, Any], expected_version: int
+    ) -> tuple[dict[str, Any] | None, str]:
+        with self._lock:
+            current_version = int((self.integration_settings or {}).get("version", 0))
+            if current_version != expected_version:
+                return deepcopy(self.integration_settings), "CONFLICT"
+            self.integration_settings = deepcopy(settings)
+            return deepcopy(settings), "OK"
+
     def save_candidate_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             self.candidate_decisions[decision["id"]] = deepcopy(decision)
@@ -491,6 +542,13 @@ class MemoryRepository:
         with self._lock:
             self.candidate_misp_actions[action["id"]] = deepcopy(action)
             return deepcopy(action)
+
+    def claim_candidate_misp_action(self, action: dict[str, Any]) -> bool:
+        with self._lock:
+            if action["id"] in self.candidate_misp_actions:
+                return False
+            self.candidate_misp_actions[action["id"]] = deepcopy(action)
+            return True
 
     def list_candidate_misp_actions(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
         values = self.candidate_misp_actions.values()
@@ -715,6 +773,15 @@ class SQLiteRepository:
             CREATE TABLE IF NOT EXISTS candidates (
               job_id TEXT PRIMARY KEY, data TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS candidate_records (
+              candidate_id TEXT PRIMARY KEY,
+              job_id TEXT NOT NULL,
+              position INTEGER NOT NULL,
+              data TEXT NOT NULL,
+              UNIQUE(job_id,position)
+            );
+            CREATE INDEX IF NOT EXISTS candidate_records_job_position
+              ON candidate_records(job_id,position);
             CREATE TABLE IF NOT EXISTS ai_analysis_runs (
               run_id TEXT PRIMARY KEY,
               analysis_job_id TEXT NOT NULL,
@@ -774,11 +841,37 @@ class SQLiteRepository:
         """)
         self._migrate_embedded_job_flows()
         self._migrate_embedded_job_signatures()
+        self._migrate_legacy_candidates()
         self.connection.commit()
 
     @staticmethod
     def _serialize(value: Any) -> str:
         return json.dumps(value, separators=(",", ":"), default=str)
+
+    def _migrate_legacy_candidates(self) -> None:
+        """Move legacy per-job candidate arrays into candidate-addressable rows exactly once."""
+        with self._lock:
+            try:
+                self.connection.execute("BEGIN IMMEDIATE")
+                rows = self.connection.execute("SELECT job_id,data FROM candidates").fetchall()
+                for job_id, raw_data in rows:
+                    candidates = json.loads(raw_data)
+                    for position, candidate in enumerate(candidates):
+                        self.connection.execute(
+                            "INSERT INTO candidate_records(candidate_id,job_id,position,data) "
+                            "VALUES(?,?,?,?) ON CONFLICT(candidate_id) DO NOTHING",
+                            (
+                                str(candidate["id"]),
+                                str(job_id),
+                                position,
+                                self._serialize(candidate),
+                            ),
+                        )
+                self.connection.execute("DELETE FROM candidates")
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def _put(self, kind: str, object_id: str, value: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -1003,6 +1096,7 @@ class SQLiteRepository:
                     export_ids,
                 )
             self.connection.execute("DELETE FROM candidates WHERE job_id=?", (job_id,))
+            self.connection.execute("DELETE FROM candidate_records WHERE job_id=?", (job_id,))
             self.connection.execute("DELETE FROM job_flow_records WHERE job_id=?", (job_id,))
             self.connection.execute("DELETE FROM job_payload_signatures WHERE job_id=?", (job_id,))
             self.connection.execute("DELETE FROM job_capture_blobs WHERE job_id=?", (job_id,))
@@ -1030,18 +1124,53 @@ class SQLiteRepository:
 
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None:
         with self._lock:
-            self.connection.execute(
-                "INSERT INTO candidates(job_id,data) VALUES(?,?) "
-                "ON CONFLICT(job_id) DO UPDATE SET data=excluded.data",
-                (job_id, self._serialize(candidates)),
-            )
-            self.connection.commit()
+            try:
+                self.connection.execute("BEGIN IMMEDIATE")
+                self.connection.execute("DELETE FROM candidate_records WHERE job_id=?", (job_id,))
+                self.connection.executemany(
+                    "INSERT INTO candidate_records(candidate_id,job_id,position,data) "
+                    "VALUES(?,?,?,?)",
+                    [
+                        (str(candidate["id"]), job_id, position, self._serialize(candidate))
+                        for position, candidate in enumerate(candidates)
+                    ],
+                )
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT data FROM candidate_records WHERE job_id=? ORDER BY position", (job_id,)
+        ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def get_candidate(self, candidate_id: str) -> tuple[str, dict[str, Any]] | None:
         row = self.connection.execute(
-            "SELECT data FROM candidates WHERE job_id=?", (job_id,)
+            "SELECT job_id,data FROM candidate_records WHERE candidate_id=?", (candidate_id,)
         ).fetchone()
-        return json.loads(row[0]) if row else []
+        return (str(row[0]), json.loads(row[1])) if row else None
+
+    def query_candidates(
+        self,
+        *,
+        minimum_score: int = 0,
+        severity: str | None = None,
+        include_suppressed: bool = False,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        clauses = ["CAST(json_extract(data,'$.score') AS INTEGER)>=?"]
+        parameters: list[Any] = [minimum_score]
+        if severity is not None:
+            clauses.append("json_extract(data,'$.severity')=?")
+            parameters.append(severity)
+        if not include_suppressed:
+            clauses.append("COALESCE(json_extract(data,'$.excluded'),0)=0")
+        rows = self.connection.execute(
+            "SELECT job_id,data FROM candidate_records WHERE " + " AND ".join(clauses),
+            parameters,
+        ).fetchall()
+        return [(str(row[0]), json.loads(row[1])) for row in rows]
 
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         with self._lock:
@@ -1187,8 +1316,40 @@ class SQLiteRepository:
             self.connection.commit()
 
     def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]:
-        rows = self.connection.execute("SELECT job_id,data FROM candidates").fetchall()
-        return {str(job_id): json.loads(data) for job_id, data in rows}
+        rows = self.connection.execute(
+            "SELECT job_id,data FROM candidate_records ORDER BY job_id,position"
+        ).fetchall()
+        result: dict[str, list[dict[str, Any]]] = {}
+        for job_id, data in rows:
+            result.setdefault(str(job_id), []).append(json.loads(data))
+        return result
+
+    def get_integration_settings(self) -> dict[str, Any] | None:
+        return self._get("integration_settings", "global")
+
+    def save_integration_settings(
+        self, settings: dict[str, Any], expected_version: int
+    ) -> tuple[dict[str, Any] | None, str]:
+        with self._lock:
+            try:
+                self.connection.execute("BEGIN IMMEDIATE")
+                row = self.connection.execute(
+                    "SELECT data FROM objects WHERE kind='integration_settings' AND id='global'"
+                ).fetchone()
+                current = json.loads(row[0]) if row else None
+                if int((current or {}).get("version", 0)) != expected_version:
+                    self.connection.commit()
+                    return current, "CONFLICT"
+                self.connection.execute(
+                    "INSERT INTO objects(kind,id,data) VALUES('integration_settings','global',?) "
+                    "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                    (self._serialize(settings),),
+                )
+                self.connection.commit()
+                return deepcopy(settings), "OK"
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def save_candidate_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
         return self._put("candidate-decision", decision["id"], decision)
@@ -1220,6 +1381,16 @@ class SQLiteRepository:
     def save_candidate_misp_action(self, action: dict[str, Any]) -> dict[str, Any]:
         return self._put("candidate-misp-action", action["id"], action)
 
+    def claim_candidate_misp_action(self, action: dict[str, Any]) -> bool:
+        with self._lock:
+            cursor = self.connection.execute(
+                "INSERT INTO objects(kind,id,data) VALUES('candidate-misp-action',?,?) "
+                "ON CONFLICT(kind,id) DO NOTHING",
+                (action["id"], self._serialize(action)),
+            )
+            self.connection.commit()
+            return cursor.rowcount > 0
+
     def list_candidate_misp_actions(self, candidate_id: str | None = None) -> list[dict[str, Any]]:
         values = self._list("candidate-misp-action")
         return [
@@ -1229,63 +1400,39 @@ class SQLiteRepository:
     def update_candidate(self, candidate_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
         """Update a candidate by ID across all jobs."""
         with self._lock:
-            # Find which job contains this candidate
-            for row in self.connection.execute("SELECT job_id,data FROM candidates"):
-                job_id = row[0]
-                candidates_list = json.loads(row[1])
+            row = self.connection.execute(
+                "SELECT data FROM candidate_records WHERE candidate_id=?", (candidate_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            from datetime import UTC
 
-                for i, candidate in enumerate(candidates_list):
-                    if candidate.get("id") == candidate_id:
-                        # Found it - need to update
-                        from datetime import UTC
-
-                        updates_copy = deepcopy(updates)
-
-                        updated = deepcopy(candidate)
-
-                        if "score_adjustment" in updates_copy:
-                            old_score = updated.get("score", 0)
-                            adj = updates_copy.pop("score_adjustment")
-                            updated["score"] = max(0, min(100, old_score + adj))
-
-                        if "exclude_reason" in updates_copy:
-                            updated["excluded"] = True
-                            updated["exclude_reason"] = updates_copy.pop("exclude_reason")
-
-                        for key, value in updates_copy.items():
-                            updated[key] = deepcopy(value)
-
-                        updated["updated_at"] = datetime.now(UTC).isoformat()
-
-                        candidates_list[i] = updated
-                        self.connection.execute("DELETE FROM candidates WHERE job_id=?", (job_id,))
-                        self.connection.execute(
-                            "INSERT INTO candidates(job_id,data) VALUES(?,?)",
-                            (job_id, self._serialize(candidates_list)),
-                        )
-                        self.connection.commit()
-                        return deepcopy(updated)
-        return None
+            updated = json.loads(row[0])
+            updates_copy = deepcopy(updates)
+            if "score_adjustment" in updates_copy:
+                old_score = updated.get("score", 0)
+                adjustment = updates_copy.pop("score_adjustment")
+                updated["score"] = max(0, min(100, old_score + adjustment))
+            if "exclude_reason" in updates_copy:
+                updated["excluded"] = True
+                updated["exclude_reason"] = updates_copy.pop("exclude_reason")
+            updated.update(deepcopy(updates_copy))
+            updated["updated_at"] = datetime.now(UTC).isoformat()
+            self.connection.execute(
+                "UPDATE candidate_records SET data=? WHERE candidate_id=?",
+                (self._serialize(updated), candidate_id),
+            )
+            self.connection.commit()
+            return deepcopy(updated)
 
     def delete_candidate(self, candidate_id: str) -> bool:
         """Delete a candidate by ID across all jobs."""
         with self._lock:
-            for row in list(self.connection.execute("SELECT job_id,data FROM candidates")):
-                job_id = row[0]
-                candidates_list = json.loads(row[1])
-
-                original_len = len(candidates_list)
-                candidates_list = [c for c in candidates_list if c.get("id") != candidate_id]
-
-                if len(candidates_list) < original_len:
-                    self.connection.execute("DELETE FROM candidates WHERE job_id=?", (job_id,))
-                    self.connection.execute(
-                        "INSERT INTO candidates(job_id,data) VALUES(?,?)",
-                        (job_id, self._serialize(candidates_list)),
-                    )
-                    self.connection.commit()
-                    return True
-            return False
+            cursor = self.connection.execute(
+                "DELETE FROM candidate_records WHERE candidate_id=?", (candidate_id,)
+            )
+            self.connection.commit()
+            return cursor.rowcount > 0
 
     def save_flow_label(self, label: dict[str, Any]) -> dict[str, Any]:
         return self._put("flow_label", label["id"], label)

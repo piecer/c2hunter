@@ -1,11 +1,105 @@
 """Candidate workflow resource persistence tests."""
 
+import json
+import sqlite3
 import threading
 from pathlib import Path
 
 import pytest
 
 from c2hunter_controller.repositories import MemoryRepository, SQLiteRepository
+
+
+def _candidate(candidate_id: str, score: int = 50) -> dict[str, object]:
+    # Candidate 저장 계약 테스트용 최소 detector 결과다.
+    return {
+        "id": candidate_id,
+        "candidate_ip": f"203.0.113.{score}",
+        "score": score,
+        "severity": "HIGH",
+    }
+
+
+def test_sqlite_migrates_legacy_job_candidate_json_once(tmp_path: Path) -> None:
+    # 구버전 DB의 Job별 JSON 배열을 만든 뒤 새 Repository가 후보 단위 행으로 이관하는지 검증한다.
+    path = tmp_path / "legacy-candidates.db"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE candidates(job_id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+    connection.execute(
+        "INSERT INTO candidates(job_id,data) VALUES(?,?)",
+        ("job-1", json.dumps([_candidate("candidate-1"), _candidate("candidate-2", 80)])),
+    )
+    connection.commit()
+    connection.close()
+
+    repository = SQLiteRepository(path)
+
+    assert repository.get_candidates("job-1") == [
+        _candidate("candidate-1"),
+        _candidate("candidate-2", 80),
+    ]
+    rows = repository.connection.execute(
+        "SELECT candidate_id,job_id FROM candidate_records ORDER BY position"
+    ).fetchall()
+    assert rows == [("candidate-1", "job-1"), ("candidate-2", "job-1")]
+    assert repository.connection.execute("SELECT COUNT(*) FROM candidates").fetchone() == (0,)
+
+    # 재시작해도 중복 행이 생기지 않아야 한다.
+    repository.close()
+    reopened = SQLiteRepository(path)
+    assert reopened.connection.execute("SELECT COUNT(*) FROM candidate_records").fetchone() == (2,)
+
+
+def test_sqlite_replaces_job_candidates_in_normalized_table(tmp_path: Path) -> None:
+    repository = SQLiteRepository(tmp_path / "normalized-candidates.db")
+    repository.save_candidates("job-1", [_candidate("candidate-1"), _candidate("candidate-2", 80)])
+
+    repository.save_candidates("job-1", [_candidate("candidate-2", 90)])
+
+    assert repository.get_candidates("job-1") == [_candidate("candidate-2", 90)]
+    assert repository.list_candidate_sets() == {"job-1": [_candidate("candidate-2", 90)]}
+    assert repository.update_candidate("candidate-2", {"score_adjustment": -10})["score"] == 80
+    assert repository.delete_candidate("candidate-2") is True
+    assert repository.get_candidates("job-1") == []
+
+
+@pytest.mark.parametrize("repository_kind", ["memory", "sqlite"])
+def test_candidate_query_prefilters_normalized_rows(tmp_path: Path, repository_kind: str) -> None:
+    repository = (
+        MemoryRepository()
+        if repository_kind == "memory"
+        else SQLiteRepository(tmp_path / "query-candidates.db")
+    )
+    repository.save_candidates(
+        "job-1",
+        [
+            _candidate("candidate-high", 90),
+            {**_candidate("candidate-low", 40), "severity": "LOW"},
+            {**_candidate("candidate-hidden", 95), "excluded": True},
+        ],
+    )
+
+    assert repository.query_candidates(minimum_score=80) == [
+        ("job-1", _candidate("candidate-high", 90))
+    ]
+    assert repository.query_candidates(minimum_score=80, include_suppressed=True) == [
+        ("job-1", _candidate("candidate-high", 90)),
+        ("job-1", {**_candidate("candidate-hidden", 95), "excluded": True}),
+    ]
+
+
+def test_sqlite_candidate_misp_action_claim_is_atomic(tmp_path: Path) -> None:
+    repository = SQLiteRepository(tmp_path / "controller.db")
+    action = {
+        "id": "management:candidate-1:100:1",
+        "candidate_id": "candidate-1",
+        "status": "PENDING",
+        "created_at": "2026-08-13T00:00:00+00:00",
+    }
+
+    assert repository.claim_candidate_misp_action(action) is True
+    assert repository.claim_candidate_misp_action(action) is False
+    assert repository.list_candidate_misp_actions("candidate-1") == [action]
 
 
 @pytest.mark.parametrize("repository_kind", ["memory", "sqlite"])

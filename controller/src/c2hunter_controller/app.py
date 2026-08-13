@@ -77,6 +77,7 @@ from .schemas import (
     AnalysisParameters,
     CancelRequest,
     CandidateActionCreate,
+    CandidateBulkOperationCreate,
     CandidateUpdate,
     CandidateVerdictCreate,
     CaptureParameters,
@@ -90,6 +91,7 @@ from .schemas import (
     FlowBatchCreate,
     FlowLabelCreate,
     Heartbeat,
+    IntegrationSettingsUpdate,
     MispExportCreate,
     PayloadSignatureUpdate,
     PcapExportCreate,
@@ -355,12 +357,14 @@ def _find_candidate(
     repo: Repository, candidate_id: str
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
     workflow = _candidate_workflow_index(repo, candidate_id)
-    jobs = {str(job["id"]): job for job in repo.list_jobs()}
-    for job_id, candidates in repo.list_candidate_sets().items():
-        candidate = next((item for item in candidates if item.get("id") == candidate_id), None)
-        if candidate is not None and job_id in jobs:
-            return jobs[job_id], _with_candidate_workflow(candidate, workflow)
-    return None
+    found = repo.get_candidate(candidate_id)
+    if found is None:
+        return None
+    job_id, candidate = found
+    job = repo.get_job_summary(job_id)
+    if job is None:
+        return None
+    return job, _with_candidate_workflow(candidate, workflow)
 
 
 _VALID_CANDIDATE_VERDICTS = {"CONFIRMED_C2", "FALSE_POSITIVE", "UNDER_REVIEW"}
@@ -872,12 +876,87 @@ def create_app(
     app.state.misp_client = misp
     app.state.ai_analysis_service = ai_service
     app.state.ai_analysis_queue = ai_tasks
+
+    def environment_integration_settings() -> dict[str, Any]:
+        return {
+            "version": 1,
+            "virustotal_enabled": bool(virustotal_key or threat_intel_service is not None),
+            "abuseipdb_enabled": bool(abuseipdb_key or threat_intel_service is not None),
+            "misp_enabled": bool((config.misp_url and misp_key) or misp_client is not None),
+            "misp_url": config.misp_url,
+            "misp_verify_tls": config.misp_verify_tls,
+            "threat_intel_timeout_seconds": config.threat_intel_timeout_seconds,
+            "abuseipdb_max_age_days": config.abuseipdb_max_age_days,
+            "abuseipdb_positive_threshold": 1,
+            "candidate_auto_enrichment_enabled": config.candidate_auto_enrichment_limit > 0,
+            "candidate_auto_enrichment_limit": config.candidate_auto_enrichment_limit,
+            "candidate_auto_enrichment_workers": config.candidate_auto_enrichment_workers,
+            "candidate_auto_enrichment_queue_capacity": (
+                config.candidate_auto_enrichment_queue_capacity
+            ),
+            "management_event_id": config.misp_default_event_id,
+            "management_auto_register": False,
+            "immediate_action_event_id": "",
+            "immediate_action_auto_register": False,
+            "immediate_action_min_positive_providers": 2,
+            "updated_by": "ENVIRONMENT_IMPORT",
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+
+    imported_settings = repo.get_integration_settings()
+    if imported_settings is None:
+        imported_settings, _ = repo.save_integration_settings(
+            environment_integration_settings(), expected_version=0
+        )
+
+    def integration_settings() -> dict[str, Any]:
+        return (
+            repo.get_integration_settings()
+            or imported_settings
+            or environment_integration_settings()
+        )
+
+    def threat_intel_for(policy: dict[str, Any]) -> ThreatIntelLookup | None:
+        if not policy.get("virustotal_enabled") and not policy.get("abuseipdb_enabled"):
+            return None
+        if threat_intel_service is not None:
+            return threat_intel_service
+        virustotal = virustotal_key if policy.get("virustotal_enabled") else ""
+        abuseipdb = abuseipdb_key if policy.get("abuseipdb_enabled") else ""
+        if not virustotal and not abuseipdb:
+            return None
+        return ThreatIntelService(
+            virustotal_api_key=virustotal,
+            abuseipdb_api_key=abuseipdb,
+            abuseipdb_max_age_days=int(policy["abuseipdb_max_age_days"]),
+            http_client=JsonHttpClient(float(policy["threat_intel_timeout_seconds"])),
+        )
+
+    def misp_for(policy: dict[str, Any]) -> MispPublisher | None:
+        if not policy.get("misp_enabled"):
+            return None
+        if misp_client is not None:
+            return misp_client
+        url = str(policy.get("misp_url", ""))
+        if not url or not misp_key:
+            return None
+        return MispClient(
+            url,
+            misp_key,
+            http_client=JsonHttpClient(
+                float(policy["threat_intel_timeout_seconds"]),
+                verify_tls=bool(policy["misp_verify_tls"]),
+            ),
+        )
+
+    app.state.integration_settings = integration_settings
     candidate_action_lock = threading.Lock()
     misp_export_lock = threading.Lock()
     enrichment_executor = ThreadPoolExecutor(
         max_workers=config.candidate_auto_enrichment_workers,
         thread_name_prefix="candidate-ti",
     )
+    retired_enrichment_executors: list[ThreadPoolExecutor] = []
     enrichment_futures: set[Future[Any]] = set()
     enrichment_lock = threading.Lock()
     enrichment_lifecycle_lock = threading.Lock()
@@ -1857,6 +1936,189 @@ def create_app(
         enqueue_worker_job(job)
         return saved
 
+    def apply_immediate_action_automation(
+        repository: Repository,
+        job_id: str,
+        candidate: dict[str, Any],
+        lookup: dict[str, Any],
+        policy: dict[str, Any],
+        publisher: MispPublisher | None,
+    ) -> None:
+        if not policy.get("immediate_action_auto_register") or publisher is None:
+            return
+        event_id = str(policy.get("immediate_action_event_id", ""))
+        if not event_id:
+            return
+        providers = lookup.get("providers", {})
+        if not isinstance(providers, dict):
+            return
+        positive: list[str] = []
+        virustotal = providers.get("virustotal")
+        if isinstance(virustotal, dict) and str(virustotal.get("status", "")).upper() == "OK":
+            if _integer(virustotal.get("malicious")) + _integer(virustotal.get("suspicious")) > 0:
+                positive.append("virustotal")
+        abuseipdb = providers.get("abuseipdb")
+        if isinstance(abuseipdb, dict) and str(abuseipdb.get("status", "")).upper() == "OK":
+            threshold = int(policy.get("abuseipdb_positive_threshold", 1))
+            if _integer(abuseipdb.get("abuse_confidence_score")) >= threshold:
+                positive.append("abuseipdb")
+        misp_result = providers.get("misp")
+        if isinstance(misp_result, dict) and str(misp_result.get("status", "")).upper() == "OK":
+            excluded_events = {
+                str(policy.get("management_event_id", "")),
+                event_id,
+            }
+            matches = misp_result.get("matches", [])
+            external_matches = [
+                match
+                for match in matches
+                if isinstance(match, dict) and str(match.get("event_id", "")) not in excluded_events
+            ]
+            if external_matches:
+                positive.append("misp")
+        minimum = int(policy.get("immediate_action_min_positive_providers", 2))
+        if len(set(positive)) < minimum:
+            return
+        created_at = datetime.now(UTC).isoformat()
+        action_id = f"immediate:{candidate['id']}:{event_id}"
+        action = {
+            "id": action_id,
+            "candidate_id": str(candidate["id"]),
+            "job_id": job_id,
+            "candidate_ip": str(candidate["candidate_ip"]),
+            "kind": "IMMEDIATE_ACTION_REGISTRATION",
+            "origin": "AUTO",
+            "event_id": event_id,
+            "attribute_type": "ip-src",
+            "settings_version": policy.get("version"),
+            "lookup_id": lookup["id"],
+            "positive_providers": sorted(set(positive)),
+            "created_by": "SYSTEM",
+            "created_at": created_at,
+            "status": "PENDING",
+        }
+        if not repository.claim_candidate_misp_action(action):
+            return
+        try:
+            result = publisher.add_ip_attribute(
+                event_id,
+                str(candidate["candidate_ip"]),
+                "C2Hunter automatic immediate action",
+            )
+            repository.save_candidate_misp_action(
+                {
+                    **action,
+                    **result,
+                    "status": "EXPORTED",
+                    "completed_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            existing = repository.list_candidate_decisions(str(candidate["id"]))
+            automatic = next(
+                (
+                    item
+                    for item in existing
+                    if item.get("origin") == "AUTOMATION"
+                    and item.get("settings_version") == policy.get("version")
+                    and item.get("verdict") == "CONFIRMED_C2"
+                ),
+                None,
+            )
+            if automatic is None:
+                automatic = repository.save_candidate_decision(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "candidate_id": str(candidate["id"]),
+                        "job_id": job_id,
+                        "candidate_ip": str(candidate["candidate_ip"]),
+                        "verdict": "CONFIRMED_C2",
+                        "confidence": "HIGH",
+                        "note": "외부 TI 기준 충족 및 MISP 등록 확인",
+                        "origin": "AUTOMATION",
+                        "lookup_id": lookup["id"],
+                        "settings_version": policy.get("version"),
+                        "positive_providers": sorted(set(positive)),
+                        "created_by": "SYSTEM",
+                        "created_at": created_at,
+                    }
+                )
+                repository.save_candidate_action(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "candidate_id": str(candidate["id"]),
+                        "verdict_id": automatic["id"],
+                        "job_id": job_id,
+                        "candidate_ip": str(candidate["candidate_ip"]),
+                        "status": "PENDING",
+                        "note": "자동 CONFIRMED_C2 판정으로 후속 조치가 생성되었습니다",
+                        "created_by": "SYSTEM",
+                        "created_at": created_at,
+                    }
+                )
+        except IntegrationError as exc:
+            repository.save_candidate_misp_action(
+                {
+                    **action,
+                    "status": "FAILED",
+                    "error_code": exc.provider,
+                    "error_message": exc.message,
+                }
+            )
+
+    def register_candidate_for_management(
+        repository: Repository,
+        job_id: str,
+        candidate: dict[str, Any],
+        policy: dict[str, Any],
+        publisher: MispPublisher | None,
+    ) -> None:
+        if not policy.get("management_auto_register") or publisher is None:
+            return
+        event_id = str(policy.get("management_event_id", ""))
+        if not event_id:
+            return
+        candidate_id = str(candidate["id"])
+        action_id = f"management:{candidate_id}:{event_id}"
+        action = {
+            "id": action_id,
+            "candidate_id": candidate_id,
+            "job_id": job_id,
+            "candidate_ip": str(candidate["candidate_ip"]),
+            "kind": "MANAGEMENT_REGISTRATION",
+            "origin": "AUTO",
+            "event_id": event_id,
+            "attribute_type": "ip-src",
+            "settings_version": policy.get("version"),
+            "created_by": "SYSTEM",
+            "created_at": datetime.now(UTC).isoformat(),
+            "status": "PENDING",
+        }
+        if not repository.claim_candidate_misp_action(action):
+            return
+        try:
+            result = publisher.add_ip_attribute(
+                event_id,
+                str(candidate["candidate_ip"]),
+                "C2Hunter candidate management registration",
+            )
+            repository.save_candidate_misp_action(
+                {
+                    **action,
+                    **result,
+                    "status": "EXPORTED",
+                    "completed_at": datetime.now(UTC).isoformat(),
+                }
+            )
+        except IntegrationError as exc:
+            repository.save_candidate_misp_action(
+                {
+                    **action,
+                    "status": "FAILED",
+                    "error_code": exc.provider,
+                    "error_message": exc.message,
+                }
+            )
+
     def enrich_candidate(
         job_id: str,
         candidate: dict[str, Any],
@@ -1864,8 +2126,12 @@ def create_app(
         origin: Literal["AUTO", "MANUAL"],
         pending_record: dict[str, Any] | None = None,
         persistence_repository: Repository | None = None,
+        settings_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         target_repository = persistence_repository or repo
+        policy = settings_snapshot or integration_settings()
+        lookup_service = threat_intel_for(policy)
+        publisher = misp_for(policy)
         candidate_id = str(candidate["id"])
         candidate_ip = str(candidate["candidate_ip"])
         base_record = pending_record or {
@@ -1883,8 +2149,8 @@ def create_app(
         providers: dict[str, dict[str, Any]] = {}
         summary: dict[str, Any] = {}
         try:
-            if threat_intel is not None:
-                result = threat_intel.lookup_ip(candidate_ip)
+            if lookup_service is not None:
+                result = lookup_service.lookup_ip(candidate_ip)
                 raw_providers = result.get("providers", {})
                 if isinstance(raw_providers, dict):
                     providers.update(
@@ -1897,9 +2163,9 @@ def create_app(
                 raw_summary = result.get("summary", {})
                 if isinstance(raw_summary, dict):
                     summary.update(raw_summary)
-            if misp is not None:
+            if publisher is not None:
                 try:
-                    providers["misp"] = misp.lookup_ip(candidate_ip)
+                    providers["misp"] = publisher.lookup_ip(candidate_ip)
                 except IntegrationError as exc:
                     providers["misp"] = {
                         "status": "ERROR",
@@ -1955,6 +2221,10 @@ def create_app(
                 "summary": summary,
             }
         target_repository.save_candidate_ti_lookup(completed)
+        if completed.get("status") in {"COMPLETED", "PARTIAL"}:
+            apply_immediate_action_automation(
+                target_repository, job_id, candidate, completed, policy, publisher
+            )
         return completed
 
     def automatic_enrichment_repository() -> Repository:
@@ -1973,6 +2243,7 @@ def create_app(
         job_id: str,
         candidate: dict[str, Any],
         pending_record: dict[str, Any],
+        settings_snapshot: dict[str, Any],
     ) -> dict[str, Any]:
         return enrich_candidate(
             job_id,
@@ -1980,15 +2251,32 @@ def create_app(
             origin="AUTO",
             pending_record=pending_record,
             persistence_repository=automatic_enrichment_repository(),
+            settings_snapshot=settings_snapshot,
         )
 
     def schedule_candidate_enrichment(job_id: str, candidates: list[dict[str, Any]]) -> None:
-        if (threat_intel is None and misp is None) or config.candidate_auto_enrichment_limit == 0:
+        policy = integration_settings()
+        publisher = misp_for(policy)
+        for candidate in candidates:
+            register_candidate_for_management(repo, job_id, candidate, policy, publisher)
+        if threat_intel_for(policy) is None and publisher is None:
             return
-        selected = sorted(candidates, key=lambda item: int(item.get("score", 0)), reverse=True)[
-            : config.candidate_auto_enrichment_limit
-        ]
+        immediate_enabled = bool(policy.get("immediate_action_auto_register"))
+        if not immediate_enabled and (
+            not policy.get("candidate_auto_enrichment_enabled")
+            or int(policy.get("candidate_auto_enrichment_limit", 0)) == 0
+        ):
+            return
+        ordered = sorted(candidates, key=lambda item: int(item.get("score", 0)), reverse=True)
+        selected = (
+            ordered
+            if immediate_enabled
+            else ordered[: int(policy["candidate_auto_enrichment_limit"])]
+        )
         for candidate in selected:
+            with enrichment_lifecycle_lock:
+                active_executor = enrichment_executor
+                active_capacity = enrichment_capacity
             pending_record = {
                 "id": str(uuid.uuid4()),
                 "candidate_id": str(candidate["id"]),
@@ -2001,7 +2289,7 @@ def create_app(
                 "summary": {},
             }
             repo.save_candidate_ti_lookup(pending_record)
-            if not enrichment_capacity.acquire(blocking=False):
+            if not active_capacity.acquire(blocking=False):
                 repo.save_candidate_ti_lookup(
                     {
                         **pending_record,
@@ -2017,7 +2305,7 @@ def create_app(
                 continue
             with enrichment_lifecycle_lock:
                 if enrichment_stopping.is_set():
-                    enrichment_capacity.release()
+                    active_capacity.release()
                     repo.save_candidate_ti_lookup(
                         {
                             **pending_record,
@@ -2031,17 +2319,20 @@ def create_app(
                         }
                     )
                     continue
-                future = enrichment_executor.submit(
+                future = active_executor.submit(
                     run_automatic_enrichment,
                     job_id,
                     candidate,
                     pending_record,
+                    dict(policy),
                 )
             with enrichment_lock:
                 enrichment_futures.add(future)
 
-            def discard_completed(completed: Future[Any]) -> None:
-                enrichment_capacity.release()
+            def discard_completed(
+                completed: Future[Any], capacity: threading.BoundedSemaphore = active_capacity
+            ) -> None:
+                capacity.release()
                 with enrichment_lock:
                     enrichment_futures.discard(completed)
 
@@ -2147,6 +2438,8 @@ def create_app(
         if result_consumer_thread is not None:
             result_consumer_thread.join()
         enrichment_executor.shutdown(wait=True, cancel_futures=False)
+        for retired_executor in retired_enrichment_executors:
+            retired_executor.shutdown(wait=True, cancel_futures=False)
         with enrichment_repository_lock:
             for worker_repository in enrichment_repositories:
                 worker_repository.close()
@@ -3237,25 +3530,21 @@ def create_app(
         jobs = {str(job["id"]): job for job in repo.list_jobs()}
         workflow = _candidate_workflow_index(repo)
         items: list[dict[str, Any]] = []
-        for job_id, candidates in repo.list_candidate_sets().items():
+        candidate_rows = repo.query_candidates(
+            minimum_score=minimum_score,
+            severity=severity,
+            include_suppressed=include_suppressed or verdict == "FALSE_POSITIVE",
+        )
+        for job_id, candidate in candidate_rows:
             job = jobs.get(job_id)
             if job is None:
                 continue
-            items.extend(
+            items.append(
                 _candidate_list_projection(
                     _public_candidate(_with_candidate_workflow(candidate, workflow), job)
                 )
-                for candidate in candidates
-                if candidate["score"] >= minimum_score
-                and (
-                    include_suppressed
-                    or verdict == "FALSE_POSITIVE"
-                    or not candidate.get("excluded", False)
-                )
             )
         workflow_counts = _candidate_workflow_counts(items)
-        if severity:
-            items = [item for item in items if item["severity"] == severity]
         if verdict:
             items = [item for item in items if _candidate_verdict(item) == verdict]
         if workflow_status:
@@ -3266,25 +3555,113 @@ def create_app(
         response["workflow_counts"] = workflow_counts
         return response
 
+    @app.get("/api/v1/integration-settings")
+    def get_integration_settings() -> dict[str, Any]:
+        return integration_settings()
+
+    @app.post("/api/v1/candidate-bulk-operations")
+    def create_candidate_bulk_operation(
+        payload: CandidateBulkOperationCreate, request: Request
+    ) -> dict[str, Any]:
+        results: list[dict[str, Any]] = []
+        for candidate_id in payload.candidate_ids:
+            found = _find_candidate(repo, candidate_id)
+            if found is None:
+                results.append(
+                    {"candidate_id": candidate_id, "status": "FAILED", "code": "NOT_FOUND"}
+                )
+                continue
+            job, candidate = found
+            created_at = datetime.now(UTC).isoformat()
+            decision = repo.save_candidate_decision(
+                {
+                    "id": str(uuid.uuid4()),
+                    "candidate_id": candidate_id,
+                    "job_id": str(job["id"]),
+                    "candidate_ip": str(candidate["candidate_ip"]),
+                    "verdict": payload.command,
+                    "confidence": payload.confidence,
+                    "note": payload.note,
+                    "origin": "BULK_MANUAL",
+                    "created_by": _request_actor(request),
+                    "created_at": created_at,
+                }
+            )
+            if payload.command == "CONFIRMED_C2":
+                repo.save_candidate_action(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "candidate_id": candidate_id,
+                        "verdict_id": decision["id"],
+                        "job_id": str(job["id"]),
+                        "candidate_ip": str(candidate["candidate_ip"]),
+                        "status": "PENDING",
+                        "note": "일괄 CONFIRMED_C2 판정으로 후속 조치가 생성되었습니다",
+                        "created_by": _request_actor(request),
+                        "created_at": created_at,
+                    }
+                )
+            results.append({"candidate_id": candidate_id, "status": "SUCCEEDED"})
+        succeeded = sum(item["status"] == "SUCCEEDED" for item in results)
+        return {
+            "status": "COMPLETED" if succeeded == len(results) else "PARTIAL",
+            "total": len(results),
+            "succeeded": succeeded,
+            "failed": len(results) - succeeded,
+            "results": results,
+        }
+
+    @app.put("/api/v1/integration-settings")
+    def update_integration_settings(
+        payload: IntegrationSettingsUpdate, request: Request
+    ) -> dict[str, Any]:
+        nonlocal enrichment_executor, enrichment_capacity
+        previous = integration_settings()
+        updated = {
+            **payload.model_dump(exclude={"expected_version"}),
+            "version": payload.expected_version + 1,
+            "updated_by": _request_actor(request),
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        stored, status = repo.save_integration_settings(updated, payload.expected_version)
+        if status == "CONFLICT":
+            raise ApiError(
+                409,
+                "INTEGRATION_SETTINGS_VERSION_CONFLICT",
+                "외부 연동 설정이 다른 관리자에 의해 변경되었습니다",
+                {"current_version": int((stored or {}).get("version", 0))},
+            )
+        if stored is None:
+            raise ApiError(500, "INTEGRATION_SETTINGS_SAVE_FAILED", "외부 연동 설정 저장 실패")
+        workers_changed = stored["candidate_auto_enrichment_workers"] != previous.get(
+            "candidate_auto_enrichment_workers"
+        )
+        capacity_changed = stored["candidate_auto_enrichment_queue_capacity"] != previous.get(
+            "candidate_auto_enrichment_queue_capacity"
+        )
+        if workers_changed or capacity_changed:
+            with enrichment_lifecycle_lock:
+                old_executor = enrichment_executor
+                enrichment_executor = ThreadPoolExecutor(
+                    max_workers=int(stored["candidate_auto_enrichment_workers"]),
+                    thread_name_prefix="candidate-ti",
+                )
+                enrichment_capacity = threading.BoundedSemaphore(
+                    int(stored["candidate_auto_enrichment_queue_capacity"])
+                )
+                retired_enrichment_executors.append(old_executor)
+            old_executor.shutdown(wait=False, cancel_futures=False)
+        return stored
+
     @app.get("/api/v1/candidates/{candidate_id}")
     def get_global_candidate(candidate_id: str) -> dict[str, Any]:
-        jobs = {str(job["id"]): job for job in repo.list_jobs()}
-        workflow = _candidate_workflow_index(repo, candidate_id)
-        for job_id, candidates in repo.list_candidate_sets().items():
-            candidate = next(
-                (item for item in candidates if item["id"] == candidate_id),
-                None,
-            )
-            if candidate is not None:
-                job = jobs.get(job_id)
-                if job is None:
-                    break
-                if "traffic_buckets" not in candidate:
-                    job = repo.get_job(job_id) or job
-                return _public_candidate(
-                    _with_candidate_workflow(candidate, workflow), job, include_traffic=True
-                )
-        raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
+        found = _find_candidate(repo, candidate_id)
+        if found is None:
+            raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
+        job, candidate = found
+        if "traffic_buckets" not in candidate:
+            job = repo.get_job(str(job["id"])) or job
+        return _public_candidate(candidate, job, include_traffic=True)
 
     @app.patch("/api/v1/candidates/{candidate_id}")
     def update_candidate(candidate_id: str, payload: CandidateUpdate) -> dict[str, Any]:
@@ -3387,7 +3764,8 @@ def create_app(
 
     @app.post("/api/v1/candidates/{candidate_id}/threat-intelligence/lookups")
     def lookup_candidate_threat_intelligence(candidate_id: str) -> dict[str, Any]:
-        if threat_intel is None and misp is None:
+        policy = integration_settings()
+        if threat_intel_for(policy) is None and misp_for(policy) is None:
             raise ApiError(
                 503,
                 "THREAT_INTELLIGENCE_NOT_CONFIGURED",
@@ -3397,15 +3775,19 @@ def create_app(
         if found is None:
             raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
         job, candidate = found
-        return enrich_candidate(str(job["id"]), candidate, origin="MANUAL")
+        return enrich_candidate(
+            str(job["id"]), candidate, origin="MANUAL", settings_snapshot=policy
+        )
 
     @app.post("/api/v1/candidates/{candidate_id}/misp-exports")
     def export_candidate_to_misp(
         candidate_id: str, payload: MispExportCreate, request: Request
     ) -> dict[str, Any]:
-        if misp is None:
+        policy = integration_settings()
+        publisher = misp_for(policy)
+        if publisher is None:
             raise ApiError(503, "MISP_NOT_CONFIGURED", "MISP URL과 API 키가 설정되지 않았습니다")
-        event_id = payload.event_id or config.misp_default_event_id
+        event_id = payload.event_id or str(policy.get("management_event_id", ""))
         if not event_id:
             raise ApiError(422, "MISP_EVENT_REQUIRED", "MISP Event ID가 필요합니다")
         with misp_export_lock:
@@ -3448,7 +3830,7 @@ def create_app(
                 "created_at": exported_at,
             }
             try:
-                external = misp.add_ip_attribute(
+                external = publisher.add_ip_attribute(
                     event_id,
                     str(candidate["candidate_ip"]),
                     payload.comment,

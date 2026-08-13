@@ -117,6 +117,71 @@ describe('C2Hunter UI', () => {
     expect(screen.getByText('3/3 조회 · 3개 양성')).toBeInTheDocument();
   });
 
+  it('selects candidates and applies a verdict without opening candidate detail', async () => {
+    const user = userEvent.setup();
+    const requests: Array<{ path: string; init?: RequestInit }> = [];
+    renderAt('/candidates', async (input, init) => {
+      const path = String(input);
+      requests.push({ path, init });
+      if (path === '/api/v1/candidate-bulk-operations') {
+        return new Response(JSON.stringify({ succeeded: 1, failed: 0 }), { status: 200 });
+      }
+      return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404 });
+    });
+    await screen.findByRole('table', { name: 'C2 candidates' });
+
+    await user.click(screen.getByLabelText('203.0.113.9 선택'));
+    const toolbar = screen.getByRole('form', { name: 'Candidate 일괄 처리' });
+    expect(within(toolbar).getByText('1개 선택')).toBeInTheDocument();
+    await user.selectOptions(within(toolbar).getByLabelText('빠른 판정'), 'CONFIRMED_C2');
+    await user.type(within(toolbar).getByLabelText('공통 메모'), '외부 TI 교차 검증 완료');
+    await user.click(within(toolbar).getByRole('button', { name: '선택 처리' }));
+
+    await waitFor(() => expect(requests.some(request =>
+      request.path === '/api/v1/candidate-bulk-operations' && request.init?.method === 'POST',
+    )).toBe(true));
+    const request = requests.find(item => item.path === '/api/v1/candidate-bulk-operations');
+    expect(JSON.parse(String(request?.init?.body))).toEqual({
+      candidate_ids: ['candidate-1'], command: 'CONFIRMED_C2', confidence: 'HIGH',
+      note: '외부 TI 교차 검증 완료',
+    });
+  });
+
+  it('edits public TI and MISP automation settings without API key fields', async () => {
+    const settings = {
+      version: 1, virustotal_enabled: true, abuseipdb_enabled: true, misp_enabled: true,
+      misp_url: 'https://misp.example', misp_verify_tls: true, threat_intel_timeout_seconds: 10,
+      abuseipdb_max_age_days: 90, abuseipdb_positive_threshold: 70,
+      candidate_auto_enrichment_enabled: true, candidate_auto_enrichment_limit: 20,
+      candidate_auto_enrichment_workers: 4, candidate_auto_enrichment_queue_capacity: 200,
+      management_event_id: '100', management_auto_register: false,
+      immediate_action_event_id: '200', immediate_action_auto_register: false,
+      immediate_action_min_positive_providers: 2,
+    };
+    const requests: Array<{ path: string; init?: RequestInit }> = [];
+    const user = userEvent.setup();
+    renderAt('/settings/integrations', async (input, init) => {
+      const path = String(input);
+      requests.push({ path, init });
+      const body = init?.method === 'PUT' ? { ...settings, version: 2 } : settings;
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+
+    expect(await screen.findByRole('heading', { name: 'Threat intelligence & MISP' })).toBeInTheDocument();
+    await screen.findByRole('form', { name: '외부 TI 및 MISP 설정' });
+    expect(screen.queryByLabelText(/API key/i)).not.toBeInTheDocument();
+    await user.clear(screen.getByLabelText('AbuseIPDB 양성 기준'));
+    await user.type(screen.getByLabelText('AbuseIPDB 양성 기준'), '80');
+    await user.click(screen.getByLabelText('자동 CONFIRMED_C2 및 즉시조치 Event 등록'));
+    await user.click(screen.getByRole('button', { name: '설정 저장' }));
+
+    await waitFor(() => expect(requests.some(request => request.init?.method === 'PUT')).toBe(true));
+    const body = JSON.parse(String(requests.find(request => request.init?.method === 'PUT')?.init?.body));
+    expect(body.abuseipdb_positive_threshold).toBe(80);
+    expect(body.immediate_action_auto_register).toBe(true);
+    expect(JSON.stringify(body)).not.toMatch(/api_key/i);
+  });
+
   it('shows the dashboard review queue newest first', async () => {
     renderAt('/');
 

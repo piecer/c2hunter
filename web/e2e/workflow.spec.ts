@@ -117,6 +117,36 @@ test('administrator validates a candidate with TI and exports it to MISP', async
   await expect(page.getByText(/Event 42/)).toBeVisible();
 });
 
+test('administrator configures automation and triages candidates from the queue', async ({ page }) => {
+  await installApiFixture(page);
+  await page.goto('/login');
+  await page.getByLabel('Username').fill('admin');
+  await page.getByRole('button', { name: 'Development login' }).click();
+
+  await page.getByRole('link', { name: 'Integration settings' }).click();
+  await page.getByRole('form', { name: '외부 TI 및 MISP 설정' }).waitFor();
+  await expect(page.getByText('API key는 배포 환경에서만 관리합니다.')).toBeVisible();
+  await page.getByLabel('AbuseIPDB 양성 기준').fill('80');
+  await page.getByLabel('자동 CONFIRMED_C2 및 즉시조치 Event 등록').check();
+  const settingsRequest = page.waitForRequest(request => request.method() === 'PUT');
+  await page.getByRole('button', { name: '설정 저장' }).click();
+  expect((await settingsRequest).postDataJSON()).toMatchObject({
+    abuseipdb_positive_threshold: 80,
+    immediate_action_auto_register: true,
+  });
+
+  await page.getByRole('link', { name: 'Candidates' }).click();
+  await page.getByLabel('203.0.113.10 선택').check();
+  await page.getByLabel('빠른 판정').selectOption('UNDER_REVIEW');
+  await page.getByLabel('공통 메모').fill('E2E queue triage');
+  const bulkRequest = page.waitForRequest(request => request.url().endsWith('/candidate-bulk-operations'));
+  await page.getByRole('button', { name: '선택 처리' }).click();
+  expect((await bulkRequest).postDataJSON()).toMatchObject({
+    candidate_ids: ['candidate-1'],
+    command: 'UNDER_REVIEW',
+  });
+});
+
 test('analyst can manage history and upload an offline PCAP', async ({ page }) => {
   await installApiFixture(page);
   await page.goto('/login');

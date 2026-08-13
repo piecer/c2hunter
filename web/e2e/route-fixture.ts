@@ -7,6 +7,16 @@ async function fulfill(route: Route, body: unknown, status = 200) { await route.
 
 export async function installApiFixture(page: Page) {
   let allowlist: Array<{ id: string; type: string; value: string; description: string }> = [];
+  let integrationSettings = {
+    version: 1, virustotal_enabled: true, abuseipdb_enabled: true, misp_enabled: true,
+    misp_url: 'https://misp.example', misp_verify_tls: true, threat_intel_timeout_seconds: 10,
+    abuseipdb_max_age_days: 90, abuseipdb_positive_threshold: 70,
+    candidate_auto_enrichment_enabled: true, candidate_auto_enrichment_limit: 20,
+    candidate_auto_enrichment_workers: 4, candidate_auto_enrichment_queue_capacity: 200,
+    management_event_id: '100', management_auto_register: false,
+    immediate_action_event_id: '200', immediate_action_auto_register: false,
+    immediate_action_min_positive_providers: 2,
+  };
   let currentCandidate: typeof candidate & Record<string, unknown> = {
     ...candidate,
     workflow_status: 'NEEDS_REVIEW',
@@ -59,6 +69,11 @@ export async function installApiFixture(page: Page) {
   await page.route('**/api/v1/**', async route => {
     const request = route.request(); const path = new URL(request.url()).pathname.replace('/api/v1', ''); const method = request.method();
     if (path === '/auth/dev-login' && method === 'POST') return fulfill(route, { access_token: 'deterministic-e2e-token' });
+    if (path === '/integration-settings' && method === 'GET') return fulfill(route, integrationSettings);
+    if (path === '/integration-settings' && method === 'PUT') {
+      integrationSettings = { ...integrationSettings, ...request.postDataJSON(), version: integrationSettings.version + 1 };
+      return fulfill(route, integrationSettings);
+    }
     if (path === '/dashboard') return fulfill(route, { generated_at: '2026-07-20T10:10:00Z', fleet: { total: 2, online: 2, offline: 0, degraded: 0, dropped_packets: 4 }, analyses: { total: 3, active: 1, completed_24h: 2, failed_24h: 0, partially_completed_24h: 0, by_status: { WAITING_FOR_SENSOR: 0, CAPTURING: 0, UPLOADING: 0, INGESTING: 0, ANALYZING: 1 } }, candidates: { total: 1, critical: 1, high: 0, medium: 0, low: 0, new_24h: 1, needs_review: 1, in_review: 0, action_required: 0, action_in_progress: 0, action_completed: 0, false_positive: 0, done: 0 }, candidate_trend: [{ hour: '2026-07-20T08:00:00Z', count: 0 }, { hour: '2026-07-20T09:00:00Z', count: 0 }, { hour: '2026-07-20T10:00:00Z', count: 1 }], priority_candidates: [{ ...currentCandidate, evidence_count: 2 }], recent_analyses: [{ id: 'job-1', name: 'E2E investigation', status: 'COMPLETED', candidate_count: 1, packet_count: 720000, flow_count: 18000, created_at: '2026-07-20T10:00:00Z' }], sensor_quality: [{ sensor_id: 'sensor-a', name: 'Sensor A', status: 'ONLINE', received_packets: 716000, dropped_packets: 4000, drop_rate_percent: 0.56, last_heartbeat_at: '2026-07-20T10:09:50Z', last_error: null }], attention: [{ kind: 'CRITICAL_CANDIDATE', severity: 'CRITICAL', title: '203.0.113.10 조사 필요', detail: '점수 87 · CRITICAL', href: '/candidates/candidate-1' }] });
     if (path === '/sensors') return fulfill(route, { items: [sensor, { ...sensor, sensor_id: 'sensor-b', name: 'Sensor B', interfaces: [{ name: 'eth1', direction: 'OUTBOUND' }] }] });
     if (path === '/sensors/sensor-a') return fulfill(route, sensor);
@@ -92,6 +107,7 @@ export async function installApiFixture(page: Page) {
     if (path === '/pcap-analysis-jobs' && method === 'POST') return fulfill(route, { id: 'upload-job', name: 'Uploaded E2E capture', status: 'COMPLETED' }, 201);
     if (path === '/analysis-jobs/upload-job' && method === 'GET') return fulfill(route, { id: 'upload-job', name: 'Uploaded E2E capture', status: 'COMPLETED', source_type: 'PCAP_UPLOAD', source: { filename: 'fixture.pcap', size_bytes: 4 }, packet_count: 1, flow_count: 1, candidate_count: 0 });
     if (path === '/candidates') return fulfill(route, { items: [currentCandidate], workflow_counts: { needs_review: 1, in_review: 0, action_required: 0, action_in_progress: 0, action_completed: 0, false_positive: 0, done: 0 } });
+    if (path === '/candidate-bulk-operations' && method === 'POST') return fulfill(route, { status: 'COMPLETED', total: 1, succeeded: 1, failed: 0, results: [{ candidate_id: 'candidate-1', status: 'SUCCEEDED' }] });
     if (path === '/candidates/candidate-1/verdicts' && method === 'POST') {
       const body = request.postDataJSON();
       const verdict = { id: 'verdict-1', ...body, created_by: 'analyst', created_at: '2026-07-20T10:11:00Z' };

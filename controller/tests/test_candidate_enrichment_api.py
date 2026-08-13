@@ -87,6 +87,173 @@ def _client() -> tuple[TestClient, MemoryRepository, FakeThreatIntelService, Fak
     return client, repository, threat_intel, misp
 
 
+def test_admin_can_persist_public_integration_settings_without_api_keys() -> None:
+    client, repository, _, _ = _client()
+
+    initial = client.get("/api/v1/integration-settings")
+    payload = {
+        "expected_version": initial.json()["version"],
+        "virustotal_enabled": True,
+        "abuseipdb_enabled": True,
+        "misp_enabled": True,
+        "misp_url": "https://misp.example",
+        "misp_verify_tls": True,
+        "threat_intel_timeout_seconds": 8,
+        "abuseipdb_max_age_days": 30,
+        "abuseipdb_positive_threshold": 80,
+        "candidate_auto_enrichment_enabled": True,
+        "candidate_auto_enrichment_limit": 50,
+        "candidate_auto_enrichment_workers": 4,
+        "candidate_auto_enrichment_queue_capacity": 200,
+        "management_event_id": "100",
+        "management_auto_register": False,
+        "immediate_action_event_id": "200",
+        "immediate_action_auto_register": True,
+        "immediate_action_min_positive_providers": 2,
+    }
+    response = client.put("/api/v1/integration-settings", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["version"] == initial.json()["version"] + 1
+    assert response.json()["abuseipdb_positive_threshold"] == 80
+    assert "api_key" not in str(response.json()).lower()
+    assert repository.get_integration_settings()["immediate_action_event_id"] == "200"
+
+    conflict = client.put(
+        "/api/v1/integration-settings",
+        json=payload,
+    )
+    assert conflict.status_code == 409
+
+
+def test_automatic_immediate_action_confirms_and_exports_when_two_providers_are_positive() -> None:
+    client, repository, threat_intel, misp = _client()
+    current = client.get("/api/v1/integration-settings").json()
+    settings = {
+        **{
+            key: value
+            for key, value in current.items()
+            if key not in {"version", "updated_at", "updated_by"}
+        },
+        "expected_version": current["version"],
+        "virustotal_enabled": True,
+        "abuseipdb_enabled": True,
+        "misp_enabled": True,
+        "misp_url": "https://misp.example",
+        "abuseipdb_positive_threshold": 80,
+        "immediate_action_event_id": "200",
+        "immediate_action_auto_register": True,
+        "immediate_action_min_positive_providers": 2,
+    }
+    assert client.put("/api/v1/integration-settings", json=settings).status_code == 200
+
+    lookup = client.post("/api/v1/candidates/candidate-1/threat-intelligence/lookups")
+
+    assert lookup.status_code == 200
+    assert threat_intel.lookups == ["203.0.113.44"]
+    candidate = client.get("/api/v1/candidates/candidate-1").json()
+    assert candidate["current_verdict"]["verdict"] == "CONFIRMED_C2"
+    assert candidate["current_verdict"]["origin"] == "AUTOMATION"
+    assert candidate["current_action"]["status"] == "PENDING"
+    assert misp.exports == [("200", "203.0.113.44", "C2Hunter automatic immediate action")]
+    action = repository.list_candidate_misp_actions("candidate-1")[-1]
+    assert action["kind"] == "IMMEDIATE_ACTION_REGISTRATION"
+    assert action["status"] == "EXPORTED"
+
+
+def test_automatic_immediate_action_does_not_confirm_when_misp_registration_fails() -> None:
+    class FailingMispClient(FakeMispClient):
+        def add_ip_attribute(self, event_id: str, ip_address: str, comment: str) -> dict[str, Any]:
+            del event_id, ip_address, comment
+            raise IntegrationError("misp", "registration failed")
+
+    repository = MemoryRepository()
+    threat_intel = FakeThreatIntelService()
+    app = create_app(
+        Settings(environment="test"),
+        repository,
+        threat_intel_service=threat_intel,
+        misp_client=FailingMispClient(),
+    )
+    current = app.state.integration_settings()
+    repository.save_integration_settings(
+        {
+            **current,
+            "immediate_action_event_id": "200",
+            "immediate_action_auto_register": True,
+            "abuseipdb_positive_threshold": 70,
+        },
+        expected_version=current["version"],
+    )
+    repository.jobs["job-1"] = {"id": "job-1", "name": "failed immediate action"}
+    candidate = {"id": "candidate-fail", "candidate_ip": "203.0.113.88", "score": 90}
+    repository.save_candidates("job-1", [candidate])
+
+    app.state.schedule_candidate_enrichment("job-1", [candidate])
+    app.state.wait_for_candidate_enrichment()
+
+    assert repository.list_candidate_decisions("candidate-fail") == []
+    actions = repository.list_candidate_misp_actions("candidate-fail")
+    assert len(actions) == 1
+    assert actions[0]["status"] == "FAILED"
+
+
+def test_management_event_registration_runs_for_new_candidates_when_enabled() -> None:
+    client, repository, _, misp = _client()
+    current = client.get("/api/v1/integration-settings").json()
+    payload = {
+        **{
+            key: value
+            for key, value in current.items()
+            if key not in {"version", "updated_at", "updated_by"}
+        },
+        "expected_version": current["version"],
+        "misp_enabled": True,
+        "misp_url": "https://misp.example",
+        "management_event_id": "100",
+        "management_auto_register": True,
+    }
+    assert client.put("/api/v1/integration-settings", json=payload).status_code == 200
+
+    client.app.state.schedule_candidate_enrichment("job-1", repository.get_candidates("job-1"))
+    client.app.state.wait_for_candidate_enrichment()
+
+    assert ("100", "203.0.113.44", "C2Hunter candidate management registration") in misp.exports
+    management = [
+        item
+        for item in repository.list_candidate_misp_actions("candidate-1")
+        if item.get("kind") == "MANAGEMENT_REGISTRATION"
+    ]
+    assert len(management) == 1
+    assert management[0]["status"] == "EXPORTED"
+
+
+def test_candidate_bulk_verdict_returns_item_level_partial_results() -> None:
+    client, repository, _, _ = _client()
+
+    response = client.post(
+        "/api/v1/candidate-bulk-operations",
+        json={
+            "candidate_ids": ["candidate-1", "missing"],
+            "command": "CONFIRMED_C2",
+            "confidence": "HIGH",
+            "note": "목록에서 외부 TI 근거를 일괄 검토함",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "PARTIAL"
+    assert response.json()["succeeded"] == 1
+    assert response.json()["failed"] == 1
+    assert response.json()["results"] == [
+        {"candidate_id": "candidate-1", "status": "SUCCEEDED"},
+        {"candidate_id": "missing", "status": "FAILED", "code": "NOT_FOUND"},
+    ]
+    decision = repository.list_candidate_decisions("candidate-1")[-1]
+    assert decision["origin"] == "BULK_MANUAL"
+    assert repository.list_candidate_actions("candidate-1")[-1]["status"] == "PENDING"
+
+
 def test_candidate_verdict_history_is_persisted_without_mutating_detection_output() -> None:
     client, repository, _, _ = _client()
 
@@ -554,6 +721,76 @@ def test_new_candidates_are_automatically_enriched_when_integrations_are_configu
     assert stored["origin"] == "AUTO"
     assert stored["providers"]["misp"]["event_count"] == 1
     assert repository.list_candidate_ti_lookups("candidate-low") == []
+
+
+def test_immediate_action_automation_evaluates_candidates_beyond_enrichment_limit() -> None:
+    repository = MemoryRepository()
+    threat_intel = FakeThreatIntelService()
+    misp = FakeMispClient()
+    app = create_app(
+        Settings(environment="test", candidate_auto_enrichment_limit=1),
+        repository,
+        threat_intel_service=threat_intel,
+        misp_client=misp,
+    )
+    current = app.state.integration_settings()
+    repository.save_integration_settings(
+        {
+            **current,
+            "immediate_action_event_id": "200",
+            "immediate_action_auto_register": True,
+            "immediate_action_min_positive_providers": 2,
+        },
+        expected_version=current["version"],
+    )
+    candidates = [
+        {"id": "candidate-high", "candidate_ip": "203.0.113.44", "score": 90},
+        {"id": "candidate-low", "candidate_ip": "203.0.113.45", "score": 10},
+    ]
+    repository.jobs["job-1"] = {"id": "job-1", "name": "complete policy coverage"}
+    repository.save_candidates("job-1", candidates)
+
+    app.state.schedule_candidate_enrichment("job-1", candidates)
+    app.state.wait_for_candidate_enrichment()
+
+    assert threat_intel.lookups == ["203.0.113.44", "203.0.113.45"]
+    assert repository.list_candidate_decisions("candidate-low")[-1]["verdict"] == "CONFIRMED_C2"
+
+
+def test_misp_automation_idempotency_survives_unrelated_settings_versions() -> None:
+    repository = MemoryRepository()
+    threat_intel = FakeThreatIntelService()
+    misp = FakeMispClient()
+    app = create_app(
+        Settings(environment="test"),
+        repository,
+        threat_intel_service=threat_intel,
+        misp_client=misp,
+    )
+    current = app.state.integration_settings()
+    stored, _ = repository.save_integration_settings(
+        {
+            **current,
+            "immediate_action_event_id": "200",
+            "immediate_action_auto_register": True,
+        },
+        expected_version=current["version"],
+    )
+    candidate = {"id": "candidate-1", "candidate_ip": "203.0.113.44", "score": 90}
+    repository.jobs["job-1"] = {"id": "job-1", "name": "idempotency"}
+    repository.save_candidates("job-1", [candidate])
+    app.state.schedule_candidate_enrichment("job-1", [candidate])
+    app.state.wait_for_candidate_enrichment()
+
+    assert stored is not None
+    repository.save_integration_settings(
+        {**stored, "version": stored["version"] + 1, "candidate_auto_enrichment_workers": 5},
+        expected_version=stored["version"],
+    )
+    app.state.schedule_candidate_enrichment("job-1", [candidate])
+    app.state.wait_for_candidate_enrichment()
+
+    assert misp.exports.count(("200", "203.0.113.44", "C2Hunter automatic immediate action")) == 1
 
 
 def test_automatic_enrichment_records_unexpected_provider_failure() -> None:
