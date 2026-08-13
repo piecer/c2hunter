@@ -240,7 +240,11 @@ def test_controller_persists_worker_result_before_ack() -> None:
     queue = QueueStub()
     repository = MemoryRepository()
     app = create_app(
-        Settings(environment="test", inline_flow_records_enabled=False),
+        Settings(
+            environment="test",
+            inline_flow_records_enabled=False,
+            threat_intel_request_delay_seconds=0,
+        ),
         repository,
         flow_store=store,
         queue=queue,

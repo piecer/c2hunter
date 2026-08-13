@@ -648,6 +648,7 @@ class IntegrationSettingsUpdate(BaseModel):
     misp_url: str = Field(default="", max_length=2048)
     misp_verify_tls: bool = True
     threat_intel_timeout_seconds: float = Field(gt=0, le=30)
+    threat_intel_request_delay_seconds: float | None = Field(default=None, ge=0, le=60)
     abuseipdb_max_age_days: int = Field(ge=1, le=365)
     abuseipdb_positive_threshold: int = Field(ge=0, le=100)
     candidate_auto_enrichment_enabled: bool

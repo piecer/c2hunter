@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any
 from unittest.mock import Mock
 
@@ -79,7 +80,11 @@ def _client() -> tuple[TestClient, MemoryRepository, FakeThreatIntelService, Fak
     misp = FakeMispClient()
     client = TestClient(
         create_app(
-            Settings(environment="test", misp_default_event_id="42"),
+            Settings(
+                environment="test",
+                misp_default_event_id="42",
+                threat_intel_request_delay_seconds=0,
+            ),
             repository,
             threat_intel_service=threat_intel,
             misp_client=misp,
@@ -100,6 +105,7 @@ def test_admin_can_persist_public_integration_settings_without_api_keys() -> Non
         "misp_url": "https://misp.example",
         "misp_verify_tls": True,
         "threat_intel_timeout_seconds": 8,
+        "threat_intel_request_delay_seconds": 1.5,
         "abuseipdb_max_age_days": 30,
         "abuseipdb_positive_threshold": 80,
         "candidate_auto_enrichment_enabled": True,
@@ -117,6 +123,7 @@ def test_admin_can_persist_public_integration_settings_without_api_keys() -> Non
     assert response.status_code == 200
     assert response.json()["version"] == initial.json()["version"] + 1
     assert response.json()["abuseipdb_positive_threshold"] == 80
+    assert response.json()["threat_intel_request_delay_seconds"] == 1.5
     assert "api_key" not in str(response.json()).lower()
     assert repository.get_integration_settings()["immediate_action_event_id"] == "200"
 
@@ -125,6 +132,22 @@ def test_admin_can_persist_public_integration_settings_without_api_keys() -> Non
         json=payload,
     )
     assert conflict.status_code == 409
+
+
+def test_legacy_settings_update_preserves_request_delay() -> None:
+    client, _, _, _ = _client()
+    current = client.get("/api/v1/integration-settings").json()
+    payload = {
+        key: value
+        for key, value in current.items()
+        if key not in {"version", "updated_at", "updated_by", "threat_intel_request_delay_seconds"}
+    }
+    payload["expected_version"] = current["version"]
+
+    response = client.put("/api/v1/integration-settings", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["threat_intel_request_delay_seconds"] == 0
 
 
 def test_saved_enrichment_runtime_settings_are_applied_after_restart() -> None:
@@ -162,6 +185,56 @@ def test_saved_enrichment_runtime_settings_are_applied_after_restart() -> None:
         "workers": 1,
         "queue_capacity": 2,
     }
+
+
+def test_external_ti_requests_are_serialized_with_configured_delay() -> None:
+    class ConcurrentThreatIntelService(FakeThreatIntelService):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lock = threading.Lock()
+            self.active = 0
+            self.maximum_active = 0
+            self.started_at: list[float] = []
+            self.finished_at: list[float] = []
+
+        def lookup_ip(self, ip_address: str) -> dict[str, Any]:
+            with self.lock:
+                self.active += 1
+                self.maximum_active = max(self.maximum_active, self.active)
+                self.started_at.append(time.monotonic())
+            time.sleep(0.02)
+            try:
+                return super().lookup_ip(ip_address)
+            finally:
+                with self.lock:
+                    self.finished_at.append(time.monotonic())
+                    self.active -= 1
+
+    repository = MemoryRepository()
+    candidates = [
+        {"id": f"candidate-{index}", "candidate_ip": f"203.0.113.{index}", "score": 90}
+        for index in range(1, 3)
+    ]
+    repository.jobs["job-1"] = {"id": "job-1", "name": "serialized TI"}
+    repository.save_candidates("job-1", candidates)
+    threat_intel = ConcurrentThreatIntelService()
+    app = create_app(
+        Settings(
+            environment="test",
+            candidate_auto_enrichment_workers=2,
+            candidate_auto_enrichment_limit=2,
+            threat_intel_request_delay_seconds=0.05,
+        ),
+        repository,
+        threat_intel_service=threat_intel,
+    )
+
+    app.state.schedule_candidate_enrichment("job-1", candidates)
+    app.state.wait_for_candidate_enrichment()
+
+    assert threat_intel.maximum_active == 1
+    assert len(threat_intel.started_at) == 2
+    assert threat_intel.started_at[1] - threat_intel.finished_at[0] >= 0.045
 
 
 def test_automatic_immediate_action_confirms_and_exports_when_two_providers_are_positive() -> None:

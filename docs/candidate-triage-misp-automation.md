@@ -45,6 +45,9 @@ MISP 전송은 Candidate 상세 화면에서 개별 수행한다. Candidate가 �
 - WebUI 기반 외부 TI/MISP 설정, 연결 시험, 비밀 값 교체와 자동화 활성화
 - 설정·정책·자동화 실행 이력과 실패 사유 감사
 - 중복 등록 방지, 제한된 병렬 처리, 재시도
+- Controller 프로세스 안의 외부 TI/MISP HTTP 요청을 직렬화하고, 각 요청 완료 후 다음 요청 시작 전
+  `threat_intel_request_delay_seconds`(기본 1초, 0~60초)를 적용한다. 한 Candidate의
+  VirusTotal/AbuseIPDB 조회를 포함해 다른 Candidate 조회나 MISP 조회·등록도 동시에 실행하지 않는다.
 
 ### 제외
 

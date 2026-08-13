@@ -14,6 +14,8 @@ from c2hunter_controller.integrations import (
     IntegrationError,
     JsonHttpClient,
     MispClient,
+    SerializedJsonHttpClient,
+    SerializedRequestGate,
     ThreatIntelService,
 )
 
@@ -102,6 +104,51 @@ class StubHttpClient(JsonHttpClient):
         if self.invalid_misp:
             return {"message": "validation failed"}
         return {"Attribute": {"id": "9001", "event_id": "42", "value": "203.0.113.44"}}
+
+
+def test_serialized_request_gate_delays_after_failed_operation() -> None:
+    now = [10.0]
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    gate = SerializedRequestGate(
+        lambda: 2.0,
+        clock=lambda: now[0],
+        sleep=sleep,
+    )
+
+    with pytest.raises(RuntimeError, match="failed"):
+        gate.run(lambda: (_ for _ in ()).throw(RuntimeError("failed")))
+    now[0] = 10.5
+
+    assert gate.run(lambda: "completed") == "completed"
+    assert sleeps == [1.5]
+
+
+def test_serialized_http_client_delays_between_provider_requests() -> None:
+    now = [10.0]
+    sleeps: list[float] = []
+    http = StubHttpClient()
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    gate = SerializedRequestGate(lambda: 1.0, clock=lambda: now[0], sleep=sleep)
+    service = ThreatIntelService(
+        virustotal_api_key="vt-secret",
+        abuseipdb_api_key="abuse-secret",
+        http_client=SerializedJsonHttpClient(http, gate),
+    )
+
+    result = service.lookup_ip("203.0.113.44")
+
+    assert result["providers"]["virustotal"]["status"] == "OK"
+    assert result["providers"]["abuseipdb"]["status"] == "OK"
+    assert sleeps == [1.0]
 
 
 @pytest.mark.parametrize(

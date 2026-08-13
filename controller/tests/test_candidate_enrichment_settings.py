@@ -26,6 +26,8 @@ def test_candidate_integration_secrets_are_masked() -> None:
     [
         ("threat_intel_timeout_seconds", 0),
         ("threat_intel_timeout_seconds", 31),
+        ("threat_intel_request_delay_seconds", -0.1),
+        ("threat_intel_request_delay_seconds", 61),
         ("abuseipdb_max_age_days", 0),
         ("abuseipdb_max_age_days", 366),
     ],

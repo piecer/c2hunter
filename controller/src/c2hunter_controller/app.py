@@ -58,6 +58,8 @@ from .integrations import (
     JsonHttpClient,
     MispClient,
     MispPublisher,
+    SerializedJsonHttpClient,
+    SerializedRequestGate,
     ThreatIntelLookup,
     ThreatIntelService,
 )
@@ -893,6 +895,7 @@ def create_app(
             "misp_url": config.misp_url,
             "misp_verify_tls": config.misp_verify_tls,
             "threat_intel_timeout_seconds": config.threat_intel_timeout_seconds,
+            "threat_intel_request_delay_seconds": config.threat_intel_request_delay_seconds,
             "abuseipdb_max_age_days": config.abuseipdb_max_age_days,
             "abuseipdb_positive_threshold": 1,
             "candidate_auto_enrichment_enabled": config.candidate_auto_enrichment_limit > 0,
@@ -917,11 +920,8 @@ def create_app(
         )
 
     def integration_settings() -> dict[str, Any]:
-        return (
-            repo.get_integration_settings()
-            or imported_settings
-            or environment_integration_settings()
-        )
+        stored = repo.get_integration_settings() or imported_settings
+        return {**environment_integration_settings(), **(stored or {})}
 
     def threat_intel_for(policy: dict[str, Any]) -> ThreatIntelLookup | None:
         if not policy.get("virustotal_enabled") and not policy.get("abuseipdb_enabled"):
@@ -936,7 +936,10 @@ def create_app(
             virustotal_api_key=virustotal,
             abuseipdb_api_key=abuseipdb,
             abuseipdb_max_age_days=int(policy["abuseipdb_max_age_days"]),
-            http_client=JsonHttpClient(float(policy["threat_intel_timeout_seconds"])),
+            http_client=SerializedJsonHttpClient(
+                JsonHttpClient(float(policy["threat_intel_timeout_seconds"])),
+                external_request_gate,
+            ),
         )
 
     def misp_for(policy: dict[str, Any]) -> MispPublisher | None:
@@ -950,13 +953,42 @@ def create_app(
         return MispClient(
             url,
             misp_key,
-            http_client=JsonHttpClient(
-                float(policy["threat_intel_timeout_seconds"]),
-                verify_tls=bool(policy["misp_verify_tls"]),
+            http_client=SerializedJsonHttpClient(
+                JsonHttpClient(
+                    float(policy["threat_intel_timeout_seconds"]),
+                    verify_tls=bool(policy["misp_verify_tls"]),
+                ),
+                external_request_gate,
             ),
         )
 
     app.state.integration_settings = integration_settings
+    external_request_gate = SerializedRequestGate(
+        lambda: float(integration_settings()["threat_intel_request_delay_seconds"])
+    )
+
+    def run_threat_intel_lookup(service: ThreatIntelLookup, ip_address: str) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            return service.lookup_ip(ip_address)
+
+        return (
+            external_request_gate.run(operation) if service is threat_intel_service else operation()
+        )
+
+    def run_misp_lookup(publisher: MispPublisher, ip_address: str) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            return publisher.lookup_ip(ip_address)
+
+        return external_request_gate.run(operation) if publisher is misp_client else operation()
+
+    def run_misp_export(
+        publisher: MispPublisher, event_id: str, ip_address: str, comment: str
+    ) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            return publisher.add_ip_attribute(event_id, ip_address, comment)
+
+        return external_request_gate.run(operation) if publisher is misp_client else operation()
+
     candidate_action_lock = threading.Lock()
     misp_export_lock = threading.Lock()
     startup_integration_settings = integration_settings()
@@ -2012,7 +2044,8 @@ def create_app(
         if not repository.claim_candidate_misp_action(action):
             return
         try:
-            result = publisher.add_ip_attribute(
+            result = run_misp_export(
+                publisher,
                 event_id,
                 str(candidate["candidate_ip"]),
                 "C2Hunter automatic immediate action",
@@ -2108,7 +2141,8 @@ def create_app(
         if not repository.claim_candidate_misp_action(action):
             return
         try:
-            result = publisher.add_ip_attribute(
+            result = run_misp_export(
+                publisher,
                 event_id,
                 str(candidate["candidate_ip"]),
                 "C2Hunter candidate management registration",
@@ -2162,7 +2196,7 @@ def create_app(
         summary: dict[str, Any] = {}
         try:
             if lookup_service is not None:
-                result = lookup_service.lookup_ip(candidate_ip)
+                result = run_threat_intel_lookup(lookup_service, candidate_ip)
                 raw_providers = result.get("providers", {})
                 if isinstance(raw_providers, dict):
                     providers.update(
@@ -2177,7 +2211,7 @@ def create_app(
                     summary.update(raw_summary)
             if publisher is not None:
                 try:
-                    providers["misp"] = publisher.lookup_ip(candidate_ip)
+                    providers["misp"] = run_misp_lookup(publisher, candidate_ip)
                 except IntegrationError as exc:
                     providers["misp"] = {
                         "status": "ERROR",
@@ -3685,8 +3719,13 @@ def create_app(
         nonlocal enrichment_capacity, enrichment_executor
         nonlocal enrichment_runtime_queue_capacity, enrichment_runtime_workers
         previous = integration_settings()
+        public_settings = payload.model_dump(exclude={"expected_version"})
+        if public_settings["threat_intel_request_delay_seconds"] is None:
+            public_settings["threat_intel_request_delay_seconds"] = previous[
+                "threat_intel_request_delay_seconds"
+            ]
         updated = {
-            **payload.model_dump(exclude={"expected_version"}),
+            **public_settings,
             "version": payload.expected_version + 1,
             "updated_by": _request_actor(request),
             "updated_at": datetime.now(UTC).isoformat(),
@@ -3902,7 +3941,8 @@ def create_app(
                 "created_at": exported_at,
             }
             try:
-                external = publisher.add_ip_attribute(
+                external = run_misp_export(
+                    publisher,
                     event_id,
                     str(candidate["candidate_ip"]),
                     payload.comment,

@@ -10,15 +10,19 @@ import asyncio
 import json
 import socket
 import ssl
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
 from ipaddress import ip_address
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypeVar, cast
 
 import httpx
+
+T = TypeVar("T")
 
 
 class IntegrationError(Exception):
@@ -37,6 +41,37 @@ class IntegrationError(Exception):
         self.message = message
         self.http_status = http_status
         self.retry_after = retry_after
+
+
+class SerializedRequestGate:
+    """Serialize external calls and keep a configurable gap between them."""
+
+    def __init__(
+        self,
+        delay_seconds: Callable[[], float],
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._delay_seconds = delay_seconds
+        self._clock = clock
+        self._sleep = sleep
+        self._lock = threading.RLock()
+        self._last_completed_at: float | None = None
+
+    def run(self, operation: Callable[[], T]) -> T:
+        with self._lock:
+            if self._last_completed_at is not None:
+                remaining = max(
+                    0.0,
+                    float(self._delay_seconds()) - (self._clock() - self._last_completed_at),
+                )
+                if remaining > 0:
+                    self._sleep(remaining)
+            try:
+                return operation()
+            finally:
+                self._last_completed_at = self._clock()
 
 
 def _transport_failure_message(exc: BaseException) -> str:
@@ -108,6 +143,24 @@ class JsonHttpClient:
         if not isinstance(parsed, dict):
             raise IntegrationError("http", "external service returned an invalid response")
         return cast(dict[str, Any], parsed)
+
+
+class SerializedJsonHttpClient(JsonHttpClient):
+    """Route each HTTP request through a process-wide serialized gate."""
+
+    def __init__(self, client: JsonHttpClient, gate: SerializedRequestGate) -> None:
+        self._client = client
+        self._gate = gate
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self._gate.run(lambda: self._client.request(method, url, headers=headers, body=body))
 
 
 class CancellableJsonHttpClient(JsonHttpClient):

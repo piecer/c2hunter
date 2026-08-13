@@ -151,6 +151,7 @@ describe('C2Hunter UI', () => {
     const settings = {
       version: 1, virustotal_enabled: true, abuseipdb_enabled: true, misp_enabled: true,
       misp_url: 'https://misp.example', misp_verify_tls: true, threat_intel_timeout_seconds: 10,
+      threat_intel_request_delay_seconds: 1,
       abuseipdb_max_age_days: 90, abuseipdb_positive_threshold: 70,
       candidate_auto_enrichment_enabled: true, candidate_auto_enrichment_limit: 20,
       candidate_auto_enrichment_workers: 4, candidate_auto_enrichment_queue_capacity: 200,
@@ -170,6 +171,9 @@ describe('C2Hunter UI', () => {
     expect(await screen.findByRole('heading', { name: 'Threat intelligence & MISP' })).toBeInTheDocument();
     await screen.findByRole('form', { name: '외부 TI 및 MISP 설정' });
     expect(screen.queryByLabelText(/API key/i)).not.toBeInTheDocument();
+    const delayInput = screen.getByLabelText(/^외부 TI 요청 간격\(초\)/);
+    await user.clear(delayInput);
+    await user.type(delayInput, '2.5');
     await user.clear(screen.getByLabelText('AbuseIPDB 양성 기준'));
     await user.type(screen.getByLabelText('AbuseIPDB 양성 기준'), '80');
     await user.click(screen.getByLabelText('자동 CONFIRMED_C2 및 즉시조치 Event 등록'));
@@ -178,6 +182,7 @@ describe('C2Hunter UI', () => {
     await waitFor(() => expect(requests.some(request => request.init?.method === 'PUT')).toBe(true));
     const body = JSON.parse(String(requests.find(request => request.init?.method === 'PUT')?.init?.body));
     expect(body.abuseipdb_positive_threshold).toBe(80);
+    expect(body.threat_intel_request_delay_seconds).toBe(2.5);
     expect(body.immediate_action_auto_register).toBe(true);
     expect(JSON.stringify(body)).not.toMatch(/api_key/i);
   });

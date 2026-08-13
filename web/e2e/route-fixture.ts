@@ -10,6 +10,7 @@ export async function installApiFixture(page: Page) {
   let integrationSettings = {
     version: 1, virustotal_enabled: true, abuseipdb_enabled: true, misp_enabled: true,
     misp_url: 'https://misp.example', misp_verify_tls: true, threat_intel_timeout_seconds: 10,
+    threat_intel_request_delay_seconds: 1,
     abuseipdb_max_age_days: 90, abuseipdb_positive_threshold: 70,
     candidate_auto_enrichment_enabled: true, candidate_auto_enrichment_limit: 20,
     candidate_auto_enrichment_workers: 4, candidate_auto_enrichment_queue_capacity: 200,
