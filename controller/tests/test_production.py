@@ -43,6 +43,7 @@ class FakeCursor:
 class FakeConnection:
     def __init__(self, *, execute_error: Exception | None = None) -> None:
         self.closed = False
+        self.autocommit = False
         self.execute_error = execute_error
         self.queries: list[str] = []
         self.rolled_back = False
@@ -58,6 +59,19 @@ class FakeConnection:
 
     def close(self) -> None:
         self.closed = True
+
+
+class FailingConcurrentIndexCursor(FakeCursor):
+    def execute(self, query: str, params: tuple | None = None) -> None:
+        if "CREATE INDEX CONCURRENTLY" in query:
+            self.connection.queries.append(query)
+            raise RuntimeError("concurrent index failed")
+        super().execute(query, params)
+
+
+class FailingConcurrentIndexConnection(FakeConnection):
+    def cursor(self) -> FailingConcurrentIndexCursor:
+        return FailingConcurrentIndexCursor(self)
 
 
 def test_background_worker_repository_uses_an_independent_connection_boundary() -> None:
@@ -252,14 +266,30 @@ def test_connection_initialization_is_thread_safe(monkeypatch: Any) -> None:
         assert first.result(timeout=1) is second.result(timeout=1)
 
     assert connection_count == 1
-    schema = "\n".join(first.result().queries)
+    queries = first.result().queries
+    schema = queries[0]
+    concurrent_indexes = "\n".join(queries[1:])
     assert "CREATE TABLE IF NOT EXISTS job_flow_records" in schema
     assert "CREATE TABLE IF NOT EXISTS candidate_records" in schema
-    assert "candidate_records_last_seen" in schema
-    assert "candidate_records_score" in schema
-    assert "candidate_records_first_seen" in schema
-    assert "candidate_records_ip" in schema
-    assert "controller_objects_candidate_workflow" in schema
+    assert "candidate_records_last_seen" not in schema
+    assert "candidate_records_score" not in schema
+    assert "candidate_records_first_seen" not in schema
+    assert "candidate_records_ip" not in schema
+    assert "controller_objects_candidate_workflow" not in schema
+    assert "pg_advisory_lock" in concurrent_indexes
+    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS candidate_records_last_seen" in (
+        concurrent_indexes
+    )
+    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS candidate_records_score" in concurrent_indexes
+    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS candidate_records_first_seen" in (
+        concurrent_indexes
+    )
+    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS candidate_records_ip" in concurrent_indexes
+    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS controller_objects_candidate_workflow" in (
+        concurrent_indexes
+    )
+    assert "pg_advisory_unlock" in concurrent_indexes
+    assert first.result().autocommit is False
     assert "WHERE candidate ? 'id'" in schema
     assert "DELETE FROM job_candidates AS legacy" in schema
     assert "record.job_id=legacy.job_id" in schema
@@ -289,6 +319,25 @@ def test_failed_connection_initialization_closes_connection_and_can_retry(monkey
 
     assert failed_connection.closed
     assert repository.connection is successful_connection
+
+
+def test_failed_concurrent_index_initialization_restores_connection_state(
+    monkeypatch: Any,
+) -> None:
+    connection = FailingConcurrentIndexConnection()
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg",
+        SimpleNamespace(connect=lambda *_args, **_kwargs: connection),
+    )
+    repository = PostgresRepository("postgresql://test", cast(MinioBlobStore, SimpleNamespace()))
+
+    with pytest.raises(RuntimeError, match="concurrent index failed"):
+        _ = repository.connection
+
+    assert any("pg_advisory_unlock" in query for query in connection.queries)
+    assert connection.autocommit is False
+    assert connection.closed is True
 
 
 def test_delete_job_cascades_ai_ledgers_before_run(monkeypatch: Any) -> None:

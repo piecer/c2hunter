@@ -114,18 +114,6 @@ class PostgresRepository:
                           ON candidate_records(job_id,position);
                         CREATE INDEX IF NOT EXISTS candidate_records_triage
                           ON candidate_records(excluded,severity,score DESC,candidate_id);
-                        CREATE INDEX IF NOT EXISTS candidate_records_score
-                          ON candidate_records (score DESC,candidate_id)
-                          WHERE excluded=false;
-                        CREATE INDEX IF NOT EXISTS candidate_records_last_seen
-                          ON candidate_records ((data->>'last_seen') DESC,candidate_id)
-                          WHERE excluded=false;
-                        CREATE INDEX IF NOT EXISTS candidate_records_first_seen
-                          ON candidate_records ((data->>'first_seen') DESC,candidate_id)
-                          WHERE excluded=false;
-                        CREATE INDEX IF NOT EXISTS candidate_records_ip
-                          ON candidate_records ((data->>'candidate_ip'),candidate_id)
-                          WHERE excluded=false;
                         CREATE TABLE IF NOT EXISTS ai_analysis_runs (
                           run_id text PRIMARY KEY,
                           analysis_job_id text NOT NULL,
@@ -181,12 +169,7 @@ class PostgresRepository:
                         CREATE INDEX IF NOT EXISTS controller_objects_active_live_jobs
                           ON controller_objects ((data->>'status'))
                           WHERE kind='job' AND data->>'mode'='LIVE';
-                        CREATE INDEX IF NOT EXISTS controller_objects_candidate_workflow
-                          ON controller_objects
-                          (kind,(data->>'candidate_id'),(data->>'created_at') DESC)
-                          WHERE kind IN
-                            ('candidate-decision','candidate-action','candidate-ti-lookup',
-                             'candidate-misp-action');
+
                         INSERT INTO job_flow_records(job_id,data)
                           SELECT id,data->'flow_records'
                           FROM controller_objects
@@ -236,11 +219,70 @@ class PostgresRepository:
                         """
                     )
                 connection.commit()
+                self._ensure_candidate_query_indexes(connection)
             except Exception:
                 connection.close()
                 raise
             self._connection = connection
             return connection
+
+    @staticmethod
+    def _ensure_candidate_query_indexes(connection: Any) -> None:
+        indexes = (
+            (
+                "candidate_records_score",
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS candidate_records_score "
+                "ON candidate_records (score DESC,candidate_id) WHERE excluded=false",
+            ),
+            (
+                "candidate_records_last_seen",
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS candidate_records_last_seen "
+                "ON candidate_records ((data->>'last_seen') DESC,candidate_id) "
+                "WHERE excluded=false",
+            ),
+            (
+                "candidate_records_first_seen",
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS candidate_records_first_seen "
+                "ON candidate_records ((data->>'first_seen') DESC,candidate_id) "
+                "WHERE excluded=false",
+            ),
+            (
+                "candidate_records_ip",
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS candidate_records_ip "
+                "ON candidate_records ((data->>'candidate_ip'),candidate_id) "
+                "WHERE excluded=false",
+            ),
+            (
+                "controller_objects_candidate_workflow",
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS controller_objects_candidate_workflow "
+                "ON controller_objects "
+                "(kind,(data->>'candidate_id'),(data->>'created_at') DESC) "
+                "WHERE kind IN "
+                "('candidate-decision','candidate-action','candidate-ti-lookup',"
+                "'candidate-misp-action')",
+            ),
+        )
+        index_names = tuple(name for name, _ in indexes)
+        connection.autocommit = True
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_lock(2026081301)")
+                try:
+                    cursor.execute(
+                        "SELECT indexrelid::regclass::text FROM pg_index "
+                        "WHERE NOT indisvalid AND indexrelid::regclass::text=ANY(%s)",
+                        (list(index_names),),
+                    )
+                    invalid_indexes = {str(row[0]) for row in cursor.fetchall()}
+                    for index_name in index_names:
+                        if index_name in invalid_indexes:
+                            cursor.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {index_name}")
+                    for _, statement in indexes:
+                        cursor.execute(statement)
+                finally:
+                    cursor.execute("SELECT pg_advisory_unlock(2026081301)")
+        finally:
+            connection.autocommit = False
 
     def close(self) -> None:
         with self._lock:
