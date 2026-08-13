@@ -112,6 +112,66 @@ def test_sqlite_candidate_page_sorts_and_paginates_in_repository(tmp_path: Path)
     assert rows == [("job-1", _candidate("candidate-middle", 50))]
 
 
+def test_sqlite_candidate_workflow_counts_use_latest_decision_and_action(tmp_path: Path) -> None:
+    repository = SQLiteRepository(tmp_path / "controller.db")
+    repository.save_candidates(
+        "job-1",
+        [_candidate("candidate-new", 90), _candidate("candidate-done", 80)],
+    )
+    repository.save_candidate_decision(
+        {
+            "id": "decision-1",
+            "candidate_id": "candidate-done",
+            "verdict": "CONFIRMED_C2",
+            "confidence": "HIGH",
+            "note": "verified",
+            "created_by": "analyst",
+            "created_at": "2026-08-13T00:00:00+00:00",
+        }
+    )
+    repository.save_candidate_decision(
+        {
+            "id": "decision-invalid",
+            "candidate_id": "candidate-new",
+            "verdict": "FALSE_POSITIVE",
+            "confidence": "HIGH",
+            "note": "invalid legacy timestamp",
+            "created_by": "analyst",
+            "created_at": "not-a-date",
+        }
+    )
+    repository.save_candidate_decision(
+        {
+            "id": "decision-naive",
+            "candidate_id": "candidate-new",
+            "verdict": "FALSE_POSITIVE",
+            "confidence": "HIGH",
+            "note": "timezone missing",
+            "created_by": "analyst",
+            "created_at": "2026-08-14T00:00:00",
+        }
+    )
+    repository.save_candidate_action(
+        {
+            "id": "action-1",
+            "candidate_id": "candidate-done",
+            "verdict_id": "decision-1",
+            "status": "COMPLETED",
+            "created_at": "2026-08-13T00:01:00+00:00",
+        }
+    )
+
+    counts = repository.candidate_workflow_counts(
+        minimum_score=0,
+        severity=None,
+        include_suppressed=False,
+    )
+
+    assert counts["needs_review"] == 1
+    assert counts["action_completed"] == 1
+    assert counts["done"] == 1
+
+
 def test_sqlite_candidate_misp_action_claim_is_atomic(tmp_path: Path) -> None:
     repository = SQLiteRepository(tmp_path / "controller.db")
     action = {

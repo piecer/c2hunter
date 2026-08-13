@@ -114,6 +114,18 @@ class PostgresRepository:
                           ON candidate_records(job_id,position);
                         CREATE INDEX IF NOT EXISTS candidate_records_triage
                           ON candidate_records(excluded,severity,score DESC,candidate_id);
+                        CREATE INDEX IF NOT EXISTS candidate_records_score
+                          ON candidate_records (score DESC,candidate_id)
+                          WHERE excluded=false;
+                        CREATE INDEX IF NOT EXISTS candidate_records_last_seen
+                          ON candidate_records ((data->>'last_seen') DESC,candidate_id)
+                          WHERE excluded=false;
+                        CREATE INDEX IF NOT EXISTS candidate_records_first_seen
+                          ON candidate_records ((data->>'first_seen') DESC,candidate_id)
+                          WHERE excluded=false;
+                        CREATE INDEX IF NOT EXISTS candidate_records_ip
+                          ON candidate_records ((data->>'candidate_ip'),candidate_id)
+                          WHERE excluded=false;
                         CREATE TABLE IF NOT EXISTS ai_analysis_runs (
                           run_id text PRIMARY KEY,
                           analysis_job_id text NOT NULL,
@@ -169,6 +181,12 @@ class PostgresRepository:
                         CREATE INDEX IF NOT EXISTS controller_objects_active_live_jobs
                           ON controller_objects ((data->>'status'))
                           WHERE kind='job' AND data->>'mode'='LIVE';
+                        CREATE INDEX IF NOT EXISTS controller_objects_candidate_workflow
+                          ON controller_objects
+                          (kind,(data->>'candidate_id'),(data->>'created_at') DESC)
+                          WHERE kind IN
+                            ('candidate-decision','candidate-action','candidate-ti-lookup',
+                             'candidate-misp-action');
                         INSERT INTO job_flow_records(job_id,data)
                           SELECT id,data->'flow_records'
                           FROM controller_objects
@@ -656,6 +674,20 @@ class PostgresRepository:
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None:
         return self._get("job", job_id)
 
+    def get_job_summaries(self, job_ids: list[str]) -> dict[str, dict[str, Any]]:
+        selected = list(dict.fromkeys(job_ids))
+        if not selected:
+            return {}
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id,data FROM controller_objects WHERE kind='job' AND id=ANY(%s)",
+                (selected,),
+            )
+            rows = cursor.fetchall()
+        return {
+            str(row[0]): row[1] if isinstance(row[1], dict) else json.loads(row[1]) for row in rows
+        }
+
     def list_jobs(self) -> list[dict[str, Any]]:
         return self._list("job")
 
@@ -904,6 +936,81 @@ class PostgresRepository:
             rows = cursor.fetchall()
             self.connection.commit()
         return [(str(row[0]), bool(row[1])) for row in rows]
+
+    def candidate_workflow_counts(
+        self,
+        *,
+        minimum_score: int,
+        severity: str | None,
+        include_suppressed: bool,
+    ) -> dict[str, int]:
+        clauses, parameters = self._candidate_query_parts(
+            minimum_score, severity, include_suppressed
+        )
+        where = " AND ".join(f"c.{clause}" for clause in clauses)
+        query = f"""
+            WITH selected AS (
+              SELECT c.candidate_id FROM candidate_records c WHERE {where}
+            ), current_decision AS (
+              SELECT DISTINCT ON (o.data->>'candidate_id')
+                o.data->>'candidate_id' AS candidate_id,
+                o.data->>'id' AS verdict_id,
+                o.data->>'verdict' AS verdict
+              FROM controller_objects o JOIN selected s
+                ON s.candidate_id=o.data->>'candidate_id'
+              WHERE o.kind='candidate-decision'
+                AND o.data->>'verdict' IN ('CONFIRMED_C2','FALSE_POSITIVE','UNDER_REVIEW')
+                AND o.data->>'confidence' IN ('CONFIRMED','HIGH','MEDIUM','LOW')
+                AND COALESCE(o.data->>'id','')<>''
+                AND COALESCE(o.data->>'candidate_id','')<>''
+                AND COALESCE(o.data->>'note','')<>''
+                AND COALESCE(o.data->>'created_by','')<>''
+                AND o.data->>'created_at' ~
+                  '^\\d{{4}}-\\d{{2}}-\\d{{2}}T\\d{{2}}:\\d{{2}}:\\d{{2}}.*(Z|[+-]\\d{{2}}:\\d{{2}})$'
+              ORDER BY o.data->>'candidate_id',o.data->>'created_at' DESC
+            ), current_action AS (
+              SELECT DISTINCT ON (o.data->>'candidate_id')
+                o.data->>'candidate_id' AS candidate_id,o.data->>'status' AS status
+              FROM controller_objects o JOIN current_decision d
+                ON d.candidate_id=o.data->>'candidate_id'
+                AND d.verdict_id=o.data->>'verdict_id'
+              WHERE o.kind='candidate-action'
+              ORDER BY o.data->>'candidate_id',o.data->>'created_at' DESC
+            )
+            SELECT
+              COUNT(*) FILTER (WHERE d.verdict IS NULL),
+              COUNT(*) FILTER (WHERE d.verdict='UNDER_REVIEW'),
+              COUNT(*) FILTER (WHERE d.verdict='CONFIRMED_C2'
+                AND COALESCE(a.status,'PENDING') NOT IN ('IN_PROGRESS','COMPLETED')),
+              COUNT(*) FILTER (WHERE d.verdict='CONFIRMED_C2' AND a.status='IN_PROGRESS'),
+              COUNT(*) FILTER (WHERE d.verdict='CONFIRMED_C2' AND a.status='COMPLETED'),
+              COUNT(*) FILTER (WHERE d.verdict='FALSE_POSITIVE'),
+              COUNT(*) FILTER (WHERE d.verdict='FALSE_POSITIVE'
+                OR (d.verdict='CONFIRMED_C2' AND a.status='COMPLETED'))
+            FROM selected s
+            LEFT JOIN current_decision d USING(candidate_id)
+            LEFT JOIN current_action a USING(candidate_id)
+        """
+        with self.connection.cursor() as cursor:
+            cursor.execute(query, parameters)
+            row = cursor.fetchone()
+            self.connection.commit()
+        values = row or (0, 0, 0, 0, 0, 0, 0)
+        return dict(
+            zip(
+                (
+                    "needs_review",
+                    "in_review",
+                    "action_required",
+                    "action_in_progress",
+                    "action_completed",
+                    "false_positive",
+                    "done",
+                ),
+                (int(value) for value in values),
+                strict=True,
+            )
+        )
 
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         connection = self.connection
@@ -1231,6 +1338,38 @@ class PostgresRepository:
         return [
             item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
         ]
+
+    def list_candidate_workflow_records(
+        self, candidate_ids: list[str]
+    ) -> dict[str, list[dict[str, Any]]]:
+        records: dict[str, list[dict[str, Any]]] = {
+            "decisions": [],
+            "actions": [],
+            "lookups": [],
+            "misp_actions": [],
+        }
+        selected = list(dict.fromkeys(candidate_ids))
+        if not selected:
+            return records
+        kinds = {
+            "candidate-decision": "decisions",
+            "candidate-action": "actions",
+            "candidate-ti-lookup": "lookups",
+            "candidate-misp-action": "misp_actions",
+        }
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT kind,data FROM controller_objects "
+                "WHERE kind=ANY(%s) AND data->>'candidate_id'=ANY(%s)",
+                (list(kinds), selected),
+            )
+            rows = cursor.fetchall()
+            self.connection.commit()
+        for kind, value in rows:
+            records[kinds[str(kind)]].append(
+                value if isinstance(value, dict) else json.loads(value)
+            )
+        return records
 
     def update_candidate(self, candidate_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
         """Update a candidate by ID across all jobs."""

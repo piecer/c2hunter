@@ -81,6 +81,32 @@ def test_background_worker_repository_uses_an_independent_connection_boundary() 
     assert primary_connection.closed is False
 
 
+def test_postgres_candidate_workflow_counts_are_aggregated_in_database() -> None:
+    repository = PostgresRepository("postgresql://controller", cast(MinioBlobStore, object()))
+    connection = FakeConnection()
+    repository._connection = connection
+
+    counts = repository.candidate_workflow_counts(
+        minimum_score=50,
+        severity="HIGH",
+        include_suppressed=False,
+    )
+
+    sql = "\n".join(connection.queries)
+    assert "WITH selected AS" in sql
+    assert "COUNT(*) FILTER" in sql
+    assert "current_decision" in sql
+    assert counts == {
+        "needs_review": 0,
+        "in_review": 0,
+        "action_required": 0,
+        "action_in_progress": 0,
+        "action_completed": 0,
+        "false_positive": 0,
+        "done": 0,
+    }
+
+
 class FailingHeartbeatCursor(FakeCursor):
     def execute(self, query: str, params: tuple | None = None) -> None:
         super().execute(query, params)
@@ -229,6 +255,11 @@ def test_connection_initialization_is_thread_safe(monkeypatch: Any) -> None:
     schema = "\n".join(first.result().queries)
     assert "CREATE TABLE IF NOT EXISTS job_flow_records" in schema
     assert "CREATE TABLE IF NOT EXISTS candidate_records" in schema
+    assert "candidate_records_last_seen" in schema
+    assert "candidate_records_score" in schema
+    assert "candidate_records_first_seen" in schema
+    assert "candidate_records_ip" in schema
+    assert "controller_objects_candidate_workflow" in schema
     assert "WHERE candidate ? 'id'" in schema
     assert "DELETE FROM job_candidates AS legacy" in schema
     assert "record.job_id=legacy.job_id" in schema

@@ -11,6 +11,83 @@ from typing import Any, Protocol
 _AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 
 
+def _valid_candidate_decision_record(decision: dict[str, Any]) -> bool:
+    if not all(
+        isinstance(decision.get(field), str) and bool(decision.get(field))
+        for field in (
+            "id",
+            "candidate_id",
+            "verdict",
+            "confidence",
+            "note",
+            "created_by",
+            "created_at",
+        )
+    ):
+        return False
+    try:
+        created_at = datetime.fromisoformat(str(decision["created_at"]).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if created_at.utcoffset() is None:
+        return False
+    return decision.get("verdict") in {
+        "CONFIRMED_C2",
+        "FALSE_POSITIVE",
+        "UNDER_REVIEW",
+    } and decision.get("confidence") in {"CONFIRMED", "HIGH", "MEDIUM", "LOW"}
+
+
+def _candidate_workflow_counts_from_records(
+    candidate_ids: list[str],
+    decisions: list[dict[str, Any]],
+    actions: list[dict[str, Any]],
+) -> dict[str, int]:
+    latest_decisions: dict[str, dict[str, Any]] = {}
+    valid_decisions = [
+        decision for decision in decisions if _valid_candidate_decision_record(decision)
+    ]
+    for decision in sorted(valid_decisions, key=lambda item: str(item["created_at"])):
+        latest_decisions[str(decision.get("candidate_id", ""))] = decision
+    latest_actions: dict[str, dict[str, Any]] = {}
+    for action in sorted(actions, key=lambda item: str(item.get("created_at", ""))):
+        candidate_id = str(action.get("candidate_id", ""))
+        current_decision = latest_decisions.get(candidate_id)
+        if current_decision is not None and action.get("verdict_id") == current_decision.get("id"):
+            latest_actions[candidate_id] = action
+    counts = {
+        "needs_review": 0,
+        "in_review": 0,
+        "action_required": 0,
+        "action_in_progress": 0,
+        "action_completed": 0,
+        "false_positive": 0,
+        "done": 0,
+    }
+    for candidate_id in candidate_ids:
+        current_decision = latest_decisions.get(candidate_id)
+        verdict = (
+            str(current_decision.get("verdict")) if current_decision is not None else "UNREVIEWED"
+        )
+        if verdict == "UNDER_REVIEW":
+            counts["in_review"] += 1
+        elif verdict == "FALSE_POSITIVE":
+            counts["false_positive"] += 1
+            counts["done"] += 1
+        elif verdict == "CONFIRMED_C2":
+            status = str(latest_actions.get(candidate_id, {}).get("status", "PENDING"))
+            if status == "IN_PROGRESS":
+                counts["action_in_progress"] += 1
+            elif status == "COMPLETED":
+                counts["action_completed"] += 1
+                counts["done"] += 1
+            else:
+                counts["action_required"] += 1
+        else:
+            counts["needs_review"] += 1
+    return counts
+
+
 class Repository(Protocol):
     """PostgreSQL adapter가 구현해야 하는 제어 영역 경계."""
 
@@ -28,6 +105,7 @@ class Repository(Protocol):
     def save_job_metadata(self, job: dict[str, Any]) -> dict[str, Any]: ...
     def get_job(self, job_id: str) -> dict[str, Any] | None: ...
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None: ...
+    def get_job_summaries(self, job_ids: list[str]) -> dict[str, dict[str, Any]]: ...
     def list_jobs(self) -> list[dict[str, Any]]: ...
     def list_active_live_jobs(self) -> list[dict[str, Any]]: ...
     def delete_job(self, job_id: str) -> bool: ...
@@ -60,6 +138,13 @@ class Repository(Protocol):
         severity: str | None,
         include_suppressed: bool,
     ) -> list[tuple[str, bool]]: ...
+    def candidate_workflow_counts(
+        self,
+        *,
+        minimum_score: int,
+        severity: str | None,
+        include_suppressed: bool,
+    ) -> dict[str, int]: ...
     def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]: ...
     def get_integration_settings(self) -> dict[str, Any] | None: ...
     def save_integration_settings(
@@ -95,6 +180,9 @@ class Repository(Protocol):
     def list_candidate_misp_actions(
         self, candidate_id: str | None = None
     ) -> list[dict[str, Any]]: ...
+    def list_candidate_workflow_records(
+        self, candidate_ids: list[str]
+    ) -> dict[str, list[dict[str, Any]]]: ...
     def save_flow_label(self, label: dict[str, Any]) -> dict[str, Any]: ...
     def list_flow_labels(self, job_id: str | None = None) -> list[dict[str, Any]]: ...
     def save_payload_signature(self, signature: dict[str, Any]) -> dict[str, Any]: ...
@@ -231,6 +319,14 @@ class MemoryRepository:
                 if key not in {"flow_records", "payload_signatures"}
             }
         )
+
+    def get_job_summaries(self, job_ids: list[str]) -> dict[str, dict[str, Any]]:
+        summaries: dict[str, dict[str, Any]] = {}
+        for job_id in dict.fromkeys(job_ids):
+            job_summary = self.get_job_summary(job_id)
+            if job_summary is not None:
+                summaries[job_id] = job_summary
+        return summaries
 
     def list_jobs(self) -> list[dict[str, Any]]:
         return [
@@ -392,6 +488,27 @@ class MemoryRepository:
                 include_suppressed=include_suppressed,
             )
         ]
+
+    def candidate_workflow_counts(
+        self,
+        *,
+        minimum_score: int,
+        severity: str | None,
+        include_suppressed: bool,
+    ) -> dict[str, int]:
+        candidate_ids = [
+            str(candidate["id"])
+            for candidates in self.candidates.values()
+            for candidate in candidates
+            if int(candidate.get("score", 0)) >= minimum_score
+            and (severity is None or candidate.get("severity") == severity)
+            and (include_suppressed or not candidate.get("excluded", False))
+        ]
+        return _candidate_workflow_counts_from_records(
+            candidate_ids,
+            list(self.candidate_decisions.values()),
+            list(self.candidate_actions.values()),
+        )
 
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         key = (run["analysis_job_id"], run["idempotency_key"])
@@ -618,6 +735,33 @@ class MemoryRepository:
             item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
         ]
         return sorted(deepcopy(selected), key=lambda item: str(item["created_at"]))
+
+    def list_candidate_workflow_records(
+        self, candidate_ids: list[str]
+    ) -> dict[str, list[dict[str, Any]]]:
+        selected = set(candidate_ids)
+        return {
+            "decisions": [
+                deepcopy(item)
+                for item in self.candidate_decisions.values()
+                if item.get("candidate_id") in selected
+            ],
+            "actions": [
+                deepcopy(item)
+                for item in self.candidate_actions.values()
+                if item.get("candidate_id") in selected
+            ],
+            "lookups": [
+                deepcopy(item)
+                for item in self.candidate_ti_lookups.values()
+                if item.get("candidate_id") in selected
+            ],
+            "misp_actions": [
+                deepcopy(item)
+                for item in self.candidate_misp_actions.values()
+                if item.get("candidate_id") in selected
+            ],
+        }
 
     def save_flow_label(self, label: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -1115,6 +1259,17 @@ class SQLiteRepository:
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None:
         return self._get("job", job_id)
 
+    def get_job_summaries(self, job_ids: list[str]) -> dict[str, dict[str, Any]]:
+        selected = list(dict.fromkeys(job_ids))
+        if not selected:
+            return {}
+        placeholders = ",".join("?" for _ in selected)
+        rows = self.connection.execute(
+            f"SELECT id,data FROM objects WHERE kind='job' AND id IN ({placeholders})",
+            selected,
+        ).fetchall()
+        return {str(row[0]): json.loads(row[1]) for row in rows}
+
     def list_jobs(self) -> list[dict[str, Any]]:
         return self._list("job")
 
@@ -1333,6 +1488,27 @@ class SQLiteRepository:
             parameters,
         ).fetchall()
         return [(str(row[0]), bool(row[1])) for row in rows]
+
+    def candidate_workflow_counts(
+        self,
+        *,
+        minimum_score: int,
+        severity: str | None,
+        include_suppressed: bool,
+    ) -> dict[str, int]:
+        candidate_ids = [
+            candidate_id
+            for candidate_id, _ in self.query_candidate_refs(
+                minimum_score=minimum_score,
+                severity=severity,
+                include_suppressed=include_suppressed,
+            )
+        ]
+        return _candidate_workflow_counts_from_records(
+            candidate_ids,
+            self.list_candidate_decisions(),
+            self.list_candidate_actions(),
+        )
 
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         with self._lock:
@@ -1558,6 +1734,33 @@ class SQLiteRepository:
         return [
             item for item in values if candidate_id is None or item["candidate_id"] == candidate_id
         ]
+
+    def list_candidate_workflow_records(
+        self, candidate_ids: list[str]
+    ) -> dict[str, list[dict[str, Any]]]:
+        selected = list(dict.fromkeys(candidate_ids))
+        records: dict[str, list[dict[str, Any]]] = {
+            "decisions": [],
+            "actions": [],
+            "lookups": [],
+            "misp_actions": [],
+        }
+        if not selected:
+            return records
+        placeholders = ",".join("?" for _ in selected)
+        for kind, key in {
+            "candidate-decision": "decisions",
+            "candidate-action": "actions",
+            "candidate-ti-lookup": "lookups",
+            "candidate-misp-action": "misp_actions",
+        }.items():
+            rows = self.connection.execute(
+                "SELECT data FROM objects WHERE kind=? "
+                f"AND json_extract(data,'$.candidate_id') IN ({placeholders})",
+                [kind, *selected],
+            ).fetchall()
+            records[key] = [json.loads(row[0]) for row in rows]
+        return records
 
     def update_candidate(self, candidate_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
         """Update a candidate by ID across all jobs."""

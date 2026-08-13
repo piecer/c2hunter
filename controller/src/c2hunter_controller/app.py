@@ -402,9 +402,22 @@ def _valid_candidate_decision(decision: object) -> bool:
 def _candidate_workflow_index(
     repo: Repository, candidate_id: str | None = None
 ) -> dict[str, dict[str, Any]]:
+    return _candidate_workflow_index_from_records(
+        {
+            "decisions": repo.list_candidate_decisions(candidate_id),
+            "actions": repo.list_candidate_actions(candidate_id),
+            "lookups": repo.list_candidate_ti_lookups(candidate_id),
+            "misp_actions": repo.list_candidate_misp_actions(candidate_id),
+        }
+    )
+
+
+def _candidate_workflow_index_from_records(
+    records: dict[str, list[dict[str, Any]]],
+) -> dict[str, dict[str, Any]]:
     workflow: dict[str, dict[str, Any]] = {}
     decisions: list[dict[str, Any]] = []
-    for decision in repo.list_candidate_decisions(candidate_id):
+    for decision in records["decisions"]:
         if not _valid_candidate_decision(decision):
             logger.warning(
                 "Ignoring malformed candidate decision id=%r candidate_id=%r",
@@ -418,9 +431,7 @@ def _candidate_workflow_index(
         entry = workflow.setdefault(str(decision["candidate_id"]), {})
         entry.setdefault("verdict_history", []).append(decision)
         entry["current_verdict"] = decision
-    candidate_actions = sorted(
-        repo.list_candidate_actions(candidate_id), key=lambda item: str(item["created_at"])
-    )
+    candidate_actions = sorted(records["actions"], key=lambda item: str(item["created_at"]))
     for action in candidate_actions:
         entry = workflow.setdefault(str(action["candidate_id"]), {})
         entry.setdefault("action_history", []).append(action)
@@ -429,14 +440,10 @@ def _candidate_workflow_index(
             "id"
         ):
             entry["current_action"] = action
-    lookups = sorted(
-        repo.list_candidate_ti_lookups(candidate_id), key=lambda item: str(item["fetched_at"])
-    )
+    lookups = sorted(records["lookups"], key=lambda item: str(item["fetched_at"]))
     for lookup in lookups:
         workflow.setdefault(str(lookup["candidate_id"]), {})["threat_intelligence"] = lookup
-    actions = sorted(
-        repo.list_candidate_misp_actions(candidate_id), key=lambda item: str(item["created_at"])
-    )
+    actions = sorted(records["misp_actions"], key=lambda item: str(item["created_at"]))
     for action in actions:
         entry = workflow.setdefault(str(action["candidate_id"]), {})
         entry.setdefault("misp_exports", []).append(action)
@@ -3551,8 +3558,6 @@ def create_app(
             "ti_priority",
         }:
             raise ApiError(422, "INVALID_SORT", "허용되지 않은 정렬 필드")
-        jobs = {str(job["id"]): job for job in repo.list_jobs()}
-        workflow = _candidate_workflow_index(repo)
         derived_filter = verdict is not None or workflow_status is not None or ti_filter is not None
         database_sort = sort_field != "ti_priority"
         if not derived_filter and database_sort:
@@ -3564,6 +3569,11 @@ def create_app(
                 page=page,
                 page_size=page_size,
             )
+            candidate_ids = [str(candidate["id"]) for _, candidate in candidate_rows]
+            jobs = repo.get_job_summaries([job_id for job_id, _ in candidate_rows])
+            workflow = _candidate_workflow_index_from_records(
+                repo.list_candidate_workflow_records(candidate_ids)
+            )
             page_items = [
                 _candidate_list_projection(
                     _public_candidate(_with_candidate_workflow(candidate, workflow), jobs[job_id])
@@ -3571,23 +3581,21 @@ def create_app(
                 for job_id, candidate in candidate_rows
                 if job_id in jobs
             ]
-            refs = repo.query_candidate_refs(
+            workflow_counts = repo.candidate_workflow_counts(
                 minimum_score=minimum_score,
                 severity=severity,
                 include_suppressed=include_suppressed,
             )
-            count_items = [
-                _with_candidate_workflow({"id": candidate_id, "excluded": excluded}, workflow)
-                for candidate_id, excluded in refs
-            ]
             return {
                 "items": page_items,
                 "page": page,
                 "page_size": page_size,
                 "total": total,
                 "total_pages": max(1, (total + page_size - 1) // page_size),
-                "workflow_counts": _candidate_workflow_counts(count_items),
+                "workflow_counts": workflow_counts,
             }
+        jobs = {str(job["id"]): job for job in repo.list_jobs()}
+        workflow = _candidate_workflow_index(repo)
         items: list[dict[str, Any]] = []
         candidate_rows = repo.query_candidates(
             minimum_score=minimum_score,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from typing import Any
+from unittest.mock import Mock
 
 from fastapi.testclient import TestClient
 
@@ -509,6 +510,22 @@ def test_default_candidate_list_uses_repository_page_query() -> None:
         return original_page_query(**kwargs)
 
     repository.query_candidate_page = page_query  # type: ignore[method-assign]
+    repository.list_jobs = Mock(side_effect=AssertionError("must not load every job"))
+    repository.list_candidate_decisions = Mock(
+        side_effect=AssertionError("must not load every decision")
+    )
+    repository.list_candidate_actions = Mock(
+        side_effect=AssertionError("must not load every action")
+    )
+    repository.list_candidate_ti_lookups = Mock(
+        side_effect=AssertionError("must not load every lookup")
+    )
+    repository.list_candidate_misp_actions = Mock(
+        side_effect=AssertionError("must not load every MISP action")
+    )
+    repository.query_candidate_refs = Mock(
+        side_effect=AssertionError("must not transfer every candidate reference")
+    )
     client = TestClient(create_app(Settings(environment="test"), repository))
 
     response = client.get("/api/v1/candidates?page_size=1&sort=-score")
