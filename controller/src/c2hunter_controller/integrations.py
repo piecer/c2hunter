@@ -51,27 +51,41 @@ class SerializedRequestGate:
         delay_seconds: Callable[[], float],
         *,
         clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep,
+        wait: Callable[[float], bool] | None = None,
     ) -> None:
         self._delay_seconds = delay_seconds
         self._clock = clock
-        self._sleep = sleep
+        self._cancelled = threading.Event()
+        self._wait = wait or self._cancelled.wait
         self._lock = threading.RLock()
+        self._start_lock = threading.Lock()
         self._last_completed_at: float | None = None
 
     def run(self, operation: Callable[[], T]) -> T:
         with self._lock:
+            if self._cancelled.is_set():
+                raise IntegrationError("internal", "external request gate is shutting down")
             if self._last_completed_at is not None:
                 remaining = max(
                     0.0,
                     float(self._delay_seconds()) - (self._clock() - self._last_completed_at),
                 )
                 if remaining > 0:
-                    self._sleep(remaining)
-            try:
-                return operation()
-            finally:
-                self._last_completed_at = self._clock()
+                    self._wait(remaining)
+                if self._cancelled.is_set():
+                    raise IntegrationError("internal", "external request gate is shutting down")
+            with self._start_lock:
+                if self._cancelled.is_set():
+                    raise IntegrationError("internal", "external request gate is shutting down")
+                try:
+                    return operation()
+                finally:
+                    self._last_completed_at = self._clock()
+
+    def cancel(self) -> None:
+        """Reject new calls and interrupt requests waiting for their pacing delay."""
+        with self._start_lock:
+            self._cancelled.set()
 
 
 def _transport_failure_message(exc: BaseException) -> str:

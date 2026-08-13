@@ -48,6 +48,8 @@ MISP 전송은 Candidate 상세 화면에서 개별 수행한다. Candidate가 �
 - Controller 프로세스 안의 외부 TI/MISP HTTP 요청을 직렬화하고, 각 요청 완료 후 다음 요청 시작 전
   `threat_intel_request_delay_seconds`(기본 1초, 0~60초)를 적용한다. 한 Candidate의
   VirusTotal/AbuseIPDB 조회를 포함해 다른 Candidate 조회나 MISP 조회·등록도 동시에 실행하지 않는다.
+- Controller shutdown은 요청 간 delay 대기를 즉시 중단하고 아직 시작하지 않은 enrichment 작업을
+  취소한다. 이미 시작한 HTTP 요청만 설정된 request timeout 범위에서 종료를 기다린다.
 
 ### 제외
 

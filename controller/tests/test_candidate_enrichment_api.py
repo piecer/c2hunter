@@ -1033,6 +1033,53 @@ def test_automatic_enrichment_after_shutdown_is_skipped_without_raising() -> Non
     assert stored["providers"]["internal"]["error"] == "automatic enrichment is shutting down"
 
 
+def test_shutdown_cancels_enrichment_that_has_not_started() -> None:
+    class BlockingThreatIntelService:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def lookup_ip(self, ip_address: str) -> dict[str, Any]:
+            self.started.set()
+            self.release.wait(timeout=5)
+            return {"ip_address": ip_address, "providers": {}, "summary": {}}
+
+    threat_intel = BlockingThreatIntelService()
+    repository = MemoryRepository()
+    app = create_app(
+        Settings(
+            environment="test",
+            threat_intel_request_delay_seconds=0,
+            candidate_auto_enrichment_workers=1,
+            candidate_auto_enrichment_queue_capacity=2,
+        ),
+        repository,
+        threat_intel_service=threat_intel,
+    )
+    candidates = [
+        {"id": "candidate-running", "candidate_ip": "203.0.113.44", "score": 90},
+        {"id": "candidate-queued", "candidate_ip": "203.0.113.45", "score": 80},
+    ]
+    repository.save_candidates("job-shutdown", candidates)
+    app.state.schedule_candidate_enrichment("job-shutdown", candidates)
+    assert threat_intel.started.wait(timeout=1)
+
+    shutdown = threading.Thread(target=app.router.on_shutdown[-1])
+    shutdown.start()
+    deadline = time.monotonic() + 1
+    while True:
+        queued = repository.list_candidate_ti_lookups("candidate-queued")[-1]
+        if queued["status"] != "PENDING" or time.monotonic() >= deadline:
+            break
+        time.sleep(0.01)
+    assert queued["status"] == "FAILED"
+    assert queued["providers"]["internal"]["error"] == ("automatic enrichment is shutting down")
+
+    threat_intel.release.set()
+    shutdown.join(timeout=1)
+    assert not shutdown.is_alive()
+
+
 def test_misp_export_requires_confirmed_candidate() -> None:
     client, _, _, misp = _client()
 

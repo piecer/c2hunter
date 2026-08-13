@@ -2376,11 +2376,26 @@ def create_app(
                 enrichment_futures.add(future)
 
             def discard_completed(
-                completed: Future[Any], capacity: threading.BoundedSemaphore = active_capacity
+                completed: Future[Any],
+                capacity: threading.BoundedSemaphore = active_capacity,
+                cancelled_record: dict[str, Any] = pending_record,
             ) -> None:
                 capacity.release()
                 with enrichment_lock:
                     enrichment_futures.discard(completed)
+                if completed.cancelled():
+                    repo.save_candidate_ti_lookup(
+                        {
+                            **cancelled_record,
+                            "status": "FAILED",
+                            "providers": {
+                                "internal": {
+                                    "status": "ERROR",
+                                    "error": "automatic enrichment is shutting down",
+                                }
+                            },
+                        }
+                    )
 
             future.add_done_callback(discard_completed)
 
@@ -2489,12 +2504,17 @@ def create_app(
     def stop_result_consumer() -> None:
         with enrichment_lifecycle_lock:
             enrichment_stopping.set()
+        with enrichment_lock:
+            pending_enrichment = set(enrichment_futures)
+        for future in pending_enrichment:
+            future.cancel()
+        external_request_gate.cancel()
         result_stop.set()
         if result_consumer_thread is not None:
             result_consumer_thread.join()
-        enrichment_executor.shutdown(wait=True, cancel_futures=False)
+        enrichment_executor.shutdown(wait=True, cancel_futures=True)
         for retired_executor in retired_enrichment_executors:
-            retired_executor.shutdown(wait=True, cancel_futures=False)
+            retired_executor.shutdown(wait=True, cancel_futures=True)
         with enrichment_repository_lock:
             for worker_repository in enrichment_repositories:
                 worker_repository.close()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 import ssl
+import threading
 import urllib.error
 import urllib.request
 from typing import Any
@@ -110,14 +111,15 @@ def test_serialized_request_gate_delays_after_failed_operation() -> None:
     now = [10.0]
     sleeps: list[float] = []
 
-    def sleep(seconds: float) -> None:
+    def wait(seconds: float) -> bool:
         sleeps.append(seconds)
         now[0] += seconds
+        return False
 
     gate = SerializedRequestGate(
         lambda: 2.0,
         clock=lambda: now[0],
-        sleep=sleep,
+        wait=wait,
     )
 
     with pytest.raises(RuntimeError, match="failed"):
@@ -133,11 +135,12 @@ def test_serialized_http_client_delays_between_provider_requests() -> None:
     sleeps: list[float] = []
     http = StubHttpClient()
 
-    def sleep(seconds: float) -> None:
+    def wait(seconds: float) -> bool:
         sleeps.append(seconds)
         now[0] += seconds
+        return False
 
-    gate = SerializedRequestGate(lambda: 1.0, clock=lambda: now[0], sleep=sleep)
+    gate = SerializedRequestGate(lambda: 1.0, clock=lambda: now[0], wait=wait)
     service = ThreatIntelService(
         virustotal_api_key="vt-secret",
         abuseipdb_api_key="abuse-secret",
@@ -149,6 +152,61 @@ def test_serialized_http_client_delays_between_provider_requests() -> None:
     assert result["providers"]["virustotal"]["status"] == "OK"
     assert result["providers"]["abuseipdb"]["status"] == "OK"
     assert sleeps == [1.0]
+
+
+def test_serialized_request_gate_cancel_interrupts_delay() -> None:
+    gate = SerializedRequestGate(lambda: 60.0)
+    gate.run(lambda: "first")
+    started = threading.Event()
+    finished = threading.Event()
+    errors: list[IntegrationError] = []
+
+    def run_waiting_request() -> None:
+        started.set()
+        try:
+            gate.run(lambda: "second")
+        except IntegrationError as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=run_waiting_request)
+    worker.start()
+    assert started.wait(timeout=1)
+
+    gate.cancel()
+
+    assert finished.wait(timeout=1)
+    worker.join(timeout=1)
+    assert errors[0].message == "external request gate is shutting down"
+
+
+def test_serialized_request_gate_does_not_start_after_delay_and_cancel_race() -> None:
+    delay_finished = threading.Event()
+    release_wait = threading.Event()
+    operation_called = threading.Event()
+
+    def wait(_: float) -> bool:
+        delay_finished.set()
+        release_wait.wait(timeout=1)
+        return False
+
+    gate = SerializedRequestGate(lambda: 60.0, wait=wait)
+    gate.run(lambda: "first")
+
+    def run_waiting_request() -> None:
+        with pytest.raises(IntegrationError, match="external request gate is shutting down"):
+            gate.run(operation_called.set)
+
+    worker = threading.Thread(target=run_waiting_request)
+    worker.start()
+    assert delay_finished.wait(timeout=1)
+    gate.cancel()
+    release_wait.set()
+    worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert not operation_called.is_set()
 
 
 @pytest.mark.parametrize(
