@@ -952,8 +952,15 @@ def create_app(
     app.state.integration_settings = integration_settings
     candidate_action_lock = threading.Lock()
     misp_export_lock = threading.Lock()
+    startup_integration_settings = integration_settings()
+    enrichment_runtime_workers = int(
+        startup_integration_settings["candidate_auto_enrichment_workers"]
+    )
+    enrichment_runtime_queue_capacity = int(
+        startup_integration_settings["candidate_auto_enrichment_queue_capacity"]
+    )
     enrichment_executor = ThreadPoolExecutor(
-        max_workers=config.candidate_auto_enrichment_workers,
+        max_workers=enrichment_runtime_workers,
         thread_name_prefix="candidate-ti",
     )
     retired_enrichment_executors: list[ThreadPoolExecutor] = []
@@ -964,9 +971,7 @@ def create_app(
     enrichment_repository_lock = threading.Lock()
     enrichment_repositories: list[PostgresRepository] = []
     enrichment_repository_local = threading.local()
-    enrichment_capacity = threading.BoundedSemaphore(
-        config.candidate_auto_enrichment_queue_capacity
-    )
+    enrichment_capacity = threading.BoundedSemaphore(enrichment_runtime_queue_capacity)
     sessions = SessionStore()
     authenticator = TokenAuthenticator(
         sessions,
@@ -2347,6 +2352,15 @@ def create_app(
     app.state.schedule_candidate_enrichment = schedule_candidate_enrichment
     app.state.wait_for_candidate_enrichment = wait_for_candidate_enrichment
 
+    def candidate_enrichment_runtime() -> dict[str, int]:
+        with enrichment_lifecycle_lock:
+            return {
+                "workers": enrichment_runtime_workers,
+                "queue_capacity": enrichment_runtime_queue_capacity,
+            }
+
+    app.state.candidate_enrichment_runtime = candidate_enrichment_runtime
+
     def persist_claimed_result(result: dict[str, Any]) -> None:
         receipt = str(result.get("receipt", ""))
         job = repo.get_job_summary(str(result.get("job_id", "")))
@@ -3660,7 +3674,8 @@ def create_app(
     def update_integration_settings(
         payload: IntegrationSettingsUpdate, request: Request
     ) -> dict[str, Any]:
-        nonlocal enrichment_executor, enrichment_capacity
+        nonlocal enrichment_capacity, enrichment_executor
+        nonlocal enrichment_runtime_queue_capacity, enrichment_runtime_workers
         previous = integration_settings()
         updated = {
             **payload.model_dump(exclude={"expected_version"}),
@@ -3693,6 +3708,10 @@ def create_app(
                 )
                 enrichment_capacity = threading.BoundedSemaphore(
                     int(stored["candidate_auto_enrichment_queue_capacity"])
+                )
+                enrichment_runtime_workers = int(stored["candidate_auto_enrichment_workers"])
+                enrichment_runtime_queue_capacity = int(
+                    stored["candidate_auto_enrichment_queue_capacity"]
                 )
                 retired_enrichment_executors.append(old_executor)
             old_executor.shutdown(wait=False, cancel_futures=False)

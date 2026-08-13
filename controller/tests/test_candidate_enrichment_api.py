@@ -126,6 +126,43 @@ def test_admin_can_persist_public_integration_settings_without_api_keys() -> Non
     assert conflict.status_code == 409
 
 
+def test_saved_enrichment_runtime_settings_are_applied_after_restart() -> None:
+    repository = MemoryRepository()
+    first_app = create_app(
+        Settings(
+            environment="test",
+            candidate_auto_enrichment_workers=7,
+            candidate_auto_enrichment_queue_capacity=70,
+        ),
+        repository,
+    )
+    current = first_app.state.integration_settings()
+    stored, status = repository.save_integration_settings(
+        {
+            **current,
+            "candidate_auto_enrichment_workers": 1,
+            "candidate_auto_enrichment_queue_capacity": 2,
+        },
+        expected_version=current["version"],
+    )
+    assert status == "OK"
+    assert stored is not None
+
+    restarted_app = create_app(
+        Settings(
+            environment="test",
+            candidate_auto_enrichment_workers=7,
+            candidate_auto_enrichment_queue_capacity=70,
+        ),
+        repository,
+    )
+
+    assert restarted_app.state.candidate_enrichment_runtime() == {
+        "workers": 1,
+        "queue_capacity": 2,
+    }
+
+
 def test_automatic_immediate_action_confirms_and_exports_when_two_providers_are_positive() -> None:
     client, repository, threat_intel, misp = _client()
     current = client.get("/api/v1/integration-settings").json()
