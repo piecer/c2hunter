@@ -80,6 +80,9 @@ class ClickHouseFlowStore:
         flow_retention_days: int = 30,
     ) -> None:
         self.url = url.rstrip("/")
+        parsed_url = urllib.parse.urlsplit(self.url)
+        if parsed_url.scheme not in {"http", "https"} or parsed_url.hostname is None:
+            raise ValueError("ClickHouse URL must use HTTP or HTTPS")
         self.database = database
         self.username = username
         self.password = password
@@ -91,11 +94,15 @@ class ClickHouseFlowStore:
 
     def _request(self, query: str, data: bytes = b"") -> bytes:
         parameters = urllib.parse.urlencode({"database": self.database, "query": query})
-        request = urllib.request.Request(f"{self.url}/?{parameters}", data=data, method="POST")
+        request = urllib.request.Request(  # noqa: S310 -- base URL validated at construction
+            f"{self.url}/?{parameters}", data=data, method="POST"
+        )
         if self.username:
             request.add_header("X-ClickHouse-User", self.username)
             request.add_header("X-ClickHouse-Key", self.password)
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+        with urllib.request.urlopen(  # noqa: S310 -- request URL uses validated base URL
+            request, timeout=self.timeout
+        ) as response:
             return cast(bytes, response.read())
 
     def _initialize(self) -> None:
@@ -139,7 +146,7 @@ class ClickHouseFlowStore:
         escaped_sensor = _clickhouse_literal(sensor_id)
         escaped_batch = _clickhouse_literal(batch_id)
         existing = self._request(
-            "SELECT record_count FROM flow_batch_ledger "
+            "SELECT record_count FROM flow_batch_ledger "  # noqa: S608 -- escaped literals only
             f"WHERE sensor_id={escaped_sensor} AND batch_id={escaped_batch} "
             "ORDER BY ingested_at DESC LIMIT 1"
         ).strip()
@@ -187,7 +194,7 @@ class ClickHouseFlowStore:
             return FlowSnapshot(str(uuid.uuid4()), ())
         sensors = ",".join(_clickhouse_literal(item) for item in sensor_ids)
         query = (
-            "SELECT data FROM flow_records PREWHERE sensor_id IN ("
+            "SELECT data FROM flow_records PREWHERE sensor_id IN ("  # noqa: S608 -- escaped literals only
             f"{sensors}) AND timestamp >= "
             f"parseDateTime64BestEffort({_clickhouse_literal(start.isoformat())}) "
             f"AND timestamp <= parseDateTime64BestEffort({_clickhouse_literal(end.isoformat())}) "

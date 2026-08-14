@@ -129,10 +129,15 @@ class JsonHttpClient:
         headers: dict[str, str] | None = None,
         body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        parsed_url = urllib.parse.urlsplit(url)
+        if parsed_url.scheme not in {"http", "https"} or parsed_url.hostname is None:
+            raise IntegrationError("http", "external service URL must use HTTP or HTTPS")
         data = json.dumps(body).encode() if body is not None else None
-        request = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+        request = urllib.request.Request(  # noqa: S310 -- scheme and host validated above
+            url, data=data, headers=headers or {}, method=method
+        )
         try:
-            with urllib.request.urlopen(
+            with urllib.request.urlopen(  # noqa: S310 -- request URL validated above
                 request,
                 timeout=self.timeout_seconds,
                 context=self.context,

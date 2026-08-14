@@ -432,14 +432,30 @@ func captureJobLimits(jobs []config.CaptureJob) (uint64, uint64) {
 	var maxPackets uint64
 	var maxBytes uint64
 	for _, job := range jobs {
-		if job.MaxPackets > 0 && (maxPackets == 0 || int64(maxPackets) > job.MaxPackets) {
-			maxPackets = uint64(job.MaxPackets)
+		if job.MaxPackets > 0 {
+			// #nosec G115 -- guarded positive int64 always fits uint64.
+			candidate := uint64(job.MaxPackets)
+			if maxPackets == 0 || maxPackets > candidate {
+				maxPackets = candidate
+			}
 		}
-		if job.MaxBytes > 0 && (maxBytes == 0 || int64(maxBytes) > job.MaxBytes) {
-			maxBytes = uint64(job.MaxBytes)
+		if job.MaxBytes > 0 {
+			// #nosec G115 -- guarded positive int64 always fits uint64.
+			candidate := uint64(job.MaxBytes)
+			if maxBytes == 0 || maxBytes > candidate {
+				maxBytes = candidate
+			}
 		}
 	}
 	return maxPackets, maxBytes
+}
+
+func positiveUint64(value int64) uint64 {
+	if value <= 0 {
+		return 0
+	}
+	// #nosec G115 -- a positive int64 always fits uint64.
+	return uint64(value)
 }
 
 // idleCaptureRuntime keeps the durable spool and PCAP archive uploaders alive
@@ -544,7 +560,9 @@ func buildPipelines(cfg config.Config, uploader sensorruntime.FlowUploader) ([]s
 	}
 	pcapBudgets := make(map[string]*sensorruntime.PCAPBudget, len(cfg.CaptureJobs))
 	for _, job := range cfg.CaptureJobs {
-		pcapBudgets[job.JobID] = sensorruntime.NewPCAPBudget(uint64(job.MaxPackets), uint64(job.MaxBytes))
+		pcapBudgets[job.JobID] = sensorruntime.NewPCAPBudget(
+			positiveUint64(job.MaxPackets), positiveUint64(job.MaxBytes),
+		)
 	}
 	jobBPF, err := captureJobBPF(cfg.CaptureJobs)
 	if err != nil {
@@ -668,6 +686,7 @@ func loadConfig(explicitPath string) (config.Config, error) {
 	if path == "" {
 		return config.Load(strings.NewReader(""))
 	}
+	// #nosec G304 -- path is an explicit CLI/environment path supplied by the local administrator.
 	file, err := os.Open(path)
 	if err != nil {
 		return config.Config{}, fmt.Errorf("open configuration: %w", err)
@@ -706,7 +725,8 @@ func buildRegistration(cfg config.Config, lookup func(string) (*net.Interface, e
 	}
 	var filesystem syscall.Statfs_t
 	availableDisk := uint64(0)
-	if err := syscall.Statfs(filepath.Dir(cfg.Spool.Directory), &filesystem); err == nil {
+	if err := syscall.Statfs(filepath.Dir(cfg.Spool.Directory), &filesystem); err == nil && filesystem.Bsize > 0 {
+		// #nosec G115 -- Bsize is checked positive and represented by int64.
 		availableDisk = filesystem.Bavail * uint64(filesystem.Bsize)
 	}
 	return telemetry.Registration{SensorID: cfg.Sensor.ID, Name: cfg.Sensor.Name, Hostname: hostname, AgentVersion: version, OS: goruntime.GOOS, KernelVersion: kernelVersion(), Interfaces: interfaces, Capabilities: []string{"AF_PACKET", "TPACKET_V3", "multi-interface", "durable-spool", "desired-config", "pcap-storage", "pcap-upload"}, CurrentTime: time.Now().UTC(), AvailableDiskBytes: availableDisk}, nil

@@ -2,7 +2,7 @@
 
 ## Current phase
 
-Phase 7 완료 — 평가 및 운영 안정화
+Phase 8 완료 — TI enrichment와 analyst response workflow
 
 ## Completed
 
@@ -76,6 +76,14 @@ Phase 7 완료 — 평가 및 운영 안정화
 - Analysis Job 삭제 시 active AI Run을 거부하고 terminal Run의 feedback → artifact → assessment → run을 Memory/SQLite/PostgreSQL transaction에서 cascade한다.
 - AI table backup/restore 검증과 report 안전성 절차를 운영 문서에 추가했다.
 
+### Phase 8
+
+- VirusTotal/AbuseIPDB 후보 enrichment를 timeout, 직렬 single-flight, configurable pacing, bounded worker/queue와 함께 추가했다.
+- analyst allowlist와 후보 terminal 상태를 보존하면서 단건/일괄 triage 및 enrichment history를 저장한다.
+- AI가 생성한 MISP artifact는 `published=false` draft와 review 상태만 저장한다. 별도 Candidate MISP export는 ADMIN의 명시적 요청에 따라 외부 MISP에 attribute를 추가하며 감사 이력을 남긴다.
+- TI 요청 gate는 shutdown cancellation과 nested/reentrant 호출을 회귀 테스트하며 설정·API·Web UI가 동일한 pacing 값을 사용한다.
+- Ollama/OpenAI-compatible endpoint URL을 검증하고 public host 사용 시 Evidence metadata의 외부 전송을 Controller와 AI Worker startup warning으로 알린다.
+
 ## Verification
 
 2026-08-09 실제 실행 결과:
@@ -91,4 +99,4 @@ Phase 7 완료 — 평가 및 운영 안정화
 
 ## Remaining milestones
 
-Phase 0~7 실행 계약을 완료했다. 실제 운영 model profile 변경은 새 평가 report, analyst feedback calibration 검토, capacity benchmark, rollback 기준을 함께 승인한 뒤 수행한다.
+Phase 0~8 실행 계약을 완료했다. 실제 운영 model profile 변경은 새 평가 report, analyst feedback calibration 검토, capacity benchmark, rollback 기준을 함께 승인한 뒤 수행한다. TI/MISP는 provider quota, 조직 데이터 반출 정책, retry/soak 결과를 별도로 승인한 뒤 활성화한다.

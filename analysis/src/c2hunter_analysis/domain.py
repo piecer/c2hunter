@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from ipaddress import ip_address, ip_network
 from typing import Any, Protocol
 
@@ -296,7 +296,10 @@ class AnalysisContext:
     def candidate_traffic_profiles(self) -> dict[str, dict[str, int]]:
         """Aggregate all scoped traffic per external endpoint for score adjustments."""
         profiles: dict[str, dict[str, int]] = {}
-        tcp_sessions: dict[str, dict[tuple[str, str, int | None, str, int | None], list[int]]] = {}
+        tcp_sessions: dict[
+            str,
+            dict[tuple[str, str, int | None, str, int | None], list[Flow]],
+        ] = {}
         for flow in self.scoped_flows():
             direction = flow.direction.upper()
             if direction == "OUTBOUND":
@@ -346,17 +349,37 @@ class AnalysisContext:
                     candidate_ip,
                     candidate_port,
                 )
-                totals = tcp_sessions.setdefault(candidate_ip, {}).setdefault(session_key, [0, 0])
-                totals[0] += max(0, int(flow.packet_count))
-                totals[1] += max(0, int(flow.total_bytes))
-        for candidate_ip, sessions in tcp_sessions.items():
+                tcp_sessions.setdefault(candidate_ip, {}).setdefault(session_key, []).append(flow)
+        idle_timeout_seconds = max(
+            1, int(self.parameters.get("tcp_session_idle_timeout_seconds", 60))
+        )
+        for candidate_ip, connection_flows in tcp_sessions.items():
             profile = profiles[candidate_ip]
-            profile["tcp_session_count"] = len(sessions)
+            session_totals: list[tuple[int, int]] = []
+            for flows in connection_flows.values():
+                packets = 0
+                total_bytes = 0
+                previous_end: datetime | None = None
+                for flow in sorted(flows, key=lambda item: item.timestamp):
+                    if (
+                        previous_end is not None
+                        and (flow.timestamp - previous_end).total_seconds() > idle_timeout_seconds
+                    ):
+                        session_totals.append((packets, total_bytes))
+                        packets = 0
+                        total_bytes = 0
+                    packets += max(0, int(flow.packet_count))
+                    total_bytes += max(0, int(flow.total_bytes))
+                    flow_end = flow.timestamp + timedelta(seconds=max(0.0, flow.duration_seconds))
+                    previous_end = max(previous_end, flow_end) if previous_end else flow_end
+                if packets or total_bytes:
+                    session_totals.append((packets, total_bytes))
+            profile["tcp_session_count"] = len(session_totals)
             profile["max_tcp_session_packets"] = max(
-                (totals[0] for totals in sessions.values()), default=0
+                (packets for packets, _ in session_totals), default=0
             )
             profile["max_tcp_session_bytes"] = max(
-                (totals[1] for totals in sessions.values()), default=0
+                (total_bytes for _, total_bytes in session_totals), default=0
             )
         return profiles
 

@@ -4,7 +4,7 @@
 
 ### Hunt unknown C2 infrastructure from behavior — not just known IOCs.
 
-**C2Hunter is an open-source network threat hunting platform that correlates live sensor traffic and offline PCAPs to detect, rank, and explain likely command-and-control infrastructure.**
+**C2Hunter is a network threat hunting platform that correlates live sensor traffic and offline PCAPs to detect, rank, and explain likely command-and-control infrastructure.**
 
 [![CI](https://github.com/piecer/c2hunter/actions/workflows/ci.yml/badge.svg)](https://github.com/piecer/c2hunter/actions/workflows/ci.yml)
 [![GitHub stars](https://img.shields.io/github/stars/piecer/c2hunter?style=flat-square)](https://github.com/piecer/c2hunter/stargazers)
@@ -564,6 +564,12 @@ Useful contributions include:
 - analyst workflow improvements.
 
 If you found a bug, please include the analysis mode, relevant configuration, and a minimal reproducible capture or synthetic fixture when possible.
+
+---
+
+## License
+
+C2Hunter is licensed under the [Apache License 2.0](LICENSE).
 
 ---
 

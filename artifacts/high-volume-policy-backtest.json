@@ -1,0 +1,123 @@
+{
+  "dataset": "curated deterministic policy fixture; not historical production traffic",
+  "case_count": 8,
+  "results": [
+    {
+      "policy": {
+        "name": "cap-20",
+        "cap": 20,
+        "strong_evidence_cap": null,
+        "penalty": null
+      },
+      "evaluated_case_count": 4,
+      "exempt_case_count": 4,
+      "triage_threshold": 40,
+      "case_count": 4,
+      "true_positive": 0,
+      "false_positive": 0,
+      "recall": 0.0,
+      "false_positive_rate": 0.0,
+      "analyst_queue_visible": 0,
+      "scores": [
+        {
+          "id": "proxy-bulk-download",
+          "label": "BENIGN_PROXY",
+          "score": 20
+        },
+        {
+          "id": "relay-backup-transfer",
+          "label": "BENIGN_PROXY",
+          "score": 20
+        },
+        {
+          "id": "c2-exfil-strong-evidence",
+          "label": "C2",
+          "score": 20
+        },
+        {
+          "id": "c2-bulk-weak-evidence",
+          "label": "C2",
+          "score": 20
+        }
+      ]
+    },
+    {
+      "policy": {
+        "name": "strong-evidence-cap-40",
+        "cap": 20,
+        "strong_evidence_cap": 40,
+        "penalty": null
+      },
+      "evaluated_case_count": 4,
+      "exempt_case_count": 4,
+      "triage_threshold": 40,
+      "case_count": 4,
+      "true_positive": 1,
+      "false_positive": 0,
+      "recall": 0.5,
+      "false_positive_rate": 0.0,
+      "analyst_queue_visible": 1,
+      "scores": [
+        {
+          "id": "proxy-bulk-download",
+          "label": "BENIGN_PROXY",
+          "score": 20
+        },
+        {
+          "id": "relay-backup-transfer",
+          "label": "BENIGN_PROXY",
+          "score": 20
+        },
+        {
+          "id": "c2-exfil-strong-evidence",
+          "label": "C2",
+          "score": 40
+        },
+        {
+          "id": "c2-bulk-weak-evidence",
+          "label": "C2",
+          "score": 20
+        }
+      ]
+    },
+    {
+      "policy": {
+        "name": "fixed-penalty-25",
+        "cap": null,
+        "strong_evidence_cap": null,
+        "penalty": 25
+      },
+      "evaluated_case_count": 4,
+      "exempt_case_count": 4,
+      "triage_threshold": 40,
+      "case_count": 4,
+      "true_positive": 2,
+      "false_positive": 2,
+      "recall": 1.0,
+      "false_positive_rate": 1.0,
+      "analyst_queue_visible": 4,
+      "scores": [
+        {
+          "id": "proxy-bulk-download",
+          "label": "BENIGN_PROXY",
+          "score": 55
+        },
+        {
+          "id": "relay-backup-transfer",
+          "label": "BENIGN_PROXY",
+          "score": 40
+        },
+        {
+          "id": "c2-exfil-strong-evidence",
+          "label": "C2",
+          "score": 65
+        },
+        {
+          "id": "c2-bulk-weak-evidence",
+          "label": "C2",
+          "score": 45
+        }
+      ]
+    }
+  ]
+}

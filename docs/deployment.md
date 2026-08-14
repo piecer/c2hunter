@@ -116,13 +116,13 @@ Repeat with a unique key and identity per sensor. In production, use the organiz
 
 Compose is a development/single-host artifact. Before production:
 
-1. Terminate HTTPS at a maintained reverse proxy; disable development login. For offline analysis, configure that proxy to accept at least 500 MiB request bodies and allow at least 10 minutes for upload processing.
-2. Require Controller↔Sensor mTLS and validate identity, EKU, expiry, and revocation.
+1. Terminate HTTPS at a maintained reverse proxy; disable development login. For offline analysis, configure that proxy to accept at least 500 MiB request bodies and allow at least 10 minutes for upload processing. Configure `C2HUNTER_TRUSTED_PROXY_CIDRS` with only the immediate proxy CIDRs; forwarded client headers from all other peers are ignored.
+2. Require HTTPS for Sensor→Controller requests and protect the enrollment/agent token at rest and in transit. Sensors send it in `X-Sensor-Token`, not the human Bearer-token RBAC header. Remote `http://` Controller URLs are rejected by default; local development requires the explicit `C2HUNTER_ALLOW_INSECURE_CONTROLLER=true` override. Rotate or revoke a token when a Sensor is decommissioned or credentials may be exposed. mTLS gRPC is not implemented; ADR-0003 records the current contract.
 3. Use managed or independently backed-up PostgreSQL/ClickHouse/Redis/object storage.
 4. Put storage and Controller on private networks and expose only HTTPS.
 5. Inject secrets from a secret manager, not `.env` or image layers.
 6. Set retention, disk alerts, NTP, monitoring, RBAC, and restore drills.
-7. Pin images by digest in the release manifest and scan them before promotion.
+7. Keep the human-readable image tag and immutable digest together in Compose, verify refreshed digests for every architecture in use, and scan them before promotion.
 
 ## 외부 Sensor 추가/제거
 

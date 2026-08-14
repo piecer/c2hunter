@@ -255,6 +255,14 @@ def test_json_http_client_sanitizes_transport_failure_messages(
         JsonHttpClient().request("GET", "https://example.test/data")
 
 
+@pytest.mark.parametrize(
+    "url", ["file:///etc/passwd", "ftp://example.test/data", "//example.test/data"]
+)
+def test_json_http_client_rejects_non_http_urls(url: str) -> None:
+    with pytest.raises(IntegrationError, match="must use HTTP or HTTPS"):
+        JsonHttpClient().request("GET", url)
+
+
 def test_threat_intel_service_normalizes_both_providers_without_exposing_keys() -> None:
     http = StubHttpClient()
     service = ThreatIntelService(

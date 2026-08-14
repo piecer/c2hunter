@@ -2,6 +2,7 @@ package pcap
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -149,9 +150,7 @@ func (f FileFactory) Open(index int, started time.Time) (Segment, error) {
 	}
 	writer := pcapgo.NewWriter(file)
 	if err := writer.WriteFileHeader(snaplen, link); err != nil {
-		file.Close()
-		os.Remove(partialPath)
-		return nil, err
+		return nil, errors.Join(err, file.Close(), os.Remove(partialPath))
 	}
 	return &fileSegment{file: file, writer: writer, partialPath: partialPath, finalPath: finalPath}, nil
 }
@@ -168,6 +167,7 @@ func openUniqueSegment(basePath string) (string, string, *os.File, error) {
 			return "", "", nil, err
 		}
 		partialPath := finalPath + ".partial"
+		// #nosec G304 -- finalPath is generated under FileFactory.Directory with a fixed suffix.
 		file, err := os.OpenFile(partialPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		if os.IsExist(err) {
 			continue
@@ -216,6 +216,7 @@ func RecoverPartialSegments(directory string) error {
 }
 
 func repairPartialSegment(path string) (bool, error) {
+	// #nosec G304 -- path is a ReadDir basename joined to the scanned directory.
 	file, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return false, err
@@ -286,8 +287,7 @@ func (s *fileSegment) WritePacket(info PacketInfo, data []byte) error {
 }
 func (s *fileSegment) Close(RotationReason) error {
 	if err := s.file.Sync(); err != nil {
-		s.file.Close()
-		return err
+		return errors.Join(err, s.file.Close())
 	}
 	if err := s.file.Close(); err != nil {
 		return err

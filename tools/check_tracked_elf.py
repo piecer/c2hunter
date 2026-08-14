@@ -6,15 +6,24 @@ Build outputs belong in the ignored artifacts directory, not in source control.
 from __future__ import annotations
 
 import subprocess
+import shutil
 from pathlib import Path
 
 ELF_MAGIC = b"\x7fELF"
 
 
+def git_executable() -> str:
+    """Resolve Git once so subprocesses never rely on a partial executable path."""
+    executable = shutil.which("git")
+    if executable is None:
+        raise RuntimeError("git executable was not found on PATH")
+    return executable
+
+
 def tracked_files(repository: Path) -> list[Path]:
     """Return paths currently present in the Git index."""
-    result = subprocess.run(
-        ["git", "ls-files", "-z"],
+    result = subprocess.run(  # noqa: S603 -- executable resolved by shutil.which
+        [git_executable(), "ls-files", "-z"],
         cwd=repository,
         check=True,
         capture_output=True,
@@ -40,8 +49,8 @@ def find_tracked_elf_files(repository: Path) -> list[Path]:
 def main() -> int:
     """Exit non-zero and list every tracked ELF binary."""
     repository = Path(
-        subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
+        subprocess.run(  # noqa: S603 -- executable resolved by shutil.which
+            [git_executable(), "rev-parse", "--show-toplevel"],
             check=True,
             capture_output=True,
             text=True,

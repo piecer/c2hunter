@@ -1,4 +1,6 @@
+from ipaddress import ip_address, ip_network
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -38,6 +40,7 @@ class Settings(BaseSettings):
     dev_login_rate_limit: int = Field(default=10, gt=0)
     enrollment_claim_rate_limit: int = Field(default=10, gt=0)
     analysis_job_rate_limit: int = Field(default=30, gt=0)
+    trusted_proxy_cidrs: str = ""
     ai_analysis_enabled: bool = False
     ai_model_provider: Literal["fake", "ollama", "openai-compatible"] = "fake"
     ai_model_base_url: str = "http://127.0.0.1:11434"
@@ -62,6 +65,23 @@ class Settings(BaseSettings):
     misp_verify_tls: bool = True
     misp_default_event_id: str = Field(default="", max_length=100)
 
+    @property
+    def trusted_proxy_networks(self) -> tuple[str, ...]:
+        return tuple(item.strip() for item in self.trusted_proxy_cidrs.split(",") if item.strip())
+
+    @property
+    def ai_model_endpoint_is_remote(self) -> bool:
+        if self.ai_model_provider == "fake":
+            return False
+        host = urlsplit(self.ai_model_base_url).hostname
+        if host in {"localhost", "localhost.localdomain", "host.docker.internal"}:
+            return False
+        try:
+            address = ip_address(host or "")
+        except ValueError:
+            return True
+        return not (address.is_private or address.is_loopback or address.is_link_local)
+
     @model_validator(mode="after")
     def compatibility_defaults(self) -> "Settings":
         if self.inline_flow_records_enabled is None:
@@ -69,6 +89,26 @@ class Settings(BaseSettings):
         if self.api_auth_required is None:
             # Unit tests use isolated in-memory repositories; deployable modes are closed.
             self.api_auth_required = self.environment != "test"
+        return self
+
+    @model_validator(mode="after")
+    def validate_network_boundaries(self) -> "Settings":
+        try:
+            for network in self.trusted_proxy_networks:
+                ip_network(network, strict=False)
+        except ValueError as exc:
+            raise ValueError(f"trusted_proxy_cidrs contains an invalid network: {exc}") from exc
+
+        endpoint = urlsplit(self.ai_model_base_url)
+        if (
+            endpoint.scheme not in {"http", "https"}
+            or not endpoint.hostname
+            or endpoint.username is not None
+            or endpoint.password is not None
+        ):
+            raise ValueError(
+                "ai_model_base_url must be an absolute HTTP(S) URL without embedded credentials"
+            )
         return self
 
     @model_validator(mode="after")

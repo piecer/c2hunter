@@ -8,7 +8,7 @@ from pathlib import Path
 
 MODULE = Path(__file__).with_name("generate.py")
 spec = importlib.util.spec_from_file_location("traffic_generator", MODULE)
-assert spec is not None and spec.loader is not None
+assert spec is not None and spec.loader is not None  # noqa: S101 -- import loader invariant
 generator = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(generator)
 

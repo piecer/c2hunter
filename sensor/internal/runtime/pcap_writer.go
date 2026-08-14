@@ -174,9 +174,15 @@ func (w *PCAPWriter) Run(ctx context.Context) error {
 func (w *PCAPWriter) write(pkt packet.Packet) {
 	info := pcapstore.PacketInfo{Timestamp: pkt.Timestamp, CaptureLength: len(pkt.RawFrame), WireLength: pkt.WireLength}
 	needed := w.cfg.Rotator.EstimatedWriteBytes(info, len(pkt.RawFrame))
+	if needed < 0 {
+		w.drop("estimated PCAP write size cannot be negative")
+		return
+	}
+	// #nosec G115 -- the negative case is rejected immediately above.
+	neededBytes := uint64(needed)
 	reserved := false
 	if w.cfg.Budget != nil {
-		if !w.cfg.Budget.Reserve(uint64(needed)) {
+		if !w.cfg.Budget.Reserve(neededBytes) {
 			w.drop("analysis PCAP limit reached")
 			return
 		}
@@ -188,14 +194,14 @@ func (w *PCAPWriter) write(pkt packet.Packet) {
 		ok, err := makePCAPRoom(w.cfg.Directory, w.cfg.MaxDiskBytes, needed)
 		if err != nil {
 			if reserved {
-				w.cfg.Budget.Release(uint64(needed))
+				w.cfg.Budget.Release(neededBytes)
 			}
 			w.drop("enforce PCAP disk limit: " + err.Error())
 			return
 		}
 		if !ok {
 			if reserved {
-				w.cfg.Budget.Release(uint64(needed))
+				w.cfg.Budget.Release(neededBytes)
 			}
 			w.drop("PCAP disk limit reached")
 			return
@@ -203,7 +209,7 @@ func (w *PCAPWriter) write(pkt packet.Packet) {
 	}
 	if err := w.cfg.Rotator.WritePacket(info, pkt.RawFrame); err != nil {
 		if reserved {
-			w.cfg.Budget.Release(uint64(needed))
+			w.cfg.Budget.Release(neededBytes)
 		}
 		w.drop("write PCAP packet: " + err.Error())
 		return

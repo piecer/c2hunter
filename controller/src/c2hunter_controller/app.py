@@ -12,19 +12,17 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Annotated, Any, Literal, cast
+from urllib.parse import urlsplit
 
-from c2hunter_analysis.domain import AllowlistEntry
 from c2hunter_analysis.pcap import PcapParseError, find_pcap_record, parse_pcap
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import (
-    CONTENT_TYPE_LATEST,
     CollectorRegistry,
     Counter,
     Gauge,
     Histogram,
-    generate_latest,
 )
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
@@ -44,9 +42,12 @@ from .ai_queueing import (
     InlineAIAnalysisTaskQueue,
     RedisAIAnalysisTaskQueue,
 )
+from .allowlist_api import allowlist_router
+from .api_errors import ApiError
 from .capture_limits import allocate_sensor_limit, limit_flow_records
 from .config import Settings
 from .detection_guidance import build_detection_guidance
+from .detector_weight_presets_api import detector_weight_preset_router
 from .flow_review import (
     filter_flows,
     flow_id,
@@ -64,6 +65,9 @@ from .integrations import (
     ThreatIntelService,
 )
 from .jobs import JobState, StateMachine, build_job, calculate, summarize_candidate_traffic
+from .logging import install_access_log_redaction
+from .operations_api import operations_router
+from .payload_signatures_api import payload_signature_router
 from .pcap import build_pcap, filter_records
 from .production import MinioBlobStore, PostgresRepository
 from .queueing import ControllerQueue, MemoryControllerQueue, RedisControllerQueue
@@ -73,7 +77,6 @@ from .schemas import (
     AIAnalysisRunCreate,
     AIArtifactReview,
     AIFeedbackCreate,
-    AllowlistCreate,
     AnalysisJobCreate,
     AnalysisJobUpdate,
     AnalysisParameters,
@@ -83,8 +86,6 @@ from .schemas import (
     CandidateUpdate,
     CandidateVerdictCreate,
     CaptureParameters,
-    DetectorWeightPresetCreate,
-    DetectorWeightPresetUpdate,
     DevLoginRequest,
     EnrollmentClaim,
     EnrollmentClaimResponse,
@@ -95,12 +96,10 @@ from .schemas import (
     Heartbeat,
     IntegrationSettingsUpdate,
     MispExportCreate,
-    PayloadSignatureUpdate,
     PcapExportCreate,
     ReanalysisRequest,
     SensorConfigurationResponse,
     SensorConfigurationUpdate,
-    SensorGroupCreate,
     SensorRegistration,
 )
 from .security import (
@@ -112,18 +111,13 @@ from .security import (
     is_enrollment_claim,
     require_role,
     required_role,
+    trusted_client_ip,
 )
+from .sensor_groups_api import sensor_group_router
 from .storage import ClickHouseFlowStore, FlowStore, MemoryFlowStore
 
 logger = logging.getLogger(__name__)
-
-
-class ApiError(Exception):
-    def __init__(self, status: int, code: str, message: str, details: Any = None) -> None:
-        self.status = status
-        self.code = code
-        self.message = message
-        self.details = details
+install_access_log_redaction()
 
 
 def _request_id(request: Request) -> str:
@@ -787,6 +781,12 @@ def create_app(
     ai_task_queue: AIAnalysisTaskQueue | None = None,
 ) -> FastAPI:
     config = settings or Settings()
+    if config.ai_model_endpoint_is_remote:
+        logger.warning(
+            "AI evidence metadata will be sent to a remote model endpoint: provider=%s host=%s",
+            config.ai_model_provider,
+            urlsplit(config.ai_model_base_url).hostname,
+        )
     if repository is not None:
         repo = repository
     elif config.database_url == "memory://":
@@ -877,6 +877,10 @@ def create_app(
     else:
         ai_tasks = None
     app = FastAPI(title="C2Hunter Controller", version="0.1.0")
+    app.include_router(allowlist_router(repo))
+    app.include_router(detector_weight_preset_router(repo))
+    app.include_router(payload_signature_router(repo))
+    app.include_router(sensor_group_router(repo))
     app.state.settings = config
     app.state.repository = repo
     app.state.flow_store = flows
@@ -1060,7 +1064,7 @@ def create_app(
             operation()
         except Exception:
             # Telemetry must not alter a persisted Run, feedback record, or original exception.
-            pass
+            logger.debug("AI metric update failed", exc_info=True)
 
     app.state.ai_metrics = {
         "enqueue_latency": ai_enqueue_latency,
@@ -1068,11 +1072,17 @@ def create_app(
         "enqueue_failures": ai_enqueue_failures,
         "feedback": ai_feedback,
     }
+    app.include_router(operations_router(repo, flows, work_queue, registry))
 
     @app.middleware("http")
     async def security(request: Request, call_next: Any) -> Response:
         path = request.url.path
-        client_key = request.client.host if request.client is not None else "unknown"
+        peer_ip = request.client.host if request.client is not None else "unknown"
+        client_key = trusted_client_ip(
+            peer_ip,
+            request.headers.get("x-forwarded-for"),
+            config.trusted_proxy_networks,
+        )
         try:
             if request.method == "POST" and path == "/api/v1/auth/dev-login":
                 rate_limiter.check("dev-login", client_key, config.dev_login_rate_limit)
@@ -1128,38 +1138,6 @@ def create_app(
     @app.exception_handler(ApiError)
     async def api_error(request: Request, exc: ApiError) -> JSONResponse:
         return _error(request, exc.status, exc.code, exc.message, exc.details)
-
-    @app.get("/api/v1/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok"}
-
-    @app.get("/api/v1/ready")
-    def ready() -> JSONResponse:
-        if isinstance(repo, PostgresRepository):
-            dependencies = {
-                "postgres": repo.database_ready(),
-                "object_storage": repo.blob_store.ready(),
-                "clickhouse": flows.ready(),
-                "redis": work_queue.ready(),
-            }
-        else:
-            dependencies = {
-                "repository": repo.ready(),
-                "flow_store": flows.ready(),
-                "queue": work_queue.ready(),
-            }
-        is_ready = all(dependencies.values())
-        return JSONResponse(
-            status_code=200 if is_ready else 503,
-            content={
-                "status": "ready" if is_ready else "not_ready",
-                "dependencies": dependencies,
-            },
-        )
-
-    @app.get("/api/v1/metrics")
-    def metrics() -> Response:
-        return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
 
     @app.post(
         "/api/v1/auth/dev-login",
@@ -1826,38 +1804,6 @@ def create_app(
         if sensor is None:
             raise ApiError(404, "SENSOR_NOT_FOUND", "센서를 찾을 수 없습니다")
         return sensor
-
-    @app.post("/api/v1/sensor-groups", status_code=201)
-    def create_group(payload: SensorGroupCreate) -> dict[str, Any]:
-        missing = [
-            sensor_id for sensor_id in payload.sensor_ids if repo.get_sensor(sensor_id) is None
-        ]
-        if missing:
-            raise ApiError(
-                404,
-                "SENSOR_NOT_FOUND",
-                "그룹 멤버 센서를 찾을 수 없습니다",
-                {"sensor_ids": missing},
-            )
-        group = {"id": str(uuid.uuid4()), **payload.model_dump()}
-        return repo.create_group(group)
-
-    @app.get("/api/v1/sensor-groups")
-    def list_groups(
-        page: int = Query(1, ge=1),
-        page_size: int = Query(50, ge=1, le=200),
-        name: str | None = None,
-        sort: str = "name",
-    ) -> dict[str, Any]:
-        items = repo.list_groups()
-        if name:
-            items = [item for item in items if name.lower() in item["name"].lower()]
-        descending = sort.startswith("-")
-        field = sort.removeprefix("-")
-        if field not in {"name", "id"}:
-            raise ApiError(422, "INVALID_SORT", "허용되지 않은 정렬 필드")
-        items.sort(key=lambda item: item[field], reverse=descending)
-        return _page(items, page, page_size)
 
     machine = StateMachine()
 
@@ -2539,54 +2485,6 @@ def create_app(
         )
         machine.transition(job, JobState.COMPLETED, "analysis completed")
         return repo.save_job_metadata(job)
-
-    @app.get("/api/v1/detector-weight-presets")
-    def list_detector_weight_presets() -> dict[str, Any]:
-        presets = repo.list_detector_weight_presets()
-        presets.sort(key=lambda preset: (not bool(preset.get("is_default")), preset["name"]))
-        return {"items": presets, "total": len(presets)}
-
-    @app.post("/api/v1/detector-weight-presets", status_code=201)
-    def create_detector_weight_preset(
-        payload: DetectorWeightPresetCreate,
-    ) -> dict[str, Any]:
-        now = datetime.now(UTC).isoformat()
-        data = payload.model_dump(exclude={"set_as_default"})
-        preset = repo.save_detector_weight_preset(
-            {
-                **data,
-                "id": str(uuid.uuid4()),
-                "is_default": payload.set_as_default,
-                "created_at": now,
-                "updated_at": now,
-            }
-        )
-        return preset
-
-    @app.patch("/api/v1/detector-weight-presets/{preset_id}")
-    def update_detector_weight_preset(
-        preset_id: str, payload: DetectorWeightPresetUpdate
-    ) -> dict[str, Any]:
-        updates = payload.model_dump(exclude_unset=True, exclude={"set_as_default"})
-        updates["updated_at"] = datetime.now(UTC).isoformat()
-        preset = repo.update_detector_weight_preset(
-            preset_id, updates, set_as_default=payload.set_as_default is True
-        )
-        if preset is None:
-            raise ApiError(
-                404,
-                "DETECTOR_WEIGHT_PRESET_NOT_FOUND",
-                "가중치 preset을 찾을 수 없습니다",
-            )
-        return preset
-
-    @app.delete("/api/v1/detector-weight-presets/{preset_id}")
-    def delete_detector_weight_preset(preset_id: str) -> dict[str, Any]:
-        if not repo.delete_detector_weight_preset(preset_id):
-            raise ApiError(
-                404, "DETECTOR_WEIGHT_PRESET_NOT_FOUND", "가중치 preset을 찾을 수 없습니다"
-            )
-        return {"deleted": True, "preset_id": preset_id}
 
     @app.post("/api/v1/analysis-jobs", status_code=201)
     def create_analysis_job(payload: AnalysisJobCreate) -> dict[str, Any]:
@@ -3991,110 +3889,6 @@ def create_app(
         if not deleted:
             raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
         return {"deleted": True, "candidate_id": candidate_id}
-
-    @app.get("/api/v1/payload-signatures")
-    def list_payload_signatures(
-        page: int = Query(1, ge=1),
-        page_size: int = Query(50, ge=1, le=200),
-        enabled: bool | None = None,
-    ) -> dict[str, Any]:
-        signatures = repo.list_payload_signatures()
-        if enabled is not None:
-            signatures = [
-                signature for signature in signatures if signature.get("enabled") is enabled
-            ]
-        signatures.sort(key=lambda item: str(item["created_at"]), reverse=True)
-        return _page(signatures, page, page_size)
-
-    @app.patch("/api/v1/payload-signatures/{signature_id}")
-    def update_payload_signature(
-        signature_id: str, payload: PayloadSignatureUpdate
-    ) -> dict[str, Any]:
-        signature = repo.get_payload_signature(signature_id)
-        if signature is None:
-            raise ApiError(404, "SIGNATURE_NOT_FOUND", "서명을 찾을 수 없습니다")
-        updated = {**signature, **payload.model_dump(exclude_unset=True)}
-        current_version = signature.get("version", 1)
-        # version이 명시적으로 전달되지 않았다면 자동으로 증가
-        if "version" not in payload.model_dump(exclude_unset=True):
-            updated["version"] = int(current_version) + 1
-        saved = repo.save_payload_signature(updated)
-        return saved
-
-    @app.delete("/api/v1/payload-signatures/{signature_id}")
-    def delete_payload_signature(signature_id: str) -> dict[str, Any]:
-        signature = repo.get_payload_signature(signature_id)
-        if signature is None:
-            raise ApiError(404, "SIGNATURE_NOT_FOUND", "서명을 찾을 수 없습니다")
-        deleted = repo.delete_payload_signature(signature_id)
-        if not deleted:
-            raise ApiError(404, "SIGNATURE_NOT_FOUND", "서명을 찾을 수 없습니다")
-        return {"deleted": True, "signature_id": signature_id}
-
-    @app.post("/api/v1/allowlist", status_code=201)
-    def create_allowlist_entry(payload: AllowlistCreate) -> dict[str, Any]:
-        created_at = datetime.now(UTC)
-        entry = {
-            "id": str(uuid.uuid4()),
-            **payload.model_dump(mode="json"),
-            "created_at": created_at.isoformat(),
-        }
-        saved = repo.save_allowlist(entry)
-        policy = AllowlistEntry.from_mapping(saved)
-        for job_id, candidates in repo.list_candidate_sets().items():
-            changed = False
-            for candidate in candidates:
-                metrics = [
-                    evidence.get("metrics", {})
-                    for evidence in candidate.get("evidence", [])
-                    if isinstance(evidence, dict)
-                ]
-                if policy.matches_metrics(str(candidate["candidate_ip"]), metrics, created_at):
-                    candidate.update(
-                        {
-                            "excluded": True,
-                            "exclude_reason": f"Allowlist: {saved['description']}",
-                            "suppressed_at": created_at.isoformat(),
-                            "suppressed_by_allowlist_id": saved["id"],
-                            "updated_at": created_at.isoformat(),
-                        }
-                    )
-                    changed = True
-            if changed:
-                repo.save_candidates(job_id, candidates)
-                job = repo.get_job(job_id)
-                if job is not None:
-                    job["candidate_count"] = sum(
-                        not candidate.get("excluded", False) for candidate in candidates
-                    )
-                    repo.save_job_metadata(job)
-        return saved
-
-    @app.get("/api/v1/allowlist")
-    def list_allowlist(
-        page: int = Query(1, ge=1),
-        page_size: int = Query(50, ge=1, le=200),
-        type: str | None = None,
-        enabled: bool | None = None,
-        sort: str = "value",
-    ) -> dict[str, Any]:
-        items = repo.list_allowlist()
-        if type:
-            items = [item for item in items if item["type"] == type]
-        if enabled is not None:
-            items = [item for item in items if item["enabled"] is enabled]
-        descending = sort.startswith("-")
-        field = sort.removeprefix("-")
-        if field not in {"value", "type", "created_at", "expires_at"}:
-            raise ApiError(422, "INVALID_SORT", "허용되지 않은 정렬 필드")
-        items.sort(key=lambda item: str(item.get(field, "")), reverse=descending)
-        return _page(items, page, page_size)
-
-    @app.delete("/api/v1/allowlist/{entry_id}", status_code=204)
-    def delete_allowlist_entry(entry_id: str) -> Response:
-        if not repo.delete_allowlist(entry_id):
-            raise ApiError(404, "ALLOWLIST_NOT_FOUND", "allowlist 항목을 찾을 수 없습니다")
-        return Response(status_code=204)
 
     @app.post("/api/v1/pcap-exports", status_code=201)
     def create_pcap_export(payload: PcapExportCreate) -> dict[str, Any]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -10,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 _AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
+logger = logging.getLogger(__name__)
 
 
 class MinioBlobStore:
@@ -806,11 +808,11 @@ class PostgresRepository:
             except Exception:
                 # Metadata deletion remains authoritative; object-store lifecycle policies
                 # provide a second cleanup path if the immediate removal is unavailable.
-                pass
+                logger.warning("Failed to delete blob %s after job deletion", object_key)
         try:
             self.blob_store.delete(self._capture_key(job_id))
         except Exception:
-            pass
+            logger.warning("Failed to delete capture blob for deleted job %s", job_id)
         return True
 
     @staticmethod
@@ -896,7 +898,8 @@ class PostgresRepository:
             clauses.append("excluded = false")
         with self.connection.cursor() as cursor:
             cursor.execute(
-                "SELECT job_id,data FROM candidate_records WHERE " + " AND ".join(clauses),
+                "SELECT job_id,data FROM candidate_records WHERE "  # noqa: S608 -- clauses are code-owned and values are bound
+                + " AND ".join(clauses),
                 parameters,
             )
             rows = cursor.fetchall()
@@ -944,11 +947,15 @@ class PostgresRepository:
         order_column = columns[field]
         where = " AND ".join(clauses)
         with self.connection.cursor() as cursor:
-            cursor.execute(f"SELECT COUNT(*) FROM candidate_records WHERE {where}", parameters)
-            total_row = cursor.fetchone()
             cursor.execute(
-                f"SELECT job_id,data FROM candidate_records WHERE {where} "
-                f"ORDER BY {order_column} {direction},candidate_id ASC LIMIT %s OFFSET %s",
+                f"SELECT COUNT(*) FROM candidate_records WHERE {where}",  # noqa: S608 -- code-owned clauses
+                parameters,
+            )
+            total_row = cursor.fetchone()
+            page_query = f"SELECT job_id,data FROM candidate_records WHERE {where} "  # noqa: S608 -- internal clauses
+            page_query += f"ORDER BY {order_column} {direction},candidate_id ASC LIMIT %s OFFSET %s"  # noqa: S608 -- allowlisted columns
+            cursor.execute(
+                page_query,
                 [*parameters, page_size, (page - 1) * page_size],
             )
             rows = cursor.fetchall()
@@ -971,7 +978,7 @@ class PostgresRepository:
         )
         with self.connection.cursor() as cursor:
             cursor.execute(
-                "SELECT candidate_id,excluded FROM candidate_records WHERE "
+                "SELECT candidate_id,excluded FROM candidate_records WHERE "  # noqa: S608 -- code-owned clauses
                 + " AND ".join(clauses),
                 parameters,
             )
@@ -1032,7 +1039,7 @@ class PostgresRepository:
             FROM selected s
             LEFT JOIN current_decision d USING(candidate_id)
             LEFT JOIN current_action a USING(candidate_id)
-        """
+        """  # noqa: S608 -- where is assembled from code-owned clauses
         with self.connection.cursor() as cursor:
             cursor.execute(query, parameters)
             row = cursor.fetchone()
@@ -1616,7 +1623,7 @@ class PostgresRepository:
                     try:
                         self.blob_store.delete(object_key)
                     except Exception:
-                        pass
+                        logger.warning("Failed to roll back uploaded sensor PCAP %s", object_key)
                 raise
 
     def get_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], bytes] | None:

@@ -39,6 +39,19 @@ func TestAggregatorBuildsKeyAndStatistics(t *testing.T) {
 	}
 }
 
+func TestAggregatorRejectsNegativeWireLengthWithoutMutatingState(t *testing.T) {
+	a := NewAggregator("sensor-a", "job-1", time.Minute)
+	p := flowPacket(time.Unix(100, 0), "10.0.0.1", "203.0.113.1", 1000, 443, "payload")
+	p.WireLength = -1
+
+	if expired := a.Add(p); len(expired) != 0 {
+		t.Fatalf("malformed packet expired records: %+v", expired)
+	}
+	if records := a.Flush(); len(records) != 0 {
+		t.Fatalf("malformed packet mutated aggregator: %+v", records)
+	}
+}
+
 func TestAggregatorRetainsBoundedFirstPayloadPreviewWhenEnabled(t *testing.T) {
 	a := NewAggregatorWithPayloadPreview("sensor-a", "job-1", time.Minute, 4)
 	p := flowPacket(time.Unix(100, 0), "10.0.0.1", "203.0.113.1", 1000, 4444, "abcdef")

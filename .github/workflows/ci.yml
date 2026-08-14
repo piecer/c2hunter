@@ -33,6 +33,7 @@ jobs:
         with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
       - run: make setup
       - run: make test-unit
+      - run: make test-coverage
   integration:
     needs: unit
     runs-on: ubuntu-24.04

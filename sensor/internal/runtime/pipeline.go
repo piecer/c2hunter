@@ -354,8 +354,17 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				continue
 			}
 			budgetStop := capture.StopReason("")
+			if pkt.WireLength < 0 {
+				p.update(func(s *CaptureSnapshot) {
+					s.DecodeErrors++
+					s.LastError = "packet wire length cannot be negative"
+				})
+				continue
+			}
+			// #nosec G115 -- the negative case is rejected immediately above.
+			wireBytes := uint64(pkt.WireLength)
 			if p.cfg.CaptureBudget != nil {
-				accepted, reason := p.cfg.CaptureBudget.Reserve(uint64(pkt.WireLength))
+				accepted, reason := p.cfg.CaptureBudget.Reserve(wireBytes)
 				if !accepted {
 					return finish(reason)
 				}
@@ -372,7 +381,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				return err
 			}
 			capturedPackets++
-			capturedBytes += uint64(pkt.WireLength)
+			capturedBytes += wireBytes
 			p.update(func(s *CaptureSnapshot) {
 				s.ReceivedPackets++
 				if len(s.Interfaces) > 0 {

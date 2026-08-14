@@ -1,0 +1,66 @@
+[
+  {
+    "id": "proxy-bulk-download",
+    "label": "BENIGN_PROXY",
+    "raw_score": 80,
+    "high_volume": true,
+    "strong_evidence": false,
+    "analyst_exact_match": false
+  },
+  {
+    "id": "relay-backup-transfer",
+    "label": "BENIGN_PROXY",
+    "raw_score": 65,
+    "high_volume": true,
+    "strong_evidence": false,
+    "analyst_exact_match": false
+  },
+  {
+    "id": "c2-exfil-strong-evidence",
+    "label": "C2",
+    "raw_score": 90,
+    "high_volume": true,
+    "strong_evidence": true,
+    "analyst_exact_match": false
+  },
+  {
+    "id": "c2-bulk-weak-evidence",
+    "label": "C2",
+    "raw_score": 70,
+    "high_volume": true,
+    "strong_evidence": false,
+    "analyst_exact_match": false
+  },
+  {
+    "id": "c2-exact-payload-signature",
+    "label": "C2",
+    "raw_score": 95,
+    "high_volume": true,
+    "strong_evidence": true,
+    "analyst_exact_match": true
+  },
+  {
+    "id": "c2-low-volume-beacon",
+    "label": "C2",
+    "raw_score": 75,
+    "high_volume": false,
+    "strong_evidence": true,
+    "analyst_exact_match": false
+  },
+  {
+    "id": "benign-low-volume-service",
+    "label": "BENIGN",
+    "raw_score": 15,
+    "high_volume": false,
+    "strong_evidence": false,
+    "analyst_exact_match": false
+  },
+  {
+    "id": "benign-background-noise",
+    "label": "BENIGN",
+    "raw_score": 5,
+    "high_volume": false,
+    "strong_evidence": false,
+    "analyst_exact_match": false
+  }
+]

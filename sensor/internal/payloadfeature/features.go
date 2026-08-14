@@ -54,7 +54,7 @@ func Compute(payload []byte) Features {
 	return Features{
 		Hash:           hex.EncodeToString(full[:]),
 		PrefixHash:     hex.EncodeToString(prefixDigest[:]),
-		Length:         uint32(len(payload)),
+		Length:         uint32(len(payload)), // #nosec G115 -- payload is bounded by captured frame size
 		Entropy:        round4(entropy),
 		PrintableRatio: round4(float64(printable) / length),
 		SimHash:        fmt.Sprintf("%016x", simHash(payload)),

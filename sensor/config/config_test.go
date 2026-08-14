@@ -10,6 +10,7 @@ func TestLoadAcceptsEnvironmentOnlyHTTPRuntimeConfiguration(t *testing.T) {
 	t.Setenv("C2HUNTER_SENSOR_ID", "sensor-a")
 	t.Setenv("C2HUNTER_SENSOR_NAME", "Sensor A")
 	t.Setenv("C2HUNTER_CONTROLLER_URL", "http://controller:8000")
+	t.Setenv("C2HUNTER_ALLOW_INSECURE_CONTROLLER", "true")
 	t.Setenv("C2HUNTER_CAPTURE_INTERFACE", "eth0")
 	t.Setenv("C2HUNTER_DIRECTION", "INBOUND")
 
@@ -22,6 +23,36 @@ func TestLoadAcceptsEnvironmentOnlyHTTPRuntimeConfiguration(t *testing.T) {
 	}
 	if len(cfg.CaptureSources) != 1 || cfg.CaptureSources[0].Interface != "eth0" {
 		t.Fatalf("capture sources = %+v", cfg.CaptureSources)
+	}
+}
+
+func TestLoadRejectsInsecureRemoteControllerByDefault(t *testing.T) {
+	t.Setenv("C2HUNTER_SENSOR_ID", "sensor-a")
+	t.Setenv("C2HUNTER_CONTROLLER_URL", "http://controller.example:8000")
+
+	_, err := Load(strings.NewReader(""))
+	if err == nil || !strings.Contains(err.Error(), "C2HUNTER_ALLOW_INSECURE_CONTROLLER") {
+		t.Fatalf("expected insecure controller error, got %v", err)
+	}
+}
+
+func TestLoadAllowsLoopbackHTTPControllerWithoutOverride(t *testing.T) {
+	t.Setenv("C2HUNTER_SENSOR_ID", "sensor-a")
+	t.Setenv("C2HUNTER_CONTROLLER_URL", "http://127.0.0.1:8000")
+
+	if _, err := Load(strings.NewReader("")); err != nil {
+		t.Fatalf("expected loopback controller to be accepted, got %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidInsecureControllerOverride(t *testing.T) {
+	t.Setenv("C2HUNTER_SENSOR_ID", "sensor-a")
+	t.Setenv("C2HUNTER_CONTROLLER_URL", "https://controller.example")
+	t.Setenv("C2HUNTER_ALLOW_INSECURE_CONTROLLER", "sometimes")
+
+	_, err := Load(strings.NewReader(""))
+	if err == nil || !strings.Contains(err.Error(), "C2HUNTER_ALLOW_INSECURE_CONTROLLER") {
+		t.Fatalf("expected boolean override error, got %v", err)
 	}
 }
 
@@ -179,5 +210,15 @@ capture_sources:
 `))
 	if err == nil || !strings.Contains(err.Error(), "capture_mode") {
 		t.Fatalf("expected capture mode validation error, got %v", err)
+	}
+}
+
+func TestLoadRejectsDurationOverflow(t *testing.T) {
+	_, err := Load(strings.NewReader(`
+sensor: {id: sensor-a, name: edge}
+capture: {duration_seconds: 18446744073709551615}
+`))
+	if err == nil || !strings.Contains(err.Error(), "maximum supported duration") {
+		t.Fatalf("expected duration overflow error, got %v", err)
 	}
 }

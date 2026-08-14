@@ -9,6 +9,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import IntEnum
+from ipaddress import ip_address, ip_network
 
 
 class Role(IntEnum):
@@ -125,6 +126,27 @@ class FixedWindowRateLimiter:
                     retry_after=retry_after,
                 )
             requests.append(now)
+
+
+def trusted_client_ip(
+    peer_ip: str, forwarded_for: str | None, trusted_proxy_cidrs: tuple[str, ...]
+) -> str:
+    """Resolve an X-Forwarded-For chain only when the direct peer is trusted."""
+    try:
+        peer = ip_address(peer_ip)
+        trusted = tuple(ip_network(cidr, strict=False) for cidr in trusted_proxy_cidrs)
+    except ValueError:
+        return peer_ip
+    if not forwarded_for or not any(peer in network for network in trusted):
+        return peer_ip
+    try:
+        chain = [ip_address(item.strip()) for item in forwarded_for.split(",")]
+    except ValueError:
+        return peer_ip
+    for address in reversed(chain):
+        if not any(address in network for network in trusted):
+            return str(address)
+    return str(chain[0]) if chain else peer_ip
 
 
 def is_enrollment_claim(method: str, path: str) -> bool:

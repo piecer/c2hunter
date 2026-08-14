@@ -1,24 +1,24 @@
 services:
   postgres:
-    image: postgres:16.6-alpine3.21
+    image: postgres:16.6-alpine3.21@sha256:1d04b9ba1d4996401f2552b51beda8187f175c0645c091e4781134fc9c9a3eef
     environment: { POSTGRES_DB: "${POSTGRES_DB:-c2hunter}", POSTGRES_USER: "${POSTGRES_USER:-c2hunter}", POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}" }
     volumes: [postgres-data:/var/lib/postgresql/data]
     healthcheck: { test: [CMD-SHELL, "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"], interval: 10s, timeout: 5s, retries: 10 }
     restart: unless-stopped
   redis:
-    image: redis:7.4.2-alpine3.21
+    image: redis:7.4.2-alpine3.21@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952
     command: [redis-server, --appendonly, "yes"]
     volumes: [redis-data:/data]
     healthcheck: { test: [CMD, redis-cli, ping], interval: 10s, timeout: 3s, retries: 10 }
     restart: unless-stopped
   clickhouse:
-    image: clickhouse/clickhouse-server:24.8.12.28-alpine
+    image: clickhouse/clickhouse-server:24.8.12.28-alpine@sha256:7347456e171a6ec64650eb53000d682b8484192b9adeae1f9642699963b5879f
     environment: { CLICKHOUSE_DB: "${CLICKHOUSE_DB:-c2hunter}", CLICKHOUSE_USER: "${CLICKHOUSE_USER:-c2hunter}", CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}" }
     volumes: [clickhouse-data:/var/lib/clickhouse]
     healthcheck: { test: [CMD-SHELL, "wget -q -O- 'http://127.0.0.1:8123/ping' | grep -q Ok"], interval: 10s, timeout: 5s, retries: 15 }
     restart: unless-stopped
   minio:
-    image: quay.io/minio/minio:RELEASE.2025-02-07T23-21-09Z
+    image: quay.io/minio/minio:RELEASE.2025-02-07T23-21-09Z@sha256:640c22768ed5dbc92eacc14502a1b06a1c708fa60431345c78dfc22917062e93
     command: server /data --console-address :9001
     environment: { MINIO_ROOT_USER: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER}", MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}" }
     volumes: [minio-data:/data]
@@ -47,6 +47,7 @@ services:
       C2HUNTER_DEV_LOGIN_RATE_LIMIT: "${C2HUNTER_DEV_LOGIN_RATE_LIMIT:-10}"
       C2HUNTER_ENROLLMENT_CLAIM_RATE_LIMIT: "${C2HUNTER_ENROLLMENT_CLAIM_RATE_LIMIT:-10}"
       C2HUNTER_ANALYSIS_JOB_RATE_LIMIT: "${C2HUNTER_ANALYSIS_JOB_RATE_LIMIT:-30}"
+      C2HUNTER_TRUSTED_PROXY_CIDRS: "${C2HUNTER_TRUSTED_PROXY_CIDRS:-172.30.0.10/32}"
       C2HUNTER_AI_ANALYSIS_ENABLED: "${C2HUNTER_AI_ANALYSIS_ENABLED:-false}"
       C2HUNTER_AI_MODEL_PROVIDER: "${C2HUNTER_AI_MODEL_PROVIDER:-fake}"
       C2HUNTER_AI_MODEL_BASE_URL: "${C2HUNTER_AI_MODEL_BASE_URL:-http://host.docker.internal:11434}"
@@ -109,6 +110,13 @@ services:
     ports: ["${WEB_PORT:-8080}:8080"]
     depends_on: { controller: { condition: service_healthy } }
     healthcheck: { test: [CMD, wget, -q, -O-, http://127.0.0.1:8080/healthz], interval: 10s, timeout: 3s, retries: 10 }
+    networks:
+      default:
+        ipv4_address: 172.30.0.10
     restart: unless-stopped
 volumes: { postgres-data: {}, redis-data: {}, clickhouse-data: {}, minio-data: {} }
-networks: { default: { name: c2hunter } }
+networks:
+  default:
+    name: c2hunter
+    ipam:
+      config: [{ subnet: 172.30.0.0/24 }]

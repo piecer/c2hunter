@@ -85,3 +85,30 @@ func TestPayloadFeatureZeroValuesRemainPresent(t *testing.T) {
 		t.Fatalf("zero printable ratio was omitted: %s", encoded)
 	}
 }
+
+func TestDecodeRoundTripsEncodedBatch(t *testing.T) {
+	encoded, err := Encode(Batch{
+		BatchID: "batch-1",
+		Flows:   []FlowRecord{{SensorID: "sensor-a", Protocol: "TCP"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.BatchID != "batch-1" || len(decoded.Flows) != 1 {
+		t.Fatalf("decoded batch = %+v", decoded)
+	}
+}
+
+func TestDecodeRejectsMalformedOrUnidentifiedBatch(t *testing.T) {
+	if _, err := Decode([]byte("{")); err == nil {
+		t.Fatal("expected malformed JSON error")
+	}
+	if _, err := Decode([]byte(`{"flows":[]}`)); err == nil {
+		t.Fatal("expected missing batch ID error")
+	}
+}

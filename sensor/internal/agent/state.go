@@ -15,6 +15,7 @@ type State struct {
 }
 
 func Load(path string) (State, error) {
+	// #nosec G304 -- path is a local administrator-configured state file.
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return State{}, nil
@@ -60,6 +61,7 @@ func Save(path string, state State) error {
 	if err := os.Rename(name, path); err != nil {
 		return err
 	}
+	// #nosec G304 -- dir is derived from the administrator-configured state path.
 	d, err := os.Open(dir)
 	if err != nil {
 		return err

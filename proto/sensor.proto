@@ -7,6 +7,8 @@ package c2hunter.sensor.v1;
 option go_package = "c2hunter/sensor/gen/sensorv1;sensorv1";
 
 service SensorGateway {
+  // Design-only future contract. ADR-0003 defines the implemented HTTPS/token
+  // transport; this service has no production gateway or generated client yet.
   // The sensor initiates this long-lived outbound stream. The controller never
   // requires an inbound connection to a sensor. Until this gRPC gateway is
   // available, sensors use the controller's HTTP/HTTPS registration and

@@ -30,7 +30,7 @@ MEASUREMENT_SCOPE = (
 
 def packets(total: int, seed: int):
     """Yield deterministic packet observations without materializing the packet set."""
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311 -- reproducible benchmark jitter, not a secret
     for index in range(total):
         host = index % 4096
         cycle = index // 4096

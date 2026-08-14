@@ -98,7 +98,7 @@ They validate `X-Sensor-Token` directly in the request handler against stored cr
 ### 3.2 Sensor Gateway / Controller API (`controller/`)
 
 **소유 책임**
-- mTLS sensor identity와 Sensor 역할 검증, 등록/heartbeat/기능 협상
+- HTTPS `X-Sensor-Token` identity 검증, 등록/heartbeat/기능 협상(ADR-0003)
 - 센서/그룹/태그/활성 상태 관리와 원격 작업 명령 발행
 - `/api/v1` REST, OpenAPI, pagination/filtering/sorting
 - 분석 요청 idempotency, 상태 머신, 권한(ADMIN/ANALYST/VIEWER/SENSOR)

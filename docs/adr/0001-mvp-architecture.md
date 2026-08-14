@@ -1,6 +1,6 @@
 # ADR-0001: MVP 분산 아키텍처와 저장소 경계
 
-- 상태: 승인(Proposed baseline)
+- 상태: 부분 대체 — Sensor transport 결정 2는 ADR-0003으로 대체
 - 날짜: 2026-07-20
 - 결정자: C2Hunter 프로젝트
 - 관련 명세: SPEC.md §4–5, §7–12, §14–19, §24–31
@@ -14,7 +14,7 @@ C2Hunter MVP는 최소 두 Linux 센서가 NAT/방화벽 내부에서도 중앙 
 ## 결정
 
 1. **센서는 Go로 구현**하고 Linux 운영 capture는 AF_PACKET/TPACKET_V3를 우선한다. 개발·fixture에는 libpcap/offline backend를 허용한다.
-2. **Sensor→Controller outbound mTLS gRPC**만 사용한다. 센서가 만든 장기 연결에서 등록, heartbeat, 명령 수신, batch ACK를 처리하며 Controller의 센서 inbound 접속을 요구하지 않는다.
+2. ~~**Sensor→Controller outbound mTLS gRPC**만 사용한다.~~ 이 전송 결정은 현재 구현과 일치하는 outbound HTTPS + enrollment/agent token 계약을 채택한 ADR-0003으로 대체됐다. Controller의 Sensor inbound 접속을 요구하지 않는 원칙은 유지한다.
 3. **중앙 제어는 Python 3.12+ FastAPI/Pydantic**, 비동기 실행은 Celery/Redis로 구현한다. API/Sensor Gateway는 MVP에서 한 배포 단위가 가능하지만 Analysis Worker는 별도 프로세스다.
 4. **저장소를 용도별 분리**한다.
    - PostgreSQL: 센서, 사용자/RBAC, 작업 상태, idempotency/ingest ledger, 후보/evidence summary, allowlist, 감사

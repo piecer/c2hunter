@@ -12,6 +12,8 @@ web/playwright-report/
 *.tsbuildinfo
 artifacts/*
 !artifacts/.gitkeep
+!artifacts/high-volume-policy-backtest.json
+!artifacts/high-volume-policy-backtest.md
 /c2hunter-sensor/c2hunter-sensor
 testdata/generated/*
 !testdata/generated/.gitkeep

@@ -75,6 +75,9 @@ func (a *Aggregator) Add(p packet.Packet) []Record {
 }
 
 func (a *Aggregator) AddWithMetadata(p packet.Packet, protocolMetadata metadata.Metadata) []Record {
+	if p.WireLength < 0 {
+		return nil
+	}
 	key := Key{a.sensorID, p.Direction, p.IPVersion, p.SourceIP, p.DestinationIP, p.SourcePort, p.DestinationPort, p.Protocol}
 	r := a.active[key]
 	var expired []Record
@@ -83,21 +86,23 @@ func (a *Aggregator) AddWithMetadata(p packet.Packet, protocolMetadata metadata.
 		delete(a.active, key)
 		r = nil
 	}
+	// #nosec G115 -- this public boundary rejects negative lengths above; readers frame-bound positives.
+	wireLength := uint32(p.WireLength)
 	if r == nil {
-		r = &Record{Key: key, CaptureJobID: a.jobID, StartTime: p.Timestamp, MinPacketSize: uint32(p.WireLength), MinPayloadLength: uint32(len(p.Payload))}
+		r = &Record{Key: key, CaptureJobID: a.jobID, StartTime: p.Timestamp, MinPacketSize: wireLength, MinPayloadLength: uint32(len(p.Payload))} // #nosec G115 -- payload is bounded by frame size
 		a.active[key] = r
 	}
 	r.EndTime = p.Timestamp
 	r.PacketCount++
-	r.TotalBytes += uint64(p.WireLength)
-	r.packetSizeSum += uint64(p.WireLength)
-	if uint32(p.WireLength) < r.MinPacketSize {
-		r.MinPacketSize = uint32(p.WireLength)
+	r.TotalBytes += uint64(p.WireLength)    // #nosec G115 -- negative lengths are rejected at this public boundary
+	r.packetSizeSum += uint64(p.WireLength) // #nosec G115 -- negative lengths are rejected at this public boundary
+	if wireLength < r.MinPacketSize {
+		r.MinPacketSize = wireLength
 	}
-	if uint32(p.WireLength) > r.MaxPacketSize {
-		r.MaxPacketSize = uint32(p.WireLength)
+	if wireLength > r.MaxPacketSize {
+		r.MaxPacketSize = wireLength
 	}
-	payloadLen := uint32(len(p.Payload))
+	payloadLen := uint32(len(p.Payload)) // #nosec G115 -- payload is bounded by captured frame size
 	r.payloadLengthSum += uint64(payloadLen)
 	if payloadLen < r.MinPayloadLength {
 		r.MinPayloadLength = payloadLen
@@ -226,11 +231,11 @@ func trackTCPFlagCombinations(record *Record, p packet.Packet) {
 // addTCPFlagCombinations computes SYN/ACK ratio, RST ratio, and connection count.
 func addTCPFlagCombinations(r *Record) {
 	if r.TCPFlags.SYN > 0 && r.TCPFlags.ACK > 0 {
-		ratio := float64(r.TCPFlags.SYN) / float64(r.TCPFlags.ACK)
+		ratio := float64(r.TCPFlags.SYN) / float64(r.TCPFlags.ACK) // #nosec G115 -- counters intentionally become ratios
 		r.SYNACKRatio = &ratio
 	}
 	if r.PacketCount > 0 {
-		rstRatio := float64(r.TCPFlags.RST) / float64(r.PacketCount)
+		rstRatio := float64(r.TCPFlags.RST) / float64(r.PacketCount) // #nosec G115 -- counters intentionally become ratios
 		r.RSTRatio = &rstRatio
 	}
 	connections := r.TCPFlags.SYN

@@ -168,12 +168,14 @@ anomaly-only Candidate까지 생성하려면 `ml_anomaly_allow_standalone=true`�
 | 단일 내부 host | 최대 -20 (`SINGLE_HOST_BEACON`은 -10, analyst exact는 미적용) |
 | 표본 부족 | 최대 -20 |
 | 대용량 endpoint (byte/packet threshold 초과) | 최대 -30 (`HIGH_VOLUME`) |
-| 대용량 TCP 세션 (양방향 5-tuple 합산) | 기본 LOW 상한 20 (`HIGH_VOLUME_TCP_SESSION`) |
+| 대용량 TCP session (양방향 5-tuple + idle timeout) | 기본 LOW 상한 20 (`HIGH_VOLUME_TCP_SESSION`) |
 
 기본값은 `score = clamp(0, 100, sum(capped contributions) + sum(adjustments))`로 계산한다. 실행별 detector weight는 type별 기본 cap을 적용한 contribution에 곱하고 최대 `2 × cap`까지 허용하므로, `0.0–1.0` 감쇠뿐 아니라 `1.0–2.0` 증폭도 유효하다. 최종 점수는 항상 100으로 clamp하며 weight와 조정 점수를 run에 snapshot한다.
 
-TCP 세션 대용량 판정은 센서별 내부 endpoint와 외부 후보 endpoint의 양방향 5-tuple을
-합산한다. 기본 임계값은 세션당 50 MiB 또는 100,000 packet이며 둘 중 하나를 넘으면
+TCP 대용량 판정은 센서별 내부 endpoint와 외부 후보 endpoint의 동일 양방향 5-tuple을
+기본 60초의 configurable idle timeout으로 sessionize한다. 같은 5-tuple도 idle timeout을 넘겨
+재사용하면 별도 session으로 분리된다. 집계 Flow에 완전한 FIN 정보가 없어 모든 TCP 종료 경계를
+복원하지는 못한다. 기본 임계값은 session당 50 MiB 또는 100,000 packet이며 둘 중 하나를 넘으면
 기존 감점 적용 후 점수를 20 이하로 제한한다. 각 임계값을 `0`으로 설정하면 해당 조건을
 비활성화할 수 있다. 분석가가 payload signature를 `EXACT`로 확인한 경우에는 이 상한보다
 명시적 확인을 우선한다.

@@ -269,7 +269,8 @@ def generate_all(output_dir: Path, seed: int = SEED):
         "format": "pcap",
         "scenarios": generated_scenarios,
     }
-    for name, (packets, oracle) in scenarios(random.Random(seed)).items():
+    # Deterministic PCAP fixtures require a seeded non-cryptographic generator.
+    for name, (packets, oracle) in scenarios(random.Random(seed)).items():  # noqa: S311
         packets.sort(key=lambda item: item[0])
         path = output_dir / f"scenario-{name.lower()}.pcap"
         write_pcap(path, packets)

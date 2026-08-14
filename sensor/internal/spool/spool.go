@@ -2,6 +2,7 @@ package spool
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,6 +48,7 @@ func Open(dir string, limits Limits, now func() time.Time) (*Spool, error) {
 		return nil, err
 	}
 	s := &Spool{dir: dir, limits: limits, now: now}
+	// #nosec G304 -- dir is a local administrator-configured spool root; filename is fixed.
 	data, err := os.ReadFile(filepath.Join(dir, ".loss.json"))
 	if err == nil {
 		if err := json.Unmarshal(data, &s.loss); err != nil {
@@ -183,6 +185,9 @@ func (s *Spool) enforce() error {
 	}
 	return s.persistLoss()
 }
+func closeWithError(file *os.File, operationErr error) error {
+	return errors.Join(operationErr, file.Close())
+}
 func (s *Spool) write(b Batch) error {
 	data, err := json.Marshal(b)
 	if err != nil {
@@ -195,16 +200,13 @@ func (s *Spool) write(b Batch) error {
 	name := tmp.Name()
 	defer os.Remove(name)
 	if err := tmp.Chmod(0600); err != nil {
-		tmp.Close()
-		return err
+		return closeWithError(tmp, err)
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
+		return closeWithError(tmp, err)
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
+		return closeWithError(tmp, err)
 	}
 	if err := tmp.Close(); err != nil {
 		return err
@@ -224,16 +226,13 @@ func (s *Spool) persistLoss() error {
 	name := tmp.Name()
 	defer os.Remove(name)
 	if err := tmp.Chmod(0600); err != nil {
-		tmp.Close()
-		return err
+		return closeWithError(tmp, err)
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
+		return closeWithError(tmp, err)
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
+		return closeWithError(tmp, err)
 	}
 	if err := tmp.Close(); err != nil {
 		return err

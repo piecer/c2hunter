@@ -115,6 +115,27 @@ def test_candidate_profile_aggregates_tcp_records_by_five_tuple() -> None:
     assert profile["max_tcp_session_bytes"] == 60_000
 
 
+def test_candidate_profile_splits_reused_five_tuple_after_idle_timeout() -> None:
+    context = AnalysisContext(
+        dataset_id="dataset",
+        start=NOW,
+        end=NOW + timedelta(minutes=5),
+        flows=[
+            _flow(protocol="TCP", packets=30, size=30_000, second=1),
+            _flow(protocol="TCP", packets=25, size=25_000, second=2),
+            _flow(protocol="TCP", packets=40, size=40_000, second=120),
+        ],
+        internal_cidrs=("10.0.0.0/8",),
+        parameters={"tcp_session_idle_timeout_seconds": 60},
+    )
+
+    profile = context.candidate_traffic_profiles()[CANDIDATE]
+
+    assert profile["tcp_session_count"] == 2
+    assert profile["max_tcp_session_packets"] == 55
+    assert profile["max_tcp_session_bytes"] == 55_000
+
+
 def test_high_volume_tcp_session_caps_c2_score() -> None:
     candidate = score_candidates(
         _high_confidence_evidence(),

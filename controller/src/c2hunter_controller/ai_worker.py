@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import signal
 import tempfile
@@ -11,6 +12,7 @@ from pathlib import Path
 from threading import Event
 from time import perf_counter
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, start_http_server
 
@@ -19,6 +21,8 @@ from .ai_gateway import create_model_gateway
 from .ai_queueing import RedisAIAnalysisWorkerQueue
 from .config import Settings
 from .production import MinioBlobStore, PostgresRepository
+
+logger = logging.getLogger(__name__)
 
 
 class WorkerQueue(Protocol):
@@ -71,7 +75,7 @@ class AIWorkerMetrics:
             operation()
         except Exception:
             # Telemetry must never alter Run state or queue acknowledgement.
-            pass
+            logger.debug("AI metric update failed", exc_info=True)
 
     def observe_execution(self, duration: float, run: dict[str, Any]) -> None:
         status = str(run.get("status") or "UNKNOWN")
@@ -196,12 +200,21 @@ def main() -> int:
     parser.add_argument("--max-age", type=int, default=30)
     args = parser.parse_args()
     health_path = Path(
-        os.getenv("C2HUNTER_AI_WORKER_HEALTH_FILE", "/tmp/c2hunter-ai-worker-health.json")
+        os.getenv(
+            "C2HUNTER_AI_WORKER_HEALTH_FILE",
+            "/tmp/c2hunter-ai-worker-health.json",  # noqa: S108 -- non-secret health status
+        )
     )
     if args.command == "healthcheck":
         return 0 if _healthy(health_path, args.max_age) else 1
 
     settings = Settings()
+    if settings.ai_model_endpoint_is_remote:
+        logger.warning(
+            "AI evidence metadata will be sent to a remote model endpoint: provider=%s host=%s",
+            settings.ai_model_provider,
+            urlsplit(settings.ai_model_base_url).hostname,
+        )
     if not settings.database_url.startswith(("postgresql://", "postgres://")):
         raise RuntimeError("AI worker requires PostgreSQL")
     if settings.s3_endpoint == "memory://":

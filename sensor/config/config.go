@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -27,8 +28,9 @@ type Config struct {
 		Name string `yaml:"name"`
 	} `yaml:"sensor"`
 	Controller struct {
-		Address string `yaml:"address"`
-		URL     string `yaml:"url"`
+		Address       string `yaml:"address"`
+		URL           string `yaml:"url"`
+		AllowInsecure bool   `yaml:"allow_insecure"`
 	} `yaml:"controller"`
 	CaptureSources    []CaptureSource `yaml:"capture_sources"`
 	CaptureJobs       []CaptureJob    `yaml:"-"`
@@ -188,14 +190,16 @@ func Load(r io.Reader) (Config, error) {
 	if err := yaml.NewDecoder(r).Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
-	applyEnvironment(&cfg)
+	if err := applyEnvironment(&cfg); err != nil {
+		return Config{}, err
+	}
 	if err := finalize(&cfg); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
 }
 
-func applyEnvironment(cfg *Config) {
+func applyEnvironment(cfg *Config) error {
 	if v := os.Getenv("C2HUNTER_SENSOR_ID"); v != "" {
 		cfg.Sensor.ID = v
 	}
@@ -207,6 +211,13 @@ func applyEnvironment(cfg *Config) {
 	}
 	if v := os.Getenv("C2HUNTER_CONTROLLER_URL"); v != "" {
 		cfg.Controller.URL = strings.TrimRight(v, "/")
+	}
+	if v := strings.TrimSpace(os.Getenv("C2HUNTER_ALLOW_INSECURE_CONTROLLER")); v != "" {
+		allowInsecure, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("C2HUNTER_ALLOW_INSECURE_CONTROLLER must be a boolean: %w", err)
+		}
+		cfg.Controller.AllowInsecure = allowInsecure
 	}
 	if v := os.Getenv("C2HUNTER_CAPTURE_INTERFACE"); v != "" {
 		direction := os.Getenv("C2HUNTER_DIRECTION")
@@ -227,6 +238,7 @@ func applyEnvironment(cfg *Config) {
 	if v := strings.TrimSpace(os.Getenv("C2HUNTER_CAPTURE_MODE")); v != "" {
 		cfg.Agent.CaptureMode = CaptureMode(strings.ToLower(v))
 	}
+	return nil
 }
 
 func finalize(cfg *Config) error {
@@ -242,6 +254,12 @@ func finalize(cfg *Config) error {
 		parsed, err := url.Parse(cfg.Controller.URL)
 		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 			return errors.New("controller.url must use http or https scheme")
+		}
+		hostIP := net.ParseIP(parsed.Hostname())
+		isLoopback := strings.EqualFold(parsed.Hostname(), "localhost") ||
+			(hostIP != nil && hostIP.IsLoopback())
+		if parsed.Scheme == "http" && !isLoopback && !cfg.Controller.AllowInsecure {
+			return errors.New("remote HTTP controller requires C2HUNTER_ALLOW_INSECURE_CONTROLLER=true")
 		}
 	}
 	validDirections := map[string]bool{"INBOUND": true, "OUTBOUND": true, "BIDIRECTIONAL": true, "UNKNOWN": true}
@@ -274,9 +292,24 @@ func finalize(cfg *Config) error {
 	if !cfg.Capture.StartTime.IsZero() && !cfg.Capture.EndTime.IsZero() && !cfg.Capture.EndTime.After(cfg.Capture.StartTime) {
 		return errors.New("capture end_time must be after start_time")
 	}
+	const maxDurationSeconds = uint64((1<<63 - 1) / int64(time.Second))
+	for name, seconds := range map[string]uint64{
+		"capture duration":      cfg.Capture.DurationSeconds,
+		"spool max age":         cfg.Spool.MaxAgeSeconds,
+		"PCAP segment duration": cfg.PCAP.MaxSegmentDurationSeconds,
+		"agent poll interval":   cfg.Agent.ConfigPollIntervalSeconds,
+	} {
+		if seconds > maxDurationSeconds {
+			return fmt.Errorf("%s exceeds the maximum supported duration", name)
+		}
+	}
+	// #nosec G115 -- each uint64 value is bounded by maxDurationSeconds above.
 	cfg.Capture.Duration = time.Duration(cfg.Capture.DurationSeconds) * time.Second
+	// #nosec G115 -- each uint64 value is bounded by maxDurationSeconds above.
 	cfg.Spool.MaxAge = time.Duration(cfg.Spool.MaxAgeSeconds) * time.Second
+	// #nosec G115 -- each uint64 value is bounded by maxDurationSeconds above.
 	cfg.PCAP.MaxSegmentDuration = time.Duration(cfg.PCAP.MaxSegmentDurationSeconds) * time.Second
+	// #nosec G115 -- each uint64 value is bounded by maxDurationSeconds above.
 	cfg.Agent.ConfigPollInterval = time.Duration(cfg.Agent.ConfigPollIntervalSeconds) * time.Second
 	if cfg.Agent.StateFile == "" || cfg.Agent.ConfigPollInterval <= 0 {
 		return errors.New("agent state file and config poll interval are required")

@@ -13,6 +13,7 @@ type streamStub struct {
 	messages []Message
 	failData bool
 	closed   bool
+	closeErr error
 }
 
 func (s *streamStub) Send(m Message) error {
@@ -23,7 +24,7 @@ func (s *streamStub) Send(m Message) error {
 	return nil
 }
 func (s *streamStub) Receive(context.Context) (Command, error) { return Command{}, context.Canceled }
-func (s *streamStub) Close() error                             { s.closed = true; return nil }
+func (s *streamStub) Close() error                             { s.closed = true; return s.closeErr }
 
 type dialerStub struct {
 	streams []*streamStub
@@ -54,6 +55,28 @@ func TestClientReconnectsAndRegistersBeforeRetry(t *testing.T) {
 		t.Fatalf("registration ordering wrong: %v %v", first.messages, second.messages)
 	}
 }
+
+func TestClientRetriesWhenFailedStreamAlsoFailsToClose(t *testing.T) {
+	first := &streamStub{failData: true, closeErr: errors.New("close")}
+	second := &streamStub{}
+	d := &dialerStub{streams: []*streamStub{first, second}}
+	r := telemetry.Registration{
+		SensorID: "s", Name: "n", Hostname: "h", AgentVersion: "1",
+		OS: "linux", KernelVersion: "k", CurrentTime: time.Now(),
+	}
+	c, err := NewClient(d, r, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := Message{Kind: MessageBatch, Batch: &Batch{ID: "b", Payload: []byte("x")}}
+	if err := c.Send(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if d.calls != 2 || !first.closed {
+		t.Fatalf("did not retry after close failure: calls=%d closed=%v", d.calls, first.closed)
+	}
+}
+
 func TestClientRejectsInvalidRegistration(t *testing.T) {
 	if _, err := NewClient(&dialerStub{}, telemetry.Registration{}, time.Second); err == nil {
 		t.Fatal("invalid registration accepted")

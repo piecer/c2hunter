@@ -1265,7 +1265,7 @@ class SQLiteRepository:
             return {}
         placeholders = ",".join("?" for _ in selected)
         rows = self.connection.execute(
-            f"SELECT id,data FROM objects WHERE kind='job' AND id IN ({placeholders})",
+            f"SELECT id,data FROM objects WHERE kind='job' AND id IN ({placeholders})",  # noqa: S608 -- placeholders contain only generated question marks
             selected,
         ).fetchall()
         return {str(row[0]): json.loads(row[1]) for row in rows}
@@ -1300,7 +1300,7 @@ class SQLiteRepository:
             if run_ids:
                 placeholders = ",".join("?" for _ in run_ids)
                 assessment_rows = self.connection.execute(
-                    f"SELECT assessment_id FROM ai_candidate_assessments "
+                    f"SELECT assessment_id FROM ai_candidate_assessments "  # noqa: S608 -- generated placeholders only
                     f"WHERE ai_run_id IN ({placeholders})",
                     run_ids,
                 ).fetchall()
@@ -1308,17 +1308,17 @@ class SQLiteRepository:
             if assessment_ids:
                 placeholders = ",".join("?" for _ in assessment_ids)
                 self.connection.execute(
-                    f"DELETE FROM ai_feedback WHERE assessment_id IN ({placeholders})",
+                    f"DELETE FROM ai_feedback WHERE assessment_id IN ({placeholders})",  # noqa: S608 -- generated placeholders only
                     assessment_ids,
                 )
                 self.connection.execute(
-                    f"DELETE FROM ai_generated_artifacts WHERE assessment_id IN ({placeholders})",
+                    f"DELETE FROM ai_generated_artifacts WHERE assessment_id IN ({placeholders})",  # noqa: S608 -- generated placeholders only
                     assessment_ids,
                 )
             if run_ids:
                 placeholders = ",".join("?" for _ in run_ids)
                 self.connection.execute(
-                    f"DELETE FROM ai_candidate_assessments WHERE ai_run_id IN ({placeholders})",
+                    f"DELETE FROM ai_candidate_assessments WHERE ai_run_id IN ({placeholders})",  # noqa: S608 -- generated placeholders only
                     run_ids,
                 )
             self.connection.execute(
@@ -1332,10 +1332,11 @@ class SQLiteRepository:
             if export_ids:
                 placeholders = ",".join("?" for _ in export_ids)
                 self.connection.execute(
-                    f"DELETE FROM export_blobs WHERE export_id IN ({placeholders})", export_ids
+                    f"DELETE FROM export_blobs WHERE export_id IN ({placeholders})",  # noqa: S608 -- generated placeholders only
+                    export_ids,
                 )
                 self.connection.execute(
-                    f"DELETE FROM objects WHERE kind='export' AND id IN ({placeholders})",
+                    f"DELETE FROM objects WHERE kind='export' AND id IN ({placeholders})",  # noqa: S608 -- generated placeholders only
                     export_ids,
                 )
             self.connection.execute("DELETE FROM candidates WHERE job_id=?", (job_id,))
@@ -1419,7 +1420,8 @@ class SQLiteRepository:
         if not include_suppressed:
             clauses.append("COALESCE(json_extract(data,'$.excluded'),0)=0")
         rows = self.connection.execute(
-            "SELECT job_id,data FROM candidate_records WHERE " + " AND ".join(clauses),
+            "SELECT job_id,data FROM candidate_records WHERE "  # noqa: S608 -- clauses are code-owned and values are bound
+            + " AND ".join(clauses),
             parameters,
         ).fetchall()
         return [(str(row[0]), json.loads(row[1])) for row in rows]
@@ -1463,11 +1465,12 @@ class SQLiteRepository:
         where = " AND ".join(clauses)
         total = int(
             self.connection.execute(
-                f"SELECT COUNT(*) FROM candidate_records WHERE {where}", parameters
+                f"SELECT COUNT(*) FROM candidate_records WHERE {where}",  # noqa: S608 -- where is built from code-owned clauses
+                parameters,
             ).fetchone()[0]
         )
         rows = self.connection.execute(
-            f"SELECT job_id,data FROM candidate_records WHERE {where} "
+            f"SELECT job_id,data FROM candidate_records WHERE {where} "  # noqa: S608 -- columns/clauses are allowlisted
             f"ORDER BY {order_column} {direction},candidate_id ASC LIMIT ? OFFSET ?",
             [*parameters, page_size, (page - 1) * page_size],
         ).fetchall()
@@ -1484,7 +1487,8 @@ class SQLiteRepository:
             minimum_score, severity, include_suppressed
         )
         rows = self.connection.execute(
-            "SELECT candidate_id,excluded FROM candidate_records WHERE " + " AND ".join(clauses),
+            "SELECT candidate_id,excluded FROM candidate_records WHERE "  # noqa: S608 -- clauses are code-owned and values are bound
+            + " AND ".join(clauses),
             parameters,
         ).fetchall()
         return [(str(row[0]), bool(row[1])) for row in rows]
@@ -1755,7 +1759,7 @@ class SQLiteRepository:
             "candidate-misp-action": "misp_actions",
         }.items():
             rows = self.connection.execute(
-                "SELECT data FROM objects WHERE kind=? "
+                "SELECT data FROM objects WHERE kind=? "  # noqa: S608 -- generated placeholders only
                 f"AND json_extract(data,'$.candidate_id') IN ({placeholders})",
                 [kind, *selected],
             ).fetchall()

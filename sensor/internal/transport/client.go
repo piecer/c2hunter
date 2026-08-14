@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -73,35 +74,38 @@ func NewClient(dialer Dialer, registration telemetry.Registration, retryDelay ti
 func (c *Client) Send(ctx context.Context, message Message) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	var lastFailure error
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return errors.Join(err, lastFailure)
 		}
 		if c.stream == nil {
 			stream, err := c.dialer.Dial(ctx)
 			if err != nil {
+				lastFailure = err
 				if err := wait(ctx, c.retryDelay); err != nil {
-					return err
+					return errors.Join(err, lastFailure)
 				}
 				continue
 			}
 			registration := c.registration
 			if err := stream.Send(Message{Kind: MessageRegistration, Registration: &registration}); err != nil {
-				stream.Close()
+				lastFailure = errors.Join(err, stream.Close())
 				if err := wait(ctx, c.retryDelay); err != nil {
-					return err
+					return errors.Join(err, lastFailure)
 				}
 				continue
 			}
 			c.stream = stream
 		}
-		if err := c.stream.Send(message); err == nil {
+		sendErr := c.stream.Send(message)
+		if sendErr == nil {
 			return nil
 		}
-		c.stream.Close()
+		lastFailure = errors.Join(sendErr, c.stream.Close())
 		c.stream = nil
 		if err := wait(ctx, c.retryDelay); err != nil {
-			return err
+			return errors.Join(err, lastFailure)
 		}
 	}
 }

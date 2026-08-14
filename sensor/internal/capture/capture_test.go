@@ -71,6 +71,21 @@ func TestRunPropagatesReaderError(t *testing.T) {
 	}
 }
 
+func TestRunRejectsNegativeWireLength(t *testing.T) {
+	reader := &sliceReader{packets: []packet.Packet{{Timestamp: time.Unix(100, 0), WireLength: -1}}}
+	consumed := false
+	_, err := Run(context.Background(), reader, Limits{}, func(packet.Packet) error {
+		consumed = true
+		return nil
+	})
+	if !errors.Is(err, ErrMalformedPacket) {
+		t.Fatalf("expected malformed packet error, got %v", err)
+	}
+	if consumed {
+		t.Fatal("consumer called for malformed packet")
+	}
+}
+
 func TestRunTreatsPacketPollTimeoutAsIdleCapture(t *testing.T) {
 	reader := &timeoutThenEndReader{}
 	result, err := Run(context.Background(), reader, Limits{}, nil)

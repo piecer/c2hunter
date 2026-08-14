@@ -82,6 +82,9 @@ func Run(ctx context.Context, r Reader, limits Limits, consume func(packet.Packe
 		if err != nil {
 			return result, err
 		}
+		if p.WireLength < 0 {
+			return result, ErrMalformedPacket
+		}
 		if started.IsZero() {
 			started = p.Timestamp
 		}
@@ -102,6 +105,7 @@ func Run(ctx context.Context, r Reader, limits Limits, consume func(packet.Packe
 			}
 		}
 		result.Packets++
+		// #nosec G115 -- the negative case is rejected before packet processing above.
 		result.Bytes += uint64(p.WireLength)
 		if limits.MaxPackets > 0 && result.Packets >= limits.MaxPackets {
 			result.Reason = StopMaxPackets

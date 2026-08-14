@@ -11,11 +11,12 @@
 - `[x] DONE`: 완료 조건과 연결된 테스트/산출물이 실제 통과
 - `[!] BLOCKED`: 원인·재현·후속 작업 기록
 
-### 2026-08-02 구현 상태 감사
+### 2026-08-14 구현 상태 감사
 
-- Phase 작업 55개 중 **DONE 22 / PARTIAL 25 / PLANNED 8**로 판정했다.
-- 전체 완료는 아니다. 주요 차단 사항은 Compose Sensor A/B, mTLS gRPC gateway,
-  필수 Make target 계약, migration harness, 전체 audit/metrics/recovery/coverage gate,
+- 2026-08-02의 **DONE 22 / PARTIAL 25 / PLANNED 8** 수치는 이후 기능을 반영하지 않아 폐기했다. 상태 표의 각 행과 DoD 표를 현재 권위로 사용하며, 전체 재감사 없이 새 합계를 추정하지 않는다.
+- dev-login production hard guard, tracked ELF 재발 방지, 양방향 대용량 TCP session 억제는 구현·회귀 테스트 완료로 재확인했다.
+- 전체 완료는 아니다. 주요 차단 사항은 Compose Sensor A/B live sign-off,
+  migration harness, 전체 audit/metrics/recovery/security baseline 부채,
   100k PPS Sensor 검증, Implementation Report와 최종 12단계 실행이다.
 - Compose 7개 서비스(Postgres/Redis/ClickHouse/MinIO/Controller/Worker/Web)는 모두 healthy다.
 - 검증된 주요 게이트: `make lint`, `make test`, `make build`, `make test-e2e`,
@@ -111,6 +112,10 @@
 | REQ-DOD-001 | §30 | 최종 Definition of Done 24개 항목 전체 |
 | REQ-VAL-001 | §31 | 최종 10개 명령 순서, 8개 런타임 확인, 실패 시 처음부터 재실행 |
 | REQ-RPT-001 | §32 | `IMPLEMENTATION_REPORT.md` 11개 section과 미완료 보고 필드 |
+| REQ-AI-001 | 확장/ADR-0002 | bounded Evidence, schema 검증, passive-only AI assessment, feedback/artifact review, 평가·rollback |
+| REQ-TI-001 | 확장 | VirusTotal/AbuseIPDB enrichment의 timeout, pacing, single-flight, bounded shutdown, history |
+| REQ-INT-001 | 확장 | MISP/Splunk 산출물의 안전 검증, draft/review, 외부 자동 publish 금지 |
+| REQ-MISP-001 | 확장 | Candidate MISP lookup/export의 ADMIN 승인, 명시적 외부 side effect, 감사 이력, bulk triage 안전 경계 |
 
 ## 2. 현실적인 MVP 수직 슬라이스 순서
 
@@ -203,7 +208,7 @@ Phase는 기능 계층별 일괄 구현이 아니라 매 단계 실행 가능한
 | [-] | P5-002 | 명세 metric/log/error coverage 완성 | REQ-ERR-001, REQ-OBS-001, REQ-OBS-002 | P4-003 | 10 오류와 10 metric, 필수 JSON fields, no sensitive payload test |
 | [ ] | P5-003 | 장애 복구 test suite 완성 | REQ-TST-006, REQ-PER-002 | P5-001 | Controller/Redis/Worker/network/MinIO/Postgres/batch redelivery 자동 통과 |
 | [ ] | P5-004 | Compose 12단계 핵심 통합 test 완성 | REQ-TST-003 | P4-005,P5-003 | 등록→job→capture→traffic→upload→worker→candidate→API→export→download→audit |
-| [-] | P5-005 | coverage gate와 API 정상/오류 suite 완성 | REQ-TST-001, REQ-TST-007 | P5-004 | backend core≥80%, detector≥90%, sensor core≥80%, 모든 API 양경로 |
+| [-] | P5-005 | coverage gate와 API 정상/오류 suite 완성 | REQ-TST-001, REQ-TST-007 | P5-004 | Controller≥80%/Analysis≥86%/detector≥90%/Sensor aggregate≥69%/Sensor core≥80% CI gate 완료; 모든 API 양경로는 미완료 |
 | [x] | P5-006 | 1M benchmark generator/runner/artifact 구현 | REQ-PER-001, REQ-TST-005 | P3-010,P5-004 | `make benchmark-1m`, 1M+, 전체 pipeline, JSON/MD time/peak RSS |
 | [ ] | P5-007 | Sensor 100k PPS/drop 및 Flow API latency benchmark | REQ-PER-002 | P5-006 | 기준 hardware/config 기록, drop≤1%·API≤5초 목표 결과/병목 문서 |
 | [-] | P5-008 | dependency/secret/image security scan과 CI gate 완성 | REQ-SEC-001, REQ-CI-001 | P5-005 | PR/push에서 필수 검사 전체, 저장소 secret/private key 없음 |
@@ -271,10 +276,10 @@ Phase는 기능 계층별 일괄 구현이 아니라 매 단계 실행 가능한
 | [x] | DOD-016 | 합성 botnet이 기대 score 이상 | Scenario A/B oracle |
 | [x] | DOD-017 | 1M benchmark OOM 없음 | P5-006 artifacts |
 | [x] | DOD-018 | unit/integration/E2E 모두 통과 | VAL-005/006/008 |
-| [-] | DOD-019 | 핵심 분석 coverage 기준 충족 | P5-005 coverage artifact |
+| [x] | DOD-019 | 핵심 분석 coverage 기준 충족 | Controller≥80%/Analysis≥86%/detector≥90%/Sensor core≥80%와 Sensor aggregate≥69% ratchet |
 | [-] | DOD-020 | Docker Compose 전체 실행 | VAL-010 health evidence |
 | [-] | DOD-021 | 비밀번호/인증서 private key 미포함 | P5-008 secret scan |
-| [x] | DOD-022 | README/운영 문서와 구현 일치 | P5-009 command/API review |
+| [-] | DOD-022 | README/운영 문서와 구현 일치 | 현재 HTTPS/`X-Sensor-Token` 계약은 ADR-0003에 반영; legacy mTLS/certificate 문구와 전체 운영 절차 재감사 필요 |
 | [-] | DOD-023 | placeholder/mock/비활성 핵심 test 없음 | repository scan + review |
 | [-] | DOD-024 | 최종 test/benchmark 결과 `artifacts/` 저장 | P5-010 artifact manifest |
 

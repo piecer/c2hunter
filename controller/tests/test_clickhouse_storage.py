@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from c2hunter_controller.storage import ClickHouseFlowStore
 
 
@@ -15,6 +17,11 @@ class RecordingClickHouseFlowStore(ClickHouseFlowStore):
     def _request(self, query: str, data: bytes = b"") -> bytes:
         self.requests.append((query, data))
         return self.responses.pop(0) if self.responses else b""
+
+
+def test_clickhouse_store_rejects_non_http_urls() -> None:
+    with pytest.raises(ValueError, match="must use HTTP or HTTPS"):
+        ClickHouseFlowStore("file:///tmp/clickhouse")
 
 
 def test_initial_schema_uses_time_partition_and_clickhouse_24_8_ttl() -> None:
