@@ -59,6 +59,8 @@ DDoS 봇넷에 감염된 여러 단말은 공격 명령 수신, 상태 보고, �
 12. 분석 이력 및 감사 로그 관리
 13. 자동화된 기능·통합·성능 테스트
 14. Docker Compose 기반 실행 환경
+15. AI 기반 C2 후보 분석 및 인텔리전스 (MISP, Splunk, Mock artifact)
+16. 분석가 정의 payload signature와 detector weight preset
 
 ## 3.2 MVP에서 제외되는 기능
 
@@ -68,7 +70,7 @@ DDoS 봇넷에 감염된 여러 단말은 공격 명령 수신, 상태 보고, �
 * 실제 공격 대상에 대한 능동 스캐닝
 * C2 서버에 대한 접속 또는 명령 수행
 * 봇넷 제거 또는 감염 단말 치료
-* 완전한 머신러닝 기반 분류 모델
+* 완전한 머신러닝 기반 분류 모델 (신경망 등). Z-score 기반 인구 집단 이상 탐지(`ml_population_anomaly`)는 포함.
 * 수십 Gbps 이상의 하드웨어 가속 패킷 처리
 * Kubernetes 기반 배포
 * 장기 보관용 빅데이터 클러스터
@@ -133,48 +135,47 @@ DDoS 봇넷에 감염된 여러 단말은 공격 명령 수신, 상태 보고, �
 
 ## 5.1 Sensor Agent
 
-* 언어: Go
+* 언어: Go 1.25
 * 패킷 캡처:
-
   * Linux AF_PACKET
   * TPACKET_V3 사용 우선
   * 개발 및 테스트 환경에서는 libpcap 사용 허용
 * 패킷 파싱: gopacket 또는 동일 수준 라이브러리
-* Controller 통신: gRPC
-* 인증: mTLS
-* 로컬 버퍼: 파일 기반 spool queue
+* Controller 통신: JSON/REST over HTTPS (mTLS 또는 bearer token)
+* 인증: token + HMAC signature (mTLS는 옵션)
+* 로컬 버퍼: 파일 기반 spool queue (`sensor/internal/spool`)
 * 설정 형식: YAML
+* 배포 산출물: `c2hunter-sensor` 바이너리, systemd unit
 
 ## 5.2 Controller 및 분석 시스템
 
 * 언어: Python 3.12 이상
 * API: FastAPI
 * 데이터 검증: Pydantic
-* 비동기 작업: Celery 또는 동급의 작업 큐
+* 비동기 작업: Redis list queue + lease 기반 Worker (`sensor/worker/src/c2hunter_worker`)
 * Queue/Cache: Redis
-* 분석 처리:
-
-  * Polars
-  * NumPy
-  * SciPy
-* 메타데이터 DB: PostgreSQL
+* 분석 처리: 표준 라이브러리 (statistics, ipaddress) + 분석 전용 모듈
+* 메타데이터 DB: PostgreSQL ( psycopg 3 )
 * Flow 저장소:
-
-  * 기본 권장: ClickHouse
-  * 테스트 환경: PostgreSQL 또는 파일 기반 저장소 사용 가능
+  * PostgreSQL (기본, analysis-flow-tables 스키마)
+  * ClickHouse는 옵션 (대규모 프로덕션)
 * PCAP/Object Storage:
-
   * MinIO
   * S3-compatible API
+* AI Assist:
+  * Local LLM Gateway (`ollama`, `openai-compatible`, 또는 `fake`)
+  * 구조화된 출력 검증 (Pydantic schema)
+  * MISP draft, Splunk SPL/DTM/MACB, Mock integration artifacts
 
 ## 5.3 Web UI
 
-* React
+* React 19
 * TypeScript
 * Vite
 * 서버 상태 관리: TanStack Query
-* 차트: ECharts 또는 Recharts
-* UI 컴포넌트: 프로젝트에서 하나의 라이브러리만 선택해 일관되게 사용
+* 라우팅: react-router-dom
+* UI: native CSS (외부 컴포넌트 라이브러리 없음)
+* 차트: SVG + native
 
 ## 5.4 실행 환경
 
@@ -476,37 +477,41 @@ CANCELLED
 
 사용자는 다음 조건을 지정할 수 있어야 한다.
 
+* 분석 이름 (`name`)
+* 멱등성 키 (`idempotency_key`)
 * Sensor ID 또는 Sensor Group
 * 분석 시작 시간
 * 분석 종료 시간
+* 모드 (`LIVE`, `HISTORICAL`, `REANALYSIS`, `PCAP_UPLOAD`)
 * 실시간 캡처 기간
 * 최대 패킷 수
 * 최대 바이트 수
 * Inbound/Outbound 방향
 * BPF 필터
-* 내부 네트워크
+* 내부 네트워크 (필수)
 * 분석 대상 프로토콜
 * PCAP 저장 여부
 * 분석 프로파일
 * 최소 감염 단말 수
 * C2 후보 최소 점수
+* Detector 가중치 (실행별)
+* ML 인구 집안 이상 탐지 활성화 여부
 
 ## 9.2 분석 요청 예
 
 ```json
 {
   "name": "suspected-botnet-analysis-001",
-  "sensor_ids": [
-    "sensor-a",
-    "sensor-b"
-  ],
+  "idempotency_key": "suspected-botnet-001-20260815",
+  "sensor_ids": ["sensor-a", "sensor-b"],
+  "mode": "LIVE",
+  "start_time": "2026-08-15T00:00:00Z",
+  "end_time": "2026-08-15T00:05:00Z",
   "capture": {
     "duration_seconds": 300,
     "max_packets": 2000000,
-    "directions": [
-      "INBOUND",
-      "OUTBOUND"
-    ],
+    "directions": ["INBOUND", "OUTBOUND"],
+    "protocols": ["TCP", "UDP"],
     "bpf_filter": "ip",
     "store_pcap": true
   },
@@ -515,10 +520,30 @@ CANCELLED
     "minimum_distinct_clients": 5,
     "minimum_candidate_score": 60,
     "command_correlation_window_seconds": 10,
-    "periodicity_min_samples": 5
-  }
+    "periodicity_min_samples": 5,
+    "well_known_port_max": 1023,
+    "non_well_known_port_min_ratio": 0.75,
+    "high_volume_bytes_threshold": 52428800,
+    "high_volume_packet_threshold": 100000,
+    "high_volume_penalty": 30,
+    "tcp_session_gating_enabled": true,
+    "detector_weights": {
+      "common_destination": 1.0,
+      "periodic_beacon": 1.5,
+      "single_host_composite_beacon": 2.0
+    },
+    "ml_anomaly_enabled": false,
+    "ml_anomaly_z_threshold": 3.5
+  },
+  "internal_networks": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
 }
 ```
+
+- `idempotency_key`로 동일 요청 중복 제출 방지.
+- `mode=LIVE`는 실시간 캡처 후 분석, `HISTORICAL`는 저장된 데이터, `PCAP_UPLOAD`는 업로드 PCAP 분석.
+- `internal_networks`는 필수이며 내부/외부 분류 기준.
+- `detector_weights`는 분석가 가중치 (default 1.0, max 2.0). 특정 detector의 기여도를 1.5배~2.0배로 조정.
+- `ml_anomaly_enabled=true` 시 Z-score 기반 인구 집단 이상 탐지 활성화.
 
 ## 9.3 과거 데이터 분석
 
@@ -543,6 +568,27 @@ class Detector:
         ...
 ```
 
+구현된 built-in detector (12개):
+
+| detector name                 | 이름 / 역할                                        |
+| --------------------------- | --------------------------------------------- |
+| `common_destination`        | 다수 단말 공통 목적지                             |
+| `non_well_known_port`       | 비 WELL-KNOWN PORT 사용                      |
+| `periodic_beacon`           | 주기적 Beacon                                |
+| `single_host_composite_beacon` | 단일 호스트 composite beacon              |
+| `analyst_payload_signature` | 분석가 정의 payload signature                 |
+| `synchronized_communication` | 동기화된 통신                                 |
+| `command_attack_correlation` | 명령 수신 후 공격 상관관계                          |
+| `persistence_rarity`        | 장기 지속성 및 목적지 희귀성                       |
+| `protocol_similarity` | 프로토콜·payload 유사성                       |
+| `ml_population_anomaly`     | 인구 집단 이상 탐지 (통계)                     |
+| `multi_sensor_context`      | 다중 센서 상관분석                                |
+| `tcp_session_quality`       | TCP 세션 품질 지표 (SYN/ACK 등)              |
+
+`analysis/scoring.py`의 `DETECTOR_NAMES`, `analysis/detectors.py`의 실제 detector 클래스와 1대1로 대응한다.
+
+추가로 분석가는 `analysis.custom.py`에 정의된 `CustomDetector` 또는 `docs/custom-detectors.md`의 Python plugin contract를 통해 자기 정의 detector를 등록할 수 있다. custom detector는 `DETECTOR` 객체, `create_detector()` factory, 또는 `analyze(context)` 함수 중 하나로 export하며, `build_detector_registry`에 추가된다.
+
 ## 10.1 다수 단말 공통 목적지 탐지
 
 동일한 외부 IP와 통신한 내부 단말 수를 계산한다.
@@ -561,7 +607,15 @@ class Detector:
 
 단, DNS, NTP, CDN, 공개 클라우드 및 사용자 등록 allowlist는 감점 또는 제외한다.
 
-## 10.2 주기적 Beacon 탐지
+## 10.2 비 WELL-KNOWN PORT 사용
+
+C2는 자주 `80`, `443` 같은 잘 알려진 포트가 아닌 비표준 포트를 사용해 탐지를 회피한다. `non_well_known_port` detector는 다음 조건을 검사한다.
+
+* 내부 단말이 `1024`보다 높은 포트로 외부 IP와 통신했는가
+* 해당 포트가 잘 알려진 서비스 포트(`80`, `443`, `53`, `5353` 등)가 아닌가
+* 관찰 횟수가 최소 기준 이상인가
+
+## 10.3 주기적 Beacon 탐지
 
 각 내부 단말과 외부 IP 간 통신 시간 간격을 분석한다.
 
@@ -586,7 +640,26 @@ class Detector:
 
 정확히 일정한 통신뿐 아니라 ±10~30% jitter가 포함된 패턴도 탐지할 수 있어야 한다.
 
-## 10.3 동기화된 통신 탐지
+## 10.4 단일 호스트 Composite Beacon
+
+`periodic_beacon`은 단말이 여러 외부 IP로 주기적으로 통신하는 패턴을 포착한다. `single_host_composite_beacon`은 **단일 외부 IP**에 대한 **단일 내부 단말**이 주기적이라는 복합 신호를 포착한다.
+
+* 단 하나의 호스트만 관찰되더라도 `single_host_composite_beacon`이 감점되지 않도록 composite score를 계산한다
+* `periodicity_min_samples` 파라미터로 최소 반복 횟수를 설정한다
+
+## 10.5 분석가 정의 Payload Signature
+
+`analyst_payload_signature`는 등록된 payload signature 목록을 이용해 Flow의 payload 해시와 메타데이터를 매칭한다. signature는 `POST /api/v1/payload-signatures`로 등록되며(`controller/repositories.py`의 `save_payload_signature`가 저장), `GET /api/v1/payload-signatures`로 조회, `PATCH /api/v1/payload-signatures/{signature_id}`로 수정, `DELETE /api/v1/payload-signatures/{signature_id}`로 삭제된다.
+
+매칭 조건:
+
+* payload hash (`payload_hash`)
+* protocol / port
+* host (DNS query name 또는 HTTP Host)
+
+매칭된 signature는 `description`과 `confidence`를 Evidence에 포함시킨다.
+
+## 10.6 동기화된 통신 탐지
 
 다수 내부 단말이 짧은 시간 범위 내에 동일한 외부 IP에 연결하는지 분석한다.
 
@@ -609,7 +682,7 @@ class Detector:
 
 반복적으로 동기화 이벤트가 발생하면 높은 점수를 부여한다.
 
-## 10.4 명령 수신 후 공격 트래픽 상관분석
+## 10.7 명령 수신 후 공격 트래픽 상관분석
 
 C2 후보로부터 다수 내부 단말에 작은 Inbound 패킷이 전달된 이후, 동일 단말들에서 공통된 Outbound 트래픽 증가가 발생하는지 확인한다.
 
@@ -634,7 +707,7 @@ C2 후보로부터 다수 내부 단말에 작은 Inbound 패킷이 전달된 �
 * 동일한 목적지 포트 또는 패킷 크기
 * 여러 센서에서 동일한 공격 시작 시점 관찰
 
-## 10.5 저용량 지속 통신 탐지
+## 10.8 저용량 지속 통신 탐지
 
 다음 특성을 가진 통신을 탐지한다.
 
@@ -644,7 +717,13 @@ C2 후보로부터 다수 내부 단말에 작은 Inbound 패킷이 전달된 �
 * 외부 IP 변경이 적음
 * 일반 사용자 트래픽과 비교해 목적지가 희귀함
 
-## 10.6 프로토콜 및 Payload 유사성
+`persistence_rarity`는 다음 항목을 검사한다.
+
+* 통신 지속 시간 (최소 시간 이상)
+* 관측된 flow 수
+* 외부 IP가 전체 population에서 얼마나 희귀한지 (분모 대비 비율)
+
+## 10.9 프로토콜 및 Payload 유사성
 
 다수 단말에서 다음 항목이 동일하거나 유사한지 비교한다.
 
@@ -660,7 +739,17 @@ C2 후보로부터 다수 내부 단말에 작은 Inbound 패킷이 전달된 �
 
 Payload 원문 대신 해시와 통계값을 우선 사용한다.
 
-## 10.7 센서 간 공통 컨텍스트 분석
+## 10.10 ML 기반 인구 집단 이상 탐지
+
+`ml_population_anomaly`는 전체 population의 통계적 기준(평균, 표준편차)을 이용해 외부 IP별 관측 횟수가 현저히 큰지를 계산한다.
+
+* Z-score 기반 이상 탐지
+* 최소 관측 수(`periodicity_min_samples`와 동일 파라미터) 이하인 후보는 제외
+* 기준을 초과한 후보는 별도 Evidence를 기록
+
+머신러닝 기반 classifier는 MVP에서는 사용하지 않는다. 향후 확장을 위해 detector interface를 분리해 두었다.
+
+## 10.11 다중 센서 상관분석
 
 동일한 IP 또는 통신 패턴이 복수 센서에서 관찰되는 경우 추가 점수를 부여한다.
 
@@ -678,7 +767,18 @@ time_bucket
 
 센서 시계 오차를 고려하여 기본 ±2초의 허용 범위를 적용한다.
 
-## 10.8 중복 패킷 제거
+## 10.12 TCP 세션 품질 지표
+
+`tcp_session_quality`는 다음 TCP 세션 메트릭을 계산한다.
+
+* SYN/ACK 비율
+* RST 비율
+* 재전송 (retransmit) 비율
+* TCP flag 조합 이상 (SYN flood / FIN-ACK 이상 순서 등)
+
+해상도가 높은 C2 채널은 낮은 재전송률과 높은 SYN/ACK 비율을 보인다.
+
+## 10.13 중복 패킷 제거
 
 미러 구성에 따라 동일 패킷이 여러 인터페이스 또는 센서에서 중복 관찰될 수 있다.
 
@@ -699,41 +799,57 @@ time_bucket
 
 # 11. C2 후보 점수 모델
 
-각 후보 IP는 0~100 사이 점수를 가진다.
+각 후보 IP는 0~100 사이 점수를 가진다. `analysis/scoring.py`의 `score_candidates`가 계산한다.
 
-초기 기본 가중치는 다음과 같다.
+초기 기본 가중치는 detector type별 CAPS이다.
 
-| 항목               | 최대 점수 |
-| ---------------- | ----: |
-| 다수 내부 단말과 통신     |    20 |
-| 주기적 Beacon       |    15 |
-| 단말 간 통신 동기화      |    15 |
-| 명령 후 공격 트래픽 발생   |    25 |
-| 복수 센서 관찰         |    10 |
-| 프로토콜·Payload 유사성 |    10 |
-| 장기 지속성 및 목적지 희귀성 |     5 |
+| detector type              | 최대 점수 |
+| ------------------------ | ----: |
+| `COMMON_DESTINATION`     |    20 |
+| `PERIODIC_BEACON`        |    15 |
+| `SYNCHRONIZED_COMMUNICATION` | 15 |
+| `COMMAND_ATTACK_CORRELATION` | 25 |
+| `MULTI_SENSOR_CONTEXT`   |    10 |
+| `PROTOCOL_PAYLOAD_SIMILARITY` | 10 |
+| `LOW_VOLUME_PERSISTENCE_RARITY` | 5 |
+| `SINGLE_HOST_BEACON`     |    35 |
+| `ANALYST_PAYLOAD_SIGNATURE` | 80 |
+| `NON_WELL_KNOWN_PORT`    |    25 |
+| `ML_POPULATION_ANOMALY`  |     5 |
+| `TCP_SESSION_QUALITY`    |    15 |
 
-감점 항목:
+각 evidence type마다 contributor의 raw_score가 CAPS로 clip되어 합산된다. 동일 type에서 다수 detector가 발화하면 가장 큰 raw_score만 유효한 것이 아니라 type별로 독립 누적된다 (CAPS 이하).
 
-| 항목                   |     감점 |
-| -------------------- | -----: |
-| 명시적 allowlist        |  후보 제외 |
-| DNS/NTP 등 공용 인프라     | 최대 -30 |
-| CDN 또는 대형 클라우드 공유 IP | 최대 -20 |
-| 내부 업무 서버             | 최대 -40 |
-| 단일 내부 단말에서만 관찰       | 최대 -20 |
-| 표본 수 부족              | 최대 -20 |
+## 11.1 Detector 가중치
 
-점수 구간:
+`detector_weights` (default 1.0, max 2.0)를 통해 특정 detector의 기여도를 조정할 수 있다. 가중치 2.0이면 CAPS의 2배까지 올라간다. `POST /api/v1/detector-weight-presets`로 실행별 가중치가 저장/복원된다.
+
+## 11.2 감점 항목
+
+| 항목                   | 감점       |
+| -------------------- | --------- |
+| 명시적 allowlist        | 후보 제외 (`AllowlistEntry.matches`가 참이면 candidate 자체 비활성화) |
+| 단일 내부 단말에서만 관찰       | -10 또는 -20 (`SINGLE_HOST_BEACON` 있으면 -10, 없으면 -20) |
+| 분석 표본 부족              | -20       |
+| 공용 DNS/NTP 정책 일치     | -30       |
+| CDN/cloud 정책 일치       | -20       |
+| 대용량 endpoint 통신 (bytes/packets threshold 초과) | -30  |
+| 대용량 TCP 세션 (adjustment 후 score cap)  | 조정 후 점수가 `high_volume_tcp_session_score_cap`(기본 20)을 초과하면 그 값으로 cap  |
+
+`ANALYST_PAYLOAD_SIGNATURE`의 EXACT 매칭(`match_mode == "EXACT"`)은 위 감점/제외 적용에서 제외된다 (분석가가 직접 등록한 시그니처인 경우).
+
+## 11.3 점수 구간
 
 ```text
-0~39   LOW
-40~59  MEDIUM
-60~79  HIGH
 80~100 CRITICAL
+60~79  HIGH
+40~59  MEDIUM
+0~39   LOW
 ```
 
-점수와 함께 반드시 점수 산출 근거를 제공한다. 단순히 숫자만 반환해서는 안 된다.
+최종 점수는 `max(0, min(100, round(raw + adjustments)))`로 0~100 범위로 clamp된다.
+
+점수와 함께 반드시 점수 산출 근거를 제공한다. 단순히 숫자만 반환해서는 안 된다. `Candidate.adjustments`에 `ScoreAdjustment(kind, points, explanation)`이 저장되며, 각 adjustment는 어떤 규칙이 얼마나 감점/보정을 했는지를 설명한다.
 
 ---
 
@@ -887,6 +1003,28 @@ Dashboard에는 다음 정보를 표시한다.
 
 Allowlist에 의해 제외된 결과도 감사 목적으로 별도 통계에 기록한다.
 
+## 13.7 AI C2 분석 화면
+
+C2 후보의 상세 화면 옆에 AI 분석 패널을 표시한다.
+
+* 분석 트리거: 후보 상세에서 "AI Analyze" 버튼
+* 진행 상태: `QUEUED` → `RUNNING` → `SUCCEEDED` / `FAILED`
+* 결과:
+  - AI summary (Korean text, 구조화된)
+  - verdict: `CONFIRMED_C2` / `LIKELY_FP` / `INCONCLUSIVE`
+  - confidence: `HIGH` / `MEDIUM` / `LOW`
+  - key_indicators (IP, 포, 프로토콜, 시그니처)
+  - risk_factors (감점/고려 사유)
+  - recommended_actions (단기 조치)
+* Artifacts:
+  - MISP draft (JSON)
+  - Splunk SPL/DTM/MACB
+  - Mock integration
+* 재분석: AI summary가 아닌 후보 상태에 따라 "Re-analyze" 버튼
+* 감사: 모든 AI 호출이 감사 로그에 기록 (token, prompt, artifact)
+
+AI 분석은 비동기로 처리되며, 결과 저장까지 통상 30초~3분. `POST /analysis-jobs/{job_id}/ai-runs`로 run을 생성한 뒤 `GET /ai-runs/{run_id}`로 run 상태를, `GET /ai-assessments/{assessment_id}`로 assessment 결과를 폴링한다.
+
 ---
 
 # 14. PCAP 저장 및 다운로드
@@ -948,32 +1086,104 @@ API prefix:
 주요 API:
 
 ```text
+# Analysis jobs
 POST   /analysis-jobs
 GET    /analysis-jobs
 GET    /analysis-jobs/{job_id}
+PATCH  /analysis-jobs/{job_id}
+DELETE /analysis-jobs/{job_id}
 POST   /analysis-jobs/{job_id}/cancel
 POST   /analysis-jobs/{job_id}/reanalyze
-
 GET    /analysis-jobs/{job_id}/candidates
 GET    /analysis-jobs/{job_id}/candidates/{candidate_id}
+GET    /analysis-jobs/{job_id}/flows
+GET    /analysis-jobs/{job_id}/flows/{flow_id}/payload-preview
+GET    /analysis-jobs/{job_id}/flows/{flow_id}/detection-guidance
+GET    /analysis-jobs/{job_id}/flow-labels
+POST   /analysis-jobs/{job_id}/flow-labels
 
+# PCAP upload analysis
+POST   /pcap-analysis-jobs
+
+# Candidate triage (분석 후 workflow)
+GET    /candidates
+GET    /candidates/{candidate_id}
+PATCH  /candidates/{candidate_id}
+DELETE /candidates/{candidate_id}
+POST   /candidates/{candidate_id}/verdicts
+POST   /candidates/{candidate_id}/actions
+POST   /candidates/{candidate_id}/threat-intelligence/lookups
+POST   /candidates/{candidate_id}/misp-exports
+POST   /candidate-bulk-operations
+GET    /integration-settings
+PUT    /integration-settings
+
+# Sensors
+POST   /sensors/register
 GET    /sensors
 GET    /sensors/{sensor_id}
+GET    /sensors/{sensor_id}/agent-config
+POST   /sensors/{sensor_id}/heartbeat
+POST   /sensors/{sensor_id}/flow-batches
+PUT    /sensors/{sensor_id}/pcap-segments/{segment_id}
+POST   /sensors/{sensor_id}/credentials/rotate
+POST   /sensors/{sensor_id}/revoke
 POST   /sensor-groups
 GET    /sensor-groups
+GET    /sensor-pcaps
+GET    /sensor-pcaps/{segment_id}/download
 
+# Sensor enrollments (admin)
+GET    /sensor-enrollments
+GET    /sensor-enrollments/{enrollment_id}
+DELETE /sensor-enrollments/{enrollment_id}
+
+# Dashboard
+GET    /dashboard
+
+# PCAP exports
 POST   /pcap-exports
 GET    /pcap-exports/{export_id}
 GET    /pcap-exports/{export_id}/download
 
-GET    /allowlist
+# Allowlist
 POST   /allowlist
+GET    /allowlist
 DELETE /allowlist/{entry_id}
 
+# Detector weight presets
+GET    /detector-weight-presets
+POST   /detector-weight-presets
+PATCH  /detector-weight-presets/{preset_id}
+DELETE /detector-weight-presets/{preset_id}
+
+# Payload signatures
+GET    /payload-signatures
+PATCH  /payload-signatures/{signature_id}
+DELETE /payload-signatures/{signature_id}
+
+# AI C2 analysis (run -> assessment -> artifact lifecycle)
+POST   /analysis-jobs/{job_id}/ai-runs
+GET    /analysis-jobs/{job_id}/ai-runs
+POST   /ai-runs/{run_id}/cancel
+GET    /ai-runs/{run_id}
+GET    /ai-runs/{run_id}/assessments
+GET    /ai-assessments/{assessment_id}
+GET    /ai-assessments/{assessment_id}/evidence-bundle
+POST   /ai-assessments/{assessment_id}/artifacts/regenerate
+POST   /ai-assessments/{assessment_id}/feedback
+GET    /ai-assessments/{assessment_id}/feedback
+GET    /ai-artifacts/{artifact_id}
+POST   /ai-artifacts/{artifact_id}/approve
+POST   /ai-artifacts/{artifact_id}/reject
+
+# Health / observability
 GET    /health
 GET    /ready
 GET    /metrics
 ```
+
+`/pcap-analysis-jobs`은 업로드 PCAP 분석(`mode=PCAP_UPLOAD`)을 위한 별도 진입점이고, candidate triage route들은 분석 완료 후 triage·AI assessment·MISP 자동화 워크플로를 담당한다. `candidate` route의 `verdicts`·`actions`는 복수 형식이며, 후보별 PCAP 조회는 `pcap-exports`를 통해 수행한다.
 
 OpenAPI 문서를 자동 생성한다.
 
@@ -1020,30 +1230,37 @@ OpenAPI 문서를 자동 생성한다.
 
 ## 18.1 통신 보안
 
-* Sensor와 Controller 간 mTLS 적용
-* Web 및 API는 HTTPS 사용
-* 평문 인증정보 저장 금지
-* 인증서 만료 확인
-* Sensor certificate revocation 지원
+* Sensor ↔ Controller: JSON/REST over HTTPS (mTLS 또는 BEARER token + HMAC-signed envelope). `c2hunter-sensor/internal/transport/http.go`가 구현한다.
+* Controller ↔ Web: HTTPS required. nginx (`web/nginx.conf`)이 TLS를终结한다.
+* 내부 서비스 (Controller ↔ Worker, Worker ↔ Analysis): localhost 또는 Docker internal network, plaintext 허용 (isolated)
+* PCAP: MinIO S3 (private endpoint), presigned URL (max 24h)
+* Postgres/ClickHouse/Redis: local 또는 Docker internal, TLS optional
+* Secrets: `.env` (gitignored), `c2hunter-sensor/environment` (mode 0640, root:c2hunter-sensor). Plaintext token은 log나 DB에 남지 않는다.
+* Payload raw bytes: sensor `payload_preview_bytes: 0`이 default (비활성). 분석은 payload 해시와 통계값 기반 (`analysis/payload_features.py`)
+* AI model: local Ollama 기본. external endpoint (openai-compatible, gpt-oss) 사용 시 Evidence가 out of host로 나가고 시작 시 warning이 출력된다. `C2HUNTER_AI_MODEL_API_KEY`는 env var에 저장된다.
+* DB password/secret: 환경 변수 또는 secret manager (`.env`에 plaintext 기록 금지)
+* Rate limit: `C2HUNTER_RATE_LIMIT_WINDOW_SECONDS`, `C2HUNTER_DEV_LOGIN_RATE_LIMIT`, `C2HUNTER_ANALYSIS_JOB_RATE_LIMIT`
+* 인증서 만료 확인 및 revocation 지원
 * API 입력값 검증
 
-## 18.2 권한
+## 18.2 권한 (Role)
 
-최소 역할:
+Role는 `controller/security.py`의 `Role` enum으로 정의된다.
 
 ```text
-ADMIN
-ANALYST
-VIEWER
-SENSOR
+VIEWER  — candidate/flow/PCAP download read-only
+ANALYST — allowlist, payload-signature, verdict, AI analysis management
+ADMIN   — sensor enrollment, detector weight preset, AI model config, token management
 ```
 
-권한 예:
+Sensor는 dedicated sensor API로 접근하며 (`/api/v1/sensor-*`) 일반 human role과 분리된다.
 
-* ADMIN: 전체 설정과 사용자 관리
-* ANALYST: 분석 생성, 재분석, PCAP 다운로드
-* VIEWER: 조회만 가능
-* SENSOR: Sensor API만 접근
+- **Authentication**: static bearer token. SHA-256 digest가 env var에 저장 (e.g. `C2HUNTER_ANALYST_TOKEN_SHA256`). plaintext는 log나 DB에 남지 않는다.
+- **Development login**: `C2HUNTER_DEV_LOGIN_ENABLED=true`로 일시 token을 발급 가능. TTL 최대 24h. production에서는 반드시 `false`.
+- **Token binding**: `controller/security.py`의 `bind_role(token_digest)`가 token → role 매핑을 관리한다.
+- **Rate limiting**: `C2HUNTER_RATE_LIMIT_WINDOW_SECONDS` per client IP (default 60s window).
+- **Fail-closed auth**: `C2HUNTER_API_AUTH_REQUIRED=true`는 default. isolated test만 off.
+- **Proxy trust**: `C2HUNTER_TRUSTED_PROXY_CIDRS`로 신뢰할 proxy만 허용.
 
 ## 18.3 감사 로그
 
@@ -1053,6 +1270,10 @@ SENSOR
 * 분석 생성 및 취소
 * PCAP 다운로드
 * Allowlist 변경
+* Payload signature 변경
+* Detector weight preset 변경
+* AI assessment 실행·결과·artifact 승인
+* Verdict 등록
 * 센서 등록 및 해제
 * 설정 변경
 * 사용자 권한 변경
@@ -1117,6 +1338,90 @@ Controller 또는 네트워크가 느린 경우 Sensor는 다음 순서로 대�
 5. 최대 용량 초과 시 오래된 데이터 삭제 또는 캡처 중지
 
 데이터가 삭제된 경우 조용히 무시하지 말고 손실량을 Controller에 보고한다.
+
+## 19.3 환경 설정
+
+### `c2hunter-sensor/config.yaml` (Sensor)
+
+```yaml
+controller:
+  url: https://controller.example.com
+sensor:
+  name: edge-sensor
+agent:
+  state_file: /var/lib/c2hunter-sensor/state/agent.json
+  config_poll_interval_seconds: 1
+  capture_mode: on_demand  # or continuous
+capture_sources: []
+internal_networks: []
+batch:
+  max_items: 1000
+  max_bytes: 1048576
+capture:
+  job_id: continuous
+  packet_queue_size: 4096
+  payload_preview_bytes: 0
+spool:
+  directory: /var/lib/c2hunter-sensor/spool
+  max_bytes: 1073741824
+  max_age_seconds: 86400
+pcap:
+  directory: /var/lib/c2hunter-sensor/pcap
+  max_segment_bytes: 134217728
+  max_segment_duration_seconds: 300
+  max_disk_bytes: 1073741824
+  queue_size: 4096
+```
+
+Sensor 인증은 `/etc/c2hunter-sensor/environment` (mode 0640, `root:c2hunter-sensor`)의 `C2HUNTER_ENROLLMENT_TOKEN`으로 처리한다.
+
+### `.env.example` (Controller / development)
+
+```bash
+POSTGRES_DB=c2hunter
+POSTGRES_USER=c2hunter
+POSTGRES_PASSWORD=change-me-postgres
+CLICKHOUSE_DB=c2hunter
+CLICKHOUSE_USER=c2hunter
+CLICKHOUSE_PASSWORD=change-me-clickhouse
+MINIO_ROOT_USER=c2hunter-dev
+MINIO_ROOT_PASSWORD=change-me-minio-at-least-8-characters
+CONTROLLER_PORT=8000
+WEB_PORT=8080
+C2HUNTER_ENVIRONMENT=development
+C2HUNTER_PCAP_UPLOAD_MAX_BYTES=524288000
+C2HUNTER_PCAP_UPLOAD_MAX_PACKETS=2000000
+C2HUNTER_DEV_LOGIN_ENABLED=true
+C2HUNTER_DEV_TOKEN_TTL_SECONDS=28800
+C2HUNTER_API_AUTH_REQUIRED=true
+C2HUNTER_VIEWER_TOKEN_SHA256=
+C2HUNTER_ANALYST_TOKEN_SHA256=
+C2HUNTER_ADMIN_TOKEN_SHA256=
+C2HUNTER_RATE_LIMIT_WINDOW_SECONDS=60
+C2HUNTER_DEV_LOGIN_RATE_LIMIT=10
+C2HUNTER_ENROLLMENT_CLAIM_RATE_LIMIT=10
+C2HUNTER_ANALYSIS_JOB_RATE_LIMIT=30
+C2HUNTER_TRUSTED_PROXY_CIDRS=172.30.0.10/32
+C2HUNTER_AI_ANALYSIS_ENABLED=false
+C2HUNTER_AI_MODEL_PROVIDER=fake
+C2HUNTER_AI_MODEL_BASE_URL=http://host.docker.internal:11434
+C2HUNTER_AI_MODEL_NAME=qwen3.6-agent:256k
+C2HUNTER_AI_MODEL_API_KEY=
+C2HUNTER_AI_MODEL_TIMEOUT_SECONDS=120
+C2HUNTER_AI_MODEL_RETRIES=1
+C2HUNTER_AI_MODEL_TEMPERATURE=0.1
+C2HUNTER_AI_MODEL_CONTEXT_TOKENS=16384
+C2HUNTER_AI_MODEL_MAX_OUTPUT_TOKENS=4096
+C2HUNTER_AI_METRICS_PORT=9102
+C2HUNTER_VIRUSTOTAL_API_KEY=
+C2HUNTER_ABUSEIPDB_API_KEY=
+C2HUNTER_THREAT_INTEL_TIMEOUT_SECONDS=10
+C2HUNTER_THREAT_INTEL_REQUEST_DELAY_SECONDS=1
+C2HUNTER_ABUSEIPDB_MAX_AGE_DAYS=90
+C2HUNTER_MISP_URL=
+```
+
+Production에서는 `.env` 대신 secret manager (Vault, AWS Secrets Manager 등)에서 주입하고 `C2HUNTER_DEV_LOGIN_ENABLED=false`로 고정한다.
 
 ---
 
@@ -1422,49 +1727,170 @@ c2hunter/
 ├── README.md
 ├── SPEC.md
 ├── TASKS.md
-├── CHANGELOG.md
+├── IMPLEMENTATION_REPORT.md
+├── ENVIRONMENT_STATUS.md
+├── HANDOFF.md
+├── REVIEW.md
+├── REVIEW2.md
+├── REVIEW3.md
+├── REVIEW4.md
+├── SETUP_NOTES.md
+├── FINAL_RESOLUTION.md
+├── FINAL_SETUP_NOTES.md
+├── EXECUTION_GUIDANCE.md
+├── ASSET-NOTES.md
+├── AI_C2_ANALYSIS_SYSTEM.md
+├── LICENSE
 ├── Makefile
 ├── docker-compose.yml
 ├── .env.example
+├── .env (gitignored)
+├── requirements.txt (Python pinned)
 ├── docs/
 │   ├── architecture.md
 │   ├── data-model.md
 │   ├── detection-logic.md
+│   ├── detection-adjustment-guidance.md
 │   ├── deployment.md
 │   ├── operations.md
 │   ├── security.md
+│   ├── ai-c2-analysis-api.md
+│   ├── ai-c2-analysis-operations.md
+│   ├── ai-c2-analysis-progress.md
+│   ├── ai-c2-analysis-security.md
+│   ├── candidate-triage-misp-automation.md
+│   ├── custom-detectors.md
+│   ├── dashboard-overview.md
+│   ├── external-api-reference.md
+│   ├── human-guided-detection-plan.md
+│   ├── human-guided-detection.md
+│   ├── performance-scaling-plan.md
+│   ├── c2hunter-intro.html
+│   ├── assets/
 │   └── adr/
 ├── sensor/
+│   ├── go.mod (module c2hunter/sensor)
+│   ├── go.sum
 │   ├── cmd/
 │   ├── internal/
-│   ├── config/
-│   ├── Dockerfile
-│   └── tests/
+│   │   ├── agent/
+│   │   ├── batch/
+│   │   ├── capture/
+│   │   ├── contract/
+│   │   ├── direction/
+│   │   ├── flow/
+│   │   ├── flowbatch/
+│   │   ├── interfaces/
+│   │   ├── metadata/
+│   │   ├── packet/
+│   │   ├── payloadfeature/
+│   │   ├── pcap/
+│   │   ├── runtime/
+│   │   ├── spool/
+│   │   ├── telemetry/
+│   │   └── transport/ (JSON/REST)
+│   ├── worker/ (Python analysis worker, src/c2hunter_worker/)
+│   └── config/
+├── c2hunter-sensor/ (built binary + systemd unit, deployable)
 ├── controller/
-│   ├── app/
-│   ├── migrations/
-│   ├── Dockerfile
+│   ├── pyproject.toml (FastAPI, psycopg, redis, minio, httpx)
+│   ├── src/c2hunter_controller/
+│   │   ├── __init__.py
+│   │   ├── app.py
+│   │   ├── api_errors.py
+│   │   ├── ai_analysis.py
+│   │   ├── ai_artifacts.py
+│   │   ├── ai_evaluation.py
+│   │   ├── ai_evaluation_pipeline.py
+│   │   ├── ai_feedback.py
+│   │   ├── ai_gateway.py
+│   │   ├── ai_queueing.py
+│   │   ├── ai_worker.py
+│   │   ├── allowlist_api.py
+│   │   ├── capture_limits.py
+│   │   ├── config.py
+│   │   ├── detection_guidance.py
+│   │   ├── detector_weight_presets_api.py
+│   │   ├── flow_review.py
+│   │   ├── healthcheck.py
+│   │   ├── integrations.py
+│   │   ├── jobs.py
+│   │   ├── logging.py
+│   │   ├── operations_api.py
+│   │   ├── payload_signatures_api.py
+│   │   ├── pcap.py
+│   │   ├── production.py
+│   │   ├── production_patch.py
+│   │   ├── queueing.py
+│   │   ├── repositories.py
+│   │   ├── retention.py
+│   │   ├── schemas.py
+│   │   ├── security.py
+│   │   ├── sensor_groups_api.py
+│   │   └── storage.py
 │   └── tests/
 ├── analysis/
-│   ├── detectors/
-│   ├── scoring/
-│   ├── pipeline/
+│   ├── pyproject.toml
+│   ├── src/c2hunter_analysis/
+│   │   ├── __init__.py
+│   │   ├── ai_candidates.py
+│   │   ├── custom.py
+│   │   ├── detectors.py
+│   │   ├── domain.py
+│   │   ├── high_volume_backtest.py
+│   │   ├── ingestion.py
+│   │   ├── pcap.py
+│   │   ├── payload_features.py
+│   │   ├── scoring.py
+│   │   └── tcp_sessions.py
 │   └── tests/
 ├── web/
-│   ├── src/
+│   ├── Dockerfile
+│   ├── e2e/
+│   ├── index.html
+│   ├── nginx-main.conf
+│   ├── nginx.conf
+│   ├── package.json
+│   ├── package-lock.json
+│   ├── playwright.config.ts
+│   ├── src/ (React 19 + TS + Vite)
+│   │   ├── AnalysisConfiguration.tsx
+│   │   ├── App.tsx
+│   │   ├── api.ts
+│   │   ├── main.tsx
+│   │   └── styles.css
 │   ├── tests/
-│   └── Dockerfile
-├── proto/
-│   └── sensor.proto
-├── tools/
-│   ├── traffic-generator/
-│   ├── pcap-inspector/
-│   └── benchmark/
-├── testdata/
-│   ├── expected/
-│   └── generated/
+│   └── vite.config.ts
+├── deploy/
+│   └── sensor/
 ├── scripts/
-└── artifacts/
+│   ├── build-sensor-tarball.sh
+│   ├── install-sensor.sh
+│   ├── controller.Dockerfile
+│   ├── sensor.Dockerfile
+│   ├── worker.Dockerfile
+│   └── migrate-clickhouse-flow-layout.sh
+├── tools/
+│   ├── benchmark/
+│   ├── traffic-generator/
+│   └── check_tracked_elf.py
+├── testdata/
+│   ├── README.md
+│   └── generated/
+├── artifacts/
+│   ├── ai-benchmark-report.json
+│   ├── ai-evaluation-report.json
+│   ├── ai-evaluation-report.md
+│   ├── benchmark-1m.json
+│   ├── benchmark-1m.md
+│   ├── high-volume-policy-backtest.json
+│   ├── high-volume-policy-backtest.md
+│   ├── coverage-analysis.json
+│   ├── c2hunter-sensor/
+│   └── c2hunter-sensor-dev-linux-amd64.tar.gz
+└── .github/
+    └── workflows/
+        └── ci.yml
 ```
 
 ---
@@ -1513,13 +1939,12 @@ make test
 ## Phase 4: 분석 엔진
 
 * 공통 detector 인터페이스
-* 공통 목적지 탐지
-* Beacon 탐지
-* 동기화 탐지
-* 명령·공격 상관분석
-* 다중 센서 상관분석
-* 점수 모델
+* 12개 built-in detector (`common_destination`, `non_well_known_port`, `periodic_beacon`, `single_host_composite_beacon`, `analyst_payload_signature`, `synchronized_communication`, `command_attack_correlation`, `persistence_rarity`, `protocol_similarity`, `multi_sensor_context`, `ml_population_anomaly`, `tcp_session_quality`; `analysis/detectors.py`)
+* Custom Python detector framework (`analysis/custom.py`)
+* 점수 모델 (`analysis/scoring.py`, `CAPS`/`DETECTOR_NAMES`)
 * Allowlist
+* Detector weight presets
+* AI C2 analysis (`controller/ai_analysis.py`, `controller/ai_gateway.py`, `controller/ai_artifacts.py`, `controller/ai_worker.py`)
 
 ## Phase 5: Web UI
 
@@ -1531,12 +1956,13 @@ make test
 * 후보 상세
 * PCAP export
 * Allowlist
+* AI C2 분석 화면
 
 ## Phase 6: 테스트 및 최적화
 
-* 합성 PCAP 생성
+* 합성 PCAP 생성 (`tools/traffic-generator`)
 * 통합 테스트
-* E2E 테스트
+* E2E 테스트 (Playwright)
 * 100만 패킷 성능 테스트
 * 장애 복구 테스트
 * 문서화
@@ -1638,14 +2064,21 @@ make build
 make up
 make down
 make lint
+make lint-security
 make test
 make test-unit
 make test-integration
 make test-e2e
+make test-ai
+make evaluate-ai
 make generate-test-pcaps
 make benchmark-1m
+make benchmark-ai
+make backtest-high-volume
 make clean
 ```
+
+추가로 `make sensor-agent`(센서 빌드·실행), `make test-coverage`(coverage 보고) 타깃을 제공한다. `lint`는 Python/Go/TypeScript lint, `lint-security`은 비밀정보·취약점 스캐닝을 수행한다.
 
 `make test`는 최소한 단위 테스트와 핵심 통합 테스트를 수행해야 한다.
 
