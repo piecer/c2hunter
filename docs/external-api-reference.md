@@ -439,11 +439,16 @@ Content-Type: application/vnd.tcpdump.pcap    // raw PCAP data
 
 ```jsonc
 {
-  "active": true,              // 활성화 여부
-  "description": "...",         // 설명
-  "simhash_threshold": 3       // 구조적 매칭 해밍 거리 (1-6)
+  "name": "sig-1",                      // 시그니처 이름 (선택)
+  "description": "...",               // 설명 (선택)
+  "enabled": true,                    // 활성화 여부 (선택)
+  "length_tolerance_ratio": 0.1,     // 길이 허용 범위 비율 (0–1, 선택)
+  "entropy_tolerance": 0.5,          // 엔트로피 허용 차이 (0–4, 선택)
+  "simhash_max_distance": 6          // 구조적 매칭 최대 해밍 거리 (0–32, 선택)
 }
 ```
+
+> **주의**: 요청 body는 `extra="forbid"`이다. 알려진 필드가 아닌 값은 422 응답으로 거부된다. 최소 하나의 필드를 지정해야 한다.
 
 ---
 

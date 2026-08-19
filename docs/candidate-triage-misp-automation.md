@@ -260,24 +260,33 @@ resource를 생성하고 bounded worker가 항목별 작업을 수행한다.
 
 ## 9. API 계약 초안
 
+> **구현 상태**: 본 섹션은 Draft 상태의 API 계약 초안이다. 현재 구현된 endpoint는 `POST /api/v1/candidate-bulk-operations`과 `GET/PUT /api/v1/integration-settings`뿐이다.
+> 미구현 endpoint는 아래 표의 "미구현" 열을 참조한다.
+
 ADMIN 전용 설정 API:
 
-- `GET /api/v1/integration-settings`
-- `PUT /api/v1/integration-settings`
-- `POST /api/v1/integration-settings/test`
-- `POST /api/v1/integration-settings/import-environment` (최초 자동 import의 상태 확인/명시적 재시도)
+| endpoint | 상태 |
+|---|---|
+| `GET /api/v1/integration-settings` | 구현됨 |
+| `PUT /api/v1/integration-settings` | 구현됨 |
+| `POST /api/v1/integration-settings/test` | **미구현** |
+| `POST /api/v1/integration-settings/import-environment` | **미구현** |
 
 목록 중심 처리 API:
 
-- `POST /api/v1/candidate-bulk-operations`
-- `GET /api/v1/candidate-bulk-operations/{operation_id}`
-- `POST /api/v1/candidate-bulk-operations/{operation_id}/retry-failures`
+| endpoint | 상태 |
+|---|---|
+| `POST /api/v1/candidate-bulk-operations` | 구현됨 |
+| `GET /api/v1/candidate-bulk-operations/{operation_id}` | **미구현** |
+| `POST /api/v1/candidate-bulk-operations/{operation_id}/retry-failures` | **미구현** |
 
 자동화 관찰·수동 실행 API:
 
-- `GET /api/v1/candidates/{candidate_id}/automation-actions`
-- `POST /api/v1/candidates/{candidate_id}/automation-actions`
-- `POST /api/v1/candidates/{candidate_id}/immediate-action/re-evaluate`
+| endpoint | 상태 |
+|---|---|
+| `GET /api/v1/candidates/{candidate_id}/automation-actions` | **미구현** |
+| `POST /api/v1/candidates/{candidate_id}/automation-actions` | **미구현** |
+| `POST /api/v1/candidates/{candidate_id}/immediate-action/re-evaluate` | **미구현** |
 
 권한:
 
