@@ -127,6 +127,23 @@ class TCPConnectionProfile:
         return self.internally_initiated or self.established
 
     @property
+    def outbound_syn_unanswered(self) -> bool:
+        """An outbound SYN is present but neither the peer's SYN-ACK nor an
+        outbound ACK ever completed the handshake.
+
+        This is the signature of a connect() that never reached the remote
+        endpoint (drop, firewall, or scan retry). It is deliberately distinct
+        from ``scan_like``: a fully half-open handshake (SYN followed by a
+        SYN-ACK) is still a live conversation, not an unanswered probe.
+        """
+        return (
+            self.metadata_available
+            and self.internally_initiated
+            and self.inbound_syn_ack == 0
+            and self.outbound_ack_only == 0
+        )
+
+    @property
     def scan_like(self) -> bool:
         return (
             self.metadata_available
@@ -193,6 +210,7 @@ def qualified_candidate_groups(context: AnalysisContext) -> dict[str, list[FlowR
     if not bool(context.parameters.get("tcp_session_gating_enabled", True)):
         return raw
     allow_legacy = bool(context.parameters.get("tcp_allow_legacy_without_flags", True))
+    require_established = bool(context.parameters.get("tcp_require_established_outbound", False))
     grouped: dict[str, list[FlowRow]] = {}
     for candidate, rows in raw.items():
         connections = profiles.get(candidate, {})
@@ -206,6 +224,15 @@ def qualified_candidate_groups(context: AnalysisContext) -> dict[str, list[FlowR
             key = _connection_key(context, flow)
             profile = connections.get(key) if key is not None else None
             if key in suppressed:
+                continue
+            if (
+                require_established
+                and profile is not None
+                and profile.metadata_available
+                and profile.outbound_syn_unanswered
+            ):
+                # Outbound SYN without a SYN-ACK or ACK: the connection never
+                # completed, so this row contributes no session evidence.
                 continue
             if profile is None:
                 if allow_legacy and not flow.tcp_flags_observed:
@@ -225,6 +252,7 @@ def qualified_tcp_flow_ids(context: AnalysisContext) -> set[int]:
         return {id(flow) for flow in context.scoped_flows() if flow.protocol.upper() == "TCP"}
     raw, profiles = tcp_profiles(context)
     allow_legacy = bool(context.parameters.get("tcp_allow_legacy_without_flags", True))
+    require_established = bool(context.parameters.get("tcp_require_established_outbound", False))
     qualified: set[int] = set()
     for candidate, rows in raw.items():
         connections = profiles.get(candidate, {})
@@ -237,6 +265,13 @@ def qualified_tcp_flow_ids(context: AnalysisContext) -> set[int]:
             if key in suppressed:
                 continue
             profile = connections.get(key) if key is not None else None
+            if (
+                require_established
+                and profile is not None
+                and profile.metadata_available
+                and profile.outbound_syn_unanswered
+            ):
+                continue
             if profile is None:
                 if allow_legacy and not flow.tcp_flags_observed:
                     qualified.add(id(flow))

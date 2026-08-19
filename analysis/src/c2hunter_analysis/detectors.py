@@ -1015,13 +1015,29 @@ class TCPSessionQualityDetector:
             min(15.0, float(context.parameters.get("tcp_established_contribution", 10))),
         )
         _raw, profiles = tcp_profiles(context)
+        require_established = bool(
+            context.parameters.get("tcp_require_established_outbound", False)
+        )
         result: list[Evidence] = []
         for candidate, connections in profiles.items():
             suppressed = scan_suppressed_keys(context, connections)
+            # Outbound SYN without a SYN-ACK or ACK means the connection never
+            # completed (drop, firewall, or scan retry). Excluding it from the
+            # initiation bonus prevents pure connect-retry traffic from being
+            # treated as active C2 when the operator requires established
+            # sessions.
+            unanswered_keys = {
+                key
+                for key, profile in connections.items()
+                if require_established and profile.outbound_syn_unanswered
+            }
             qualified = [
                 profile
                 for key, profile in connections.items()
-                if key not in suppressed and profile.metadata_available and profile.qualified
+                if key not in suppressed
+                and key not in unanswered_keys
+                and profile.metadata_available
+                and profile.qualified
             ]
             if not qualified:
                 continue
@@ -1046,6 +1062,7 @@ class TCPSessionQualityDetector:
                         "outbound_initiated_connections": initiated,
                         "established_connections": established,
                         "qualified_tcp_connections": len(qualified),
+                        "syn_unanswered_connections": len(unanswered_keys),
                         "scan_suppressed_connections": sum(
                             profile.scan_like or key in suppressed
                             for key, profile in connections.items()

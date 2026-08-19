@@ -5,6 +5,18 @@ import pytest
 from c2hunter_controller.schemas import AnalysisParameters
 
 
+def test_tcp_established_outbound_default_is_off() -> None:
+    parameters = AnalysisParameters()
+
+    assert parameters.tcp_require_established_outbound is False
+
+
+def test_tcp_established_outbound_parameter_accepts_true() -> None:
+    parameters = AnalysisParameters(tcp_require_established_outbound=True)
+
+    assert parameters.tcp_require_established_outbound is True
+
+
 def test_high_volume_tcp_session_defaults_are_safe() -> None:
     parameters = AnalysisParameters()
 

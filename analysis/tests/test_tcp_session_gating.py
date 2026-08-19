@@ -246,3 +246,112 @@ def test_legacy_tcp_records_remain_compatible_but_can_be_disabled() -> None:
         )
         == []
     )
+
+
+def test_syn_only_outbound_is_kept_by_default_when_gated() -> None:
+    flows = [
+        tcp_flow(
+            index,
+            f"10.0.0.{index}",
+            direction="OUTBOUND",
+            source_port=60000 + index,
+            destination_port=4444,
+            syn=1,
+            syn_only=1,
+        )
+        for index in range(1, 4)
+    ]
+
+    analysis = context(flows, minimum_distinct_clients=3)
+
+    assert CommonDestinationDetector().analyze(analysis)
+    session = TCPSessionQualityDetector().analyze(analysis)
+    assert session[0].metrics["outbound_initiated_connections"] == 3
+    assert session[0].metrics["established_connections"] == 0
+    assert session[0].metrics.get("syn_unanswered_connections", 0) == 0
+
+
+def test_syn_only_outbound_can_be_required_to_have_established_session() -> None:
+    flows = [
+        tcp_flow(
+            index,
+            f"10.0.0.{index}",
+            direction="OUTBOUND",
+            source_port=60000 + index,
+            destination_port=4444,
+            syn=1,
+            syn_only=1,
+        )
+        for index in range(1, 4)
+    ]
+
+    analysis = context(
+        flows,
+        minimum_distinct_clients=3,
+        tcp_require_established_outbound=True,
+    )
+
+    assert CommonDestinationDetector().analyze(analysis) == []
+    assert TCPSessionQualityDetector().analyze(analysis) == []
+    assert run_detectors(analysis) == []
+
+
+def test_syn_retries_with_established_peer_are_not_over_filtered() -> None:
+    flows: list[Flow] = []
+    for index in range(1, 4):
+        host = f"10.0.0.{index}"
+        port = 60000 + index
+        # One unanswered SYN on its own port...
+        flows.append(
+            tcp_flow(
+                index,
+                host,
+                direction="OUTBOUND",
+                source_port=port,
+                destination_port=4444,
+                syn=1,
+                syn_only=1,
+            )
+        )
+        # ...plus a completed handshake on a distinct port for the same host.
+        flows.extend(
+            [
+                tcp_flow(
+                    index + 1.0,
+                    host,
+                    direction="OUTBOUND",
+                    source_port=port + 10,
+                    destination_port=4444,
+                    syn=1,
+                    ack=1,
+                    syn_only=1,
+                    ack_only=1,
+                    bidirectional=True,
+                    payload=True,
+                ),
+                tcp_flow(
+                    index + 1.001,
+                    host,
+                    direction="INBOUND",
+                    source_port=4444,
+                    destination_port=port + 10,
+                    syn=1,
+                    ack=1,
+                    syn_ack=1,
+                    bidirectional=True,
+                ),
+            ]
+        )
+
+    analysis = context(
+        flows,
+        minimum_distinct_clients=3,
+        tcp_require_established_outbound=True,
+    )
+
+    common = CommonDestinationDetector().analyze(analysis)
+    session = TCPSessionQualityDetector().analyze(analysis)
+    assert common
+    assert session
+    assert session[0].metrics["outbound_initiated_connections"] == 3
+    assert session[0].metrics["established_connections"] == 3

@@ -268,6 +268,11 @@ class AnalysisParameters(BaseModel):
     tcp_scan_min_targets: int = Field(default=8, ge=2, le=100000)
     tcp_scan_probe_max_packets: int = Field(default=4, ge=1, le=100)
     tcp_scan_probe_ratio: float = Field(default=0.8, ge=0, le=1)
+    # Outbound SYN without a SYN-ACK or ACK means the connection never
+    # completed. Enabling this removes such half-open candidates and sessions
+    # from evidence, filtering out scan-retry / no-accept traffic that would
+    # otherwise look like outbound C2 initiation.
+    tcp_require_established_outbound: bool = False
     detector_weights: dict[str, float] = Field(
         default_factory=lambda: dict(DEFAULT_DETECTOR_WEIGHTS)
     )

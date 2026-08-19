@@ -527,6 +527,7 @@ CANCELLED
     "high_volume_packet_threshold": 100000,
     "high_volume_penalty": 30,
     "tcp_session_gating_enabled": true,
+    "tcp_require_established_outbound": false,
     "detector_weights": {
       "common_destination": 1.0,
       "periodic_beacon": 1.5,
