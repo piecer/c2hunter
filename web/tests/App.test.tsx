@@ -607,6 +607,38 @@ describe('C2Hunter UI', () => {
     expect(JSON.parse(String(reanalyzeCall?.[1]?.body))).toEqual({ idempotency_key: expect.any(String) });
   });
 
+  it('downloads a completed candidate PCAP export', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/v1/pcap-exports' && init?.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'export-1', status: 'COMPLETED', matched_packet_count: 20 }), { status: 201 });
+      }
+      if (path === '/api/v1/pcap-exports/export-1/download') {
+        expect(new Headers(init?.headers).get('authorization')).toBe('Bearer token');
+        return new Response(new Blob(['pcap']), {
+          status: 200,
+          headers: {
+            'content-type': 'application/vnd.tcpdump.pcap',
+            'content-disposition': 'attachment; filename="c2hunter-export-1.pcap"',
+          },
+        });
+      }
+      return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404 });
+    });
+    vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:candidate-pcap'), revokeObjectURL: vi.fn() });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    renderAt('/candidates/candidate-1', fetchMock);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Export candidate PCAP' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/pcap-exports/export-1/download',
+      expect.objectContaining({ headers: expect.objectContaining({ authorization: 'Bearer token' }) }),
+    ));
+    expect(URL.createObjectURL).toHaveBeenCalled();
+    expect(click).toHaveBeenCalled();
+  });
+
   it('records verdicts, looks up TI, and exports confirmed candidates to MISP', async () => {
     const original = responses['/api/v1/candidates/candidate-1'] as Record<string, unknown>;
     const automaticThreatIntelligence = {

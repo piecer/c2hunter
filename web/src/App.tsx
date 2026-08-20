@@ -824,7 +824,14 @@ function CandidateDetail() {
     queryFn: () => api.get(`/candidates/${id}`),
     refetchInterval: query => query.state.data?.threat_intelligence?.status === 'PENDING' ? 1000 : false,
   });
-  const exportPcap = useMutation({ mutationFn: () => api.post('/pcap-exports', { job_id: q.data?.job_id, candidate_id: id }), onSuccess: () => setNotice('PCAP export requested') });
+  const exportPcap = useMutation({
+    mutationFn: async () => {
+      const created = await api.post<{ id: string; status: string; error?: string | null }>('/pcap-exports', { job_id: q.data?.job_id, candidate_id: id });
+      if (created.status !== 'COMPLETED') throw new Error(created.error ?? 'PCAP export is not available');
+      await api.download(`/pcap-exports/${created.id}/download`, `c2hunter-${created.id}.pcap`);
+    },
+    onSuccess: () => setNotice('Candidate PCAP downloaded'),
+  });
   const reanalyze = useMutation({ mutationFn: () => api.post(`/analysis-jobs/${q.data?.job_id}/reanalyze`, { idempotency_key: idempotencyKey() }), onSuccess: () => setNotice('Reanalysis created') });
   const addToAllowlist = useMutation({ 
     mutationFn: (body: unknown) => api.post('/allowlist', body), 

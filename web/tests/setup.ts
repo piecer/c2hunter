@@ -6,5 +6,6 @@ expect.extend(matchers);
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   localStorage.clear();
 });
