@@ -551,6 +551,30 @@ Content-Type: application/vnd.tcpdump.pcap    // raw PCAP data
 | `GET` | `/api/v1/pcap-exports/{id}` | 200 | Export 상태 조회 |
 | `GET` | `/api/v1/pcap-exports/{id}/download` | 200 | Export 파일 다운로드 |
 
+`POST`는 동기식으로 retained source를 해석하고 `COMPLETED` 또는 호환 가능한 `FAILED` export metadata를 반환한다. Upload 분석은 canonical capture, 완료된 LIVE 분석은 고정된 sensor-PCAP segment 집합, reanalysis는 parent provenance를 사용한다. Active LIVE 분석은 `409`, source/output byte·packet limit 초과는 `413`, validation 실패는 `422`, rate limit 초과는 `429`다.
+
+기존 scalar 조건은 모두 AND다. `include_filters`와 `exclude_filters`는 각각 최대 20개 group이며, group 내부 active field는 AND, 각 group 목록은 OR로 평가한다. Nested `candidate_ip`는 exact IP/CIDR, `port`는 inferred external service port, `source_port`/`destination_port`는 transport port, `has_payload`는 aggregated flow가 아닌 개별 packet payload를 의미한다.
+
+```jsonc
+{
+  "job_id": "analysis-id",
+  "candidate_id": null,
+  "internal_host_ip": "10.0.0.12",
+  "protocol": "TCP",
+  "include_filters": [
+    {
+      "candidate_ip": "203.0.113.0/24",
+      "destination_port": 443,
+      "direction": "OUTBOUND",
+      "has_payload": true
+    }
+  ],
+  "exclude_filters": []
+}
+```
+
+성공 metadata에는 `source_job_id`, `source_capture_count`, `source_manifest`, `matched_packet_count`, `size_bytes`, `capture_format`, server-generated `filename`이 포함된다. 단일 link type은 `.pcap`, mixed interface/link type 또는 classic timestamp 범위 밖 packet은 `.pcapng`으로 생성된다. Source 없음과 no-match는 각각 `FAILED/PCAP_SOURCE_UNAVAILABLE`, `FAILED/PCAP_NO_MATCH`로 저장되며 download는 `409 PCAP_NOT_AVAILABLE`을 반환한다.
+
 ---
 
 ## 에러 응답
@@ -670,12 +694,23 @@ export_resp = requests.post(
     headers={**headers, "Content-Type": "application/json"},
     json={
         "job_id": job['id'],
-        "candidate_ids": [priority[0]['id']],
-        "format": "pcapng"
+        "candidate_id": priority[0]['id'],
+        "include_filters": [
+            {"protocol": "TCP", "port": 443, "has_payload": True}
+        ]
     }
 )
 export = export_resp.json()
 print(f"\nExport ID: {export['id']}, Status: {export['status']}")
+
+if export["status"] == "COMPLETED":
+    download = requests.get(
+        f"{BASE}/api/v1/pcap-exports/{export['id']}/download",
+        headers=headers,
+    )
+    download.raise_for_status()
+    with open(export["filename"], "wb") as f:
+        f.write(download.content)
 ```
 
 ## Rate Limiting

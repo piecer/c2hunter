@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
+
+import pytest
 
 from c2hunter_controller.production import PostgresRepository
 
@@ -37,3 +40,21 @@ def test_json_preserves_non_nul_unicode_and_control_characters() -> None:
     decoded = json.loads(encoded)
     assert decoded["korean"] == "도메인"
     assert decoded["control"] == "before\x19after"
+
+
+class _FailingBlobStore:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def get(self, _key: str) -> bytes:
+        raise self.error
+
+
+def test_get_job_capture_only_treats_missing_objects_as_absent() -> None:
+    repository = PostgresRepository.__new__(PostgresRepository)
+    repository.blob_store = cast(Any, _FailingBlobStore(KeyError("missing")))
+    assert repository.get_job_capture("job-a") is None
+
+    repository.blob_store = cast(Any, _FailingBlobStore(TimeoutError("object store unavailable")))
+    with pytest.raises(TimeoutError, match="object store unavailable"):
+        repository.get_job_capture("job-a")

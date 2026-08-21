@@ -89,7 +89,7 @@ C2Hunter is designed for **defensive analysis**. It does not connect to candidat
 | **Human-guided detection** | Lets an analyst confirm a C2 flow and create a versioned payload signature for future analyses. |
 | **Local AI analysis** | Optionally explains supporting/counter evidence and drafts Splunk hunting/detection queries and MISP data for analyst review. |
 | **REST API** | Integrates with SIEM, SOAR, scripts, and other defensive workflows. |
-| **PCAP evidence export** | Exports bounded candidate-related traffic for deeper investigation. |
+| **Filtered PCAP evidence export** | Exports bounded candidate or applied flow-filter traffic from upload, completed live, and reanalysis sources as valid PCAP/PCAPNG evidence. |
 
 ---
 

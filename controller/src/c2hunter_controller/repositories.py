@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 _AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
+_JOB_TERMINAL_STATUSES = {"COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELLED"}
 
 
 def _valid_candidate_decision_record(decision: dict[str, Any]) -> bool:
@@ -204,7 +205,12 @@ class Repository(Protocol):
     def get_export(self, export_id: str) -> tuple[dict[str, Any], bytes] | None: ...
     def save_sensor_pcap(self, segment: dict[str, Any], content: bytes) -> dict[str, Any]: ...
     def save_sensor_pcap_limited(
-        self, segment: dict[str, Any], content: bytes, max_total_bytes: int | None
+        self,
+        segment: dict[str, Any],
+        content: bytes,
+        max_total_bytes: int | None,
+        *,
+        require_open_job: bool = False,
     ) -> tuple[dict[str, Any] | None, str]: ...
     def get_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], bytes] | None: ...
     def list_sensor_pcaps(self) -> list[dict[str, Any]]: ...
@@ -823,9 +829,19 @@ class MemoryRepository:
         return stored
 
     def save_sensor_pcap_limited(
-        self, segment: dict[str, Any], content: bytes, max_total_bytes: int | None
+        self,
+        segment: dict[str, Any],
+        content: bytes,
+        max_total_bytes: int | None,
+        *,
+        require_open_job: bool = False,
     ) -> tuple[dict[str, Any] | None, str]:
         with self._lock:
+            analysis_job_id = segment.get("analysis_job_id")
+            if require_open_job and analysis_job_id is not None:
+                job = self.jobs.get(str(analysis_job_id))
+                if job is None or job.get("status") in _JOB_TERMINAL_STATUSES:
+                    return None, "JOB_CLOSED"
             existing = self.sensor_pcaps.get(segment["id"])
             if existing is not None:
                 matches = all(
@@ -833,7 +849,6 @@ class MemoryRepository:
                     for field in ("sensor_id", "analysis_job_id", "sha256")
                 )
                 return (deepcopy(existing), "EXISTS") if matches else (None, "CONFLICT")
-            analysis_job_id = segment.get("analysis_job_id")
             if max_total_bytes is not None and analysis_job_id is not None:
                 used = sum(
                     int(item.get("size_bytes", 0) or 0)
@@ -1870,11 +1885,26 @@ class SQLiteRepository:
         return stored
 
     def save_sensor_pcap_limited(
-        self, segment: dict[str, Any], content: bytes, max_total_bytes: int | None
+        self,
+        segment: dict[str, Any],
+        content: bytes,
+        max_total_bytes: int | None,
+        *,
+        require_open_job: bool = False,
     ) -> tuple[dict[str, Any] | None, str]:
         with self._lock:
             try:
                 self.connection.execute("BEGIN IMMEDIATE")
+                analysis_job_id = segment.get("analysis_job_id")
+                if require_open_job and analysis_job_id is not None:
+                    job_row = self.connection.execute(
+                        "SELECT data FROM objects WHERE kind='job' AND id=?",
+                        (analysis_job_id,),
+                    ).fetchone()
+                    job = json.loads(job_row[0]) if job_row is not None else None
+                    if job is None or job.get("status") in _JOB_TERMINAL_STATUSES:
+                        self.connection.commit()
+                        return None, "JOB_CLOSED"
                 row = self.connection.execute(
                     "SELECT data FROM objects WHERE kind='sensor_pcap' AND id=?",
                     (segment["id"],),
@@ -1887,7 +1917,6 @@ class SQLiteRepository:
                     )
                     self.connection.commit()
                     return (existing, "EXISTS") if matches else (None, "CONFLICT")
-                analysis_job_id = segment.get("analysis_job_id")
                 if max_total_bytes is not None and analysis_job_id is not None:
                     used_row = self.connection.execute(
                         "SELECT COALESCE("

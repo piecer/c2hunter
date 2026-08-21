@@ -82,6 +82,11 @@ def test_parse_pcap_and_pcapng_to_directional_flow(capture: bytes, capture_forma
     assert record["payload_printable_ratio"] == 1.0
     assert record["payload_simhash"] == "e627bf19152d67b3"
     assert record["raw_packet_hex"] == udp_packet().hex()
+    assert record["raw_packet_link_type"] == 1
+    assert record["raw_packet_captured_length"] == len(udp_packet())
+    assert record["raw_packet_original_length"] == len(udp_packet())
+    assert record["raw_packet_index"] == 0
+    assert record["raw_packet_interface_id"] == 0
 
 
 def test_payload_preview_is_bounded_and_opt_in() -> None:
@@ -133,6 +138,7 @@ def test_linux_cooked_capture_and_packet_limit() -> None:
     )
     assert result.link_types == (113,)
     assert result.records[0]["direction"] == "OUTBOUND"
+    assert result.records[0]["raw_packet_link_type"] == 113
 
     with pytest.raises(PcapParseError, match="packet limit") as error:
         parse_pcap(
@@ -158,3 +164,46 @@ def test_malformed_and_non_ip_captures_are_rejected() -> None:
             internal_networks=["10.0.0.0/8"],
         )
     assert error.value.code == "NO_SUPPORTED_IP_PACKETS"
+
+
+def test_non_ip_segment_can_be_admitted_for_multi_segment_export() -> None:
+    arp_frame = bytes.fromhex("ffffffffffff0000000000000806") + b"\0" * 28
+
+    result = parse_pcap(
+        classic_pcap(arp_frame),
+        sensor_id="uploaded",
+        internal_networks=["10.0.0.0/8"],
+        allow_no_supported_packets=True,
+    )
+
+    assert result.records == ()
+    assert result.captured_packet_count == 1
+    assert result.parsed_packet_count == 0
+
+
+@pytest.mark.parametrize("capture_format", ["PCAP", "PCAPNG"])
+def test_packet_lengths_must_not_exceed_original_length_or_snaplen(
+    capture_format: str,
+) -> None:
+    packet = udp_packet()
+    malformed_original = bytearray(
+        classic_pcap(packet) if capture_format == "PCAP" else pcapng(packet)
+    )
+    malformed_snaplen = bytearray(malformed_original)
+    if capture_format == "PCAP":
+        struct.pack_into("<I", malformed_original, 36, len(packet) - 1)
+        struct.pack_into("<I", malformed_snaplen, 16, len(packet) - 1)
+    else:
+        section_length = struct.unpack_from("<I", malformed_original, 4)[0]
+        interface_length = struct.unpack_from("<I", malformed_original, section_length + 4)[0]
+        packet_offset = section_length + interface_length
+        struct.pack_into("<I", malformed_original, packet_offset + 24, len(packet) - 1)
+        struct.pack_into("<I", malformed_snaplen, section_length + 12, len(packet) - 1)
+
+    for capture in (malformed_original, malformed_snaplen):
+        with pytest.raises(PcapParseError, match="length"):
+            parse_pcap(
+                bytes(capture),
+                sensor_id="uploaded",
+                internal_networks=["10.0.0.0/8"],
+            )

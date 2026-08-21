@@ -34,11 +34,16 @@ class _CapturedPacket:
     timestamp: datetime
     link_type: int
     data: bytes
+    original_length: int
+    packet_index: int
+    interface_id: int
 
 
 @dataclass(frozen=True)
 class _PcapNgInterface:
+    interface_id: int
     link_type: int
+    snaplen: int
     timestamp_resolution: float = 0.000001
     timestamp_offset: int = 0
 
@@ -63,6 +68,7 @@ def parse_pcap(
     max_packets: int = 2_000_000,
     retain_packet_bytes: bool = True,
     retain_payload_sample_bytes: int = 0,
+    allow_no_supported_packets: bool = False,
 ) -> PcapParseResult:
     """Parse bounded PCAP/PCAPNG bytes into the existing flow-analysis contract."""
     if max_packets < 1:
@@ -80,9 +86,11 @@ def parse_pcap(
         raise PcapParseError("file is not a classic PCAP or PCAPNG capture")
     records: list[dict[str, Any]] = []
     captured_packet_count = 0
+    captured_timestamps: list[datetime] = []
     link_types: set[int] = set()
     for packet in packets:
         captured_packet_count += 1
+        captured_timestamps.append(packet.timestamp)
         link_types.add(packet.link_type)
         decoded = _decode_packet(
             packet,
@@ -95,12 +103,11 @@ def parse_pcap(
             records.append(decoded)
     if captured_packet_count == 0:
         raise PcapParseError("capture does not contain timestamped packets", "EMPTY_PCAP")
-    if not records:
+    if not records and not allow_no_supported_packets:
         raise PcapParseError(
             "capture contains no supported IPv4 or IPv6 packets",
             "NO_SUPPORTED_IP_PACKETS",
         )
-    timestamps = [record["timestamp"] for record in records]
     return PcapParseResult(
         tuple(records),
         capture_format,
@@ -108,8 +115,8 @@ def parse_pcap(
         len(records),
         captured_packet_count - len(records),
         tuple(sorted(link_types)),
-        min(timestamps),
-        max(timestamps),
+        min(captured_timestamps),
+        max(captured_timestamps),
     )
 
 
@@ -188,12 +195,16 @@ def _iter_classic_pcap(content: bytes, max_packets: int) -> Iterator[_CapturedPa
     while offset < len(content):
         if len(content) - offset < 16:
             raise PcapParseError("classic PCAP packet header is truncated")
-        seconds, fraction, captured_length, _original_length = struct.unpack_from(
+        seconds, fraction, captured_length, original_length = struct.unpack_from(
             f"{endian}IIII", content, offset
         )
         offset += 16
         if captured_length > _MAX_CAPTURED_PACKET_BYTES or captured_length > len(content) - offset:
             raise PcapParseError("classic PCAP packet data is truncated or oversized")
+        if captured_length > original_length or captured_length > snaplen:
+            raise PcapParseError(
+                "classic PCAP packet length exceeds original length or snap length"
+            )
         count += 1
         if count > max_packets:
             raise PcapParseError(
@@ -202,7 +213,12 @@ def _iter_classic_pcap(content: bytes, max_packets: int) -> Iterator[_CapturedPa
         packet = content[offset : offset + captured_length]
         offset += captured_length
         yield _CapturedPacket(
-            _timestamp(seconds + fraction / resolution), int(link_type & 0xFFFF), packet
+            _timestamp(seconds + fraction / resolution),
+            int(link_type & 0xFFFF),
+            packet,
+            original_length,
+            count - 1,
+            0,
         )
 
 
@@ -222,6 +238,7 @@ def _iter_pcapng(content: bytes, max_packets: int) -> Iterator[_CapturedPacket]:
     endian = "<"
     interfaces: list[_PcapNgInterface] = []
     count = 0
+    next_interface_id = 0
     saw_section = False
     while offset < len(content):
         if len(content) - offset < 12:
@@ -245,21 +262,33 @@ def _iter_pcapng(content: bytes, max_packets: int) -> Iterator[_CapturedPacket]:
             if block_length < 20:
                 raise PcapParseError("PCAPNG interface block is truncated")
             link_type = struct.unpack_from(f"{endian}H", content, offset + 8)[0]
+            snaplen = struct.unpack_from(f"{endian}I", content, offset + 12)[0]
+            if snaplen < 1 or snaplen > _MAX_CAPTURED_PACKET_BYTES:
+                raise PcapParseError("PCAPNG interface snap length is invalid")
             resolution, timestamp_offset = _pcapng_interface_options(
                 content, offset + 16, offset + block_length - 4, endian
             )
-            interfaces.append(_PcapNgInterface(link_type, resolution, timestamp_offset))
+            interfaces.append(
+                _PcapNgInterface(
+                    next_interface_id,
+                    link_type,
+                    snaplen,
+                    resolution,
+                    timestamp_offset,
+                )
+            )
+            next_interface_id += 1
         elif block_type in {2, 6}:
             minimum = 28 if block_type == 6 else 28
             if block_length < minimum + 4:
                 raise PcapParseError("PCAPNG packet block is truncated")
             if block_type == 6:
-                interface_id, high, low, captured_length, _original_length = struct.unpack_from(
+                interface_id, high, low, captured_length, original_length = struct.unpack_from(
                     f"{endian}IIIII", content, offset + 8
                 )
                 packet_offset = offset + 28
             else:
-                interface_id, _drops, high, low, captured_length, _original_length = (
+                interface_id, _drops, high, low, captured_length, original_length = (
                     struct.unpack_from(f"{endian}HHIIII", content, offset + 8)
                 )
                 packet_offset = offset + 28
@@ -278,12 +307,19 @@ def _iter_pcapng(content: bytes, max_packets: int) -> Iterator[_CapturedPacket]:
                     "PCAP_PACKET_LIMIT_EXCEEDED",
                 )
             interface = interfaces[interface_id]
+            if captured_length > original_length or captured_length > interface.snaplen:
+                raise PcapParseError(
+                    "PCAPNG packet length exceeds original length or interface snap length"
+                )
             raw_timestamp = (high << 32) | low
             timestamp = raw_timestamp * interface.timestamp_resolution + interface.timestamp_offset
             yield _CapturedPacket(
                 _timestamp(timestamp),
                 interface.link_type,
                 content[packet_offset : packet_offset + captured_length],
+                original_length,
+                count - 1,
+                interface.interface_id,
             )
         elif block_type == 3:
             raise PcapParseError(
@@ -381,6 +417,11 @@ def _decode_packet(
         record["payload_sample_hex"] = payload[:retain_payload_sample_bytes].hex()
     if retain_packet_bytes:
         record["raw_packet_hex"] = captured.data.hex()
+        record["raw_packet_link_type"] = captured.link_type
+        record["raw_packet_captured_length"] = len(captured.data)
+        record["raw_packet_original_length"] = captured.original_length
+        record["raw_packet_index"] = captured.packet_index
+        record["raw_packet_interface_id"] = captured.interface_id
     return record
 
 

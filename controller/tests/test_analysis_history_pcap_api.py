@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import struct
 from datetime import UTC, datetime
@@ -154,6 +155,87 @@ def test_pcap_upload_runs_existing_detectors_and_appears_in_history() -> None:
     assert rerun.status_code == 201
     assert rerun.json()["source_type"] == "PCAP_UPLOAD"
     assert rerun.json()["source"]["sha256"] == job["source"]["sha256"]
+
+
+def test_completed_live_job_exports_associated_sensor_pcaps_with_nested_filters() -> None:
+    repository = MemoryRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    capture = _pcap()
+    repository.create_job(
+        {
+            "id": "live-export-job",
+            "idempotency_key": "live-export-job-key",
+            "name": "Live export",
+            "status": "COMPLETED",
+            "mode": "LIVE",
+            "source_type": "SENSOR_CAPTURE",
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "capture": {"store_pcap": True},
+            "flow_records": [],
+            "created_at": "2026-08-21T09:00:00+00:00",
+        }
+    )
+    digest = hashlib.sha256(capture).hexdigest()
+    repository.save_sensor_pcap(
+        {
+            "id": "segment-a",
+            "sensor_id": "sensor-a",
+            "analysis_job_id": "live-export-job",
+            "filename": "segment-a.pcap",
+            "size_bytes": len(capture),
+            "sha256": digest,
+            "uploaded_at": "2026-08-21T09:01:00+00:00",
+        },
+        capture,
+    )
+    repository.save_sensor_pcap(
+        {
+            "id": "unrelated",
+            "sensor_id": "sensor-a",
+            "analysis_job_id": "other-job",
+            "filename": "other.pcap",
+            "size_bytes": len(capture),
+            "sha256": digest,
+            "uploaded_at": "2026-08-21T09:02:00+00:00",
+        },
+        capture,
+    )
+
+    response = client.post(
+        "/api/v1/pcap-exports",
+        json={
+            "job_id": "live-export-job",
+            "include_filters": [{"candidate_ip": "203.0.113.0/24", "port": 443}],
+            "exclude_filters": [{"source_port": 50001}],
+        },
+    )
+
+    assert response.status_code == 201
+    exported = response.json()
+    assert exported["status"] == "COMPLETED"
+    assert exported["matched_packet_count"] == 12
+    assert exported["source_capture_count"] == 1
+    download = client.get(f"/api/v1/pcap-exports/{exported['id']}/download")
+    assert download.status_code == 200
+    assert download.headers["content-disposition"].endswith('.pcap"')
+
+    no_match = client.post(
+        "/api/v1/pcap-exports",
+        json={
+            "job_id": "live-export-job",
+            "include_filters": [{"candidate_ip": "192.0.2.0/24"}],
+        },
+    )
+    assert no_match.status_code == 201
+    assert no_match.json()["status"] == "FAILED"
+    assert no_match.json()["error_code"] == "PCAP_NO_MATCH"
+
+    invalid = client.post(
+        "/api/v1/pcap-exports",
+        json={"job_id": "live-export-job", "include_filters": [{}]},
+    )
+    assert invalid.status_code == 422
 
 
 def test_pcap_upload_validates_media_format_size_and_packet_limit() -> None:

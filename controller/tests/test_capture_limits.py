@@ -1,7 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 
 from c2hunter_controller.capture_limits import allocate_sensor_limit, limit_flow_records
-from c2hunter_controller.repositories import MemoryRepository
+from c2hunter_controller.repositories import MemoryRepository, SQLiteRepository
 
 
 def test_allocate_sensor_limit_never_exceeds_analysis_total() -> None:
@@ -96,3 +96,39 @@ def test_memory_sensor_pcap_limited_save_is_idempotent() -> None:
     }
     assert repository.save_sensor_pcap_limited(segment, b"pcap", 4)[1] == "OK"
     assert repository.save_sensor_pcap_limited(segment, b"pcap", 4)[1] == "EXISTS"
+
+
+def test_memory_sensor_pcap_admission_rejects_terminal_job() -> None:
+    repository = MemoryRepository()
+    repository.save_job({"id": "job-a", "status": "COMPLETED"})
+    segment = {
+        "id": "segment-a",
+        "sensor_id": "sensor-a",
+        "analysis_job_id": "job-a",
+        "size_bytes": 4,
+        "sha256": "digest",
+    }
+
+    stored, status = repository.save_sensor_pcap_limited(segment, b"pcap", 4, require_open_job=True)
+
+    assert stored is None
+    assert status == "JOB_CLOSED"
+    assert repository.list_sensor_pcaps() == []
+
+
+def test_sqlite_sensor_pcap_admission_rejects_terminal_job(tmp_path) -> None:
+    repository = SQLiteRepository(tmp_path / "controller.db")
+    repository.save_job({"id": "job-a", "status": "COMPLETED"})
+    segment = {
+        "id": "segment-a",
+        "sensor_id": "sensor-a",
+        "analysis_job_id": "job-a",
+        "size_bytes": 4,
+        "sha256": "digest",
+    }
+
+    stored, status = repository.save_sensor_pcap_limited(segment, b"pcap", 4, require_open_job=True)
+
+    assert stored is None
+    assert status == "JOB_CLOSED"
+    assert repository.list_sensor_pcaps() == []

@@ -86,7 +86,7 @@ ingress-level or Redis-backed distributed limiting for multi-replica production.
 
 ## PCAP and privacy
 
-Payload/PCAP retention is opt-in and shortest-necessary. Prefer flow statistics and hashes. Validate export filters (candidate, internal host, time, port, protocol, direction, sensor), stream with size limits, generate object keys and filenames server-side, authorize both creation and download, and use short-lived signed URLs. Audit request/result/bytes without storing signed URLs or payload. Use encryption at rest and restricted backup access.
+Payload/PCAP retention is opt-in and shortest-necessary. Prefer flow statistics and hashes. Validate scalar and nested export filters, source provenance, cumulative packet/byte limits, and retained-object digests before creating bounded output. Generate object keys and filenames server-side and authorize both creation and Controller-mediated download. Audit request/result/bytes without storing payload in audit records. Use encryption at rest and restricted backup access.
 
 Offline uploads are untrusted binary input. The Controller enforces a byte limit before buffering, a packet-count limit while parsing, validates PCAP/PCAPNG block lengths and timestamps, supports only explicit link types, and strips client path components from the displayed filename. Keep the defaults conservative, reject unsupported media types, and never invoke external packet tools or contact addresses found in a capture. Uploaded packet bytes are restricted evidence and follow the analysis-result retention policy.
 

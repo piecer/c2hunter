@@ -89,10 +89,10 @@ Payload 원문과 미리보기는 라벨, signature, job snapshot, 감사 로그
 | `pcap_objects` | id, job/dataset/sensor FK, server-generated object key, start/end, size, SHA-256, packet count, rotation reason, state, retention/delete time |
 | uploaded source PCAP | `captures/{job_id}.pcap` server-generated key로 MinIO에 한 번 저장. normalized flow에는 기본적으로 raw packet hex를 중복 보관하지 않음 |
 | `flow_pcap_refs` | flow identity/range와 object FK, byte/time index 힌트 |
-| `pcap_exports` | id, requester, candidate/job FK, normalized filter JSON, status, estimated/actual size, output object FK, expires_at, error |
+| `pcap_exports` | id, requester, requested job/candidate, resolved `source_job_id`, normalized scalar/nested filter JSON, source count/manifest, status, matched packet count, capture format/filename, actual bytes, output blob, error code/message, created time |
 | `download_audits` | export/object/user, request IP, time, result, bytes |
 
-Export 필터는 candidate IP, internal host IP, time range, port, protocol, direction, sensor를 포함한다. signed URL 자체를 장기 저장하지 않고 만료 시간만 기록한다.
+Export 필터는 candidate/internal host IP, time range, port, protocol, direction, sensor와 최대 20개의 include/exclude packet-filter group을 포함한다. Group 내부 조건은 AND, include/exclude group은 각각 OR이며 scalar 조건과 nested 결과는 AND로 결합한다. Source manifest는 provenance별 source ID와 SHA-256을 기록하고 결과 blob은 인증된 download endpoint를 통해 제공한다.
 
 ### 2.8 감사·설정·보관
 

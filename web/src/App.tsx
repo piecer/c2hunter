@@ -596,7 +596,7 @@ function JobDetail() {
       <AnalysisPCAPs jobId={j.id}/>
       {j.status === 'COMPLETED' && j.dataset_id && <JobReanalysis key={j.id} job={j}/>}
       <section className="panel compact"><h2>탐지 후보</h2><AsyncState query={candidates} empty={data => items(data).length === 0}>{data => <div className="table-wrap"><table aria-label="Analysis candidates"><thead><tr><th>후보</th><th>점수</th><th>External TI</th><th>판정</th><th>호스트 / 센서</th><th>네트워크 정보</th><th>탐지 근거</th><th>관측 시각</th></tr></thead><tbody>{items(data).map(candidate => { const hosts = candidateHosts(candidate); const sensors = candidateSensors(candidate); const protocols = strings(candidate.protocols); const ports = numbers(candidate.ports); const evidence = candidateEvidence(candidate); return <tr key={candidate.id}><td><Link to={`/candidates/${candidate.id}`}>{candidate.candidate_ip}</Link><small className={candidate.severity.toLowerCase()}>{candidate.severity}</small></td><td><strong>{candidate.score}</strong></td><td><CandidateThreatIntel assessment={candidate.ti_assessment} /></td><td><CandidateWorkflowBadge candidate={candidate} /></td><td>{hosts.length || candidate.distinct_internal_hosts || 0}개 호스트<small>{sensors.length}개 센서</small></td><td>{protocols.length ? protocols.join(', ') : '알 수 없는 프로토콜'}<small>{ports.length ? `포트 ${ports.join(', ')}` : '서비스 포트 없음'}</small></td><td>{candidate.evidence_count ?? evidence.length}건<small>{evidence.map(item => evidenceLabel(item.type)).join(', ') || '상세 근거 없음'}</small></td><td>{fmt(candidate.first_seen)}<small>~ {fmt(candidate.last_seen)}</small></td></tr>; })}</tbody></table></div>}</AsyncState></section>
-      <JobFlowReviewPanel jobId={j.id} />
+      <JobFlowReviewPanel key={`flow-review-${j.id}`} jobId={j.id} />
       <section className="panel compact"><h2>State transitions</h2>{j.transitions?.length ? <ol className="timeline">{j.transitions.map((transition, index) => <li key={`${transition.to_status}-${transition.occurred_at}-${index}`}><strong>{transition.to_status}</strong><span>{fmt(transition.occurred_at)}</span><p>{transition.reason ?? 'No transition reason recorded'}{transition.from_status ? ` · from ${transition.from_status}` : ''}</p></li>)}</ol> : <p className="muted">No state transition history was recorded.</p>}</section>
     </>;
   }}</AsyncState>;
@@ -909,6 +909,16 @@ function JobFlowReviewPanel({ jobId }: { jobId: string }) {
   const [draft, setDraft] = useState<FlowFilterSet>(defaultFlowFilters);
   const [filters, setFilters] = useState<FlowFilterSet>(defaultFlowFilters);
   const [page, setPage] = useState(1);
+  const [exporting, setExporting] = useState(false);
+  const [exportNotice, setExportNotice] = useState('');
+  const [exportError, setExportError] = useState('');
+  useEffect(() => {
+    setDraft(defaultFlowFilters());
+    setFilters(defaultFlowFilters());
+    setPage(1);
+    setExportNotice('');
+    setExportError('');
+  }, [jobId]);
   const query = useQuery<Page<FlowRecordReview>, Error>({
     queryKey: ['job-flows', jobId, filters, page],
     queryFn: () => {
@@ -920,16 +930,40 @@ function JobFlowReviewPanel({ jobId }: { jobId: string }) {
   });
   const applyFilters = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    setExportNotice('');
+    setExportError('');
     setPage(1);
     setFilters({ include: draft.include.map(filter => ({ ...filter })), exclude: draft.exclude.map(filter => ({ ...filter })) });
   };
   const resetFilters = () => {
+    setExportNotice('');
+    setExportError('');
     setDraft(defaultFlowFilters());
     setFilters(defaultFlowFilters());
     setPage(1);
   };
   const filtersDirty = JSON.stringify(draft) !== JSON.stringify(filters);
-  return <section className="panel compact"><h2>All analysis flows</h2><p className="muted">Build a focused review queue, then remove known noise. Conditions inside each group are combined.</p><form className="flow-filter-builder" onSubmit={applyFilters}><section className="flow-filter-section include"><div className="flow-filter-heading"><div><span className="flow-filter-eyebrow">MATCH ANY GROUP</span><h3>Include flows</h3><p className="muted">Narrow the review queue to relevant traffic.</p></div><button type="button" className="flow-filter-add" aria-label="Add filter" onClick={() => setDraft(current => ({ ...current, include: [...current.include, newFlowFilter()] }))}><span>+</span> Add group</button></div>{draft.include.map((filter, index) => <FlowFilterGroup key={`include-${index}`} kind="Filter" index={index} filter={filter} onChange={updated => setDraft(current => ({ ...current, include: current.include.map((item, itemIndex) => itemIndex === index ? updated : item) }))} onRemove={() => setDraft(current => ({ ...current, include: current.include.filter((_, itemIndex) => itemIndex !== index) }))} />)}{draft.include.length === 0 && <div className="flow-filter-empty"><strong>No include filters</strong><span>All flows will be considered before exclusions.</span></div>}</section><section className="flow-filter-section exclude"><div className="flow-filter-heading"><div><span className="flow-filter-eyebrow">REMOVE ANY MATCH</span><h3>Filter out patterns</h3><p className="muted">Hide known noise, infrastructure, or reviewed traffic.</p></div><button type="button" className="flow-filter-add exclude" aria-label="Add filter out" onClick={() => setDraft(current => ({ ...current, exclude: [...current.exclude, newFlowFilter()] }))}><span>+</span> Add pattern</button></div>{draft.exclude.map((filter, index) => <FlowFilterGroup key={`exclude-${index}`} kind="Filter out" index={index} filter={filter} onChange={updated => setDraft(current => ({ ...current, exclude: current.exclude.map((item, itemIndex) => itemIndex === index ? updated : item) }))} onRemove={() => setDraft(current => ({ ...current, exclude: current.exclude.filter((_, itemIndex) => itemIndex !== index) }))} />)}{draft.exclude.length === 0 && <div className="flow-filter-empty exclude"><strong>No filter-out patterns configured</strong><span>Add trusted IPs, CIDRs, or protocol patterns to remove noise.</span></div>}</section><div className="flow-filter-toolbar"><div><span className={`flow-filter-state ${filtersDirty ? 'dirty' : ''}`}>{filtersDirty ? 'Unapplied changes' : 'Filters applied'}</span><small>{draft.include.length} include · {draft.exclude.length} exclude groups</small></div><div className="actions"><button type="button" className="secondary" onClick={resetFilters}>Reset</button><button disabled={!filtersDirty}>Apply filters</button></div></div></form><AsyncState query={query} empty={data => items(data).length === 0}>{data => <><div className="table-wrap"><table aria-label="Analysis flows"><thead><tr><th>Observed</th><th>Direction</th><th>Endpoints</th><th>Protocol</th><th>Volume</th><th>Payload features</th><th>Current label</th><th>Review</th></tr></thead><tbody>{items(data).map(flow => <FlowReviewRow key={flow.flow_id} flow={flow} />)}</tbody></table></div><FlowPagination data={data} page={page} onPage={setPage}/></>}</AsyncState></section>;
+  const downloadFilteredCapture = async () => {
+    setExporting(true);
+    setExportNotice('');
+    setExportError('');
+    try {
+      const includeFilters = filters.include.map(serializedFlowFilter).filter(filter => Object.keys(filter).length);
+      const excludeFilters = filters.exclude.map(serializedFlowFilter).filter(filter => Object.keys(filter).length);
+      const exported = await api.post<{ id: string; status: string; matched_packet_count: number; filename?: string; error?: string }>(
+        '/pcap-exports',
+        { job_id: jobId, include_filters: includeFilters, exclude_filters: excludeFilters },
+      );
+      if (exported.status !== 'COMPLETED') throw new Error(exported.error || 'No packets matched the applied filters.');
+      await api.download(`/pcap-exports/${exported.id}/download`, exported.filename || `c2hunter-${jobId}-filtered.pcap`);
+      setExportNotice(`Filtered capture downloaded (${exported.matched_packet_count} packets).`);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : 'Filtered capture download failed.');
+    } finally {
+      setExporting(false);
+    }
+  };
+  return <section className="panel compact"><h2>All analysis flows</h2><p className="muted">Build a focused review queue, then remove known noise. Conditions inside each group are combined.</p><form className="flow-filter-builder" onSubmit={applyFilters}><section className="flow-filter-section include"><div className="flow-filter-heading"><div><span className="flow-filter-eyebrow">MATCH ANY GROUP</span><h3>Include flows</h3><p className="muted">Narrow the review queue to relevant traffic. Up to 20 groups.</p></div><button type="button" className="flow-filter-add" aria-label="Add filter" disabled={draft.include.length >= 20} onClick={() => setDraft(current => ({ ...current, include: [...current.include, newFlowFilter()] }))}><span>+</span> Add group</button></div>{draft.include.map((filter, index) => <FlowFilterGroup key={`include-${index}`} kind="Filter" index={index} filter={filter} onChange={updated => setDraft(current => ({ ...current, include: current.include.map((item, itemIndex) => itemIndex === index ? updated : item) }))} onRemove={() => setDraft(current => ({ ...current, include: current.include.filter((_, itemIndex) => itemIndex !== index) }))} />)}{draft.include.length === 0 && <div className="flow-filter-empty"><strong>No include filters</strong><span>All flows will be considered before exclusions.</span></div>}</section><section className="flow-filter-section exclude"><div className="flow-filter-heading"><div><span className="flow-filter-eyebrow">REMOVE ANY MATCH</span><h3>Filter out patterns</h3><p className="muted">Hide known noise, infrastructure, or reviewed traffic. Up to 20 patterns.</p></div><button type="button" className="flow-filter-add exclude" aria-label="Add filter out" disabled={draft.exclude.length >= 20} onClick={() => setDraft(current => ({ ...current, exclude: [...current.exclude, newFlowFilter()] }))}><span>+</span> Add pattern</button></div>{draft.exclude.map((filter, index) => <FlowFilterGroup key={`exclude-${index}`} kind="Filter out" index={index} filter={filter} onChange={updated => setDraft(current => ({ ...current, exclude: current.exclude.map((item, itemIndex) => itemIndex === index ? updated : item) }))} onRemove={() => setDraft(current => ({ ...current, exclude: current.exclude.filter((_, itemIndex) => itemIndex !== index) }))} />)}{draft.exclude.length === 0 && <div className="flow-filter-empty exclude"><strong>No filter-out patterns configured</strong><span>Add trusted IPs, CIDRs, or protocol patterns to remove noise.</span></div>}</section><div className="flow-filter-toolbar"><div><span className={`flow-filter-state ${filtersDirty ? 'dirty' : ''}`}>{filtersDirty ? 'Unapplied changes' : 'Filters applied'}</span><small>{draft.include.length} include · {draft.exclude.length} exclude groups</small></div><div className="actions"><button type="button" className="secondary" onClick={resetFilters}>Reset</button><button disabled={!filtersDirty}>Apply filters</button></div></div></form><div className="flow-export-actions"><div><strong>Filtered packet capture</strong><p className="muted">Exports decoded packets using the last applied filters. Payload-only applies per packet.</p></div><button type="button" disabled={exporting} onClick={downloadFilteredCapture}>{exporting ? 'Preparing capture…' : 'Download filtered capture'}</button></div>{exportNotice && <p role="status" className="success">{exportNotice}</p>}{exportError && <p role="alert" className="error">{exportError}</p>}<AsyncState query={query} empty={data => items(data).length === 0}>{data => <><div className="table-wrap"><table aria-label="Analysis flows"><thead><tr><th>Observed</th><th>Direction</th><th>Endpoints</th><th>Protocol</th><th>Volume</th><th>Payload features</th><th>Current label</th><th>Review</th></tr></thead><tbody>{items(data).map(flow => <FlowReviewRow key={flow.flow_id} flow={flow} />)}</tbody></table></div><FlowPagination data={data} page={page} onPage={setPage}/></>}</AsyncState></section>;
 }
 
 function FlowPagination({ data, page, onPage }: { data: Page<FlowRecordReview>; page: number; onPage: (page: number) => void }) {

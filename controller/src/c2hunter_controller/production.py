@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 _AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
+_JOB_TERMINAL_STATUSES = {"COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELLED"}
 logger = logging.getLogger(__name__)
 
 
@@ -825,8 +826,13 @@ class PostgresRepository:
     def get_job_capture(self, job_id: str) -> bytes | None:
         try:
             return self.blob_store.get(self._capture_key(job_id))
-        except Exception:
-            return None
+        except Exception as exc:
+            if isinstance(exc, FileNotFoundError | KeyError) or getattr(exc, "code", None) in {
+                "NoSuchKey",
+                "NoSuchObject",
+            }:
+                return None
+            raise
 
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None:
         connection = self.connection
@@ -1562,7 +1568,12 @@ class PostgresRepository:
         return stored
 
     def save_sensor_pcap_limited(
-        self, segment: dict[str, Any], content: bytes, max_total_bytes: int | None
+        self,
+        segment: dict[str, Any],
+        content: bytes,
+        max_total_bytes: int | None,
+        *,
+        require_open_job: bool = False,
     ) -> tuple[dict[str, Any] | None, str]:
         connection = self.connection
         analysis_job_id = segment.get("analysis_job_id")
@@ -1576,6 +1587,22 @@ class PostgresRepository:
                         "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                         (lock_key,),
                     )
+                    if require_open_job and analysis_job_id is not None:
+                        cursor.execute(
+                            "SELECT data FROM controller_objects "
+                            "WHERE kind='job' AND id=%s FOR UPDATE",
+                            (analysis_job_id,),
+                        )
+                        job_row = cursor.fetchone()
+                        value = job_row[0] if job_row is not None else None
+                        locked_job: dict[str, Any] | None
+                        if isinstance(value, dict):
+                            locked_job = value
+                        else:
+                            locked_job = json.loads(value) if value else None
+                        if locked_job is None or locked_job.get("status") in _JOB_TERMINAL_STATUSES:
+                            connection.commit()
+                            return None, "JOB_CLOSED"
                     cursor.execute(
                         "SELECT data FROM controller_objects "
                         "WHERE kind='sensor_pcap' AND id=%s FOR UPDATE",

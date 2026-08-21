@@ -1048,9 +1048,9 @@ PCAP 파일은 다음 기준으로 회전한다.
 회전 시간: 5분
 ```
 
-## 14.2 후보별 PCAP 추출
+## 14.2 필터 기반 PCAP 추출
 
-사용자는 전체 작업 PCAP뿐 아니라 특정 C2 후보와 관련된 패킷만 추출해 다운로드할 수 있어야 한다.
+사용자는 전체 작업 PCAP뿐 아니라 특정 C2 후보 또는 분석 화면에서 적용한 flow filter와 관련된 패킷만 추출해 다운로드할 수 있어야 한다. Upload 분석은 canonical capture, 완료된 LIVE 분석은 고정된 sensor-PCAP segment manifest, reanalysis는 parent provenance를 사용한다. Active LIVE source와 terminal job의 늦은 segment 저장은 거부한다.
 
 지원 필터:
 
@@ -1061,14 +1061,19 @@ PCAP 파일은 다음 기준으로 회전한다.
 * Protocol
 * Direction
 * Sensor
+* Include/Exclude filter group (각 최대 20개, group 내부 AND, group 간 OR)
+* Source/Destination port
+* Packet payload 존재 여부
 
-대규모 PCAP 추출은 비동기 작업으로 처리한다.
+추출은 configured source/output byte limit과 cumulative packet limit 안에서 Controller가 동기식으로 수행한다. Limit 초과는 `413`으로 거부하고 부분 export를 저장하지 않는다. 설정 한도를 크게 상향하기 전에는 durable asynchronous export queue와 cross-process coordination을 먼저 구현해야 한다.
+
+Source manifest의 ID와 SHA-256을 검증하며 missing/corrupt blob 또는 storage 장애에서 부분 결과나 묵시적 fallback을 허용하지 않는다. 단일 link type은 원 DLT/captured/wire length를 보존한 PCAP, mixed interface/link type 또는 classic timestamp 범위 밖 packet은 source order를 보존한 PCAPNG으로 생성한다.
 
 ## 14.3 다운로드 보안
 
 * 인증된 사용자만 다운로드 가능
 * 다운로드 이력 기록
-* 만료 시간이 있는 다운로드 URL 사용
+* 인증된 Controller download endpoint 사용
 * 경로 조작 방지
 * Content-Disposition filename 검증
 * 최대 다운로드 크기 제한
@@ -1234,7 +1239,7 @@ OpenAPI 문서를 자동 생성한다.
 * Sensor ↔ Controller: JSON/REST over HTTPS (mTLS 또는 BEARER token + HMAC-signed envelope). `c2hunter-sensor/internal/transport/http.go`가 구현한다.
 * Controller ↔ Web: HTTPS required. nginx (`web/nginx.conf`)이 TLS를终结한다.
 * 내부 서비스 (Controller ↔ Worker, Worker ↔ Analysis): localhost 또는 Docker internal network, plaintext 허용 (isolated)
-* PCAP: MinIO S3 (private endpoint), presigned URL (max 24h)
+* PCAP: MinIO S3 private endpoint에 저장하고, 사용자 다운로드는 인증·인가된 Controller endpoint를 통해서만 제공
 * Postgres/ClickHouse/Redis: local 또는 Docker internal, TLS optional
 * Secrets: `.env` (gitignored), `c2hunter-sensor/environment` (mode 0640, root:c2hunter-sensor). Plaintext token은 log나 DB에 남지 않는다.
 * Payload raw bytes: sensor `payload_preview_bytes: 0`이 default (비활성). 분석은 payload 해시와 통계값 기반 (`analysis/payload_features.py`)

@@ -357,7 +357,7 @@ def test_openapi_documents_gateway_routes_and_sensor_token_header() -> None:
 
 
 def test_sensor_pcap_upload_is_authenticated_idempotent_listed_and_downloadable() -> None:
-    api, _ = api_and_repo()
+    api, repo = api_and_repo()
     sensor_id, token = enroll_and_claim(api)
     filename = "eth0-000001.pcap"
     segment_id = hashlib.sha256(f"{sensor_id}\0{filename}".encode()).hexdigest()
@@ -419,6 +419,26 @@ def test_sensor_pcap_upload_is_authenticated_idempotent_listed_and_downloadable(
     assert downloaded.headers["content-type"].startswith("application/vnd.tcpdump.pcap")
     assert downloaded.headers["content-disposition"] == 'attachment; filename="eth0-000001.pcap"'
     assert downloaded.headers["x-content-type-options"] == "nosniff"
+
+    repo.save_job(
+        {
+            "id": "completed-live-job",
+            "mode": "LIVE",
+            "status": "COMPLETED",
+            "sensor_ids": [sensor_id],
+            "capture": {"store_pcap": True},
+        }
+    )
+    late_filename = "eth0-000002.pcap"
+    late_segment_id = hashlib.sha256(f"{sensor_id}\0{late_filename}".encode()).hexdigest()
+    late = api.put(
+        f"/api/v1/sensors/{sensor_id}/pcap-segments/{late_segment_id}",
+        params={"filename": late_filename, "analysis_job_id": "completed-live-job"},
+        content=capture,
+        headers={"X-Sensor-Token": token, "content-type": "application/vnd.tcpdump.pcap"},
+    )
+    assert late.status_code == 409
+    assert late.json()["error"]["code"] == "PCAP_JOB_CLOSED"
 
 
 def test_sqlite_sensor_pcap_survives_repository_restart(tmp_path: Any) -> None:

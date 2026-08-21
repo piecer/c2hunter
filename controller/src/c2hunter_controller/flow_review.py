@@ -181,6 +181,30 @@ def filter_flows(
     return result
 
 
+def filter_packet_records(
+    records: list[dict[str, Any]],
+    *,
+    internal_networks: list[str],
+    include_filters: list[dict[str, Any]] | None = None,
+    exclude_filters: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Apply flow-review groups to decoded packets while returning raw records."""
+    normalized_includes = [_normalize_filter(item) for item in include_filters or []]
+    normalized_excludes = [_normalize_filter(item) for item in exclude_filters or []]
+    result: list[dict[str, Any]] = []
+    for raw in records:
+        decorated = decorate_flow("packet-export", raw, internal_networks)
+        include_match = not normalized_includes or any(
+            _matches_filter(decorated, **packet_filter) for packet_filter in normalized_includes
+        )
+        exclude_match = any(
+            _matches_filter(decorated, **packet_filter) for packet_filter in normalized_excludes
+        )
+        if include_match and not exclude_match:
+            result.append(raw)
+    return result
+
+
 def _normalize_filter(flow_filter: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "candidate_ip",

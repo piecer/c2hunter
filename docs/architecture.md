@@ -170,13 +170,14 @@ Redis는 시스템 기록의 권위 저장소가 아니다. 작업 상태는 Pos
 
 기존 capture dataset/time range를 참조해 새 analysis run을 만든다. 원 Flow/PCAP은 복제하지 않고 profile/threshold/allowlist snapshot은 새로 고정한다. 원본 보관 만료로 불완전하면 요청 검증 또는 결과 warning으로 명시한다.
 
-### 4.4 후보별 PCAP export
+### 4.4 필터 기반 PCAP export
 
-1. 권한·필터·최대 크기 검증 후 비동기 export 생성.
-2. 관련 PCAP object 목록과 candidate/internal host/time/port/protocol/direction/sensor 필터를 정규화한다.
-3. Worker가 object를 스트리밍 읽고 패킷을 스트리밍 필터링해 새 object로 multipart upload한다.
-4. 완료 후 만료 signed URL을 발급한다. object key는 서버 생성 값만 사용하며 filename을 정화한다.
-5. 요청·성공·다운로드를 감사 기록한다. 원본이 만료됐으면 UI/API가 명시한다.
+1. Controller가 권한, rate limit, scalar/nested filter와 source/output byte·packet limit을 검증한다.
+2. Upload는 canonical job capture, 완료된 LIVE 분석은 `analysis_job_id`로 고정된 sensor-PCAP manifest, reanalysis는 parent provenance를 사용한다. Active LIVE source와 terminal job의 늦은 segment 저장은 거부한다.
+3. Source ID와 SHA-256 manifest를 고정하고 각 blob의 크기·digest를 검증한다. Missing/corrupt object 또는 storage 장애에서 부분 결과를 만들거나 legacy source로 조용히 fallback하지 않는다.
+4. Controller가 retained packet을 source order로 동기식 필터링한다. Scalar 조건은 AND, include/exclude group은 각 OR, group 내부는 AND이며 packet-level payload 의미를 사용한다.
+5. 단일 link type은 원 DLT와 captured/wire length를 보존한 PCAP, 여러 interface/link type 또는 classic timestamp 범위 밖 값은 PCAPNG으로 저장한다.
+6. 생성 응답은 `COMPLETED` 또는 호환 가능한 `FAILED` 결과를 반환하고, 인증된 download endpoint가 서버 생성 filename/content type으로 object를 전송한다. 생성·실패·다운로드를 감사 기록한다.
 
 ## 5. 작업 상태 머신
 

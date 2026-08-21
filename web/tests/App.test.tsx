@@ -478,6 +478,58 @@ describe('C2Hunter UI', () => {
     ));
   });
 
+  it('downloads packets using the last applied analysis-flow filters', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/v1/pcap-exports' && init?.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'filtered-export', status: 'COMPLETED', matched_packet_count: 12, filename: 'c2hunter-job-1-filtered-filtered-export.pcap' }), { status: 201 });
+      }
+      if (path === '/api/v1/pcap-exports/filtered-export/download') {
+        return new Response(new Blob(['pcap']), { status: 200, headers: { 'content-type': 'application/vnd.tcpdump.pcap', 'content-disposition': 'attachment; filename="c2hunter-job-1-filtered-filtered-export.pcap"' } });
+      }
+      if (path.includes('/flows?')) {
+        return new Response(JSON.stringify(responses['/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&include_filter=%7B%22has_payload%22%3Atrue%7D']), { status: 200 });
+      }
+      return new Response(JSON.stringify(responses[path] ?? { items: [] }), { status: responses[path] ? 200 : 404 });
+    });
+    vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:filtered-pcap'), revokeObjectURL: vi.fn() });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    renderAt('/analyses/job-1', fetchMock);
+    const user = userEvent.setup();
+
+    await screen.findByRole('table', { name: 'Analysis flows' });
+    await user.click(screen.getByRole('button', { name: 'Add filter out' }));
+    await user.type(screen.getByLabelText('Filter out 1 endpoint IP or CIDR'), '198.51.100.0/24');
+    await user.click(screen.getByRole('button', { name: 'Apply filters' }));
+    await user.click(screen.getByRole('button', { name: 'Download filtered capture' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/pcap-exports', expect.objectContaining({ method: 'POST' })));
+    const call = fetchMock.mock.calls.find(([url, init]) => url === '/api/v1/pcap-exports' && init?.method === 'POST');
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+      job_id: 'job-1',
+      include_filters: [{ has_payload: true }],
+      exclude_filters: [{ candidate_ip: '198.51.100.0/24' }],
+    });
+    expect(await screen.findByRole('status')).toHaveTextContent('Filtered capture downloaded (12 packets)');
+    await user.click(screen.getByRole('button', { name: 'Reset' }));
+    expect(screen.queryByText('Filtered capture downloaded (12 packets)')).not.toBeInTheDocument();
+  });
+
+  it('limits include and exclude filter groups to the API contract', async () => {
+    renderAt('/analyses/job-1');
+    const user = userEvent.setup();
+    await screen.findByRole('table', { name: 'Analysis flows' });
+    const addInclude = screen.getByRole('button', { name: 'Add filter' });
+    const addExclude = screen.getByRole('button', { name: 'Add filter out' });
+
+    for (let index = 1; index < 20; index += 1) await user.click(addInclude);
+    for (let index = 0; index < 20; index += 1) await user.click(addExclude);
+
+    expect(addInclude).toBeDisabled();
+    expect(addExclude).toBeDisabled();
+    expect(screen.getByText('20 include · 20 exclude groups')).toBeInTheDocument();
+  });
+
   it('renders an error state with retry when a request fails', async () => {
     localStorage.setItem('c2hunter-token', 'token');
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { message: 'Storage unavailable' } }), { status: 503, headers: { 'content-type': 'application/json' } })));

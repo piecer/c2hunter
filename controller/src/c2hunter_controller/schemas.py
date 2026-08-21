@@ -578,6 +578,28 @@ class AllowlistCreate(BaseModel):
         return self
 
 
+class PcapFlowFilter(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_ip: str | None = None
+    protocol: str | None = Field(default=None, max_length=32)
+    port: int | None = Field(default=None, ge=0, le=65535)
+    source_port: int | None = Field(default=None, ge=0, le=65535)
+    destination_port: int | None = Field(default=None, ge=0, le=65535)
+    direction: Direction | None = None
+    has_payload: bool | None = None
+
+    @model_validator(mode="after")
+    def normalize_and_require_condition(self) -> PcapFlowFilter:
+        if self.candidate_ip:
+            self.candidate_ip = str(ip_network(self.candidate_ip, strict=False))
+        if self.protocol:
+            self.protocol = self.protocol.strip().upper() or None
+        if all(value is None for value in self.model_dump().values()):
+            raise ValueError("flow filter must contain an active condition")
+        return self
+
+
 class PcapExportCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     job_id: str
@@ -589,6 +611,8 @@ class PcapExportCreate(BaseModel):
     protocol: str | None = None
     direction: Direction | None = None
     sensor_id: str | None = None
+    include_filters: list[PcapFlowFilter] = Field(default_factory=list, max_length=20)
+    exclude_filters: list[PcapFlowFilter] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def valid_range(self) -> PcapExportCreate:

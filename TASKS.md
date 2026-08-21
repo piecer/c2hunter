@@ -81,8 +81,8 @@
 | REQ-UI-004 | §13.5 | 후보 목록 필드와 상세 chart/host/sensor/beacon/timeline/target/evidence/flow/PCAP |
 | REQ-UI-005 | §13.6 | 5종 allowlist+설명/만료 CRUD 및 제외 통계 |
 | REQ-PCP-001 | §14.1 | 작업별 PCAP opt-in, size/time/job end/restart 회전, 기본 1GB/5분 |
-| REQ-PCP-002 | §14.2 | 전체/후보 PCAP, 7종 필터, 대형 export 비동기 |
-| REQ-PCP-003 | §14.3 | 인증/RBAC/audit/expiring URL/path·filename 방어/max size/access check |
+| REQ-PCP-002 | §14.2 | Upload/LIVE/reanalysis source, 전체/후보/applied-filter PCAP, nested filter, source integrity, bounded synchronous PCAP/PCAPNG export |
+| REQ-PCP-003 | §14.3 | 인증/RBAC/audit/controller download/path·filename 방어/max size/access check |
 | REQ-API-001 | §15 | `/api/v1`에 명세의 20개 REST endpoint, OpenAPI |
 | REQ-API-002 | §15 | 모든 목록 pagination/filtering/sorting |
 | REQ-RET-001 | §16 | configurable retention: PCAP7/Flow30/result180/audit365/heartbeat30일, cleanup |
@@ -190,8 +190,8 @@ Phase는 기능 계층별 일괄 구현이 아니라 매 단계 실행 가능한
 | [x] | P4-001 | 인증과 ADMIN/ANALYST/VIEWER/SENSOR RBAC 구현 | REQ-SEC-002, REQ-API-001 | P2-002 | endpoint/resource별 allow/deny matrix test |
 | [-] | P4-002 | 로그인/작업/PCAP/allowlist/sensor/config/role/delete audit 구현 | REQ-SEC-003 | P4-001 | 8종 event와 user/time/IP/action/target/result, secret redaction test |
 | [-] | P4-003 | 분석/sensor/group/allowlist API 전체와 목록 공통 query 구현 | REQ-API-001, REQ-API-002, REQ-UI-005 | P3-009,P4-001 | 명세 endpoint 20개, 정상/오류, pagination/filter/sort, OpenAPI snapshot |
-| [-] | P4-004 | 후보별 PCAP streaming export worker 구현 | REQ-PCP-002 | P2-009,P3-008 | 7종 filter, async 상태, 대용량 bounded memory, packet 정확성 test |
-| [-] | P4-005 | secure PCAP download 구현 | REQ-PCP-003 | P4-001,P4-002,P4-004 | RBAC, signed expiry, path traversal/filename/max size/access/audit tests |
+| [x] | P4-004 | source provenance 기반 bounded filtered PCAP/PCAPNG export 구현 | REQ-PCP-002 | P2-009,P3-008 | scalar+nested filter, immutable manifest/digest, byte·packet limit, packet/interface/format 정확성 test |
+| [x] | P4-005 | secure PCAP download 구현 | REQ-PCP-003 | P4-001,P4-002,P4-004 | RBAC, authenticated endpoint, server filename/content type, max size/access/audit tests |
 | [x] | P4-006 | Dashboard/Sensor UI 구현 | REQ-UI-001, REQ-UI-002 | P4-003 | 명세 필드/차트 렌더, loading/empty/error/accessibility test |
 | [x] | P4-007 | 분석 생성/진행/취소 UI 구현 | REQ-UI-003 | P4-003 | live/history 전체 input, progress/count/time/sensor/error/warning/cancel |
 | [x] | P4-008 | 후보 목록/상세/PCAP UI 구현 | REQ-UI-004 | P3-008,P4-005 | list/detail 요구 필드, timeline/chart/flow/export/download test |
@@ -314,7 +314,7 @@ Phase는 기능 계층별 일괄 구현이 아니라 매 단계 실행 가능한
 - **패킷 dedup 오탐:** 완전 필드가 없으면 confidence를 기록하고 과도 제거 금지; sensor observation은 항상 보존.
 - **시계 오차:** 보정으로 숨기지 않고 DEGRADED/warning/confidence까지 전파.
 - **ClickHouse/PostgreSQL 정합성:** DB ledger claim→chunk insert→commit/ACK의 멱등 경계와 reconciliation job 필요.
-- **PCAP 개인정보/용량:** opt-in, 짧은 retention, streaming export, RBAC/signed URL/audit 적용.
+- **PCAP 개인정보/용량:** opt-in, 짧은 retention, bounded synchronous export, RBAC/authenticated download/audit 적용. 한도 상향 전 durable async queue 필요.
 - **성능 목표:** 180초/RSS8GB/100k PPS는 기준 hardware에서 측정; 목표 미달이어도 OOM/묵시적 loss는 허용하지 않고 병목을 보고.
 - **MVP 과대 범위:** Phase gate마다 수직 슬라이스를 유지하고 명세 제외 기능은 구현하지 않는다.
 - **중요 결정 변경:** queue/store/protocol/capture/scoring 경계 변경은 새 ADR 승인 후 진행.
