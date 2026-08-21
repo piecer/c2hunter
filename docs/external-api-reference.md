@@ -551,7 +551,7 @@ Content-Type: application/vnd.tcpdump.pcap    // raw PCAP data
 | `GET` | `/api/v1/pcap-exports/{id}` | 200 | Export 상태 조회 |
 | `GET` | `/api/v1/pcap-exports/{id}/download` | 200 | Export 파일 다운로드 |
 
-`POST`는 동기식으로 retained source를 해석하고 `COMPLETED` 또는 호환 가능한 `FAILED` export metadata를 반환한다. Upload 분석은 canonical capture, 완료된 LIVE 분석은 고정된 sensor-PCAP segment 집합, reanalysis는 parent provenance를 사용한다. Active LIVE 분석은 `409`, source/output byte·packet limit 초과는 `413`, validation 실패는 `422`, rate limit 초과는 `429`다.
+`POST`는 동기식으로 retained source를 해석하고 `COMPLETED` 또는 호환 가능한 `FAILED` export metadata를 반환한다. Upload 분석은 canonical capture, 완료된 LIVE 분석은 고정된 sensor-PCAP segment 집합, reanalysis는 parent provenance를 사용한다. Active LIVE 분석은 `409`, validation 실패는 `422`, rate limit 초과는 `429`다. 정상 설정에서 source scan/output 한도 도달은 `413`이 아니라 packet/block 경계의 `COMPLETED` partial export다. 필수 PCAP/PCAPNG header조차 수용하지 못하는 output 설정만 `413 PCAP_EXPORT_LIMIT_EXCEEDED`다.
 
 기존 scalar 조건은 모두 AND다. `include_filters`와 `exclude_filters`는 각각 최대 20개 group이며, group 내부 active field는 AND, 각 group 목록은 OR로 평가한다. Nested `candidate_ip`는 exact IP/CIDR, `port`는 inferred external service port, `source_port`/`destination_port`는 transport port, `has_payload`는 aggregated flow가 아닌 개별 packet payload를 의미한다.
 
@@ -573,7 +573,7 @@ Content-Type: application/vnd.tcpdump.pcap    // raw PCAP data
 }
 ```
 
-성공 metadata에는 `source_job_id`, `source_capture_count`, `source_manifest`, `matched_packet_count`, `size_bytes`, `capture_format`, server-generated `filename`이 포함된다. 단일 link type은 `.pcap`, mixed interface/link type 또는 classic timestamp 범위 밖 packet은 `.pcapng`으로 생성된다. Source 없음과 no-match는 각각 `FAILED/PCAP_SOURCE_UNAVAILABLE`, `FAILED/PCAP_NO_MATCH`로 저장되며 download는 `409 PCAP_NOT_AVAILABLE`을 반환한다.
+성공 metadata에는 `source_job_id`, `source_capture_count`, `scanned_source_capture_count`, `omitted_source_capture_count`, `source_total_bytes`, `scanned_source_bytes`, `scanned_packet_count`, `output_byte_limit`, `source_scan_byte_limit`, `source_scan_packet_limit`, 검증 완료된 `source_manifest`, `matched_packet_count`, `exported_packet_count`, `omitted_packet_count`, `truncated`, `truncation_reasons`, `size_bytes`, artifact `sha256`, `capture_format`, server-generated `filename`이 포함된다. Stable reason은 `SOURCE_BYTE_LIMIT`, `SOURCE_PACKET_LIMIT`, `OUTPUT_BYTE_LIMIT`이다. Partial artifact의 filename에는 `-partial-` marker가 포함된다. 단일 link type은 `.pcap`, mixed interface/link type 또는 classic timestamp 범위 밖 packet은 `.pcapng`으로 생성되며 필요한 interface block만 packet과 함께 원자적으로 기록한다. Source 없음, scan ceiling이 첫 source/packet도 허용하지 않음, complete scan no-match, incomplete scan prefix no-match, matched packet 하나도 output에 들어가지 않는 경우는 각각 `FAILED/PCAP_SOURCE_UNAVAILABLE`, `FAILED/PCAP_SOURCE_SCAN_LIMIT_TOO_SMALL`, `FAILED/PCAP_NO_MATCH`, `FAILED/PCAP_SOURCE_SCAN_INCOMPLETE`, `FAILED/PCAP_OUTPUT_LIMIT_TOO_SMALL`로 저장되며 download는 `409 PCAP_NOT_AVAILABLE`을 반환한다. 저장된 source/artifact의 size 또는 SHA-256가 metadata와 다르면 각각 `409 PCAP_SOURCE_INTEGRITY_ERROR`/`409 PCAP_EXPORT_INTEGRITY_ERROR`를 반환한다. 동시 export admission 한도를 초과하면 `429 PCAP_EXPORT_BUSY`를 반환한다.
 
 ---
 

@@ -51,6 +51,10 @@ Values marked "SHA-256" must be 64-character lowercase hex digests — never pla
 | `C2HUNTER_AI_ANALYSIS_ENABLED`        | `false`             | Enable manual AI Runs; start Compose with `--profile ai` |
 | `C2HUNTER_PCAP_UPLOAD_MAX_BYTES`      | `524288000` (500 MiB)| Maximum PCAP upload size                            |
 | `C2HUNTER_PCAP_UPLOAD_MAX_PACKETS`    | `2000000`           | Maximum packets per PCAP upload                     |
+| `C2HUNTER_PCAP_EXPORT_MAX_BYTES`      | upload byte limit   | Maximum serialized filtered PCAP/PCAPNG prefix      |
+| `C2HUNTER_PCAP_EXPORT_SCAN_MAX_BYTES` | upload byte limit   | Maximum retained source bytes scanned per export    |
+| `C2HUNTER_PCAP_EXPORT_SCAN_MAX_PACKETS` | upload packet limit | Maximum complete source packets scanned per export |
+| `C2HUNTER_PCAP_EXPORT_MAX_CONCURRENT` | `1`                 | Maximum synchronous exports executing concurrently  |
 
 ### Candidate 외부 검증 및 MISP 연동
 

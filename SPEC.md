@@ -1065,7 +1065,7 @@ PCAP 파일은 다음 기준으로 회전한다.
 * Source/Destination port
 * Packet payload 존재 여부
 
-추출은 configured source/output byte limit과 cumulative packet limit 안에서 Controller가 동기식으로 수행한다. Limit 초과는 `413`으로 거부하고 부분 export를 저장하지 않는다. 설정 한도를 크게 상향하기 전에는 durable asynchronous export queue와 cross-process coordination을 먼저 구현해야 한다.
+추출은 upload admission과 분리된 configured source scan byte/packet limit 및 serialized output byte limit 안에서 Controller가 동기식으로 수행한다. Scan 한도에서는 다음 complete source/packet 전에, output 한도에서는 다음 complete packet/PCAPNG block 전에 중단한다. 생성된 prefix는 설정 byte 이하이며 독립 parsing 가능해야 하고, `truncated`, stable reason, matched/exported/omitted packet 수와 scanned/omitted source 수를 반환해야 한다. 필수 capture header도 수용하지 못하는 설정은 명시적 `413`, matched packet 하나도 담기지 않는 결과는 `FAILED/PCAP_OUTPUT_LIMIT_TOO_SMALL`로 구분한다. 설정 한도를 크게 상향하기 전에는 durable asynchronous export queue와 cross-process coordination을 먼저 구현해야 한다.
 
 Source manifest의 ID와 SHA-256을 검증하며 missing/corrupt blob 또는 storage 장애에서 부분 결과나 묵시적 fallback을 허용하지 않는다. 단일 link type은 원 DLT/captured/wire length를 보존한 PCAP, mixed interface/link type 또는 classic timestamp 범위 밖 packet은 source order를 보존한 PCAPNG으로 생성한다.
 
@@ -1397,6 +1397,10 @@ WEB_PORT=8080
 C2HUNTER_ENVIRONMENT=development
 C2HUNTER_PCAP_UPLOAD_MAX_BYTES=524288000
 C2HUNTER_PCAP_UPLOAD_MAX_PACKETS=2000000
+C2HUNTER_PCAP_EXPORT_MAX_BYTES=524288000
+C2HUNTER_PCAP_EXPORT_SCAN_MAX_BYTES=524288000
+C2HUNTER_PCAP_EXPORT_SCAN_MAX_PACKETS=2000000
+C2HUNTER_PCAP_EXPORT_MAX_CONCURRENT=1
 C2HUNTER_DEV_LOGIN_ENABLED=true
 C2HUNTER_DEV_TOKEN_TTL_SECONDS=28800
 C2HUNTER_API_AUTH_REQUIRED=true

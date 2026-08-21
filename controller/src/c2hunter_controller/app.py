@@ -75,7 +75,7 @@ from .jobs import (
 from .logging import install_access_log_redaction
 from .operations_api import operations_router
 from .payload_signatures_api import payload_signature_router
-from .pcap import build_capture, filter_records
+from .pcap import build_capture_result, filter_records
 from .production import MinioBlobStore, PostgresRepository
 from .queueing import ControllerQueue, MemoryControllerQueue, RedisControllerQueue
 from .repositories import MemoryRepository, Repository
@@ -776,6 +776,15 @@ def _public_enrollment(enrollment: dict[str, Any], now: datetime) -> dict[str, A
     return {**public, "status": status}
 
 
+def _raw_packet_hex_size(value: Any) -> int:
+    raw_packet = str(value)
+    if len(raw_packet) % 2 or any(
+        character not in "0123456789abcdefABCDEF" for character in raw_packet
+    ):
+        raise ValueError("retained raw packet is not valid hexadecimal data")
+    return len(raw_packet) // 2
+
+
 def create_app(
     settings: Settings | None = None,
     repository: Repository | None = None,
@@ -788,6 +797,7 @@ def create_app(
     ai_task_queue: AIAnalysisTaskQueue | None = None,
 ) -> FastAPI:
     config = settings or Settings()
+    pcap_export_slots = threading.BoundedSemaphore(config.pcap_export_max_concurrent)
     if config.ai_model_endpoint_is_remote:
         logger.warning(
             "AI evidence metadata will be sent to a remote model endpoint: provider=%s host=%s",
@@ -3916,8 +3926,7 @@ def create_app(
             raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
         return {"deleted": True, "candidate_id": candidate_id}
 
-    @app.post("/api/v1/pcap-exports", status_code=201)
-    def create_pcap_export(payload: PcapExportCreate) -> dict[str, Any]:
+    def _create_pcap_export(payload: PcapExportCreate) -> dict[str, Any]:
         job = repo.get_job(payload.job_id)
         if job is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
@@ -3987,87 +3996,186 @@ def create_app(
 
         source_records: list[dict[str, Any]] = []
         source_manifest: list[dict[str, str]] = []
-        captures: list[tuple[str, bytes]] = []
+        sensor_ids = source_job.get("sensor_ids") or ["uploaded"]
         if retained_capture is not None:
-            digest = hashlib.sha256(retained_capture).hexdigest()
             expected_digest = (source_job.get("source") or {}).get("sha256")
-            if expected_digest and not hmac.compare_digest(str(expected_digest), digest):
-                raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP digest mismatch")
-            sensor_ids = source_job.get("sensor_ids") or ["uploaded"]
-            captures.append((str(sensor_ids[0]), retained_capture))
-            source_manifest.append({"id": source_job_id, "sha256": digest})
-        else:
-            declared_sensor_bytes = sum(
-                int(segment.get("size_bytes", 0) or 0) for segment in segment_metadata
-            )
-            if declared_sensor_bytes > config.pcap_upload_max_bytes:
-                raise ApiError(
-                    413,
-                    "PCAP_SOURCE_LIMIT_EXCEEDED",
-                    "PCAP source exceeds byte limit",
+            source_descriptors: list[tuple[dict[str, Any], bytes | None]] = [
+                (
+                    {
+                        "id": source_job_id,
+                        "sensor_id": str(sensor_ids[0]),
+                        "size_bytes": len(retained_capture),
+                        "sha256": str(expected_digest or ""),
+                    },
+                    retained_capture,
                 )
-            for segment in segment_metadata:
-                stored_segment = repo.get_sensor_pcap(str(segment["id"]))
+            ]
+        else:
+            source_descriptors = [(segment, None) for segment in segment_metadata]
+
+        source_capture_count = len(source_descriptors)
+        try:
+            declared_source_sizes = [
+                int(descriptor.get("size_bytes", 0) or 0)
+                for descriptor, _content in source_descriptors
+            ]
+        except (TypeError, ValueError) as exc:
+            raise ApiError(
+                409,
+                "PCAP_SOURCE_INTEGRITY_ERROR",
+                "retained PCAP size metadata is invalid",
+            ) from exc
+        if any(size < 0 for size in declared_source_sizes):
+            raise ApiError(
+                409,
+                "PCAP_SOURCE_INTEGRITY_ERROR",
+                "retained PCAP size metadata is invalid",
+            )
+        source_total_bytes = sum(declared_source_sizes)
+        scan_max_bytes = cast(int, config.pcap_export_scan_max_bytes)
+        scan_max_packets = cast(int, config.pcap_export_scan_max_packets)
+        scanned_source_bytes = 0
+        scanned_source_capture_count = 0
+        remaining_packets = scan_max_packets
+        source_truncation_reasons: list[str] = []
+        for source_order, (descriptor, retained_content) in enumerate(source_descriptors):
+            declared_size = declared_source_sizes[source_order]
+            if scanned_source_bytes + declared_size > scan_max_bytes:
+                source_truncation_reasons.append("SOURCE_BYTE_LIMIT")
+                break
+            if remaining_packets < 1:
+                source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
+                break
+            if retained_content is None:
+                stored_segment = repo.get_sensor_pcap(str(descriptor["id"]))
                 if stored_segment is None:
                     raise ApiError(
                         409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP segment missing"
                     )
-                stored_metadata, segment_content = stored_segment
-                digest = hashlib.sha256(segment_content).hexdigest()
-                expected_digest = stored_metadata.get("sha256")
-                if not expected_digest or not hmac.compare_digest(str(expected_digest), digest):
-                    raise ApiError(
-                        409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP digest mismatch"
-                    )
-                captures.append((str(stored_metadata["sensor_id"]), segment_content))
-                source_manifest.append({"id": str(stored_metadata["id"]), "sha256": digest})
-
-        total_source_bytes = sum(len(content) for _sensor_id, content in captures)
-        if total_source_bytes > config.pcap_upload_max_bytes:
-            raise ApiError(413, "PCAP_SOURCE_LIMIT_EXCEEDED", "PCAP source exceeds byte limit")
-        remaining_packets = config.pcap_upload_max_packets
-        for source_order, (sensor_id, capture_content) in enumerate(captures):
-            if remaining_packets < 1:
+                stored_metadata, capture_content = stored_segment
+            else:
+                stored_metadata, capture_content = descriptor, retained_content
+            stored_size_value = stored_metadata.get("size_bytes")
+            try:
+                if isinstance(stored_size_value, bool) or not isinstance(
+                    stored_size_value, int | str
+                ):
+                    raise ValueError
+                stored_size = int(stored_size_value)
+            except (TypeError, ValueError) as exc:
                 raise ApiError(
-                    413, "PCAP_PACKET_LIMIT_EXCEEDED", "PCAP source exceeds packet limit"
+                    409,
+                    "PCAP_SOURCE_INTEGRITY_ERROR",
+                    "retained PCAP size metadata is invalid",
+                ) from exc
+            if stored_size < 0 or stored_size != len(capture_content):
+                raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP size mismatch")
+            if retained_content is None and (
+                str(stored_metadata.get("id", "")) != str(descriptor.get("id", ""))
+                or str(stored_metadata.get("sensor_id", "")) != str(descriptor.get("sensor_id", ""))
+                or stored_metadata.get("analysis_job_id") != source_job_id
+                or stored_size != declared_size
+                or str(stored_metadata.get("sha256", "")) != str(descriptor.get("sha256", ""))
+            ):
+                raise ApiError(
+                    409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP metadata mismatch"
                 )
+            if scanned_source_bytes + len(capture_content) > scan_max_bytes:
+                source_truncation_reasons.append("SOURCE_BYTE_LIMIT")
+                break
+            digest = hashlib.sha256(capture_content).hexdigest()
+            expected_digest = stored_metadata.get("sha256")
+            if expected_digest and not hmac.compare_digest(str(expected_digest), digest):
+                raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP digest mismatch")
+            if not expected_digest:
+                raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP digest missing")
+            source_manifest.append({"id": str(stored_metadata["id"]), "sha256": digest})
             try:
                 parsed = parse_pcap(
                     capture_content,
-                    sensor_id=sensor_id,
+                    sensor_id=str(stored_metadata["sensor_id"]),
                     internal_networks=list(job["internal_networks"]),
                     max_packets=remaining_packets,
                     retain_packet_bytes=True,
+                    retain_packet_bytes_as_bytes=True,
                     allow_no_supported_packets=True,
+                    truncate_at_max_packets=True,
                 )
             except PcapParseError as exc:
-                status_code = 413 if exc.code == "PCAP_PACKET_LIMIT_EXCEEDED" else 422
-                raise ApiError(status_code, exc.code, str(exc)) from exc
+                raise ApiError(422, exc.code, str(exc)) from exc
+            scanned_source_bytes += len(capture_content)
+            scanned_source_capture_count += 1
             remaining_packets -= parsed.captured_packet_count
             source_records.extend(
                 {**record, "raw_packet_source_order": source_order} for record in parsed.records
             )
+            if parsed.truncated:
+                source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
+                break
 
-        if not captures:
-            source_records = [
+        if not source_descriptors:
+            fallback_records = [
                 dict(record)
                 for record in source_job.get("flow_records", [])
                 if record.get("raw_packet_hex")
             ]
+            try:
+                fallback_sizes = [
+                    _raw_packet_hex_size(record["raw_packet_hex"]) for record in fallback_records
+                ]
+            except ValueError as exc:
+                raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", str(exc)) from exc
+            source_total_bytes = sum(fallback_sizes)
+            source_records = []
+            for record, packet_size in zip(fallback_records, fallback_sizes, strict=True):
+                if scanned_source_bytes + packet_size > scan_max_bytes:
+                    source_truncation_reasons.append("SOURCE_BYTE_LIMIT")
+                    break
+                if len(source_records) >= scan_max_packets:
+                    source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
+                    break
+                source_records.append(record)
+                scanned_source_bytes += packet_size
+        scanned_packet_count = (
+            scan_max_packets - remaining_packets if source_descriptors else len(source_records)
+        )
         records = filter_records(
             source_records,
             normalized,
             internal_networks=list(job["internal_networks"]),
         )
         try:
-            content, packet_count, capture_format = build_capture(
-                records, max_output_bytes=config.pcap_upload_max_bytes
-            )
+            max_output_bytes = cast(int, config.pcap_export_max_bytes)
+            capture_result = build_capture_result(records, max_output_bytes=max_output_bytes)
         except ValueError as exc:
             raise ApiError(413, "PCAP_EXPORT_LIMIT_EXCEEDED", str(exc)) from exc
+        content = capture_result.content
+        packet_count = capture_result.exported_packet_count
+        capture_format = capture_result.capture_format
+        truncation_reasons = list(
+            dict.fromkeys([*source_truncation_reasons, *capture_result.truncation_reasons])
+        )
         export_id = str(uuid.uuid4())
         status = "COMPLETED" if packet_count else "FAILED"
-        source_available = bool(captures or source_records)
+        source_available = bool(source_descriptors or source_records)
+        if packet_count:
+            error_code = None
+            error_message = None
+        elif capture_result.matched_packet_count:
+            error_code = "PCAP_OUTPUT_LIMIT_TOO_SMALL"
+            error_message = "output byte limit cannot fit a complete matched packet"
+        elif source_truncation_reasons and not scanned_source_capture_count:
+            error_code = "PCAP_SOURCE_SCAN_LIMIT_TOO_SMALL"
+            error_message = "source scan byte limit cannot fit the first retained capture"
+        elif source_truncation_reasons:
+            error_code = "PCAP_SOURCE_SCAN_INCOMPLETE"
+            error_message = "no packets matched in the incomplete source prefix"
+        elif source_available:
+            error_code = "PCAP_NO_MATCH"
+            error_message = "no packets matched the applied filters"
+        else:
+            error_code = "PCAP_SOURCE_UNAVAILABLE"
+            error_message = "retained source packet bytes are unavailable"
         safe_job_id = (
             "".join(
                 character
@@ -4077,32 +4185,51 @@ def create_app(
             or "analysis"
         )
         extension = "pcapng" if capture_format == "PCAPNG" else "pcap"
+        completeness = "-partial" if truncation_reasons else ""
         metadata = {
             "id": export_id,
             "job_id": payload.job_id,
             "source_job_id": str(source_job["id"]),
             "candidate_id": payload.candidate_id,
             "status": status,
-            "matched_packet_count": packet_count,
+            "matched_packet_count": capture_result.matched_packet_count,
+            "exported_packet_count": packet_count,
+            "omitted_packet_count": capture_result.omitted_packet_count,
+            "truncated": bool(truncation_reasons),
+            "truncation_reasons": truncation_reasons,
             "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
             "capture_format": capture_format,
-            "filename": f"c2hunter-{safe_job_id}-filtered-{export_id}.{extension}",
+            "filename": (f"c2hunter-{safe_job_id}-filtered{completeness}-{export_id}.{extension}"),
             "filter": normalized,
-            "source_capture_count": len(captures),
+            "source_capture_count": source_capture_count,
+            "scanned_source_capture_count": scanned_source_capture_count,
+            "omitted_source_capture_count": (source_capture_count - scanned_source_capture_count),
+            "source_total_bytes": source_total_bytes,
+            "scanned_source_bytes": scanned_source_bytes,
+            "scanned_packet_count": scanned_packet_count,
+            "output_byte_limit": max_output_bytes,
+            "source_scan_byte_limit": scan_max_bytes,
+            "source_scan_packet_limit": scan_max_packets,
             "source_manifest": source_manifest,
             "created_at": datetime.now(UTC).isoformat(),
-            "error_code": None
-            if packet_count
-            else ("PCAP_NO_MATCH" if source_available else "PCAP_SOURCE_UNAVAILABLE"),
-            "error": None
-            if packet_count
-            else (
-                "no packets matched the applied filters"
-                if source_available
-                else "retained source packet bytes are unavailable"
-            ),
+            "error_code": error_code,
+            "error": error_message,
         }
         return repo.save_export(metadata, content)
+
+    @app.post("/api/v1/pcap-exports", status_code=201)
+    def create_pcap_export(payload: PcapExportCreate) -> dict[str, Any]:
+        if not pcap_export_slots.acquire(blocking=False):
+            raise ApiError(
+                429,
+                "PCAP_EXPORT_BUSY",
+                "PCAP export capacity is busy; retry after an active export completes",
+            )
+        try:
+            return _create_pcap_export(payload)
+        finally:
+            pcap_export_slots.release()
 
     @app.get("/api/v1/pcap-exports/{export_id}")
     def get_pcap_export(export_id: str) -> dict[str, Any]:
@@ -4119,6 +4246,17 @@ def create_app(
         metadata, content = stored
         if metadata["status"] != "COMPLETED":
             raise ApiError(409, "PCAP_NOT_AVAILABLE", "PCAP export가 사용 가능하지 않습니다")
+        expected_size = metadata.get("size_bytes")
+        expected_digest = metadata.get("sha256")
+        if (expected_size is not None and len(content) != expected_size) or (
+            expected_digest is not None
+            and not hmac.compare_digest(hashlib.sha256(content).hexdigest(), expected_digest)
+        ):
+            raise ApiError(
+                409,
+                "PCAP_EXPORT_INTEGRITY_ERROR",
+                "PCAP export artifact integrity validation failed",
+            )
         filename = metadata.get("filename", f"c2hunter-{export_id}.pcap")
         return Response(
             content,

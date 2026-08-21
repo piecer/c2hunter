@@ -37,7 +37,7 @@ def classic_pcap(packet: bytes, link_type: int = 1, count: int = 1) -> bytes:
     return bytes(content)
 
 
-def pcapng(packet: bytes) -> bytes:
+def pcapng(packet: bytes, count: int = 1) -> bytes:
     def block(kind: int, body: bytes) -> bytes:
         body += b"\0" * (-len(body) % 4)
         length = 12 + len(body)
@@ -46,10 +46,20 @@ def pcapng(packet: bytes) -> bytes:
     section = block(0x0A0D0D0A, struct.pack("<IHHq", 0x1A2B3C4D, 1, 0, -1))
     interface = block(1, struct.pack("<HHI", 1, 0, 65535))
     timestamp = 1_784_544_000_500_000
-    enhanced = block(
-        6,
-        struct.pack("<IIIII", 0, timestamp >> 32, timestamp & 0xFFFFFFFF, len(packet), len(packet))
-        + packet,
+    enhanced = b"".join(
+        block(
+            6,
+            struct.pack(
+                "<IIIII",
+                0,
+                (timestamp + index) >> 32,
+                (timestamp + index) & 0xFFFFFFFF,
+                len(packet),
+                len(packet),
+            )
+            + packet,
+        )
+        for index in range(count)
     )
     return section + interface + enhanced
 
@@ -108,6 +118,20 @@ def test_payload_preview_is_bounded_and_opt_in() -> None:
     assert with_preview.records[0]["payload_sample_hex"] == b"beac".hex()
 
 
+def test_parser_can_retain_packet_bytes_without_hex_amplification() -> None:
+    packet = udp_packet()
+
+    result = parse_pcap(
+        classic_pcap(packet),
+        sensor_id="uploaded",
+        internal_networks=["10.0.0.0/8"],
+        retain_packet_bytes_as_bytes=True,
+    )
+
+    assert result.records[0]["raw_packet_bytes"] == packet
+    assert "raw_packet_hex" not in result.records[0]
+
+
 def test_targeted_payload_preview_stops_without_materializing_capture() -> None:
     inspected: list[str] = []
 
@@ -148,6 +172,39 @@ def test_linux_cooked_capture_and_packet_limit() -> None:
             max_packets=1,
         )
     assert error.value.code == "PCAP_PACKET_LIMIT_EXCEEDED"
+
+
+@pytest.mark.parametrize(
+    "capture", [classic_pcap(udp_packet(), count=3), pcapng(udp_packet(), count=3)]
+)
+def test_parse_pcap_can_return_a_bounded_packet_prefix(capture: bytes) -> None:
+    result = parse_pcap(
+        capture,
+        sensor_id="uploaded",
+        internal_networks=["10.0.0.0/8"],
+        max_packets=2,
+        truncate_at_max_packets=True,
+    )
+
+    assert result.captured_packet_count == 2
+    assert result.parsed_packet_count == 2
+    assert result.truncated is True
+
+
+@pytest.mark.parametrize(
+    "capture", [classic_pcap(udp_packet(), count=2), pcapng(udp_packet(), count=2)]
+)
+def test_parse_pcap_prefix_is_complete_at_exact_packet_limit(capture: bytes) -> None:
+    result = parse_pcap(
+        capture,
+        sensor_id="uploaded",
+        internal_networks=["10.0.0.0/8"],
+        max_packets=2,
+        truncate_at_max_packets=True,
+    )
+
+    assert result.captured_packet_count == 2
+    assert result.truncated is False
 
 
 def test_malformed_and_non_ip_captures_are_rejected() -> None:

@@ -1550,10 +1550,18 @@ class PostgresRepository:
             return bool(deleted)
 
     def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any]:
-        key = f"exports/{export['id']}.pcap"
+        extension = "pcapng" if export.get("capture_format") == "PCAPNG" else "pcap"
+        key = f"exports/{export['id']}.{extension}"
         self.blob_store.put(key, content)
         stored = {**export, "object_key": key}
-        return self._put("export", export["id"], stored)
+        try:
+            return self._put("export", export["id"], stored)
+        except Exception:
+            try:
+                self.blob_store.delete(key)
+            except Exception:
+                logger.warning("Failed to delete orphaned export blob %s", key)
+            raise
 
     def get_export(self, export_id: str) -> tuple[dict[str, Any], bytes] | None:
         metadata = self._get("export", export_id)

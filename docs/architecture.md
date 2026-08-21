@@ -174,10 +174,10 @@ Redis는 시스템 기록의 권위 저장소가 아니다. 작업 상태는 Pos
 
 1. Controller가 권한, rate limit, scalar/nested filter와 source/output byte·packet limit을 검증한다.
 2. Upload는 canonical job capture, 완료된 LIVE 분석은 `analysis_job_id`로 고정된 sensor-PCAP manifest, reanalysis는 parent provenance를 사용한다. Active LIVE source와 terminal job의 늦은 segment 저장은 거부한다.
-3. Source ID와 SHA-256 manifest를 고정하고 각 blob의 크기·digest를 검증한다. Missing/corrupt object 또는 storage 장애에서 부분 결과를 만들거나 legacy source로 조용히 fallback하지 않는다.
-4. Controller가 retained packet을 source order로 동기식 필터링한다. Scalar 조건은 AND, include/exclude group은 각 OR, group 내부는 AND이며 packet-level payload 의미를 사용한다.
-5. 단일 link type은 원 DLT와 captured/wire length를 보존한 PCAP, 여러 interface/link type 또는 classic timestamp 범위 밖 값은 PCAPNG으로 저장한다.
-6. 생성 응답은 `COMPLETED` 또는 호환 가능한 `FAILED` 결과를 반환하고, 인증된 download endpoint가 서버 생성 filename/content type으로 object를 전송한다. 생성·실패·다운로드를 감사 기록한다.
+3. Source ID와 SHA-256 manifest를 고정하고 blob을 하나씩 크기·digest 검증 후 parse한다. Missing/corrupt object 또는 storage 장애에서 부분 결과를 만들거나 legacy source로 조용히 fallback하지 않는다.
+4. Controller가 retained packet을 source order로 동기식 필터링한다. Source scan ceiling에서는 다음 complete source/packet 전에 중단하고 partial metadata에 이유와 처리량을 기록한다. Scalar 조건은 AND, include/exclude group은 각 OR, group 내부는 AND이며 packet-level payload 의미를 사용한다.
+5. 단일 link type은 원 DLT와 captured/wire length를 보존한 PCAP, 여러 interface/link type 또는 classic timestamp 범위 밖 값은 PCAPNG으로 저장한다. Serialized output ceiling에서는 packet/IDB 경계 전에 중단하므로 결과는 설정 byte 이하의 독립 parsing 가능한 prefix다.
+6. 생성 응답은 full/partial `COMPLETED` 또는 호환 가능한 `FAILED` 결과를 반환하고, 인증된 download endpoint가 서버 생성 filename/content type으로 object를 전송한다. 생성·실패·다운로드를 감사 기록한다.
 
 ## 5. 작업 상태 머신
 

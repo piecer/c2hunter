@@ -482,7 +482,16 @@ describe('C2Hunter UI', () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path === '/api/v1/pcap-exports' && init?.method === 'POST') {
-        return new Response(JSON.stringify({ id: 'filtered-export', status: 'COMPLETED', matched_packet_count: 12, filename: 'c2hunter-job-1-filtered-filtered-export.pcap' }), { status: 201 });
+        return new Response(JSON.stringify({
+          id: 'filtered-export',
+          status: 'COMPLETED',
+          matched_packet_count: 12,
+          exported_packet_count: 8,
+          omitted_packet_count: 4,
+          truncated: true,
+          truncation_reasons: ['OUTPUT_BYTE_LIMIT'],
+          filename: 'c2hunter-job-1-filtered-filtered-export.pcap',
+        }), { status: 201 });
       }
       if (path === '/api/v1/pcap-exports/filtered-export/download') {
         return new Response(new Blob(['pcap']), { status: 200, headers: { 'content-type': 'application/vnd.tcpdump.pcap', 'content-disposition': 'attachment; filename="c2hunter-job-1-filtered-filtered-export.pcap"' } });
@@ -510,9 +519,9 @@ describe('C2Hunter UI', () => {
       include_filters: [{ has_payload: true }],
       exclude_filters: [{ candidate_ip: '198.51.100.0/24' }],
     });
-    expect(await screen.findByRole('status')).toHaveTextContent('Filtered capture downloaded (12 packets)');
+    expect(await screen.findByRole('status')).toHaveTextContent('Partial filtered capture downloaded (8 of 12 matched packets; output byte limit reached)');
     await user.click(screen.getByRole('button', { name: 'Reset' }));
-    expect(screen.queryByText('Filtered capture downloaded (12 packets)')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Partial filtered capture downloaded/)).not.toBeInTheDocument();
   });
 
   it('limits include and exclude filter groups to the API contract', async () => {
@@ -663,7 +672,15 @@ describe('C2Hunter UI', () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path === '/api/v1/pcap-exports' && init?.method === 'POST') {
-        return new Response(JSON.stringify({ id: 'export-1', status: 'COMPLETED', matched_packet_count: 20 }), { status: 201 });
+        return new Response(JSON.stringify({
+          id: 'export-1',
+          status: 'COMPLETED',
+          matched_packet_count: 20,
+          exported_packet_count: 12,
+          truncated: true,
+          truncation_reasons: ['SOURCE_PACKET_LIMIT'],
+          filename: 'c2hunter-job-1-filtered-partial-export-1.pcapng',
+        }), { status: 201 });
       }
       if (path === '/api/v1/pcap-exports/export-1/download') {
         expect(new Headers(init?.headers).get('authorization')).toBe('Bearer token');
@@ -671,14 +688,16 @@ describe('C2Hunter UI', () => {
           status: 200,
           headers: {
             'content-type': 'application/vnd.tcpdump.pcap',
-            'content-disposition': 'attachment; filename="c2hunter-export-1.pcap"',
           },
         });
       }
       return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404 });
     });
     vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:candidate-pcap'), revokeObjectURL: vi.fn() });
-    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    let downloadedFilename = '';
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      downloadedFilename = this.download;
+    });
     renderAt('/candidates/candidate-1', fetchMock);
 
     await userEvent.click(await screen.findByRole('button', { name: 'Export candidate PCAP' }));
@@ -689,6 +708,36 @@ describe('C2Hunter UI', () => {
     ));
     expect(URL.createObjectURL).toHaveBeenCalled();
     expect(click).toHaveBeenCalled();
+    expect(downloadedFilename).toBe('c2hunter-job-1-filtered-partial-export-1.pcapng');
+    expect(await screen.findByRole('status')).toHaveTextContent('Partial candidate PCAP downloaded (12 of 20 matched packets; source scan packet limit reached)');
+  });
+
+  it('explains when candidate export found no match in an incomplete source prefix', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/v1/pcap-exports' && init?.method === 'POST') {
+        return new Response(JSON.stringify({
+          id: 'export-incomplete',
+          status: 'FAILED',
+          matched_packet_count: 0,
+          truncated: true,
+          truncation_reasons: ['SOURCE_PACKET_LIMIT'],
+          error: 'no packets matched in the incomplete source prefix',
+        }), { status: 201 });
+      }
+      return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404 });
+    });
+    renderAt('/candidates/candidate-1', fetchMock);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Export candidate PCAP' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'no packets matched in the incomplete source prefix (source scan packet limit reached)',
+    );
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      '/api/v1/pcap-exports/export-incomplete/download',
+      expect.anything(),
+    );
   });
 
   it('records verdicts, looks up TI, and exports confirmed candidates to MISP', async () => {

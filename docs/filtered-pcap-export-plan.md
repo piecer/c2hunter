@@ -47,17 +47,18 @@ Source selection is based on provenance, not only blob existence:
 4. Legacy jobs with no retained capture may use existing `flow_records` only when at least one record contains `raw_packet_hex`, preserving compatibility.
 5. If canonical `job_capture` exists, associated sensor segments and inline raw records are not also read, preventing duplicate source inclusion.
 
-At export start, the selected metadata is copied as the request's source manifest. Every sensor blob is loaded by exact ID and its bytes are checked against metadata `sha256`. Canonical upload bytes are checked against `job.source.sha256` when present. Missing blobs, digest mismatch, storage failure, or one corrupt segment abort the whole request; partial exports are never persisted as completed.
+At export start, the selected metadata is copied as the request's source manifest. Every sensor blob is loaded by exact ID and its bytes are checked against metadata `sha256`. Canonical upload bytes require and are checked against `job.source.sha256`. A missing digest or blob, digest mismatch, storage failure, or one corrupt segment aborts the whole request; partial exports are never persisted as completed.
 
 Export metadata records `source_job_id`, `source_capture_count`, and a manifest of source IDs/SHA-256 values for audit reproducibility.
 
 ## 5. Resource limits
 
-- The sum of selected source bytes must not exceed `pcap_upload_max_bytes`; rejection is HTTP 413 with `PCAP_SOURCE_LIMIT_EXCEEDED`.
-- `pcap_upload_max_packets` is a cumulative pre-filter captured-packet scan limit across every selected source, not a per-segment or matched-packet limit. Exceeding it is HTTP 413 with `PCAP_PACKET_LIMIT_EXCEEDED`.
-- Generated output must not exceed `pcap_upload_max_bytes`; rejection is HTTP 413 with `PCAP_EXPORT_LIMIT_EXCEEDED`.
-- Limits are checked before a completed export is saved. A parser/limit/integrity request failure does not leave a partial export blob.
-- The implementation avoids duplicate source lists but, because repositories currently save `bytes`, bounded in-memory output construction remains part of the synchronous contract.
+- `pcap_export_scan_max_bytes` and `pcap_export_scan_max_packets` are cumulative source-prefix limits across every selected capture. They inherit upload limits when omitted.
+- A scan ceiling stops before the next source or complete packet and saves a parseable prefix artifact with `truncated=true` and `SOURCE_BYTE_LIMIT` or `SOURCE_PACKET_LIMIT`.
+- `pcap_export_max_bytes` stops before the next complete PCAP packet or PCAPNG block and records `OUTPUT_BYTE_LIMIT` rather than returning a size-related 413.
+- If no match exists in an incomplete scanned prefix, the export fails as `PCAP_SOURCE_SCAN_INCOMPLETE`, not definitive `PCAP_NO_MATCH`.
+- Integrity/parser failures do not save a completed export blob. `pcap_export_max_concurrent` bounds overlapping synchronous work and returns `429 PCAP_EXPORT_BUSY` when saturated.
+- The implementation avoids packet hex round trips, but repositories currently save `bytes`, so bounded in-memory source and output construction remains part of the synchronous contract.
 
 ## 6. API request
 
@@ -184,7 +185,7 @@ Backend/parser/writer:
 7. Invalid/empty/21st nested group returns 422.
 8. Missing source persists `FAILED/PCAP_SOURCE_UNAVAILABLE`; no match persists `FAILED/PCAP_NO_MATCH`; both downloads return 409.
 9. Sensor metadata/blob missing, SHA mismatch, corrupt final segment, and parser failure produce no partial completed export.
-10. Two one-packet segments with global limit one fail pre-filter with 413; source/output byte limits are enforced.
+10. Two one-packet segments with global limit one produce a deterministic one-packet partial prefix; source/output byte limits are enforced at complete packet/block boundaries.
 11. Ethernet, RAW, and SLL single-link exports round-trip through `parse_pcap` with correct DLT, endpoints, packet count, raw bytes, captured/original lengths.
 12. Mixed-link sources produce valid PCAPNG rather than Ethernet-mislabeled PCAP.
 13. Truncated packet lengths, snaplen over 65535 where supported, duplicate packets, equal timestamps, source tie ordering, and canonical-source precedence are deterministic.

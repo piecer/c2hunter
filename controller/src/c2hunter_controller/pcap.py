@@ -2,10 +2,22 @@ from __future__ import annotations
 
 import math
 import struct
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from .flow_review import filter_packet_records
+
+
+@dataclass(frozen=True)
+class CaptureBuildResult:
+    content: bytes
+    capture_format: str
+    matched_packet_count: int
+    exported_packet_count: int
+    omitted_packet_count: int
+    truncated: bool
+    truncation_reasons: tuple[str, ...]
 
 
 def filter_records(
@@ -60,10 +72,14 @@ def _packet_rows(
 ) -> list[tuple[datetime, int, int, int, int, bytes, int]]:
     rows: list[tuple[datetime, int, int, int, int, bytes, int]] = []
     for record in records:
+        raw_bytes = record.get("raw_packet_bytes")
         raw_hex = record.get("raw_packet_hex")
-        if not raw_hex:
+        if isinstance(raw_bytes, bytes):
+            packet = raw_bytes
+        elif raw_hex:
+            packet = bytes.fromhex(str(raw_hex))
+        else:
             continue
-        packet = bytes.fromhex(str(raw_hex))
         raw_timestamp = record["timestamp"]
         timestamp = (
             raw_timestamp
@@ -86,7 +102,7 @@ def _packet_rows(
 
 
 def _timestamp_parts(timestamp: datetime) -> tuple[int, int]:
-    return int(timestamp.timestamp()), timestamp.microsecond
+    return math.floor(timestamp.timestamp()), timestamp.microsecond
 
 
 def _block(kind: int, body: bytes) -> bytes:
@@ -95,9 +111,9 @@ def _block(kind: int, body: bytes) -> bytes:
     return struct.pack("<II", kind, length) + body + struct.pack("<I", length)
 
 
-def build_capture(
+def build_capture_result(
     records: list[dict[str, Any]], *, max_output_bytes: int | None = None
-) -> tuple[bytes, int, str]:
+) -> CaptureBuildResult:
     rows = _packet_rows(records)
     interface_keys = {(row[1], row[3], row[4]) for row in rows}
     classic_timestamps = all(0 <= _timestamp_parts(row[0])[0] <= 0xFFFFFFFF for row in rows)
@@ -105,6 +121,9 @@ def build_capture(
         link_type = next(iter(interface_keys), (0, 0, 1))[2]
         snaplen = max((len(row[5]) for row in rows), default=65535)
         output = bytearray(struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, snaplen, link_type))
+        if max_output_bytes is not None and len(output) > max_output_bytes:
+            raise ValueError("output byte limit is too small for the PCAP header")
+        exported_packet_count = 0
         for (
             timestamp,
             _source_order,
@@ -115,28 +134,41 @@ def build_capture(
             original_length,
         ) in rows:
             seconds, microseconds = _timestamp_parts(timestamp)
-            output.extend(struct.pack("<IIII", seconds, microseconds, len(packet), original_length))
-            output.extend(packet)
-            if max_output_bytes is not None and len(output) > max_output_bytes:
-                raise ValueError("generated capture exceeds the output byte limit")
-        return bytes(output), len(rows), "PCAP"
-
-    ordered_interfaces = sorted(interface_keys)
-    interface_ids = {key: index for index, key in enumerate(ordered_interfaces)}
-    timestamp_offsets = {
-        key: min(
-            0,
-            math.floor(min(row[0].timestamp() for row in rows if (row[1], row[3], row[4]) == key)),
+            packet_record = (
+                struct.pack("<IIII", seconds, microseconds, len(packet), original_length) + packet
+            )
+            if max_output_bytes is not None and len(output) + len(packet_record) > max_output_bytes:
+                break
+            output.extend(packet_record)
+            exported_packet_count += 1
+        omitted_packet_count = len(rows) - exported_packet_count
+        return CaptureBuildResult(
+            bytes(output),
+            "PCAP",
+            len(rows),
+            exported_packet_count,
+            omitted_packet_count,
+            bool(omitted_packet_count),
+            ("OUTPUT_BYTE_LIMIT",) if omitted_packet_count else (),
         )
-        for key in ordered_interfaces
+
+    interface_snaplens: dict[tuple[int, int, int], int] = {}
+    interface_min_timestamps: dict[tuple[int, int, int], float] = {}
+    for timestamp, source_order, _packet_index, interface_id, link_type, packet, _ in rows:
+        key = (source_order, interface_id, link_type)
+        interface_snaplens[key] = max(interface_snaplens.get(key, 0), len(packet))
+        unix_timestamp = timestamp.timestamp()
+        interface_min_timestamps[key] = min(
+            interface_min_timestamps.get(key, unix_timestamp), unix_timestamp
+        )
+    timestamp_offsets = {
+        key: min(0, math.floor(timestamp)) for key, timestamp in interface_min_timestamps.items()
     }
     output = bytearray(_block(0x0A0D0D0A, struct.pack("<IHHq", 0x1A2B3C4D, 1, 0, -1)))
-    for key in ordered_interfaces:
-        snaplen = max(len(row[5]) for row in rows if (row[1], row[3], row[4]) == key)
-        options = b""
-        if timestamp_offsets[key]:
-            options = struct.pack("<HHqHH", 14, 8, timestamp_offsets[key], 0, 0)
-        output.extend(_block(1, struct.pack("<HHI", key[2], 0, snaplen) + options))
+    if max_output_bytes is not None and len(output) > max_output_bytes:
+        raise ValueError("output byte limit is too small for the PCAPNG section header")
+    interface_ids: dict[tuple[int, int, int], int] = {}
+    exported_packet_count = 0
     for (
         timestamp,
         source_order,
@@ -147,13 +179,21 @@ def build_capture(
         original_length,
     ) in rows:
         key = (source_order, interface_id, _link_type)
+        interface_block = b""
+        if key not in interface_ids:
+            options = b""
+            if timestamp_offsets[key]:
+                options = struct.pack("<HHqHH", 14, 8, timestamp_offsets[key], 0, 0)
+            interface_block = _block(
+                1, struct.pack("<HHI", key[2], 0, interface_snaplens[key]) + options
+            )
         ticks = round((timestamp.timestamp() - timestamp_offsets[key]) * 1_000_000)
         if not 0 <= ticks <= 0xFFFFFFFFFFFFFFFF:
             raise ValueError("packet timestamp exceeds the PCAPNG range")
         body = (
             struct.pack(
                 "<IIIII",
-                interface_ids[key],
+                interface_ids.get(key, len(interface_ids)),
                 ticks >> 32,
                 ticks & 0xFFFFFFFF,
                 len(packet),
@@ -161,10 +201,34 @@ def build_capture(
             )
             + packet
         )
-        output.extend(_block(6, body))
-        if max_output_bytes is not None and len(output) > max_output_bytes:
-            raise ValueError("generated capture exceeds the output byte limit")
-    return bytes(output), len(rows), "PCAPNG"
+        packet_block = _block(6, body)
+        required_bytes = len(interface_block) + len(packet_block)
+        if max_output_bytes is not None and len(output) + required_bytes > max_output_bytes:
+            break
+        if interface_block:
+            interface_ids[key] = len(interface_ids)
+            output.extend(interface_block)
+        output.extend(packet_block)
+        exported_packet_count += 1
+    omitted_packet_count = len(rows) - exported_packet_count
+    return CaptureBuildResult(
+        bytes(output),
+        "PCAPNG",
+        len(rows),
+        exported_packet_count,
+        omitted_packet_count,
+        bool(omitted_packet_count),
+        ("OUTPUT_BYTE_LIMIT",) if omitted_packet_count else (),
+    )
+
+
+def build_capture(
+    records: list[dict[str, Any]], *, max_output_bytes: int | None = None
+) -> tuple[bytes, int, str]:
+    result = build_capture_result(records, max_output_bytes=max_output_bytes)
+    if max_output_bytes is not None and result.truncated:
+        raise ValueError("generated capture exceeds the output byte limit")
+    return result.content, result.exported_packet_count, result.capture_format
 
 
 def build_pcap(records: list[dict[str, Any]]) -> tuple[bytes, int]:

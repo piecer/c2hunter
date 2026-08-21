@@ -3,9 +3,12 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import struct
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
 
+from c2hunter_analysis.pcap import parse_pcap
 from fastapi.testclient import TestClient
 from test_analysis_job_api import api, payload, synthetic_flows
 
@@ -54,6 +57,24 @@ def _pcap() -> bytes:
             )
             content.extend(packet)
     return bytes(content)
+
+
+def _legacy_packet_record(packet: bytes, index: int) -> dict[str, Any]:
+    timestamp = datetime(2026, 7, 20, 12, 0, index, tzinfo=UTC).isoformat()
+    return {
+        "source_ip": "10.0.0.1",
+        "destination_ip": "203.0.113.77",
+        "source_port": 50001,
+        "destination_port": 443,
+        "protocol": "UDP",
+        "raw_packet_hex": packet.hex(),
+        "timestamp": timestamp,
+        "raw_packet_timestamp": timestamp,
+        "raw_packet_index": index,
+        "raw_packet_interface_id": 0,
+        "raw_packet_link_type": 1,
+        "raw_packet_original_length": len(packet),
+    }
 
 
 def test_analysis_history_can_update_metadata_and_delete_terminal_job() -> None:
@@ -157,6 +178,293 @@ def test_pcap_upload_runs_existing_detectors_and_appears_in_history() -> None:
     assert rerun.json()["source"]["sha256"] == job["source"]["sha256"]
 
 
+def test_pcap_export_returns_valid_packet_prefix_at_output_limit() -> None:
+    repository = MemoryRepository()
+    first_packet = _udp_packet("10.0.0.1", "203.0.113.77", 50001, 1)
+    output_limit = 24 + 16 + len(first_packet)
+    client = TestClient(
+        create_app(
+            Settings(environment="test", pcap_export_max_bytes=output_limit),
+            repository,
+        )
+    )
+    capture = _pcap()
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Partial export", "filename": "partial.pcap"},
+        content=capture,
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+    assert upload.status_code == 201
+
+    response = client.post(
+        "/api/v1/pcap-exports",
+        json={"job_id": upload.json()["id"]},
+    )
+
+    assert response.status_code == 201
+    exported = response.json()
+    assert exported["status"] == "COMPLETED"
+    assert exported["matched_packet_count"] == 18
+    assert exported["exported_packet_count"] == 1
+    assert exported["omitted_packet_count"] == 17
+    assert exported["truncated"] is True
+    assert exported["truncation_reasons"] == ["OUTPUT_BYTE_LIMIT"]
+    assert exported["output_byte_limit"] == output_limit
+    assert exported["size_bytes"] == output_limit
+    assert "-partial-" in exported["filename"]
+    download = client.get(f"/api/v1/pcap-exports/{exported['id']}/download")
+    assert download.status_code == 200
+    assert len(download.content) == output_limit
+    assert exported["sha256"] == hashlib.sha256(download.content).hexdigest()
+    reparsed = parse_pcap(
+        download.content,
+        sensor_id="download",
+        internal_networks=["10.0.0.0/8"],
+        max_packets=10,
+    )
+    assert reparsed.captured_packet_count == 1
+
+    repository.export_content[exported["id"]] = b"corrupt"
+    corrupted = client.get(f"/api/v1/pcap-exports/{exported['id']}/download")
+    assert corrupted.status_code == 409
+    assert corrupted.json()["error"]["code"] == "PCAP_EXPORT_INTEGRITY_ERROR"
+
+
+def test_pcap_export_preserves_packet_prefix_at_scan_packet_limit() -> None:
+    repository = MemoryRepository()
+    client = TestClient(
+        create_app(
+            Settings(environment="test", pcap_export_scan_max_packets=2),
+            repository,
+        )
+    )
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Packet bounded export", "filename": "packets.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+    response = client.post("/api/v1/pcap-exports", json={"job_id": upload.json()["id"]})
+
+    assert response.status_code == 201
+    exported = response.json()
+    assert exported["status"] == "COMPLETED"
+    assert exported["matched_packet_count"] == 2
+    assert exported["exported_packet_count"] == 2
+    assert exported["scanned_packet_count"] == 2
+    assert exported["source_scan_packet_limit"] == 2
+    assert exported["truncated"] is True
+    assert exported["truncation_reasons"] == ["SOURCE_PACKET_LIMIT"]
+
+
+def test_partial_source_scan_without_a_prefix_match_is_not_reported_as_no_match() -> None:
+    repository = MemoryRepository()
+    client = TestClient(
+        create_app(Settings(environment="test", pcap_export_scan_max_packets=1), repository)
+    )
+    packets = [
+        _udp_packet("10.0.0.1", "203.0.113.77", 50001, 1),
+        _udp_packet("10.0.0.1", "203.0.113.88", 50001, 2),
+    ]
+    capture = bytearray(struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
+    for index, packet in enumerate(packets):
+        capture.extend(struct.pack("<IIII", 1_700_000_000 + index, 0, len(packet), len(packet)))
+        capture.extend(packet)
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Partial no-match", "filename": "partial-no-match.pcap"},
+        content=bytes(capture),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+
+    response = client.post(
+        "/api/v1/pcap-exports",
+        json={
+            "job_id": upload.json()["id"],
+            "include_filters": [{"candidate_ip": "203.0.113.88"}],
+        },
+    )
+
+    assert response.status_code == 201
+    exported = response.json()
+    assert exported["status"] == "FAILED"
+    assert exported["error_code"] == "PCAP_SOURCE_SCAN_INCOMPLETE"
+    assert exported["truncated"] is True
+    assert exported["truncation_reasons"] == ["SOURCE_PACKET_LIMIT"]
+
+
+def test_pcap_export_rejects_retained_segment_size_mismatch() -> None:
+    repository = MemoryRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    capture = _pcap()
+    repository.create_job(
+        {
+            "id": "size-mismatch-export",
+            "idempotency_key": "size-mismatch-export-key",
+            "status": "COMPLETED",
+            "mode": "LIVE",
+            "source_type": "SENSOR_CAPTURE",
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "capture": {"store_pcap": True},
+            "flow_records": [],
+            "created_at": "2026-08-21T09:00:00+00:00",
+        }
+    )
+    repository.save_sensor_pcap(
+        {
+            "id": "size-mismatch-segment",
+            "sensor_id": "sensor-a",
+            "analysis_job_id": "size-mismatch-export",
+            "filename": "segment.pcap",
+            "size_bytes": len(capture),
+            "sha256": hashlib.sha256(capture).hexdigest(),
+            "uploaded_at": "2026-08-21T09:01:00+00:00",
+        },
+        capture,
+    )
+    repository.sensor_pcaps["size-mismatch-segment"]["size_bytes"] = len(capture) - 1
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": "size-mismatch-export"})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PCAP_SOURCE_INTEGRITY_ERROR"
+
+
+def test_pcap_export_rejects_canonical_capture_without_a_trusted_digest() -> None:
+    repository = MemoryRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Missing digest", "filename": "missing-digest.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+    assert upload.status_code == 201
+    job_id = upload.json()["id"]
+    job = repository.get_job(job_id)
+    assert job is not None
+    job["source"].pop("sha256")
+    repository.save_job(job)
+
+    response = client.post(
+        "/api/v1/pcap-exports",
+        json={"job_id": job_id},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PCAP_SOURCE_INTEGRITY_ERROR"
+
+
+def test_pcap_export_rejects_concurrent_memory_intensive_requests() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingRepository(MemoryRepository):
+        def get_job_capture(self, job_id: str) -> bytes | None:
+            content = super().get_job_capture(job_id)
+            entered.set()
+            release.wait(timeout=5)
+            return content
+
+    repository = BlockingRepository()
+    client = TestClient(
+        create_app(
+            Settings(environment="test", pcap_export_max_concurrent=1),
+            repository,
+        )
+    )
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Admission", "filename": "admission.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+    entered.clear()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        first = executor.submit(
+            client.post,
+            "/api/v1/pcap-exports",
+            json={"job_id": upload.json()["id"]},
+        )
+        assert entered.wait(timeout=2)
+        second = client.post("/api/v1/pcap-exports", json={"job_id": upload.json()["id"]})
+        release.set()
+        assert first.result(timeout=5).status_code == 201
+
+    assert second.status_code == 429
+    assert second.json()["error"]["code"] == "PCAP_EXPORT_BUSY"
+
+
+def test_legacy_pcap_export_preserves_packet_prefix_at_scan_byte_limit() -> None:
+    repository = MemoryRepository()
+    first_packet = _udp_packet("10.0.0.1", "203.0.113.77", 50001, 1)
+    second_packet = _udp_packet("10.0.0.1", "203.0.113.77", 50001, 2)
+    client = TestClient(
+        create_app(
+            Settings(environment="test", pcap_export_scan_max_bytes=len(first_packet)),
+            repository,
+        )
+    )
+    repository.create_job(
+        {
+            "id": "legacy-byte-bounded-export",
+            "idempotency_key": "legacy-byte-bounded-export-key",
+            "status": "COMPLETED",
+            "mode": "LIVE",
+            "source_type": "SENSOR_CAPTURE",
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "capture": {"store_pcap": False},
+            "flow_records": [
+                _legacy_packet_record(first_packet, 0),
+                _legacy_packet_record(second_packet, 1),
+            ],
+            "created_at": "2026-08-21T09:00:00+00:00",
+        }
+    )
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": "legacy-byte-bounded-export"})
+
+    assert response.status_code == 201
+    exported = response.json()
+    assert exported["status"] == "COMPLETED"
+    assert exported["matched_packet_count"] == 1
+    assert exported["exported_packet_count"] == 1
+    assert exported["source_total_bytes"] == len(first_packet) + len(second_packet)
+    assert exported["scanned_source_bytes"] == len(first_packet)
+    assert exported["scanned_packet_count"] == 1
+    assert exported["truncated"] is True
+    assert exported["truncation_reasons"] == ["SOURCE_BYTE_LIMIT"]
+
+
+def test_pcap_export_reports_when_output_limit_cannot_fit_a_packet() -> None:
+    repository = MemoryRepository()
+    client = TestClient(
+        create_app(
+            Settings(environment="test", pcap_export_max_bytes=24),
+            repository,
+        )
+    )
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Header only export", "filename": "header-only.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+    response = client.post("/api/v1/pcap-exports", json={"job_id": upload.json()["id"]})
+
+    assert response.status_code == 201
+    exported = response.json()
+    assert exported["status"] == "FAILED"
+    assert exported["matched_packet_count"] == 18
+    assert exported["exported_packet_count"] == 0
+    assert exported["error_code"] == "PCAP_OUTPUT_LIMIT_TOO_SMALL"
+    assert exported["truncation_reasons"] == ["OUTPUT_BYTE_LIMIT"]
+
+
 def test_completed_live_job_exports_associated_sensor_pcaps_with_nested_filters() -> None:
     repository = MemoryRepository()
     client = TestClient(create_app(Settings(environment="test"), repository))
@@ -236,6 +544,61 @@ def test_completed_live_job_exports_associated_sensor_pcaps_with_nested_filters(
         json={"job_id": "live-export-job", "include_filters": [{}]},
     )
     assert invalid.status_code == 422
+
+
+def test_live_export_preserves_scanned_prefix_when_source_byte_limit_is_reached() -> None:
+    repository = MemoryRepository()
+    capture = _pcap()
+    client = TestClient(
+        create_app(
+            Settings(environment="test", pcap_export_scan_max_bytes=len(capture)),
+            repository,
+        )
+    )
+    repository.create_job(
+        {
+            "id": "bounded-live-export",
+            "idempotency_key": "bounded-live-export-key",
+            "status": "COMPLETED",
+            "mode": "LIVE",
+            "source_type": "SENSOR_CAPTURE",
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "capture": {"store_pcap": True},
+            "flow_records": [],
+            "created_at": "2026-08-21T09:00:00+00:00",
+        }
+    )
+    digest = hashlib.sha256(capture).hexdigest()
+    for index in range(2):
+        repository.save_sensor_pcap(
+            {
+                "id": f"bounded-segment-{index}",
+                "sensor_id": "sensor-a",
+                "analysis_job_id": "bounded-live-export",
+                "filename": f"bounded-{index}.pcap",
+                "size_bytes": len(capture),
+                "sha256": digest,
+                "uploaded_at": f"2026-08-21T09:0{index}:00+00:00",
+            },
+            capture,
+        )
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": "bounded-live-export"})
+
+    assert response.status_code == 201
+    exported = response.json()
+    assert exported["status"] == "COMPLETED"
+    assert exported["matched_packet_count"] == 18
+    assert exported["exported_packet_count"] == 18
+    assert exported["source_capture_count"] == 2
+    assert exported["scanned_source_capture_count"] == 1
+    assert exported["omitted_source_capture_count"] == 1
+    assert exported["source_total_bytes"] == 2 * len(capture)
+    assert exported["scanned_source_bytes"] == len(capture)
+    assert exported["source_scan_byte_limit"] == len(capture)
+    assert exported["truncated"] is True
+    assert exported["truncation_reasons"] == ["SOURCE_BYTE_LIMIT"]
 
 
 def test_pcap_upload_validates_media_format_size_and_packet_limit() -> None:

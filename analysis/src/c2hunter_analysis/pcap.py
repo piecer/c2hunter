@@ -27,6 +27,7 @@ class PcapParseResult:
     link_types: tuple[int, ...]
     start_time: datetime
     end_time: datetime
+    truncated: bool
 
 
 @dataclass(frozen=True)
@@ -67,8 +68,10 @@ def parse_pcap(
     internal_networks: Sequence[str],
     max_packets: int = 2_000_000,
     retain_packet_bytes: bool = True,
+    retain_packet_bytes_as_bytes: bool = False,
     retain_payload_sample_bytes: int = 0,
     allow_no_supported_packets: bool = False,
+    truncate_at_max_packets: bool = False,
 ) -> PcapParseResult:
     """Parse bounded PCAP/PCAPNG bytes into the existing flow-analysis contract."""
     if max_packets < 1:
@@ -76,19 +79,24 @@ def parse_pcap(
     if not 0 <= retain_payload_sample_bytes <= 256:
         raise ValueError("retain_payload_sample_bytes must be between 0 and 256")
     networks = _networks(internal_networks)
+    iterator_max_packets = max_packets + 1 if truncate_at_max_packets else max_packets
     if content[:4] in _CLASSIC_MAGIC:
         capture_format = "PCAP"
-        packets = _iter_classic_pcap(content, max_packets)
+        packets = _iter_classic_pcap(content, iterator_max_packets)
     elif content[:4] == _PCAPNG_SECTION:
         capture_format = "PCAPNG"
-        packets = _iter_pcapng(content, max_packets)
+        packets = _iter_pcapng(content, iterator_max_packets)
     else:
         raise PcapParseError("file is not a classic PCAP or PCAPNG capture")
     records: list[dict[str, Any]] = []
     captured_packet_count = 0
     captured_timestamps: list[datetime] = []
     link_types: set[int] = set()
+    truncated = False
     for packet in packets:
+        if truncate_at_max_packets and captured_packet_count >= max_packets:
+            truncated = True
+            break
         captured_packet_count += 1
         captured_timestamps.append(packet.timestamp)
         link_types.add(packet.link_type)
@@ -97,6 +105,7 @@ def parse_pcap(
             sensor_id,
             networks,
             retain_packet_bytes,
+            retain_packet_bytes_as_bytes,
             retain_payload_sample_bytes,
         )
         if decoded is not None:
@@ -117,6 +126,7 @@ def parse_pcap(
         tuple(sorted(link_types)),
         min(captured_timestamps),
         max(captured_timestamps),
+        truncated,
     )
 
 
@@ -148,6 +158,7 @@ def find_pcap_record(
             packet,
             sensor_id,
             networks,
+            False,
             False,
             retain_payload_sample_bytes,
         )
@@ -358,6 +369,7 @@ def _decode_packet(
     sensor_id: str,
     networks: tuple[Network, ...],
     retain_packet_bytes: bool,
+    retain_packet_bytes_as_bytes: bool,
     retain_payload_sample_bytes: int,
 ) -> dict[str, Any] | None:
     network = _network_packet(captured.data, captured.link_type)
@@ -416,7 +428,10 @@ def _decode_packet(
     if retain_payload_sample_bytes and payload:
         record["payload_sample_hex"] = payload[:retain_payload_sample_bytes].hex()
     if retain_packet_bytes:
-        record["raw_packet_hex"] = captured.data.hex()
+        if retain_packet_bytes_as_bytes:
+            record["raw_packet_bytes"] = captured.data
+        else:
+            record["raw_packet_hex"] = captured.data.hex()
         record["raw_packet_link_type"] = captured.link_type
         record["raw_packet_captured_length"] = len(captured.data)
         record["raw_packet_original_length"] = captured.original_length

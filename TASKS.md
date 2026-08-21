@@ -190,7 +190,7 @@ Phase는 기능 계층별 일괄 구현이 아니라 매 단계 실행 가능한
 | [x] | P4-001 | 인증과 ADMIN/ANALYST/VIEWER/SENSOR RBAC 구현 | REQ-SEC-002, REQ-API-001 | P2-002 | endpoint/resource별 allow/deny matrix test |
 | [-] | P4-002 | 로그인/작업/PCAP/allowlist/sensor/config/role/delete audit 구현 | REQ-SEC-003 | P4-001 | 8종 event와 user/time/IP/action/target/result, secret redaction test |
 | [-] | P4-003 | 분석/sensor/group/allowlist API 전체와 목록 공통 query 구현 | REQ-API-001, REQ-API-002, REQ-UI-005 | P3-009,P4-001 | 명세 endpoint 20개, 정상/오류, pagination/filter/sort, OpenAPI snapshot |
-| [x] | P4-004 | source provenance 기반 bounded filtered PCAP/PCAPNG export 구현 | REQ-PCP-002 | P2-009,P3-008 | scalar+nested filter, immutable manifest/digest, byte·packet limit, packet/interface/format 정확성 test |
+| [x] | P4-004 | source provenance 기반 bounded filtered PCAP/PCAPNG export 구현 | REQ-PCP-002 | P2-009,P3-008 | scalar+nested filter, immutable manifest/digest, source/output limit 분리, packet-boundary partial export, packet/interface/format 정확성 test |
 | [x] | P4-005 | secure PCAP download 구현 | REQ-PCP-003 | P4-001,P4-002,P4-004 | RBAC, authenticated endpoint, server filename/content type, max size/access/audit tests |
 | [x] | P4-006 | Dashboard/Sensor UI 구현 | REQ-UI-001, REQ-UI-002 | P4-003 | 명세 필드/차트 렌더, loading/empty/error/accessibility test |
 | [x] | P4-007 | 분석 생성/진행/취소 UI 구현 | REQ-UI-003 | P4-003 | live/history 전체 input, progress/count/time/sensor/error/warning/cancel |

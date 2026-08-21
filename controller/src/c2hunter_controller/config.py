@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     flow_ingestion_grace_seconds: int = Field(default=65, ge=0)
     pcap_upload_max_bytes: int = Field(default=500 * 1024 * 1024, gt=0)
     pcap_upload_max_packets: int = Field(default=2_000_000, gt=0)
+    pcap_export_max_bytes: int | None = Field(default=None, ge=24)
+    pcap_export_scan_max_bytes: int | None = Field(default=None, gt=0)
+    pcap_export_scan_max_packets: int | None = Field(default=None, gt=0)
+    pcap_export_max_concurrent: int = Field(default=1, ge=1, le=16)
     inline_flow_records_enabled: bool | None = None
     # This only enables the explicitly limited development token minting endpoint.
     # Production deployments should use pre-hashed static tokens or a future OIDC integration.
@@ -89,6 +93,12 @@ class Settings(BaseSettings):
         if self.api_auth_required is None:
             # Unit tests use isolated in-memory repositories; deployable modes are closed.
             self.api_auth_required = self.environment != "test"
+        if self.pcap_export_max_bytes is None:
+            self.pcap_export_max_bytes = self.pcap_upload_max_bytes
+        if self.pcap_export_scan_max_bytes is None:
+            self.pcap_export_scan_max_bytes = self.pcap_upload_max_bytes
+        if self.pcap_export_scan_max_packets is None:
+            self.pcap_export_scan_max_packets = self.pcap_upload_max_packets
         return self
 
     @model_validator(mode="after")

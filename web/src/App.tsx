@@ -79,6 +79,41 @@ type DashboardData = {
 };
 type AllowEntry = { id: string; type: string; value: string; description?: string; expires_at?: string };
 const PCAP_UPLOAD_MAX_BYTES = 500 * 1024 * 1024;
+type PcapExportResult = {
+  id: string;
+  status: string;
+  matched_packet_count: number;
+  exported_packet_count?: number;
+  omitted_packet_count?: number;
+  omitted_source_capture_count?: number;
+  truncated?: boolean;
+  truncation_reasons?: string[];
+  filename?: string;
+  error?: string | null;
+};
+const pcapTruncationReasonLabels: Record<string, string> = {
+  OUTPUT_BYTE_LIMIT: 'output byte limit reached',
+  SOURCE_BYTE_LIMIT: 'source scan byte limit reached',
+  SOURCE_PACKET_LIMIT: 'source scan packet limit reached',
+};
+const pcapDownloadNotice = (exported: PcapExportResult, label: 'filtered capture' | 'candidate PCAP') => {
+  const exportedPackets = exported.exported_packet_count ?? exported.matched_packet_count;
+  if (!exported.truncated) {
+    const title = label === 'filtered capture' ? 'Filtered capture' : 'Candidate PCAP';
+    return `${title} downloaded (${exportedPackets} packets).`;
+  }
+  const reasons = (exported.truncation_reasons ?? []).map(reason => pcapTruncationReasonLabels[reason] ?? reason).join(', ');
+  const sourceOmission = exported.omitted_source_capture_count
+    ? `, ${exported.omitted_source_capture_count} source capture(s) omitted`
+    : '';
+  return `Partial ${label} downloaded (${exportedPackets} of ${exported.matched_packet_count} matched packets; ${reasons || 'configured limit reached'}${sourceOmission}).`;
+};
+const pcapExportFailure = (exported: PcapExportResult, fallback: string) => {
+  const message = exported.error || fallback;
+  if (!exported.truncated) return message;
+  const reasons = (exported.truncation_reasons ?? []).map(reason => pcapTruncationReasonLabels[reason] ?? reason).join(', ');
+  return `${message} (${reasons || 'configured source limit reached'}).`;
+};
 type DetectorWeights = Record<string, number>;
 type DetectorWeightPreset = { id: string; name: string; description?: string; detector_weights: DetectorWeights; is_default: boolean };
 const detectorDefinitions = [
@@ -826,11 +861,12 @@ function CandidateDetail() {
   });
   const exportPcap = useMutation({
     mutationFn: async () => {
-      const created = await api.post<{ id: string; status: string; error?: string | null }>('/pcap-exports', { job_id: q.data?.job_id, candidate_id: id });
-      if (created.status !== 'COMPLETED') throw new Error(created.error ?? 'PCAP export is not available');
-      await api.download(`/pcap-exports/${created.id}/download`, `c2hunter-${created.id}.pcap`);
+      const created = await api.post<PcapExportResult>('/pcap-exports', { job_id: q.data?.job_id, candidate_id: id });
+      if (created.status !== 'COMPLETED') throw new Error(pcapExportFailure(created, 'PCAP export is not available'));
+      await api.download(`/pcap-exports/${created.id}/download`, created.filename || `c2hunter-${created.id}.pcap`);
+      return created;
     },
-    onSuccess: () => setNotice('Candidate PCAP downloaded'),
+    onSuccess: created => setNotice(pcapDownloadNotice(created, 'candidate PCAP')),
   });
   const reanalyze = useMutation({ mutationFn: () => api.post(`/analysis-jobs/${q.data?.job_id}/reanalyze`, { idempotency_key: idempotencyKey() }), onSuccess: () => setNotice('Reanalysis created') });
   const addToAllowlist = useMutation({ 
@@ -950,13 +986,13 @@ function JobFlowReviewPanel({ jobId }: { jobId: string }) {
     try {
       const includeFilters = filters.include.map(serializedFlowFilter).filter(filter => Object.keys(filter).length);
       const excludeFilters = filters.exclude.map(serializedFlowFilter).filter(filter => Object.keys(filter).length);
-      const exported = await api.post<{ id: string; status: string; matched_packet_count: number; filename?: string; error?: string }>(
+      const exported = await api.post<PcapExportResult>(
         '/pcap-exports',
         { job_id: jobId, include_filters: includeFilters, exclude_filters: excludeFilters },
       );
-      if (exported.status !== 'COMPLETED') throw new Error(exported.error || 'No packets matched the applied filters.');
+      if (exported.status !== 'COMPLETED') throw new Error(pcapExportFailure(exported, 'No packets matched the applied filters.'));
       await api.download(`/pcap-exports/${exported.id}/download`, exported.filename || `c2hunter-${jobId}-filtered.pcap`);
-      setExportNotice(`Filtered capture downloaded (${exported.matched_packet_count} packets).`);
+      setExportNotice(pcapDownloadNotice(exported, 'filtered capture'));
     } catch (error) {
       setExportError(error instanceof Error ? error.message : 'Filtered capture download failed.');
     } finally {

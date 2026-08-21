@@ -1,6 +1,10 @@
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+from pydantic import ValidationError
+
 from c2hunter_controller.capture_limits import allocate_sensor_limit, limit_flow_records
+from c2hunter_controller.config import Settings
 from c2hunter_controller.repositories import MemoryRepository, SQLiteRepository
 
 
@@ -57,6 +61,38 @@ def test_limit_flow_records_keeps_unlimited_input_unchanged() -> None:
     assert limited is not records
     assert summary["retained_packets"] == 4
     assert summary["discarded_packets"] == 0
+
+
+def test_export_limits_inherit_upload_limits_by_default() -> None:
+    settings = Settings(
+        environment="test",
+        pcap_upload_max_bytes=1234,
+        pcap_upload_max_packets=56,
+    )
+
+    assert settings.pcap_export_max_bytes == 1234
+    assert settings.pcap_export_scan_max_bytes == 1234
+    assert settings.pcap_export_scan_max_packets == 56
+
+
+def test_export_limits_can_be_configured_independently() -> None:
+    settings = Settings(
+        environment="test",
+        pcap_upload_max_bytes=1234,
+        pcap_upload_max_packets=56,
+        pcap_export_max_bytes=800,
+        pcap_export_scan_max_bytes=2400,
+        pcap_export_scan_max_packets=100,
+    )
+
+    assert settings.pcap_export_max_bytes == 800
+    assert settings.pcap_export_scan_max_bytes == 2400
+    assert settings.pcap_export_scan_max_packets == 100
+
+
+def test_export_output_limit_must_fit_a_classic_capture_header() -> None:
+    with pytest.raises(ValidationError):
+        Settings(environment="test", pcap_export_max_bytes=23)
 
 
 def test_memory_sensor_pcap_limit_reservation_is_atomic() -> None:
