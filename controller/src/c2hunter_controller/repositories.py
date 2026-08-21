@@ -201,7 +201,7 @@ class Repository(Protocol):
     def list_detector_weight_presets(self) -> list[dict[str, Any]]: ...
     def delete_detector_weight_preset(self, preset_id: str) -> bool: ...
     def set_default_detector_weight_preset(self, preset_id: str) -> dict[str, Any] | None: ...
-    def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any]: ...
+    def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any] | None: ...
     def get_export(self, export_id: str) -> tuple[dict[str, Any], bytes] | None: ...
     def save_sensor_pcap(self, segment: dict[str, Any], content: bytes) -> dict[str, Any]: ...
     def save_sensor_pcap_limited(
@@ -811,8 +811,10 @@ class MemoryRepository:
         with self._lock:
             return self.allowlist.pop(entry_id, None) is not None
 
-    def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any]:
+    def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any] | None:
         with self._lock:
+            if str(export["job_id"]) not in self.jobs:
+                return None
             self.exports[export["id"]] = deepcopy(export)
             self.export_content[export["id"]] = bytes(content)
             return deepcopy(export)
@@ -1299,6 +1301,7 @@ class SQLiteRepository:
 
     def delete_job(self, job_id: str) -> bool:
         with self._lock, self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
             job = self.get_job(job_id)
             if job is None:
                 return False
@@ -1860,16 +1863,32 @@ class SQLiteRepository:
             self.connection.commit()
             return cursor.rowcount > 0
 
-    def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any]:
+    def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any] | None:
         with self._lock:
-            self._put("export", export["id"], export)
-            self.connection.execute(
-                "INSERT INTO export_blobs(export_id,content) VALUES(?,?) "
-                "ON CONFLICT(export_id) DO UPDATE SET content=excluded.content",
-                (export["id"], content),
-            )
-            self.connection.commit()
-            return deepcopy(export)
+            try:
+                self.connection.execute("BEGIN IMMEDIATE")
+                parent = self.connection.execute(
+                    "SELECT 1 FROM objects WHERE kind='job' AND id=?",
+                    (str(export["job_id"]),),
+                ).fetchone()
+                if parent is None:
+                    self.connection.commit()
+                    return None
+                self.connection.execute(
+                    "INSERT INTO objects(kind,id,data) VALUES('export',?,?) "
+                    "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                    (export["id"], self._serialize(export)),
+                )
+                self.connection.execute(
+                    "INSERT INTO export_blobs(export_id,content) VALUES(?,?) "
+                    "ON CONFLICT(export_id) DO UPDATE SET content=excluded.content",
+                    (export["id"], content),
+                )
+                self.connection.commit()
+                return deepcopy(export)
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def get_export(self, export_id: str) -> tuple[dict[str, Any], bytes] | None:
         metadata = self._get("export", export_id)

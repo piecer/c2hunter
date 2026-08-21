@@ -624,3 +624,29 @@ def test_candidate_workflow_resource_uses_object_store_and_audit(monkeypatch: An
     assert saved_action == action
     assert sum("INSERT INTO controller_objects" in query for query in connection.queries) == 2
     assert sum("INSERT INTO audit_events" in query for query in connection.queries) == 2
+
+
+def test_postgres_export_save_cleans_blob_when_parent_is_missing() -> None:
+    uploaded: list[tuple[str, bytes]] = []
+    deleted: list[str] = []
+    blob_store = cast(
+        MinioBlobStore,
+        SimpleNamespace(
+            put=lambda key, content: uploaded.append((key, content)),
+            delete=lambda key: deleted.append(key),
+        ),
+    )
+    repository = PostgresRepository("postgresql://controller", blob_store)
+    connection = FakeConnection()
+    repository._connection = connection
+
+    stored = repository.save_export(
+        {"id": "export-1", "job_id": "deleted-job", "capture_format": "PCAP"},
+        b"capture",
+    )
+
+    assert stored is None
+    assert uploaded == [("exports/export-1.pcap", b"capture")]
+    assert deleted == ["exports/export-1.pcap"]
+    assert any("FOR UPDATE" in query for query in connection.queries)
+    assert not any("INSERT INTO controller_objects" in query for query in connection.queries)

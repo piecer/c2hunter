@@ -704,3 +704,115 @@ def test_sqlite_job_delete_cascades_candidates_and_exports(tmp_path: Any) -> Non
     assert repository.get_export("export-1") is None
     assert repository.get_job_capture("job-1") is None
     assert repository.delete_job("job-1") is False
+
+
+def test_canonical_capture_over_scan_limit_is_not_materialized() -> None:
+    class GuardedRepository(MemoryRepository):
+        reject_reads = False
+
+        def get_job_capture(self, job_id: str) -> bytes | None:
+            if self.reject_reads:
+                raise AssertionError("oversized canonical capture was materialized")
+            return super().get_job_capture(job_id)
+
+    repository = GuardedRepository()
+    capture = _pcap()
+    client = TestClient(
+        create_app(
+            Settings(environment="test", pcap_export_scan_max_bytes=len(capture) - 1),
+            repository,
+        )
+    )
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Bounded canonical", "filename": "bounded.pcap"},
+        content=capture,
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+    assert upload.status_code == 201
+    repository.reject_reads = True
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": upload.json()["id"]})
+
+    assert response.status_code == 201
+    exported = response.json()
+    assert exported["status"] == "FAILED"
+    assert exported["error_code"] == "PCAP_SOURCE_SCAN_LIMIT_TOO_SMALL"
+    assert exported["scanned_source_bytes"] == 0
+
+
+def test_export_is_not_saved_after_its_parent_job_is_deleted() -> None:
+    class DeletingRepository(MemoryRepository):
+        def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any] | None:
+            assert self.delete_job(str(export["job_id"]))
+            return super().save_export(export, content)
+
+    repository = DeletingRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Delete race", "filename": "delete-race.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+    job_id = upload.json()["id"]
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": job_id})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PCAP_SOURCE_UNAVAILABLE"
+    assert repository.get_job(job_id) is None
+    assert repository.exports == {}
+    assert repository.export_content == {}
+
+
+def test_legacy_partial_scan_without_match_reports_incomplete_prefix() -> None:
+    repository = MemoryRepository()
+    first_packet = _udp_packet("10.0.0.1", "203.0.113.77", 50001, 1)
+    second_packet = _udp_packet("10.0.0.1", "203.0.113.88", 50001, 2)
+    client = TestClient(
+        create_app(Settings(environment="test", pcap_export_scan_max_packets=1), repository)
+    )
+    repository.create_job(
+        {
+            "id": "legacy-partial-no-match",
+            "idempotency_key": "legacy-partial-no-match-key",
+            "status": "COMPLETED",
+            "mode": "LIVE",
+            "source_type": "SENSOR_CAPTURE",
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "capture": {"store_pcap": False},
+            "flow_records": [
+                _legacy_packet_record(first_packet, 0),
+                _legacy_packet_record(second_packet, 1),
+            ],
+            "created_at": "2026-08-21T09:00:00+00:00",
+        }
+    )
+
+    response = client.post(
+        "/api/v1/pcap-exports",
+        json={
+            "job_id": "legacy-partial-no-match",
+            "include_filters": [{"candidate_ip": "203.0.113.88"}],
+        },
+    )
+
+    assert response.status_code == 201
+    exported = response.json()
+    assert exported["status"] == "FAILED"
+    assert exported["scanned_packet_count"] == 1
+    assert exported["error_code"] == "PCAP_SOURCE_SCAN_INCOMPLETE"
+
+
+def test_sqlite_export_save_rejects_a_missing_parent_and_blob(tmp_path: Any) -> None:
+    repository = SQLiteRepository(tmp_path / "missing-parent.db")
+
+    stored = repository.save_export(
+        {"id": "orphan-export", "job_id": "deleted-job", "capture_format": "PCAP"},
+        b"capture",
+    )
+
+    assert stored is None
+    assert repository.get_export("orphan-export") is None

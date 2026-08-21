@@ -205,3 +205,16 @@ def test_cancel_accepts_the_web_reason_body_and_rejects_unknown_fields() -> None
         json={"reason": "operator", "unexpected": True},
     )
     assert invalid.status_code == 422
+
+
+def test_openapi_documents_pcap_export_metadata_responses() -> None:
+    schema = create_app(Settings(environment="test"), MemoryRepository()).openapi()
+
+    create_response = schema["paths"]["/api/v1/pcap-exports"]["post"]["responses"]["201"]
+    get_response = schema["paths"]["/api/v1/pcap-exports/{export_id}"]["get"]["responses"]["200"]
+    expected_ref = "#/components/schemas/PcapExportResponse"
+
+    assert create_response["content"]["application/json"]["schema"]["$ref"] == expected_ref
+    assert get_response["content"]["application/json"]["schema"]["$ref"] == expected_ref
+    properties = schema["components"]["schemas"]["PcapExportResponse"]["properties"]
+    assert {"truncated", "truncation_reasons", "error_code", "source_manifest"} <= properties.keys()

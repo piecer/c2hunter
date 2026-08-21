@@ -104,6 +104,7 @@ from .schemas import (
     IntegrationSettingsUpdate,
     MispExportCreate,
     PcapExportCreate,
+    PcapExportResponse,
     ReanalysisRequest,
     SensorConfigurationResponse,
     SensorConfigurationUpdate,
@@ -3954,6 +3955,7 @@ def create_app(
         source_job = job
         visited: set[str] = set()
         retained_capture: bytes | None = None
+        canonical_capture_metadata: dict[str, Any] | None = None
         segment_metadata: list[dict[str, Any]] = []
         while True:
             source_job_id = str(source_job["id"])
@@ -3962,6 +3964,10 @@ def create_app(
                     409, "PCAP_SOURCE_PROVENANCE_INVALID", "PCAP source provenance cycle"
                 )
             visited.add(source_job_id)
+            source_metadata = source_job.get("source")
+            if isinstance(source_metadata, dict) and source_metadata.get("packet_bytes_retained"):
+                canonical_capture_metadata = source_metadata
+                break
             retained_capture = repo.get_job_capture(source_job_id)
             if retained_capture is not None:
                 break
@@ -3997,9 +4003,22 @@ def create_app(
         source_records: list[dict[str, Any]] = []
         source_manifest: list[dict[str, str]] = []
         sensor_ids = source_job.get("sensor_ids") or ["uploaded"]
-        if retained_capture is not None:
-            expected_digest = (source_job.get("source") or {}).get("sha256")
+        if canonical_capture_metadata is not None:
             source_descriptors: list[tuple[dict[str, Any], bytes | None]] = [
+                (
+                    {
+                        "id": source_job_id,
+                        "sensor_id": str(sensor_ids[0]),
+                        "size_bytes": canonical_capture_metadata.get("size_bytes"),
+                        "sha256": canonical_capture_metadata.get("sha256"),
+                        "_canonical": True,
+                    },
+                    None,
+                )
+            ]
+        elif retained_capture is not None:
+            expected_digest = (source_job.get("source") or {}).get("sha256")
+            source_descriptors = [
                 (
                     {
                         "id": source_job_id,
@@ -4015,10 +4034,12 @@ def create_app(
 
         source_capture_count = len(source_descriptors)
         try:
-            declared_source_sizes = [
-                int(descriptor.get("size_bytes", 0) or 0)
-                for descriptor, _content in source_descriptors
-            ]
+            declared_source_sizes = []
+            for descriptor, _content in source_descriptors:
+                size_value = descriptor.get("size_bytes")
+                if isinstance(size_value, bool) or not isinstance(size_value, int | str):
+                    raise ValueError
+                declared_source_sizes.append(int(size_value))
         except (TypeError, ValueError) as exc:
             raise ApiError(
                 409,
@@ -4046,7 +4067,15 @@ def create_app(
             if remaining_packets < 1:
                 source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
                 break
-            if retained_content is None:
+            is_canonical = descriptor.get("_canonical") is True
+            if is_canonical:
+                capture_content = repo.get_job_capture(source_job_id)
+                if capture_content is None:
+                    raise ApiError(
+                        409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained canonical PCAP missing"
+                    )
+                stored_metadata = descriptor
+            elif retained_content is None:
                 stored_segment = repo.get_sensor_pcap(str(descriptor["id"]))
                 if stored_segment is None:
                     raise ApiError(
@@ -4070,12 +4099,17 @@ def create_app(
                 ) from exc
             if stored_size < 0 or stored_size != len(capture_content):
                 raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP size mismatch")
-            if retained_content is None and (
-                str(stored_metadata.get("id", "")) != str(descriptor.get("id", ""))
-                or str(stored_metadata.get("sensor_id", "")) != str(descriptor.get("sensor_id", ""))
-                or stored_metadata.get("analysis_job_id") != source_job_id
-                or stored_size != declared_size
-                or str(stored_metadata.get("sha256", "")) != str(descriptor.get("sha256", ""))
+            if (
+                retained_content is None
+                and not is_canonical
+                and (
+                    str(stored_metadata.get("id", "")) != str(descriptor.get("id", ""))
+                    or str(stored_metadata.get("sensor_id", ""))
+                    != str(descriptor.get("sensor_id", ""))
+                    or stored_metadata.get("analysis_job_id") != source_job_id
+                    or stored_size != declared_size
+                    or str(stored_metadata.get("sha256", "")) != str(descriptor.get("sha256", ""))
+                )
             ):
                 raise ApiError(
                     409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP metadata mismatch"
@@ -4164,7 +4198,7 @@ def create_app(
         elif capture_result.matched_packet_count:
             error_code = "PCAP_OUTPUT_LIMIT_TOO_SMALL"
             error_message = "output byte limit cannot fit a complete matched packet"
-        elif source_truncation_reasons and not scanned_source_capture_count:
+        elif source_truncation_reasons and not scanned_packet_count:
             error_code = "PCAP_SOURCE_SCAN_LIMIT_TOO_SMALL"
             error_message = "source scan byte limit cannot fit the first retained capture"
         elif source_truncation_reasons:
@@ -4216,9 +4250,16 @@ def create_app(
             "error_code": error_code,
             "error": error_message,
         }
-        return repo.save_export(metadata, content)
+        stored_export = repo.save_export(metadata, content)
+        if stored_export is None:
+            raise ApiError(
+                409,
+                "PCAP_SOURCE_UNAVAILABLE",
+                "analysis job was deleted before the PCAP export could be saved",
+            )
+        return stored_export
 
-    @app.post("/api/v1/pcap-exports", status_code=201)
+    @app.post("/api/v1/pcap-exports", status_code=201, response_model=PcapExportResponse)
     def create_pcap_export(payload: PcapExportCreate) -> dict[str, Any]:
         if not pcap_export_slots.acquire(blocking=False):
             raise ApiError(
@@ -4231,7 +4272,7 @@ def create_app(
         finally:
             pcap_export_slots.release()
 
-    @app.get("/api/v1/pcap-exports/{export_id}")
+    @app.get("/api/v1/pcap-exports/{export_id}", response_model=PcapExportResponse)
     def get_pcap_export(export_id: str) -> dict[str, Any]:
         stored = repo.get_export(export_id)
         if stored is None:

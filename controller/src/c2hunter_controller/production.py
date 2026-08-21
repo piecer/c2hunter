@@ -1549,19 +1549,42 @@ class PostgresRepository:
             self.connection.commit()
             return bool(deleted)
 
-    def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any]:
+    def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any] | None:
         extension = "pcapng" if export.get("capture_format") == "PCAPNG" else "pcap"
         key = f"exports/{export['id']}.{extension}"
         self.blob_store.put(key, content)
         stored = {**export, "object_key": key}
         try:
-            return self._put("export", export["id"], stored)
+            with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT 1 FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
+                    (str(export["job_id"]),),
+                )
+                if cursor.fetchone() is None:
+                    self.connection.commit()
+                    result = None
+                else:
+                    cursor.execute(
+                        "INSERT INTO controller_objects(kind,id,data) "
+                        "VALUES('export',%s,%s::jsonb) "
+                        "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                        (export["id"], self._json(stored)),
+                    )
+                    self._audit("export", str(export["id"]), stored)
+                    self.connection.commit()
+                    result = deepcopy(stored)
         except Exception:
             try:
                 self.blob_store.delete(key)
             except Exception:
                 logger.warning("Failed to delete orphaned export blob %s", key)
             raise
+        if result is None:
+            try:
+                self.blob_store.delete(key)
+            except Exception:
+                logger.warning("Failed to delete orphaned export blob %s", key)
+        return result
 
     def get_export(self, export_id: str) -> tuple[dict[str, Any], bytes] | None:
         metadata = self._get("export", export_id)

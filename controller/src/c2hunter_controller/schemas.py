@@ -623,6 +623,42 @@ class PcapExportCreate(BaseModel):
         return self
 
 
+class PcapExportSource(BaseModel):
+    id: str
+    sha256: str
+
+
+class PcapExportResponse(BaseModel):
+    id: str
+    job_id: str
+    source_job_id: str
+    candidate_id: str | None
+    status: Literal["COMPLETED", "FAILED"]
+    matched_packet_count: int
+    exported_packet_count: int
+    omitted_packet_count: int
+    truncated: bool
+    truncation_reasons: list[str]
+    size_bytes: int
+    sha256: str
+    capture_format: Literal["PCAP", "PCAPNG"]
+    filename: str
+    filter: dict[str, Any]
+    source_capture_count: int
+    scanned_source_capture_count: int
+    omitted_source_capture_count: int
+    source_total_bytes: int
+    scanned_source_bytes: int
+    scanned_packet_count: int
+    output_byte_limit: int
+    source_scan_byte_limit: int
+    source_scan_packet_limit: int
+    source_manifest: list[PcapExportSource]
+    created_at: datetime
+    error_code: str | None
+    error: str | None
+
+
 class CandidateUpdate(BaseModel):
     """후보 수정을 위한 스키마. 분석 결과의 메타데이터 수정."""
 
