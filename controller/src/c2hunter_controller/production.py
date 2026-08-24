@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
 import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Iterable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, BinaryIO
+from uuid import uuid4
 
-from c2hunter_controller.repositories import CaptureSource
+from c2hunter_controller.repositories import (
+    ArtifactAlreadyExistsError,
+    ArtifactMissingError,
+    ArtifactProducerError,
+    ArtifactStorageError,
+    ArtifactWriteResult,
+    CaptureSource,
+)
 
 _AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 _JOB_TERMINAL_STATUSES = {"COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELLED"}
@@ -58,6 +67,172 @@ class MinioBlobStore:
             len(content),
             content_type="application/vnd.tcpdump.pcap",
         )
+
+    def put_stream(
+        self,
+        key: str,
+        chunks: Iterable[bytes],
+        *,
+        size_hint: int,
+        content_type: str,
+    ) -> ArtifactWriteResult:
+        if size_hint < 0:
+            raise ArtifactProducerError("artifact size hint must be non-negative")
+
+        class BoundedReader(io.RawIOBase):
+            def __init__(self) -> None:
+                self.iterator = iter(chunks)
+                self.buffer = b""
+                self.size = 0
+                self.digest = hashlib.sha256()
+                self.ended = False
+                self.validated = False
+
+            def _next(self) -> bytes:
+                try:
+                    chunk = next(self.iterator)
+                except StopIteration:
+                    self.ended = True
+                    return b""
+                except Exception as exc:
+                    raise ArtifactProducerError("artifact producer failed") from exc
+                if type(chunk) is not bytes:
+                    raise ArtifactProducerError("artifact chunks must be exact bytes values")
+                return chunk
+
+            def read(self, size: int = -1) -> bytes:
+                if size < 0:
+                    size = max(1, size_hint - self.size)
+                wanted = min(size, size_hint - self.size)
+                while len(self.buffer) < wanted and not self.ended:
+                    chunk = self._next()
+                    if chunk:
+                        self.buffer += chunk
+                data, self.buffer = self.buffer[:wanted], self.buffer[wanted:]
+                self.size += len(data)
+                self.digest.update(data)
+                return data
+
+            def readable(self) -> bool:
+                return True
+
+            def readinto(self, buffer: Any) -> int:
+                data = self.read(len(buffer))
+                buffer[: len(data)] = data
+                return len(data)
+
+            def finish(self) -> ArtifactWriteResult:
+                if self.size != size_hint:
+                    raise ArtifactProducerError("artifact producer ended before size hint")
+                if self.buffer:
+                    raise ArtifactProducerError("artifact producer yielded more than size hint")
+                while not self.ended:
+                    chunk = self._next()
+                    if chunk:
+                        raise ArtifactProducerError("artifact producer yielded more than size hint")
+                self.validated = True
+                return ArtifactWriteResult(self.size, self.digest.hexdigest())
+
+        bounded_reader = BoundedReader()
+        reader: BinaryIO = io.BufferedReader(bounded_reader, buffer_size=1024 * 1024)
+        upload_attempted = False
+        try:
+            if not self.client.bucket_exists(self.bucket):
+                self.client.make_bucket(self.bucket)
+            upload_attempted = True
+            self.client.put_object(
+                self.bucket,
+                key,
+                reader,
+                size_hint,
+                content_type=content_type,
+                part_size=5 * 1024 * 1024,
+            )
+            return bounded_reader.finish()
+        except ArtifactProducerError:
+            raise
+        except Exception as exc:
+            raise ArtifactStorageError("MinIO artifact upload failed") from exc
+        finally:
+            if upload_attempted and not bounded_reader.validated:
+                try:
+                    self.client.remove_object(self.bucket, key)
+                except Exception:
+                    logger.warning("Failed to clean up incomplete artifact object %s", key)
+
+    @contextmanager
+    def open_stream(self, key: str, *, chunk_size: int) -> Iterator[Iterator[bytes]]:
+        if chunk_size <= 0:
+            raise ValueError("artifact read chunk size must be positive")
+        try:
+            response = self.client.get_object(self.bucket, key)
+        except Exception as exc:
+            if _is_missing_object_error(exc):
+                raise ArtifactMissingError(f"artifact object is missing: {key}") from exc
+            raise ArtifactStorageError("MinIO artifact open failed") from exc
+        closed = False
+
+        def close() -> None:
+            nonlocal closed
+            if closed:
+                return
+            closed = True
+            failure: Exception | None = None
+            try:
+                response.close()
+            except Exception as exc:
+                failure = exc
+            try:
+                response.release_conn()
+            except Exception as exc:
+                if failure is None:
+                    failure = exc
+            if failure is not None:
+                raise ArtifactStorageError("MinIO artifact stream close failed") from failure
+
+        class OwnedIterator(Iterator[bytes]):
+            def __next__(self) -> bytes:
+                if closed:
+                    raise StopIteration
+                try:
+                    chunk = response.read(chunk_size)
+                    if type(chunk) is not bytes:
+                        raise ArtifactStorageError(
+                            "MinIO artifact reader returned a non-bytes chunk"
+                        )
+                    if not chunk:
+                        close()
+                        raise StopIteration
+                    return chunk
+                except StopIteration:
+                    raise
+                except ArtifactStorageError:
+                    try:
+                        close()
+                    except ArtifactStorageError:
+                        pass
+                    raise
+                except Exception as exc:
+                    try:
+                        close()
+                    except ArtifactStorageError:
+                        pass
+                    raise ArtifactStorageError("MinIO artifact read failed") from exc
+
+            def close(self) -> None:
+                close()
+
+        owned = OwnedIterator()
+        try:
+            yield owned
+        except BaseException:
+            try:
+                owned.close()
+            except ArtifactStorageError:
+                logger.debug("Artifact response cleanup failed", exc_info=True)
+            raise
+        else:
+            owned.close()
 
     def get(self, key: str) -> bytes:
         source = self.open(key)
@@ -1601,47 +1776,107 @@ class PostgresRepository:
             return bool(deleted)
 
     def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any] | None:
+        return self.save_export_stream(export, iter((content,)), size_hint=len(content))
+
+    def save_export_stream(
+        self, export: dict[str, Any], chunks: Iterable[bytes], *, size_hint: int
+    ) -> dict[str, Any] | None:
         extension = "pcapng" if export.get("capture_format") == "PCAPNG" else "pcap"
-        key = f"exports/{export['id']}.{extension}"
-        self.blob_store.put(key, content)
-        stored = {**export, "object_key": key}
+        key = f"exports/{export['id']}/{uuid4().hex}.{extension}"
+        content_type = (
+            "application/x-pcapng"
+            if export.get("capture_format") == "PCAPNG"
+            else "application/vnd.tcpdump.pcap"
+        )
+        result = self.blob_store.put_stream(
+            key, chunks, size_hint=size_hint, content_type=content_type
+        )
+        stored = {
+            **export,
+            "object_key": key,
+            "size_bytes": result.size_bytes,
+            "sha256": result.sha256,
+        }
+        primary: Exception | None = None
+        parent_missing = False
+
+        def rollback_quietly() -> None:
+            try:
+                self.connection.rollback()
+            except Exception:
+                logger.warning("Failed to roll back export publication for %s", export["id"])
+
         try:
-            with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            with self._lock, self.connection.cursor() as cursor:
                 cursor.execute(
                     "SELECT 1 FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
                     (str(export["job_id"]),),
                 )
                 if cursor.fetchone() is None:
-                    self.connection.commit()
-                    result = None
+                    rollback_quietly()
+                    parent_missing = True
                 else:
                     cursor.execute(
+                        "SELECT 1 FROM controller_objects WHERE kind='export' AND id=%s FOR UPDATE",
+                        (str(export["id"]),),
+                    )
+                    if cursor.fetchone() is not None:
+                        raise ArtifactAlreadyExistsError(f"export already exists: {export['id']}")
+                    cursor.execute(
                         "INSERT INTO controller_objects(kind,id,data) "
-                        "VALUES('export',%s,%s::jsonb) "
-                        "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                        "VALUES('export',%s,%s::jsonb)",
                         (export["id"], self._json(stored)),
                     )
-                    self._audit("export", str(export["id"]), stored)
+                    cursor.execute(
+                        "INSERT INTO audit_events(kind,object_id,occurred_at,data) "
+                        "VALUES('export',%s,%s,%s::jsonb)",
+                        (export["id"], datetime.now(UTC), self._json(stored)),
+                    )
                     self.connection.commit()
-                    result = deepcopy(stored)
-        except Exception:
-            try:
-                self.blob_store.delete(key)
-            except Exception:
-                logger.warning("Failed to delete orphaned export blob %s", key)
-            raise
-        if result is None:
-            try:
-                self.blob_store.delete(key)
-            except Exception:
-                logger.warning("Failed to delete orphaned export blob %s", key)
-        return result
+                    return deepcopy(stored)
+        except ArtifactAlreadyExistsError as exc:
+            rollback_quietly()
+            primary = exc
+        except Exception as exc:
+            rollback_quietly()
+            primary = ArtifactStorageError("PostgreSQL artifact publication failed")
+            primary.__cause__ = exc
 
-    def get_export(self, export_id: str) -> tuple[dict[str, Any], bytes] | None:
-        metadata = self._get("export", export_id)
+        try:
+            self.blob_store.delete(key)
+        except Exception:
+            logger.warning("Failed to delete orphaned export blob %s", key)
+        if primary is not None:
+            raise primary
+        if parent_missing:
+            return None
+        raise ArtifactStorageError("PostgreSQL artifact publication failed")
+
+    def get_export_metadata(self, export_id: str) -> dict[str, Any] | None:
+        try:
+            return self._get("export", export_id)
+        except ArtifactStorageError:
+            raise
+        except Exception as exc:
+            raise ArtifactStorageError("PostgreSQL export metadata lookup failed") from exc
+
+    def open_export_stream(
+        self, export_id: str
+    ) -> tuple[dict[str, Any], AbstractContextManager[Iterator[bytes]]] | None:
+        metadata = self.get_export_metadata(export_id)
         if metadata is None:
             return None
-        return metadata, self.blob_store.get(str(metadata["object_key"]))
+        return deepcopy(metadata), self.blob_store.open_stream(
+            str(metadata["object_key"]), chunk_size=1024 * 1024
+        )
+
+    def get_export(self, export_id: str) -> tuple[dict[str, Any], bytes] | None:
+        opened = self.open_export_stream(export_id)
+        if opened is None:
+            return None
+        metadata, stream = opened
+        with stream as chunks:
+            return metadata, b"".join(chunks)
 
     def save_sensor_pcap(self, segment: dict[str, Any], content: bytes) -> dict[str, Any]:
         stored, status = self.save_sensor_pcap_limited(segment, content, None)

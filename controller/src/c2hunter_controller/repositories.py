@@ -5,8 +5,10 @@ import io
 import json
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -14,6 +16,61 @@ from typing import Any, Protocol
 _AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 _JOB_TERMINAL_STATUSES = {"COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELLED"}
 _DEFAULT_CAPTURE_CHUNK_SIZE = 64 * 1024
+_DEFAULT_ARTIFACT_CHUNK_SIZE = 1024 * 1024
+
+
+class ArtifactError(Exception):
+    """Base class for typed export-artifact failures."""
+
+
+class ArtifactProducerError(ArtifactError):
+    """The artifact producer violated its one-pass byte stream contract."""
+
+
+class ArtifactStorageError(ArtifactError):
+    """Artifact persistence or retrieval failed."""
+
+
+class ArtifactMissingError(ArtifactError):
+    """Published artifact metadata references absent content."""
+
+
+class ArtifactAlreadyExistsError(ArtifactError):
+    """An immutable export identifier is already published."""
+
+
+@dataclass(frozen=True)
+class ArtifactWriteResult:
+    size_bytes: int
+    sha256: str
+
+
+def _consume_artifact_chunks(
+    chunks: Iterable[bytes], *, size_hint: int
+) -> tuple[tuple[bytes, ...], ArtifactWriteResult]:
+    if size_hint < 0:
+        raise ArtifactProducerError("artifact size hint must be non-negative")
+    collected: list[bytes] = []
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        for chunk in chunks:
+            if type(chunk) is not bytes:
+                raise ArtifactProducerError("artifact chunks must be exact bytes values")
+            if not chunk:
+                continue
+            size += len(chunk)
+            if size > size_hint:
+                raise ArtifactProducerError("artifact producer yielded more than size hint")
+            digest.update(chunk)
+            collected.append(chunk)
+    except ArtifactProducerError:
+        raise
+    except Exception as exc:
+        raise ArtifactProducerError("artifact producer failed") from exc
+    if size != size_hint:
+        raise ArtifactProducerError("artifact producer ended before size hint")
+    return tuple(collected), ArtifactWriteResult(size, digest.hexdigest())
 
 
 class _CaptureStream(Protocol):
@@ -289,6 +346,13 @@ class Repository(Protocol):
     def set_default_detector_weight_preset(self, preset_id: str) -> dict[str, Any] | None: ...
     def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any] | None: ...
     def get_export(self, export_id: str) -> tuple[dict[str, Any], bytes] | None: ...
+    def save_export_stream(
+        self, export: dict[str, Any], chunks: Iterable[bytes], *, size_hint: int
+    ) -> dict[str, Any] | None: ...
+    def get_export_metadata(self, export_id: str) -> dict[str, Any] | None: ...
+    def open_export_stream(
+        self, export_id: str
+    ) -> tuple[dict[str, Any], AbstractContextManager[Iterator[bytes]]] | None: ...
     def save_sensor_pcap(self, segment: dict[str, Any], content: bytes) -> dict[str, Any]: ...
     def save_sensor_pcap_limited(
         self,
@@ -908,17 +972,60 @@ class MemoryRepository:
             return self.allowlist.pop(entry_id, None) is not None
 
     def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any] | None:
+        return self.save_export_stream(export, iter((content,)), size_hint=len(content))
+
+    def save_export_stream(
+        self, export: dict[str, Any], chunks: Iterable[bytes], *, size_hint: int
+    ) -> dict[str, Any] | None:
+        private_chunks, result = _consume_artifact_chunks(chunks, size_hint=size_hint)
+        stored = {
+            **deepcopy(export),
+            "size_bytes": result.size_bytes,
+            "sha256": result.sha256,
+        }
         with self._lock:
             if str(export["job_id"]) not in self.jobs:
                 return None
-            self.exports[export["id"]] = deepcopy(export)
-            self.export_content[export["id"]] = bytes(content)
-            return deepcopy(export)
+            if str(export["id"]) in self.exports:
+                raise ArtifactAlreadyExistsError(f"export already exists: {export['id']}")
+            self.exports[str(export["id"])] = stored
+            self.export_content[str(export["id"])] = b"".join(private_chunks)
+            return deepcopy(stored)
+
+    def get_export_metadata(self, export_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            metadata = self.exports.get(export_id)
+            return deepcopy(metadata) if metadata is not None else None
+
+    def open_export_stream(
+        self, export_id: str
+    ) -> tuple[dict[str, Any], AbstractContextManager[Iterator[bytes]]] | None:
+        with self._lock:
+            metadata = self.exports.get(export_id)
+            content = self.export_content.get(export_id)
+            if metadata is None:
+                return None
+            if content is None:
+                raise ArtifactMissingError(f"artifact content is missing: {export_id}")
+            snapshot = bytes(content)
+
+        @contextmanager
+        def opened() -> Iterator[Iterator[bytes]]:
+            def iterator() -> Iterator[bytes]:
+                for offset in range(0, len(snapshot), _DEFAULT_ARTIFACT_CHUNK_SIZE):
+                    yield snapshot[offset : offset + _DEFAULT_ARTIFACT_CHUNK_SIZE]
+
+            yield iterator()
+
+        return deepcopy(metadata), opened()
 
     def get_export(self, export_id: str) -> tuple[dict[str, Any], bytes] | None:
-        if export_id not in self.exports:
+        opened = self.open_export_stream(export_id)
+        if opened is None:
             return None
-        return deepcopy(self.exports[export_id]), bytes(self.export_content[export_id])
+        metadata, stream = opened
+        with stream as chunks:
+            return metadata, b"".join(chunks)
 
     def save_sensor_pcap(self, segment: dict[str, Any], content: bytes) -> dict[str, Any]:
         stored, status = self.save_sensor_pcap_limited(segment, content, None)
@@ -2001,6 +2108,13 @@ class SQLiteRepository:
             return cursor.rowcount > 0
 
     def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any] | None:
+        return self.save_export_stream(export, iter((content,)), size_hint=len(content))
+
+    def save_export_stream(
+        self, export: dict[str, Any], chunks: Iterable[bytes], *, size_hint: int
+    ) -> dict[str, Any] | None:
+        if size_hint < 0:
+            raise ArtifactProducerError("artifact size hint must be non-negative")
         with self._lock:
             try:
                 self.connection.execute("BEGIN IMMEDIATE")
@@ -2011,28 +2125,208 @@ class SQLiteRepository:
                 if parent is None:
                     self.connection.commit()
                     return None
+                if (
+                    self.connection.execute(
+                        "SELECT 1 FROM objects WHERE kind='export' AND id=?", (export["id"],)
+                    ).fetchone()
+                    is not None
+                ):
+                    raise ArtifactAlreadyExistsError(f"export already exists: {export['id']}")
                 self.connection.execute(
-                    "INSERT INTO objects(kind,id,data) VALUES('export',?,?) "
-                    "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                    "INSERT INTO objects(kind,id,data) VALUES('export',?,?)",
                     (export["id"], self._serialize(export)),
                 )
                 self.connection.execute(
-                    "INSERT INTO export_blobs(export_id,content) VALUES(?,?) "
-                    "ON CONFLICT(export_id) DO UPDATE SET content=excluded.content",
-                    (export["id"], content),
+                    "INSERT INTO export_blobs(export_id,content) VALUES(?,zeroblob(?))",
+                    (export["id"], size_hint),
+                )
+                row = self.connection.execute(
+                    "SELECT rowid FROM export_blobs WHERE export_id=?", (export["id"],)
+                ).fetchone()
+                if row is None:
+                    raise ArtifactStorageError("artifact blob row disappeared")
+                digest = hashlib.sha256()
+                size = 0
+                blob = self.connection.blobopen(
+                    "export_blobs", "content", int(row[0]), readonly=False
+                )
+                stream_error: Exception | None = None
+                try:
+                    iterator = iter(chunks)
+                    while True:
+                        try:
+                            chunk = next(iterator)
+                        except StopIteration:
+                            break
+                        except Exception as exc:
+                            raise ArtifactProducerError("artifact producer failed") from exc
+                        if type(chunk) is not bytes:
+                            raise ArtifactProducerError(
+                                "artifact chunks must be exact bytes values"
+                            )
+                        if not chunk:
+                            continue
+                        size += len(chunk)
+                        if size > size_hint:
+                            raise ArtifactProducerError(
+                                "artifact producer yielded more than size hint"
+                            )
+                        try:
+                            blob.write(chunk)
+                        except Exception as exc:
+                            raise ArtifactStorageError("SQLite artifact blob write failed") from exc
+                        digest.update(chunk)
+                except Exception as exc:
+                    stream_error = exc
+                try:
+                    blob.close()
+                except Exception as exc:
+                    if stream_error is None:
+                        raise ArtifactStorageError("SQLite artifact blob close failed") from exc
+                if stream_error is not None:
+                    raise stream_error
+                if size != size_hint:
+                    raise ArtifactProducerError("artifact producer ended before size hint")
+                stored = {
+                    **deepcopy(export),
+                    "size_bytes": size,
+                    "sha256": digest.hexdigest(),
+                }
+                self.connection.execute(
+                    "UPDATE objects SET data=? WHERE kind='export' AND id=?",
+                    (self._serialize(stored), export["id"]),
                 )
                 self.connection.commit()
-                return deepcopy(export)
-            except Exception:
+                return deepcopy(stored)
+            except (ArtifactProducerError, ArtifactAlreadyExistsError):
                 self.connection.rollback()
                 raise
+            except Exception as exc:
+                self.connection.rollback()
+                if isinstance(exc, ArtifactStorageError):
+                    raise
+                raise ArtifactStorageError("SQLite artifact persistence failed") from exc
+
+    def get_export_metadata(self, export_id: str) -> dict[str, Any] | None:
+        try:
+            return self._get("export", export_id)
+        except ArtifactStorageError:
+            raise
+        except Exception as exc:
+            raise ArtifactStorageError("SQLite export metadata lookup failed") from exc
+
+    def open_export_stream(
+        self, export_id: str
+    ) -> tuple[dict[str, Any], AbstractContextManager[Iterator[bytes]]] | None:
+        try:
+            with self._lock:
+                metadata = self._get("export", export_id)
+                if metadata is None:
+                    return None
+                row = self.connection.execute(
+                    "SELECT rowid FROM export_blobs WHERE export_id=?", (export_id,)
+                ).fetchone()
+                if row is None:
+                    raise ArtifactMissingError(f"artifact content is missing: {export_id}")
+                rowid = int(row[0])
+        except ArtifactMissingError:
+            raise
+        except ArtifactStorageError:
+            raise
+        except Exception as exc:
+            raise ArtifactStorageError("SQLite export stream resolution failed") from exc
+
+        @contextmanager
+        def opened() -> Iterator[Iterator[bytes]]:
+            self._lock.acquire()
+            blob: Any = None
+            lock_held = True
+            closed = False
+
+            def close() -> None:
+                nonlocal closed, lock_held
+                if closed:
+                    return
+                closed = True
+                failure: Exception | None = None
+                try:
+                    if blob is not None:
+                        blob.close()
+                except Exception as exc:
+                    failure = exc
+                finally:
+                    if lock_held:
+                        lock_held = False
+                        self._lock.release()
+                if failure is not None:
+                    raise ArtifactStorageError("SQLite artifact blob close failed") from failure
+
+            class OwnedIterator(Iterator[bytes]):
+                def __next__(self) -> bytes:
+                    if closed:
+                        raise StopIteration
+                    try:
+                        chunk = blob.read(_DEFAULT_ARTIFACT_CHUNK_SIZE)
+                        if type(chunk) is not bytes:
+                            raise ArtifactStorageError(
+                                "SQLite artifact reader returned a non-bytes chunk"
+                            )
+                        if not chunk:
+                            close()
+                            raise StopIteration
+                        return chunk
+                    except StopIteration:
+                        raise
+                    except ArtifactStorageError:
+                        try:
+                            close()
+                        except ArtifactStorageError:
+                            pass
+                        raise
+                    except Exception as exc:
+                        try:
+                            close()
+                        except ArtifactStorageError:
+                            pass
+                        raise ArtifactStorageError("SQLite artifact read failed") from exc
+
+                def close(self) -> None:
+                    close()
+
+            try:
+                blob = self.connection.blobopen("export_blobs", "content", rowid, readonly=True)
+                owned = OwnedIterator()
+                try:
+                    yield owned
+                except BaseException:
+                    try:
+                        owned.close()
+                    except ArtifactStorageError:
+                        pass
+                    raise
+                else:
+                    owned.close()
+            except ArtifactError:
+                raise
+            except Exception as exc:
+                try:
+                    close()
+                except ArtifactStorageError:
+                    pass
+                raise ArtifactStorageError("SQLite artifact read failed") from exc
+            finally:
+                if not closed:
+                    close()
+
+        return metadata, opened()
 
     def get_export(self, export_id: str) -> tuple[dict[str, Any], bytes] | None:
-        metadata = self._get("export", export_id)
-        row = self.connection.execute(
-            "SELECT content FROM export_blobs WHERE export_id=?", (export_id,)
-        ).fetchone()
-        return (metadata, bytes(row[0])) if metadata is not None and row else None
+        opened = self.open_export_stream(export_id)
+        if opened is None:
+            return None
+        metadata, stream = opened
+        with stream as chunks:
+            return metadata, b"".join(chunks)
 
     def save_sensor_pcap(self, segment: dict[str, Any], content: bytes) -> dict[str, Any]:
         stored, status = self.save_sensor_pcap_limited(segment, content, None)

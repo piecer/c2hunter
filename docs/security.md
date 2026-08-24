@@ -100,6 +100,8 @@ Validate REST/Pydantic and protobuf fields, normalized IP/CIDR/domain/fingerprin
 
 Append-only audits cover login, analysis create/cancel/reanalysis, PCAP export/download, allowlist, sensor enrollment/removal, settings, roles, and deletion. Record UTC time, actor, source IP, request ID, action, target, and result. Protect audit retention (default 365 days) and clock synchronization. Preserve detector version, parameter/allowlist snapshot, object checksum, loss/skew warning, and state transitions so a result can be reproduced and challenged.
 
+PCAP export object keys and filenames are server-generated/sanitized; storage exceptions are mapped to typed public errors without backend keys, credentials, or provider details. Streaming publication independently counts and hashes exact `bytes` chunks and compensates failed PostgreSQL publication with object deletion. Download validates the complete object before headers, adds `nosniff`, ignores Range rather than exposing partial unvalidated bytes, and closes backend/local resources on exhaustion, faults, or cancellation. Cleanup failures are logged but never replace the primary integrity/storage error.
+
 ## Network and container hardening
 
 Expose only the HTTPS ingress. Keep PostgreSQL, Redis, ClickHouse, MinIO, Worker, and sensor gateway private. Use non-root containers, read-only roots where supported, dropped capabilities, resource limits, and separate service accounts. Live sensor capture receives only required capabilities (`CAP_NET_RAW`, optionally `CAP_NET_ADMIN`) rather than root. Pin release images by digest and patch on a measured schedule.

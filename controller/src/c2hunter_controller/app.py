@@ -5,6 +5,7 @@ import hmac
 import json
 import logging
 import secrets
+import tempfile
 import threading
 import uuid
 from collections.abc import Callable, Iterator
@@ -24,7 +25,7 @@ from c2hunter_analysis.pcap import (
 from c2hunter_analysis.pcap_export import open_export_capture
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import (
     CollectorRegistry,
     Counter,
@@ -98,7 +99,15 @@ from .pcap_stream import (
 )
 from .production import MinioBlobStore, PostgresRepository
 from .queueing import ControllerQueue, MemoryControllerQueue, RedisControllerQueue
-from .repositories import CaptureSource, MemoryRepository, Repository
+from .repositories import (
+    ArtifactAlreadyExistsError,
+    ArtifactMissingError,
+    ArtifactProducerError,
+    ArtifactStorageError,
+    CaptureSource,
+    MemoryRepository,
+    Repository,
+)
 from .schemas import (
     AIAnalysisRunCancel,
     AIAnalysisRunCreate,
@@ -4597,24 +4606,61 @@ def create_app(
             "error": error_message,
         }
         if artifact is not None:
-            metadata["sha256"] = artifact.sha256
             try:
                 with artifact:
                     with _measure_pcap_export_stage(stage_seconds, "save"):
-                        # Stage 6 keeps byte persistence; materialize exactly once here.
-                        stored_export = repo.save_export(metadata, artifact.read_bytes())
+                        if config.pcap_artifact_io == "streaming":
+                            stored_export = repo.save_export_stream(
+                                metadata,
+                                artifact.iter_chunks(),
+                                size_hint=artifact.size_bytes,
+                            )
+                        else:
+                            metadata["sha256"] = artifact.sha256
+                            stored_export = repo.save_export(metadata, artifact.read_bytes())
             except CaptureStorageError as exc:
                 raise ApiError(
                     500,
                     "PCAP_EXPORT_STORAGE_ERROR",
                     "temporary PCAP export storage failed",
                 ) from exc
+            except ArtifactStorageError as exc:
+                raise ApiError(
+                    503,
+                    "PCAP_EXPORT_STORAGE_ERROR",
+                    "PCAP export persistence is temporarily unavailable",
+                ) from exc
+            except (ArtifactProducerError, ArtifactAlreadyExistsError) as exc:
+                raise ApiError(
+                    500,
+                    "PCAP_EXPORT_STORAGE_ERROR",
+                    "PCAP export artifact production failed",
+                ) from exc
         else:
             content = capture_result.content
-            with _measure_pcap_export_stage(stage_seconds, "hash"):
-                metadata["sha256"] = hashlib.sha256(content).hexdigest()
-            with _measure_pcap_export_stage(stage_seconds, "save"):
-                stored_export = repo.save_export(metadata, content)
+            if config.pcap_artifact_io == "streaming":
+                try:
+                    with _measure_pcap_export_stage(stage_seconds, "save"):
+                        stored_export = repo.save_export_stream(
+                            metadata, iter((content,)), size_hint=len(content)
+                        )
+                except ArtifactStorageError as exc:
+                    raise ApiError(
+                        503,
+                        "PCAP_EXPORT_STORAGE_ERROR",
+                        "PCAP export persistence is temporarily unavailable",
+                    ) from exc
+                except (ArtifactProducerError, ArtifactAlreadyExistsError) as exc:
+                    raise ApiError(
+                        500,
+                        "PCAP_EXPORT_STORAGE_ERROR",
+                        "PCAP export artifact production failed",
+                    ) from exc
+            else:
+                with _measure_pcap_export_stage(stage_seconds, "hash"):
+                    metadata["sha256"] = hashlib.sha256(content).hexdigest()
+                with _measure_pcap_export_stage(stage_seconds, "save"):
+                    stored_export = repo.save_export(metadata, content)
         if stored_export is None:
             raise ApiError(
                 409,
@@ -4659,39 +4705,194 @@ def create_app(
 
     @app.get("/api/v1/pcap-exports/{export_id}", response_model=PcapExportResponse)
     def get_pcap_export(export_id: str) -> dict[str, Any]:
-        stored = repo.get_export(export_id)
-        if stored is None:
+        try:
+            metadata = repo.get_export_metadata(export_id)
+        except ArtifactStorageError as exc:
+            raise ApiError(
+                503,
+                "PCAP_EXPORT_STORAGE_ERROR",
+                "PCAP export storage is temporarily unavailable",
+            ) from exc
+        if metadata is None:
             raise ApiError(404, "PCAP_EXPORT_NOT_FOUND", "PCAP export를 찾을 수 없습니다")
-        return stored[0]
+        return metadata
 
     @app.get("/api/v1/pcap-exports/{export_id}/download")
     def download_pcap_export(export_id: str) -> Response:
-        stored = repo.get_export(export_id)
-        if stored is None:
+        if config.pcap_artifact_io == "legacy":
+            stored = repo.get_export(export_id)
+            if stored is None:
+                raise ApiError(404, "PCAP_EXPORT_NOT_FOUND", "PCAP export를 찾을 수 없습니다")
+            metadata, content = stored
+            if metadata["status"] != "COMPLETED":
+                raise ApiError(409, "PCAP_NOT_AVAILABLE", "PCAP export가 사용 가능하지 않습니다")
+            expected_size = metadata.get("size_bytes")
+            expected_digest = metadata.get("sha256")
+            if (expected_size is not None and len(content) != expected_size) or (
+                expected_digest is not None
+                and not hmac.compare_digest(hashlib.sha256(content).hexdigest(), expected_digest)
+            ):
+                raise ApiError(
+                    409,
+                    "PCAP_EXPORT_INTEGRITY_ERROR",
+                    "PCAP export artifact integrity validation failed",
+                )
+            filename = metadata.get("filename", f"c2hunter-{export_id}.pcap")
+            return Response(
+                content,
+                media_type=(
+                    "application/x-pcapng"
+                    if metadata.get("capture_format") == "PCAPNG"
+                    else "application/vnd.tcpdump.pcap"
+                ),
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+
+        try:
+            streaming_metadata = repo.get_export_metadata(export_id)
+        except ArtifactStorageError as exc:
+            raise ApiError(
+                503,
+                "PCAP_EXPORT_STORAGE_ERROR",
+                "PCAP export storage is temporarily unavailable",
+            ) from exc
+        if streaming_metadata is None:
             raise ApiError(404, "PCAP_EXPORT_NOT_FOUND", "PCAP export를 찾을 수 없습니다")
-        metadata, content = stored
+        metadata = streaming_metadata
         if metadata["status"] != "COMPLETED":
             raise ApiError(409, "PCAP_NOT_AVAILABLE", "PCAP export가 사용 가능하지 않습니다")
-        expected_size = metadata.get("size_bytes")
-        expected_digest = metadata.get("sha256")
-        if (expected_size is not None and len(content) != expected_size) or (
-            expected_digest is not None
-            and not hmac.compare_digest(hashlib.sha256(content).hexdigest(), expected_digest)
-        ):
+
+        spool = None
+
+        def close_spool_quietly(file: Any) -> None:
+            try:
+                file.close()
+            except Exception:
+                logger.debug("PCAP download spool close failed", exc_info=True)
+
+        try:
+            opened = repo.open_export_stream(export_id)
+            if opened is None:
+                raise ArtifactMissingError(f"artifact content is missing: {export_id}")
+            _, stream = opened
+            spool = tempfile.SpooledTemporaryFile(
+                max_size=config.pcap_download_spool_max_memory_bytes,
+                mode="w+b",
+                dir=config.pcap_download_spool_directory,
+            )
+            digest = hashlib.sha256()
+            size = 0
+            with stream as chunks:
+                for chunk in chunks:
+                    if type(chunk) is not bytes:
+                        raise ArtifactStorageError("artifact reader returned a non-bytes chunk")
+                    if not chunk:
+                        continue
+                    written = spool.write(chunk)
+                    if written != len(chunk):
+                        raise ArtifactStorageError("artifact download spool short write")
+                    digest.update(chunk)
+                    size += len(chunk)
+            expected_size = int(metadata.get("size_bytes", -1))
+            expected_digest = str(metadata.get("sha256", ""))
+            if size != expected_size or not hmac.compare_digest(
+                digest.hexdigest(), expected_digest
+            ):
+                raise ApiError(
+                    409,
+                    "PCAP_EXPORT_INTEGRITY_ERROR",
+                    "PCAP export artifact integrity validation failed",
+                )
+            spool.flush()
+            spool.seek(0)
+            staged_digest = hashlib.sha256()
+            staged_size = 0
+            while True:
+                read_limit = min(1024 * 1024, expected_size - staged_size + 1)
+                if read_limit <= 0:
+                    read_limit = 1
+                staged_chunk = spool.read(read_limit)
+                if type(staged_chunk) is not bytes:
+                    raise ArtifactStorageError("artifact download spool returned non-bytes data")
+                if not staged_chunk:
+                    break
+                staged_size += len(staged_chunk)
+                staged_digest.update(staged_chunk)
+                if staged_size > expected_size:
+                    break
+            if staged_size != expected_size or not hmac.compare_digest(
+                staged_digest.hexdigest(), expected_digest
+            ):
+                raise ApiError(
+                    409,
+                    "PCAP_EXPORT_INTEGRITY_ERROR",
+                    "PCAP export artifact integrity validation failed",
+                )
+            spool.seek(0)
+        except ApiError:
+            if spool is not None:
+                close_spool_quietly(spool)
+            raise
+        except ArtifactMissingError as exc:
+            if spool is not None:
+                close_spool_quietly(spool)
             raise ApiError(
                 409,
                 "PCAP_EXPORT_INTEGRITY_ERROR",
                 "PCAP export artifact integrity validation failed",
+            ) from exc
+        except ArtifactStorageError as exc:
+            if spool is not None:
+                close_spool_quietly(spool)
+            raise ApiError(
+                503,
+                "PCAP_EXPORT_STORAGE_ERROR",
+                "PCAP export storage is temporarily unavailable",
+            ) from exc
+        except Exception as exc:
+            if spool is not None:
+                close_spool_quietly(spool)
+            raise ApiError(
+                503,
+                "PCAP_EXPORT_STORAGE_ERROR",
+                "PCAP export download staging is temporarily unavailable",
+            ) from exc
+
+        if spool is None:
+            raise ApiError(
+                503,
+                "PCAP_EXPORT_STORAGE_ERROR",
+                "PCAP export download staging is temporarily unavailable",
             )
-        filename = metadata.get("filename", f"c2hunter-{export_id}.pcap")
-        return Response(
-            content,
-            media_type=(
-                "application/x-pcapng"
-                if metadata.get("capture_format") == "PCAPNG"
-                else "application/vnd.tcpdump.pcap"
-            ),
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        staged = spool
+
+        def response_chunks() -> Iterator[bytes]:
+            try:
+                while chunk := staged.read(1024 * 1024):
+                    yield bytes(chunk)
+            finally:
+                close_spool_quietly(staged)
+
+        extension = "pcapng" if metadata.get("capture_format") == "PCAPNG" else "pcap"
+        raw_filename = str(metadata.get("filename", f"c2hunter-{export_id}.{extension}"))
+        filename = "".join(
+            character for character in raw_filename if character.isalnum() or character in "-_."
+        )[:180]
+        if not filename:
+            filename = f"c2hunter-{export_id}.{extension}"
+        media_type = (
+            "application/x-pcapng"
+            if metadata.get("capture_format") == "PCAPNG"
+            else "application/vnd.tcpdump.pcap"
+        )
+        return StreamingResponse(
+            response_chunks(),
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(metadata["size_bytes"]),
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     return app

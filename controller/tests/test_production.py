@@ -4,6 +4,7 @@ import io
 import logging
 import sys
 import threading
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any, cast
@@ -12,7 +13,13 @@ import pytest
 
 import c2hunter_controller.production as production
 from c2hunter_controller.production import MinioBlobStore, PostgresRepository
-from c2hunter_controller.repositories import CaptureSource
+from c2hunter_controller.repositories import (
+    ArtifactAlreadyExistsError,
+    ArtifactProducerError,
+    ArtifactStorageError,
+    ArtifactWriteResult,
+    CaptureSource,
+)
 
 
 class FakeCursor:
@@ -633,10 +640,20 @@ def test_candidate_workflow_resource_uses_object_store_and_audit(monkeypatch: An
 def test_postgres_export_save_cleans_blob_when_parent_is_missing() -> None:
     uploaded: list[tuple[str, bytes]] = []
     deleted: list[str] = []
+
+    def put_stream(
+        key: str, chunks: Iterable[bytes], *, size_hint: int, content_type: str
+    ) -> ArtifactWriteResult:
+        content = b"".join(chunks)
+        uploaded.append((key, content))
+        assert size_hint == len(content)
+        assert content_type == "application/vnd.tcpdump.pcap"
+        return ArtifactWriteResult(len(content), __import__("hashlib").sha256(content).hexdigest())
+
     blob_store = cast(
         MinioBlobStore,
         SimpleNamespace(
-            put=lambda key, content: uploaded.append((key, content)),
+            put_stream=put_stream,
             delete=lambda key: deleted.append(key),
         ),
     )
@@ -650,10 +667,225 @@ def test_postgres_export_save_cleans_blob_when_parent_is_missing() -> None:
     )
 
     assert stored is None
-    assert uploaded == [("exports/export-1.pcap", b"capture")]
-    assert deleted == ["exports/export-1.pcap"]
+    assert len(uploaded) == 1
+    assert uploaded[0][0].startswith("exports/export-1/")
+    assert uploaded[0][0].endswith(".pcap")
+    assert uploaded[0][1] == b"capture"
+    assert deleted == [uploaded[0][0]]
     assert any("FOR UPDATE" in query for query in connection.queries)
     assert not any("INSERT INTO controller_objects" in query for query in connection.queries)
+
+
+class ExportPublicationCursor(FakeCursor):
+    def execute(self, query: str, params: tuple | None = None) -> None:
+        super().execute(query, params)
+        connection = cast(ExportPublicationConnection, self.connection)
+        if "kind='job'" in query and "FOR UPDATE" in query:
+            self._last_row = (1,)
+        elif "kind='export'" in query and "FOR UPDATE" in query:
+            self._last_row = (1,) if connection.duplicate else None
+        if connection.fail_at and connection.fail_at in query:
+            raise RuntimeError("private database fault")
+
+
+class ExportPublicationConnection(FakeConnection):
+    def __init__(
+        self,
+        *,
+        duplicate: bool = False,
+        fail_at: str | None = None,
+        fail_commit: bool = False,
+        fail_rollback: bool = False,
+    ) -> None:
+        super().__init__()
+        self.duplicate = duplicate
+        self.fail_at = fail_at
+        self.fail_commit = fail_commit
+        self.fail_rollback = fail_rollback
+
+    def cursor(self) -> ExportPublicationCursor:
+        return ExportPublicationCursor(self)
+
+    def commit(self) -> None:
+        if self.fail_commit:
+            raise RuntimeError("private commit fault")
+
+    def rollback(self) -> None:
+        self.rolled_back = True
+        if self.fail_rollback:
+            raise RuntimeError("private rollback fault")
+
+
+def _postgres_export_repository(
+    connection: ExportPublicationConnection,
+    deleted: list[str],
+    *,
+    delete_fails: bool = False,
+) -> PostgresRepository:
+    def put_stream(
+        _key: str, chunks: Iterable[bytes], *, size_hint: int, content_type: str
+    ) -> ArtifactWriteResult:
+        content = b"".join(chunks)
+        assert len(content) == size_hint
+        assert content_type == "application/vnd.tcpdump.pcap"
+        return ArtifactWriteResult(size_hint, __import__("hashlib").sha256(content).hexdigest())
+
+    def delete(key: str) -> None:
+        deleted.append(key)
+        if delete_fails:
+            raise RuntimeError("private cleanup fault")
+
+    repository = PostgresRepository(
+        "postgresql://controller",
+        cast(MinioBlobStore, SimpleNamespace(put_stream=put_stream, delete=delete)),
+    )
+    repository._connection = connection
+    return repository
+
+
+def test_postgres_duplicate_cannot_replace_or_delete_published_object() -> None:
+    objects = {"exports/immutable.pcap": b"ORIGINAL"}
+    deleted: list[str] = []
+
+    def put_stream(
+        key: str, chunks: Iterable[bytes], *, size_hint: int, content_type: str
+    ) -> ArtifactWriteResult:
+        content = b"".join(chunks)
+        objects[key] = content
+        return ArtifactWriteResult(size_hint, __import__("hashlib").sha256(content).hexdigest())
+
+    def delete(key: str) -> None:
+        deleted.append(key)
+        objects.pop(key, None)
+
+    repository = PostgresRepository(
+        "postgresql://controller",
+        cast(MinioBlobStore, SimpleNamespace(put_stream=put_stream, delete=delete)),
+    )
+    repository._connection = ExportPublicationConnection(duplicate=True)
+
+    with pytest.raises(ArtifactAlreadyExistsError):
+        repository.save_export_stream(
+            {"id": "immutable", "job_id": "job-1", "capture_format": "PCAP"},
+            iter((b"REPLACED",)),
+            size_hint=8,
+        )
+
+    assert objects == {"exports/immutable.pcap": b"ORIGINAL"}
+    assert len(deleted) == 1
+    assert deleted[0] != "exports/immutable.pcap"
+
+
+def test_postgres_concurrent_duplicate_has_one_winner_and_no_orphan() -> None:
+    objects: dict[str, bytes] = {}
+    upload_barrier = threading.Barrier(2)
+
+    class ConcurrentCursor(FakeCursor):
+        def execute(self, query: str, params: tuple | None = None) -> None:
+            super().execute(query, params)
+            connection = cast(ConcurrentConnection, self.connection)
+            if "kind='job'" in query and "FOR UPDATE" in query:
+                self._last_row = (1,)
+            elif "kind='export'" in query and "FOR UPDATE" in query:
+                self._last_row = (1,) if connection.published is not None else None
+            elif "INSERT INTO controller_objects" in query:
+                assert params is not None
+                connection.published = __import__("json").loads(params[1])
+
+    class ConcurrentConnection(FakeConnection):
+        published: dict[str, Any] | None = None
+
+        def cursor(self) -> ConcurrentCursor:
+            return ConcurrentCursor(self)
+
+    def put_stream(
+        key: str, chunks: Iterable[bytes], *, size_hint: int, content_type: str
+    ) -> ArtifactWriteResult:
+        content = b"".join(chunks)
+        objects[key] = content
+        upload_barrier.wait(timeout=2)
+        return ArtifactWriteResult(size_hint, __import__("hashlib").sha256(content).hexdigest())
+
+    blob_store = cast(
+        MinioBlobStore,
+        SimpleNamespace(
+            put_stream=put_stream,
+            delete=lambda key: objects.pop(key, None),
+        ),
+    )
+    repository = PostgresRepository("postgresql://controller", blob_store)
+    connection = ConcurrentConnection()
+    repository._connection = connection
+
+    def publish(content: bytes) -> str:
+        try:
+            repository.save_export_stream(
+                {"id": "raced", "job_id": "job-1", "capture_format": "PCAP"},
+                iter((content,)),
+                size_hint=len(content),
+            )
+            return "winner"
+        except ArtifactAlreadyExistsError:
+            return "loser"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(publish, (b"FIRST", b"SECOND")))
+
+    assert sorted(outcomes) == ["loser", "winner"]
+    assert connection.published is not None
+    winning_key = connection.published["object_key"]
+    assert objects == {winning_key: objects[winning_key]}
+    assert objects[winning_key] in {b"FIRST", b"SECOND"}
+
+
+def test_postgres_duplicate_preserves_primary_when_rollback_and_cleanup_fail() -> None:
+    deleted: list[str] = []
+    repository = _postgres_export_repository(
+        ExportPublicationConnection(duplicate=True, fail_rollback=True),
+        deleted,
+        delete_fails=True,
+    )
+
+    with pytest.raises(ArtifactAlreadyExistsError):
+        repository.save_export_stream(
+            {"id": "immutable", "job_id": "job-1", "capture_format": "PCAP"},
+            iter((b"capture",)),
+            size_hint=7,
+        )
+
+    assert len(deleted) == 1
+    assert deleted[0].startswith("exports/immutable/")
+    assert deleted[0].endswith(".pcap")
+
+
+@pytest.mark.parametrize(
+    ("connection", "failed_sql"),
+    [
+        (ExportPublicationConnection(fail_at="INSERT INTO controller_objects"), "metadata"),
+        (ExportPublicationConnection(fail_at="INSERT INTO audit_events"), "audit"),
+        (ExportPublicationConnection(fail_commit=True), "commit"),
+    ],
+)
+def test_postgres_publication_failure_compensates_uploaded_object(
+    connection: ExportPublicationConnection, failed_sql: str
+) -> None:
+    deleted: list[str] = []
+    repository = _postgres_export_repository(connection, deleted)
+
+    with pytest.raises(ArtifactStorageError) as caught:
+        repository.save_export_stream(
+            {"id": f"failed-{failed_sql}", "job_id": "job-1", "capture_format": "PCAP"},
+            iter((b"capture",)),
+            size_hint=7,
+        )
+
+    assert "private" not in str(caught.value)
+    assert connection.rolled_back
+    assert len(deleted) == 1
+    assert deleted[0].startswith(f"exports/failed-{failed_sql}/")
+    assert deleted[0].endswith(".pcap")
+    assert any("kind='job'" in query and "FOR UPDATE" in query for query in connection.queries)
+    assert any("kind='export'" in query and "FOR UPDATE" in query for query in connection.queries)
 
 
 class SensorPcapListCursor(FakeCursor):
@@ -738,6 +970,173 @@ def _blob_store_with_response(response: TrackingObjectResponse) -> MinioBlobStor
     store.bucket = "captures"
     store.client = SimpleNamespace(get_object=lambda bucket, key: response)
     return store
+
+
+def test_minio_put_stream_uses_known_size_and_rejects_unconsumed_extra_data() -> None:
+    uploads: list[tuple[int, int, str, bytes]] = []
+    removed: list[str] = []
+    store = MinioBlobStore.__new__(MinioBlobStore)
+    store.bucket = "captures"
+
+    def put_object(
+        _bucket: str,
+        _key: str,
+        reader: object,
+        length: int,
+        *,
+        content_type: str,
+        part_size: int,
+    ) -> None:
+        uploads.append((length, part_size, content_type, reader.read(length)))  # type: ignore[attr-defined]
+
+    store.client = SimpleNamespace(
+        bucket_exists=lambda _bucket: True,
+        put_object=put_object,
+        remove_object=lambda _bucket, key: removed.append(key),
+    )
+
+    result = store.put_stream(
+        "exports/ok.pcap", iter((b"ab", b"cd")), size_hint=4, content_type="pcap/type"
+    )
+
+    assert result == ArtifactWriteResult(4, __import__("hashlib").sha256(b"abcd").hexdigest())
+    assert uploads == [(4, 5 * 1024 * 1024, "pcap/type", b"abcd")]
+    with pytest.raises(ArtifactProducerError, match="more than"):
+        store.put_stream(
+            "exports/extra.pcap",
+            iter((b"abcd", b"extra")),
+            size_hint=4,
+            content_type="pcap/type",
+        )
+    assert removed == ["exports/extra.pcap"]
+
+
+def test_minio_put_stream_attempts_cleanup_after_failed_upload() -> None:
+    removed: list[str] = []
+    store = MinioBlobStore.__new__(MinioBlobStore)
+    store.bucket = "captures"
+
+    def fail_put(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("upload failed after partial object creation")
+
+    store.client = SimpleNamespace(
+        bucket_exists=lambda _bucket: True,
+        put_object=fail_put,
+        remove_object=lambda _bucket, key: removed.append(key),
+    )
+
+    with pytest.raises(Exception, match="MinIO artifact upload failed"):
+        store.put_stream(
+            "exports/partial.pcap",
+            iter((b"abcd",)),
+            size_hint=4,
+            content_type="pcap/type",
+        )
+
+    assert removed == ["exports/partial.pcap"]
+
+
+def test_minio_open_stream_reads_bounded_chunks_and_releases_once() -> None:
+    response = TrackingObjectResponse(b"abcdefgh", {})
+    store = _blob_store_with_response(response)
+
+    with store.open_stream("exports/a.pcap", chunk_size=3) as chunks:
+        assert list(chunks) == [b"abc", b"def", b"gh"]
+        assert response.close_count == 1
+        assert response.release_count == 1
+
+    assert response.read_sizes == [3, 3, 3, 3]
+    assert response.close_count == 1
+    assert response.release_count == 1
+
+
+def test_minio_open_stream_close_is_idempotent_after_cancellation() -> None:
+    response = TrackingObjectResponse(b"abcdefgh", {})
+    store = _blob_store_with_response(response)
+
+    with store.open_stream("exports/a.pcap", chunk_size=3) as chunks:
+        assert next(chunks) == b"abc"
+        chunks.close()  # type: ignore[attr-defined]
+        chunks.close()  # type: ignore[attr-defined]
+        assert response.close_count == 1
+        assert response.release_count == 1
+
+    assert response.close_count == 1
+    assert response.release_count == 1
+
+
+def test_postgres_export_metadata_fault_is_typed_storage_error(monkeypatch: Any) -> None:
+    repository = PostgresRepository("postgresql://controller", cast(MinioBlobStore, object()))
+    monkeypatch.setattr(
+        repository,
+        "_get",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("private metadata fault")),
+    )
+
+    with pytest.raises(ArtifactStorageError, match="metadata lookup") as caught:
+        repository.get_export_metadata("export-1")
+    assert "private" not in str(caught.value)
+
+
+def test_postgres_export_metadata_cursor_fault_is_typed_storage_error() -> None:
+    repository = PostgresRepository("postgresql://controller", cast(MinioBlobStore, object()))
+    repository._connection = FakeConnection(execute_error=RuntimeError("private cursor fault"))
+
+    with pytest.raises(ArtifactStorageError, match="metadata lookup") as caught:
+        repository.open_export_stream("export-1")
+    assert "private" not in str(caught.value)
+
+
+def test_minio_open_stream_read_failure_releases_once() -> None:
+    class ReadFaultResponse(TrackingObjectResponse):
+        def read(self, size: int = -1) -> bytes:
+            super().read(size)
+            raise OSError("private read fault")
+
+    response = ReadFaultResponse(b"bad", {})
+    store = _blob_store_with_response(response)
+
+    with pytest.raises(ArtifactStorageError, match="read failed"):
+        with store.open_stream("exports/a.pcap", chunk_size=3) as chunks:
+            next(chunks)
+
+    assert response.close_count == 1
+    assert response.release_count == 1
+
+
+def test_minio_open_stream_close_failure_at_eof_is_typed() -> None:
+    class CloseFaultResponse(TrackingObjectResponse):
+        def close(self) -> None:
+            super().close()
+            raise OSError("private close fault")
+
+    response = CloseFaultResponse(b"", {})
+    store = _blob_store_with_response(response)
+
+    with pytest.raises(ArtifactStorageError, match="stream close") as caught:
+        with store.open_stream("exports/a.pcap", chunk_size=3) as chunks:
+            list(chunks)
+
+    assert "private" not in str(caught.value)
+    assert response.close_count == 1
+    assert response.release_count == 1
+
+
+def test_minio_open_stream_rejects_nonbytes_without_hiding_backend_defect() -> None:
+    class NonBytesResponse(TrackingObjectResponse):
+        def read(self, size: int = -1) -> bytes:
+            value = super().read(size)
+            return bytearray(value)  # type: ignore[return-value]
+
+    response = NonBytesResponse(b"bad", {})
+    store = _blob_store_with_response(response)
+
+    with pytest.raises(ArtifactStorageError, match="non-bytes"):
+        with store.open_stream("exports/a.pcap", chunk_size=3) as chunks:
+            list(chunks)
+
+    assert response.close_count == 1
+    assert response.release_count == 1
 
 
 def test_minio_open_is_lazy_bounded_and_releases_connection_once() -> None:

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import ipaddress
 import struct
 import threading
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
 from c2hunter_analysis.pcap import parse_pcap
 from fastapi.testclient import TestClient
 from test_analysis_job_api import api, payload, synthetic_flows
@@ -92,6 +95,11 @@ def _legacy_packet_record(packet: bytes, index: int) -> dict[str, Any]:
 
 
 def test_streaming_export_uses_open_source_without_materializing(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        controller_capture_sink.CaptureArtifact,
+        "read_bytes",
+        lambda _self: (_ for _ in ()).throw(AssertionError("streaming artifact materialized")),
+    )
     repository = MemoryRepository()
     client = TestClient(create_app(Settings(environment="test"), repository))
     upload = client.post(
@@ -131,7 +139,14 @@ def test_streaming_and_legacy_rollout_paths_are_byte_for_byte_differential() -> 
         headers={"content-type": "application/vnd.tcpdump.pcap"},
     ).json()
     legacy = TestClient(
-        create_app(Settings(environment="test", pcap_export_pipeline="legacy"), repository)
+        create_app(
+            Settings(
+                environment="test",
+                pcap_export_pipeline="legacy",
+                pcap_artifact_io="legacy",
+            ),
+            repository,
+        )
     )
 
     streamed = streaming.post(
@@ -304,7 +319,7 @@ def test_pcap_upload_runs_existing_detectors_and_appears_in_history() -> None:
     assert rerun.json()["source"]["sha256"] == job["source"]["sha256"]
 
 
-def test_pcap_export_returns_valid_packet_prefix_at_output_limit() -> None:
+def test_pcap_export_returns_valid_packet_prefix_at_output_limit(monkeypatch: Any) -> None:
     repository = MemoryRepository()
     first_packet = _udp_packet("10.0.0.1", "203.0.113.77", 50001, 1)
     output_limit = 24 + 16 + len(first_packet)
@@ -323,6 +338,21 @@ def test_pcap_export_returns_valid_packet_prefix_at_output_limit() -> None:
     )
     assert upload.status_code == 201
 
+    monkeypatch.setattr(
+        repository,
+        "save_export",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("streaming save used compatibility wrapper")
+        ),
+    )
+    monkeypatch.setattr(
+        repository,
+        "get_export",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("streaming read used compatibility wrapper")
+        ),
+    )
+
     response = client.post(
         "/api/v1/pcap-exports",
         json={"job_id": upload.json()["id"]},
@@ -339,9 +369,30 @@ def test_pcap_export_returns_valid_packet_prefix_at_output_limit() -> None:
     assert exported["output_byte_limit"] == output_limit
     assert exported["size_bytes"] == output_limit
     assert "-partial-" in exported["filename"]
-    download = client.get(f"/api/v1/pcap-exports/{exported['id']}/download")
+    original_open = repository.open_export_stream
+    monkeypatch.setattr(
+        repository,
+        "open_export_stream",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("metadata GET opened artifact content")
+        ),
+    )
+    metadata_response = client.get(f"/api/v1/pcap-exports/{exported['id']}")
+    assert metadata_response.status_code == 200
+    monkeypatch.setattr(repository, "open_export_stream", original_open)
+    download = client.get(
+        f"/api/v1/pcap-exports/{exported['id']}/download",
+        headers={"Range": "bytes=1-2"},
+    )
     assert download.status_code == 200
     assert len(download.content) == output_limit
+    assert download.headers["content-length"] == str(output_limit)
+    assert download.headers["x-content-type-options"] == "nosniff"
+    assert "accept-ranges" not in download.headers
+    assert "content-range" not in download.headers
+    assert download.headers["content-disposition"] == (
+        f'attachment; filename="{exported["filename"]}"'
+    )
     assert exported["sha256"] == hashlib.sha256(download.content).hexdigest()
     reparsed = parse_pcap(
         download.content,
@@ -355,6 +406,305 @@ def test_pcap_export_returns_valid_packet_prefix_at_output_limit() -> None:
     corrupted = client.get(f"/api/v1/pcap-exports/{exported['id']}/download")
     assert corrupted.status_code == 409
     assert corrupted.json()["error"]["code"] == "PCAP_EXPORT_INTEGRITY_ERROR"
+
+    repository.export_content.pop(exported["id"])
+    missing = client.get(f"/api/v1/pcap-exports/{exported['id']}/download")
+    assert missing.status_code == 409
+    assert missing.json()["error"]["code"] == "PCAP_EXPORT_INTEGRITY_ERROR"
+
+
+def test_download_integrity_error_precedes_staging_spool_close_failure(
+    monkeypatch: Any,
+) -> None:
+    repository = MemoryRepository()
+    repository.save_job({"id": "job-1", "status": "COMPLETED"})
+    stored = repository.save_export_stream(
+        {
+            "id": "export-close-fault",
+            "job_id": "job-1",
+            "status": "COMPLETED",
+            "capture_format": "PCAP",
+            "filename": "safe.pcap",
+        },
+        iter((b"expected",)),
+        size_hint=8,
+    )
+    assert stored is not None
+    repository.export_content["export-close-fault"] = b"corrupt!"
+
+    class CloseFaultSpool(io.BytesIO):
+        def close(self) -> None:
+            super().close()
+            raise OSError("private spool close fault")
+
+    monkeypatch.setattr(
+        controller_app.tempfile,
+        "SpooledTemporaryFile",
+        lambda **_kwargs: CloseFaultSpool(),
+    )
+    client = TestClient(create_app(Settings(environment="test"), repository))
+
+    response = client.get("/api/v1/pcap-exports/export-close-fault/download")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PCAP_EXPORT_INTEGRITY_ERROR"
+    assert "private" not in response.text
+
+
+def test_download_seek_failure_is_sanitized_as_storage_error(monkeypatch: Any) -> None:
+    repository = MemoryRepository()
+    repository.save_job({"id": "job-1", "status": "COMPLETED"})
+    repository.save_export_stream(
+        {
+            "id": "export-seek-fault",
+            "job_id": "job-1",
+            "status": "COMPLETED",
+            "capture_format": "PCAP",
+            "filename": "safe.pcap",
+        },
+        iter((b"valid",)),
+        size_hint=5,
+    )
+
+    class SeekFaultSpool(io.BytesIO):
+        def seek(self, *_args: object, **_kwargs: object) -> int:
+            raise RuntimeError("private seek fault")
+
+    monkeypatch.setattr(
+        controller_app.tempfile,
+        "SpooledTemporaryFile",
+        lambda **_kwargs: SeekFaultSpool(),
+    )
+    client = TestClient(create_app(Settings(environment="test"), repository))
+
+    response = client.get("/api/v1/pcap-exports/export-seek-fault/download")
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "PCAP_EXPORT_STORAGE_ERROR"
+    assert "private" not in response.text
+
+
+def test_download_rejects_short_spool_write_before_response(monkeypatch: Any) -> None:
+    repository = MemoryRepository()
+    repository.save_job({"id": "job-1", "status": "COMPLETED"})
+    repository.save_export_stream(
+        {
+            "id": "export-short-write",
+            "job_id": "job-1",
+            "status": "COMPLETED",
+            "capture_format": "PCAP",
+            "filename": "safe.pcap",
+        },
+        iter((b"valid",)),
+        size_hint=5,
+    )
+
+    class ShortWriteSpool(io.BytesIO):
+        def write(self, data: bytes) -> int:
+            return super().write(data[:-1])
+
+    monkeypatch.setattr(
+        controller_app.tempfile,
+        "SpooledTemporaryFile",
+        lambda **_kwargs: ShortWriteSpool(),
+    )
+    response = TestClient(create_app(Settings(environment="test"), repository)).get(
+        "/api/v1/pcap-exports/export-short-write/download"
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "PCAP_EXPORT_STORAGE_ERROR"
+
+
+def test_download_flushes_validated_spool_before_rewind(monkeypatch: Any) -> None:
+    repository = MemoryRepository()
+    repository.save_job({"id": "job-1", "status": "COMPLETED"})
+    repository.save_export_stream(
+        {
+            "id": "export-flush",
+            "job_id": "job-1",
+            "status": "COMPLETED",
+            "capture_format": "PCAP",
+            "filename": "safe.pcap",
+        },
+        iter((b"valid",)),
+        size_hint=5,
+    )
+
+    class FlushRequiredSpool(io.BytesIO):
+        flushed = False
+
+        def flush(self) -> None:
+            self.flushed = True
+            super().flush()
+
+        def seek(self, *args: object, **kwargs: object) -> int:
+            if not self.flushed:
+                raise OSError("rewound before flush")
+            return super().seek(*args, **kwargs)
+
+    monkeypatch.setattr(
+        controller_app.tempfile,
+        "SpooledTemporaryFile",
+        lambda **_kwargs: FlushRequiredSpool(),
+    )
+    response = TestClient(create_app(Settings(environment="test"), repository)).get(
+        "/api/v1/pcap-exports/export-flush/download"
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"valid"
+
+
+def test_download_second_pass_read_fault_fails_before_success_response(monkeypatch: Any) -> None:
+    repository = MemoryRepository()
+    repository.save_job({"id": "job-1", "status": "COMPLETED"})
+    repository.save_export_stream(
+        {
+            "id": "export-second-read-fault",
+            "job_id": "job-1",
+            "status": "COMPLETED",
+            "capture_format": "PCAP",
+            "filename": "safe.pcap",
+        },
+        iter((b"valid",)),
+        size_hint=5,
+    )
+
+    class SecondPassFaultSpool(io.BytesIO):
+        rewinds = 0
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            result = super().seek(offset, whence)
+            if offset == 0 and whence == 0:
+                self.rewinds += 1
+            return result
+
+        def read(self, size: int | None = -1) -> bytes:
+            effective_size = -1 if size is None else size
+            if self.rewinds == 1 and self.tell() >= 3:
+                raise OSError("private second-pass read fault")
+            if self.rewinds == 1:
+                return super().read(min(effective_size, 3))
+            return super().read(effective_size)
+
+    monkeypatch.setattr(
+        controller_app.tempfile,
+        "SpooledTemporaryFile",
+        lambda **_kwargs: SecondPassFaultSpool(),
+    )
+    response = TestClient(create_app(Settings(environment="test"), repository)).get(
+        "/api/v1/pcap-exports/export-second-read-fault/download"
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "PCAP_EXPORT_STORAGE_ERROR"
+    assert "private" not in response.text
+
+    messages: list[dict[str, Any]] = []
+    request_sent = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        messages.append(message)
+
+    application = create_app(Settings(environment="test"), repository)
+    asyncio.run(
+        application(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "http",
+                "path": "/api/v1/pcap-exports/export-second-read-fault/download",
+                "raw_path": b"/api/v1/pcap-exports/export-second-read-fault/download",
+                "query_string": b"",
+                "headers": [],
+                "client": ("127.0.0.1", 1234),
+                "server": ("testserver", 80),
+            },
+            receive,
+            send,
+        )
+    )
+    starts = [message for message in messages if message["type"] == "http.response.start"]
+    bodies = [message for message in messages if message["type"] == "http.response.body"]
+    assert [message["status"] for message in starts] == [503]
+    assert not any(message.get("body") == b"val" for message in bodies)
+
+
+@pytest.mark.parametrize("fault", ["short", "extra", "corrupt"])
+def test_download_rejects_second_pass_spool_integrity_faults(monkeypatch: Any, fault: str) -> None:
+    repository = MemoryRepository()
+    repository.save_job({"id": "job-1", "status": "COMPLETED"})
+    repository.save_export_stream(
+        {
+            "id": "export-local-integrity",
+            "job_id": "job-1",
+            "status": "COMPLETED",
+            "capture_format": "PCAP",
+            "filename": "safe.pcap",
+        },
+        iter((b"valid",)),
+        size_hint=5,
+    )
+
+    class IntegrityFaultSpool(io.BytesIO):
+        rewinds = 0
+        fault_emitted = False
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            result = super().seek(offset, whence)
+            if offset == 0 and whence == 0:
+                self.rewinds += 1
+            return result
+
+        def read(self, size: int | None = -1) -> bytes:
+            effective_size = -1 if size is None else size
+            data = super().read(effective_size)
+            if self.rewinds != 1:
+                return data
+            if fault == "short":
+                return data[:3]
+            if self.fault_emitted:
+                return data
+            self.fault_emitted = True
+            if fault == "extra":
+                return data + b"x"
+            return b"X" + data[1:]
+
+    monkeypatch.setattr(
+        controller_app.tempfile,
+        "SpooledTemporaryFile",
+        lambda **_kwargs: IntegrityFaultSpool(),
+    )
+    response = TestClient(create_app(Settings(environment="test"), repository)).get(
+        "/api/v1/pcap-exports/export-local-integrity/download"
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PCAP_EXPORT_INTEGRITY_ERROR"
+
+
+def test_sqlite_metadata_database_faults_are_sanitized_for_get_and_download(tmp_path: Any) -> None:
+    repository = SQLiteRepository(tmp_path / "closed-download.db")
+    client = TestClient(create_app(Settings(environment="test"), repository))  # type: ignore[arg-type]
+    repository.connection.close()
+
+    for path in (
+        "/api/v1/pcap-exports/export-1",
+        "/api/v1/pcap-exports/export-1/download",
+    ):
+        response = client.get(path)
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "PCAP_EXPORT_STORAGE_ERROR"
 
 
 def test_pcap_export_preserves_packet_prefix_at_scan_packet_limit() -> None:
@@ -1387,9 +1737,15 @@ def test_source_byte_limit_below_first_packet_reports_limit_too_small() -> None:
 
 def test_export_is_not_saved_after_its_parent_job_is_deleted() -> None:
     class DeletingRepository(MemoryRepository):
-        def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any] | None:
+        def save_export_stream(
+            self,
+            export: dict[str, Any],
+            chunks: Iterable[bytes],
+            *,
+            size_hint: int,
+        ) -> dict[str, Any] | None:
             assert self.delete_job(str(export["job_id"]))
-            return super().save_export(export, content)
+            return super().save_export_stream(export, chunks, size_hint=size_hint)
 
     repository = DeletingRepository()
     client = TestClient(create_app(Settings(environment="test"), repository))

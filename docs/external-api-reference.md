@@ -553,6 +553,8 @@ Content-Type: application/vnd.tcpdump.pcap    // raw PCAP data
 
 `POST`는 동기식으로 retained source를 해석하고 `COMPLETED` 또는 호환 가능한 `FAILED` export metadata를 반환한다. Upload 분석은 canonical capture, 완료된 LIVE 분석은 고정된 sensor-PCAP segment 집합, reanalysis는 parent provenance를 사용한다. Active LIVE 분석은 `409`, validation 실패는 `422`, rate limit 초과는 `429`다. 정상 설정에서 source scan/output 한도 도달은 `413`이 아니라 packet/block 경계의 `COMPLETED` partial export다. 필수 PCAP/PCAPNG header조차 수용하지 못하는 output 설정만 `413 PCAP_EXPORT_LIMIT_EXCEEDED`다.
 
+Artifact save는 기본적으로 repository에 chunk stream으로 전달되며, metadata 조회는 blob을 열지 않는다. Download는 repository stream 전체를 로컬 bounded spool에 먼저 저장하면서 크기와 SHA-256을 검증한 뒤에만 `200` headers를 만든다. 성공 응답은 정확한 `Content-Length`, `X-Content-Type-Options: nosniff`, 정제된 server filename을 포함한다. `Range`는 지원하지 않고 무시하여 전체 body를 `200`으로 반환하며 `Accept-Ranges`/`Content-Range`는 보내지 않는다. Missing/corrupt artifact는 `409 PCAP_EXPORT_INTEGRITY_ERROR`, pre-response backend/spool 장애는 sanitized `503 PCAP_EXPORT_STORAGE_ERROR`, `FAILED` artifact download는 `409 PCAP_NOT_AVAILABLE`이다.
+
 기존 scalar 조건은 모두 AND다. `include_filters`와 `exclude_filters`는 각각 최대 20개 group이며, group 내부 active field는 AND, 각 group 목록은 OR로 평가한다. Nested `candidate_ip`는 exact IP/CIDR, `port`는 inferred external service port, `source_port`/`destination_port`는 transport port, `has_payload`는 aggregated flow가 아닌 개별 packet payload를 의미한다.
 
 ```jsonc

@@ -64,6 +64,24 @@ Offline PCAP upload defaults to 500 MiB and 2,000,000 packets. The bundled web p
 
 Filtered PCAP export is synchronous. `C2HUNTER_PCAP_EXPORT_MAX_BYTES` (minimum 24 bytes, the classic PCAP global-header size) bounds the serialized download, while `C2HUNTER_PCAP_EXPORT_SCAN_MAX_BYTES` and `C2HUNTER_PCAP_EXPORT_SCAN_MAX_PACKETS` bound retained-source scanning; each inherits the corresponding upload ceiling when omitted. `C2HUNTER_PCAP_EXPORT_MAX_CONCURRENT` defaults to 1 and rejects excess work with `429 PCAP_EXPORT_BUSY`, preventing multiple memory-intensive exports from overlapping in one Controller process. At a scan ceiling the Controller stops before the next complete source/packet, and at the output ceiling it stops before the next complete packet/PCAPNG block. A valid prefix capture is returned with `truncated=true`, stable reason codes, and scanned/exported/omitted counts. Source blobs are fetched, size/digest-verified, and parsed one at a time rather than accumulated beyond the scan ceiling; export parsing retains packet bytes directly instead of hex-encoding and decoding them again. Keep limits below available Controller memory and object-store throughput; do not substantially increase them without introducing a durable asynchronous export queue. Active LIVE jobs cannot be exported, and completed/terminal jobs reject late sensor-PCAP segments so a recorded source manifest remains immutable.
 
+Artifact persistence/download defaults to `C2HUNTER_PCAP_ARTIFACT_IO=streaming`; `legacy` is a temporary same-layout rollback path, not a retry. Every streaming download is fully size/SHA-validated in a private local spool before response headers, including a complete bounded second read of that immutable spool. `C2HUNTER_PCAP_DOWNLOAD_SPOOL_MAX_MEMORY_BYTES` defaults to 8 MiB per concurrent download; larger artifacts roll to `C2HUNTER_PCAP_DOWNLOAD_SPOOL_DIRECTORY`, or the system temporary directory when blank/unset. Capacity planning must include concurrent spool disk bytes and inodes. Monitor this filesystem for ENOSPC/permission failures, which return sanitized `503` before headers. After successful validation, an operating-system read failure can only terminate the already-started HTTP body and clean up the spool; HTTP cannot retract headers already sent.
+
+MinIO/S3 bucket provisioning **must** install an `AbortIncompleteMultipartUpload` lifecycle rule for the configured export bucket. SDK cleanup of a named object does not guarantee that remote multipart parts are aborted after process, network, or SDK failure. Provision with credentials authorized to manage bucket lifecycle (application credentials may remain least-privileged):
+
+```bash
+cat > /tmp/c2hunter-export-lifecycle.json <<'JSON'
+{"Rules":[{"ID":"c2hunter-abort-incomplete-multipart","Status":"Enabled","Filter":{"Prefix":"exports/"},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":1}}]}
+JSON
+aws --endpoint-url "$C2HUNTER_S3_ENDPOINT" s3api put-bucket-lifecycle-configuration \
+  --bucket "${C2HUNTER_S3_BUCKET:-c2hunter}" \
+  --lifecycle-configuration file:///tmp/c2hunter-export-lifecycle.json
+aws --endpoint-url "$C2HUNTER_S3_ENDPOINT" s3api get-bucket-lifecycle-configuration \
+  --bucket "${C2HUNTER_S3_BUCKET:-c2hunter}"
+rm /tmp/c2hunter-export-lifecycle.json
+```
+
+Operator verification is mandatory after initial provisioning, bucket replacement, or lifecycle changes: the `get-bucket-lifecycle-configuration` output must contain the enabled rule, the `exports/` prefix, and `DaysAfterInitiation` of 1. If it is absent or altered, stop export traffic, re-run the `put-bucket-lifecycle-configuration` command with the reviewed policy, verify it, and inspect object-store capacity/incomplete multipart metrics before resuming. The Controller does not mutate or claim to verify this administrative policy at startup, preserving compatibility with external buckets and least-privileged runtime credentials.
+
 Analyst-guided Payload signatures are also snapshotted outside compact job metadata. Signature changes
 affect only analyses created afterward; use reanalysis to apply them to retained evidence. Structural
 matches are monitor-only until reviewed. Disabling a bad signature preserves its versions and source

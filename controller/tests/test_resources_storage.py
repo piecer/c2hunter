@@ -1,4 +1,6 @@
+import hashlib
 import struct
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -7,7 +9,13 @@ from fastapi.testclient import TestClient
 
 from c2hunter_controller.app import create_app
 from c2hunter_controller.config import Settings
-from c2hunter_controller.repositories import MemoryRepository, SQLiteRepository
+from c2hunter_controller.repositories import (
+    ArtifactAlreadyExistsError,
+    ArtifactProducerError,
+    ArtifactStorageError,
+    MemoryRepository,
+    SQLiteRepository,
+)
 from c2hunter_controller.retention import RetentionPolicy
 
 START = datetime(2026, 7, 20, tzinfo=UTC)
@@ -17,6 +25,216 @@ def configured_client() -> TestClient:
     repository = MemoryRepository()
     repository.upsert_sensor({"sensor_id": "s1", "name": "sensor", "derived_status": "ONLINE"})
     return TestClient(create_app(Settings(environment="test"), repository))
+
+
+def test_artifact_streaming_settings_have_separate_download_spool() -> None:
+    settings = Settings(environment="test")
+
+    assert settings.pcap_artifact_io == "streaming"
+    assert settings.pcap_download_spool_max_memory_bytes == 8 * 1024 * 1024
+    assert settings.pcap_download_spool_directory is None
+    with pytest.raises(ValueError):
+        Settings(environment="test", pcap_download_spool_max_memory_bytes=0)
+
+
+@pytest.mark.parametrize("repository_kind", ["memory", "sqlite"])
+def test_export_stream_is_authoritative_atomic_and_immutable(
+    repository_kind: str, tmp_path: Path
+) -> None:
+    repository = (
+        MemoryRepository()
+        if repository_kind == "memory"
+        else SQLiteRepository(tmp_path / "artifact-stream.db")
+    )
+    repository.save_job({"id": "job-1", "status": "COMPLETED"})
+    metadata = {
+        "id": "export-1",
+        "job_id": "job-1",
+        "capture_format": "PCAP",
+        "size_bytes": 999,
+        "sha256": "caller-is-not-authoritative",
+    }
+
+    stored = repository.save_export_stream(metadata, iter((b"ab", b"", b"cd")), size_hint=4)
+
+    assert stored is not None
+    assert stored["size_bytes"] == 4
+    assert stored["sha256"] == hashlib.sha256(b"abcd").hexdigest()
+    assert repository.get_export_metadata("export-1") == stored
+    opened = repository.open_export_stream("export-1")
+    assert opened is not None
+    opened_metadata, stream = opened
+    with stream as chunks:
+        assert b"".join(chunks) == b"abcd"
+    assert opened_metadata == stored
+    with pytest.raises(ArtifactAlreadyExistsError):
+        repository.save_export_stream(metadata, iter((b"xxxx",)), size_hint=4)
+    assert repository.get_export("export-1") == (stored, b"abcd")
+
+
+@pytest.mark.parametrize("repository_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize(
+    ("chunks", "size_hint"),
+    [((b"abc",), 4), ((b"abc", b"d"), 3), ((bytearray(b"abc"),), 3)],
+)
+def test_export_stream_rejects_invalid_producer_without_publication(
+    repository_kind: str, chunks: tuple[object, ...], size_hint: int, tmp_path: Path
+) -> None:
+    repository = (
+        MemoryRepository()
+        if repository_kind == "memory"
+        else SQLiteRepository(tmp_path / f"invalid-{size_hint}-{len(chunks)}.db")
+    )
+    repository.save_job({"id": "job-1", "status": "COMPLETED"})
+    metadata = {"id": "bad", "job_id": "job-1", "capture_format": "PCAP"}
+
+    with pytest.raises(ArtifactProducerError):
+        repository.save_export_stream(metadata, iter(chunks), size_hint=size_hint)  # type: ignore[arg-type]
+
+    assert repository.get_export_metadata("bad") is None
+    assert repository.open_export_stream("bad") is None
+
+
+def test_memory_export_stream_returns_none_if_parent_disappears_before_publication() -> None:
+    repository = MemoryRepository()
+    repository.save_job({"id": "job-1", "idempotency_key": "job-1", "status": "COMPLETED"})
+
+    def chunks() -> Iterator[bytes]:
+        yield b"abc"
+        repository.delete_job("job-1")
+
+    result = repository.save_export_stream(
+        {"id": "raced", "job_id": "job-1", "capture_format": "PCAP"},
+        chunks(),
+        size_hint=3,
+    )
+
+    assert result is None
+    assert repository.get_export_metadata("raced") is None
+
+
+def test_sqlite_export_stream_preserves_producer_error_over_blob_close_failure(
+    tmp_path: Path,
+) -> None:
+    repository = SQLiteRepository(tmp_path / "close-precedence.db")
+    repository.save_job({"id": "job-1", "status": "COMPLETED"})
+    real_connection = repository.connection
+
+    class FailingCloseBlob:
+        def __init__(self, wrapped: object) -> None:
+            self.wrapped = wrapped
+
+        def write(self, content: bytes) -> object:
+            return self.wrapped.write(content)  # type: ignore[attr-defined,no-any-return]
+
+        def close(self) -> None:
+            self.wrapped.close()  # type: ignore[attr-defined]
+            raise OSError("blob close failed")
+
+    class ConnectionWrapper:
+        def __getattr__(self, name: str) -> object:
+            return getattr(real_connection, name)
+
+        def blobopen(self, *args: object, **kwargs: object) -> FailingCloseBlob:
+            return FailingCloseBlob(real_connection.blobopen(*args, **kwargs))  # type: ignore[arg-type]
+
+    repository.connection = ConnectionWrapper()  # type: ignore[assignment]
+
+    with pytest.raises(ArtifactProducerError, match="exact bytes"):
+        repository.save_export_stream(
+            {"id": "bad-close", "job_id": "job-1", "capture_format": "PCAP"},
+            iter((bytearray(b"x"),)),  # type: ignore[arg-type]
+            size_hint=1,
+        )
+
+    assert repository.get_export_metadata("bad-close") is None
+
+
+def test_sqlite_export_stream_preserves_read_error_over_blob_close_failure(
+    tmp_path: Path,
+) -> None:
+    repository = SQLiteRepository(tmp_path / "read-close-precedence.db")
+    repository.save_job({"id": "job-1", "status": "COMPLETED"})
+    repository.save_export_stream(
+        {"id": "read-fault", "job_id": "job-1", "capture_format": "PCAP"},
+        iter((b"abc",)),
+        size_hint=3,
+    )
+    real_connection = repository.connection
+
+    class FailingReadBlob:
+        def read(self, _size: int) -> bytes:
+            raise OSError("blob read failed")
+
+        def close(self) -> None:
+            raise OSError("blob close failed")
+
+    class ConnectionWrapper:
+        def __getattr__(self, name: str) -> object:
+            return getattr(real_connection, name)
+
+        def blobopen(self, *_args: object, **_kwargs: object) -> FailingReadBlob:
+            return FailingReadBlob()
+
+    repository.connection = ConnectionWrapper()  # type: ignore[assignment]
+    opened = repository.open_export_stream("read-fault")
+    assert opened is not None
+    _, stream = opened
+
+    with pytest.raises(ArtifactStorageError, match="read failed"):
+        with stream as chunks:
+            list(chunks)
+
+
+def test_sqlite_export_stream_releases_lock_at_eof_before_context_exit(tmp_path: Path) -> None:
+    repository = SQLiteRepository(tmp_path / "eof-release.db")
+    repository.save_job({"id": "job-1", "status": "COMPLETED"})
+    repository.save_export_stream(
+        {"id": "eof", "job_id": "job-1", "capture_format": "PCAP"},
+        iter((b"abc",)),
+        size_hint=3,
+    )
+    opened = repository.open_export_stream("eof")
+    assert opened is not None
+    _, stream = opened
+
+    with stream as chunks:
+        assert list(chunks) == [b"abc"]
+        acquired: list[bool] = []
+
+        def acquire_from_other_thread() -> None:
+            locked = repository._lock.acquire(timeout=0.2)
+            acquired.append(locked)
+            if locked:
+                repository._lock.release()
+
+        worker = __import__("threading").Thread(target=acquire_from_other_thread)
+        worker.start()
+        worker.join()
+        assert acquired == [True]
+
+
+def test_sqlite_export_metadata_and_open_faults_are_typed(tmp_path: Path) -> None:
+    repository = SQLiteRepository(tmp_path / "typed-read-fault.db")
+    repository.connection.close()
+
+    with pytest.raises(ArtifactStorageError, match="metadata lookup"):
+        repository.get_export_metadata("missing")
+    with pytest.raises(ArtifactStorageError, match="stream resolution"):
+        repository.open_export_stream("missing")
+
+
+def test_sqlite_export_stream_returns_none_for_missing_parent(tmp_path: Path) -> None:
+    repository = SQLiteRepository(tmp_path / "missing-parent.db")
+
+    result = repository.save_export_stream(
+        {"id": "missing", "job_id": "gone", "capture_format": "PCAP"},
+        iter((b"abc",)),
+        size_hint=3,
+    )
+
+    assert result is None
+    assert repository.get_export_metadata("missing") is None
 
 
 def job_payload(key: str = "job") -> dict[str, object]:

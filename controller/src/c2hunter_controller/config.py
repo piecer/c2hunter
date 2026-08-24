@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     pcap_export_spool_max_memory_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
     pcap_export_spool_directory: str | None = None
     pcap_export_pipeline: Literal["streaming", "legacy"] = "streaming"
+    pcap_artifact_io: Literal["streaming", "legacy"] = "streaming"
+    pcap_download_spool_max_memory_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
+    pcap_download_spool_directory: str | None = None
     inline_flow_records_enabled: bool | None = None
     # This only enables the explicitly limited development token minting endpoint.
     # Production deployments should use pre-hashed static tokens or a future OIDC integration.
@@ -73,7 +76,7 @@ class Settings(BaseSettings):
     misp_verify_tls: bool = True
     misp_default_event_id: str = Field(default="", max_length=100)
 
-    @field_validator("pcap_export_spool_directory", mode="before")
+    @field_validator("pcap_export_spool_directory", "pcap_download_spool_directory", mode="before")
     @classmethod
     def normalize_blank_spool_directory(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():
