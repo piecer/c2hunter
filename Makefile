@@ -11,7 +11,7 @@ SENSOR_CORE_COVERAGE_MIN := 80.0
 SENSOR_CORE_PACKAGES := ./internal/direction ./internal/flow ./internal/capture ./internal/metadata ./internal/packet ./internal/spool ./internal/batch ./internal/flowbatch
 COMPOSE := docker compose --env-file .env
 
-.PHONY: setup lint lint-security test test-unit test-integration test-coverage test-e2e test-ai evaluate-ai benchmark-ai backtest-high-volume build sensor-agent up down generate-test-pcaps benchmark-1m clean
+.PHONY: setup lint lint-security test test-unit test-integration test-coverage test-e2e test-ai evaluate-ai benchmark-ai benchmark-pcap-export backtest-high-volume build sensor-agent up down generate-test-pcaps benchmark-1m clean
 
 setup:
 	@test -f .env || cp .env.example .env
@@ -61,6 +61,7 @@ test-unit:
 	PYTHONPATH=sensor/worker/src $(PYTEST) -q sensor/worker/tests
 	$(VENV)/bin/python tools/traffic-generator/test_generate.py
 	$(VENV)/bin/python tools/benchmark/test_benchmark.py
+	PYTHONPATH=controller/src:analysis/src $(VENV)/bin/python tools/benchmark/test_pcap_export_benchmark.py
 	npm --prefix web run test
 
 test-integration:
@@ -106,6 +107,9 @@ generate-test-pcaps:
 
 benchmark-1m:
 	$(VENV)/bin/python tools/benchmark/benchmark.py --packets 1000000 --chunk-size 10000 --output artifacts --seed 20260720
+
+benchmark-pcap-export:
+	PYTHONPATH=controller/src:analysis/src $(VENV)/bin/python tools/benchmark/pcap_export.py --packets 10000 --output artifacts --seed 20260720
 
 clean:
 	rm -rf web/dist web/coverage web/test-results artifacts/web-coverage artifacts/playwright-report testdata/generated/*

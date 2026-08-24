@@ -12,6 +12,7 @@ from c2hunter_analysis.pcap import parse_pcap
 from fastapi.testclient import TestClient
 from test_analysis_job_api import api, payload, synthetic_flows
 
+import c2hunter_controller.app as controller_app
 from c2hunter_controller.app import create_app
 from c2hunter_controller.config import Settings
 from c2hunter_controller.repositories import MemoryRepository, SQLiteRepository
@@ -999,3 +1000,128 @@ def test_sqlite_export_save_rejects_a_missing_parent_and_blob(tmp_path: Any) -> 
 
     assert stored is None
     assert repository.get_export("orphan-export") is None
+
+
+def test_pcap_export_emits_bounded_stage_and_volume_metrics_without_ids() -> None:
+    repository = MemoryRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Metrics", "filename": "metrics.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    ).json()
+
+    exported = client.post("/api/v1/pcap-exports", json={"job_id": upload["id"]}).json()
+    metrics = client.get("/api/v1/metrics").text
+
+    for stage in ("source_read", "hash", "frame", "decode", "filter", "write", "save", "total"):
+        assert (
+            f'c2hunter_pcap_export_stage_duration_seconds_count{{stage="{stage}"}} 1.0' in metrics
+        )
+    assert 'c2hunter_pcap_export_packets_total{kind="scanned"} 18.0' in metrics
+    assert 'c2hunter_pcap_export_packets_total{kind="matched"} 18.0' in metrics
+    assert 'c2hunter_pcap_export_packets_total{kind="exported"} 18.0' in metrics
+    assert f'c2hunter_pcap_export_bytes_total{{kind="source"}} {float(len(_pcap()))}' in metrics
+    assert (
+        f'c2hunter_pcap_export_bytes_total{{kind="output"}} {float(exported["size_bytes"])}'
+        in metrics
+    )
+    assert upload["id"] not in metrics
+    assert exported["id"] not in metrics
+
+
+def test_missing_job_export_records_only_total_stage_metric() -> None:
+    client = TestClient(create_app(Settings(environment="test"), MemoryRepository()))
+    before = client.get("/api/v1/metrics").text
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": "missing-job"})
+    after = client.get("/api/v1/metrics").text
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "JOB_NOT_FOUND"
+    for stage in ("source_read", "hash", "frame", "decode", "filter", "write", "save"):
+        sample = f'c2hunter_pcap_export_stage_duration_seconds_count{{stage="{stage}"}}'
+        assert sample not in before
+        assert sample not in after
+    total = 'c2hunter_pcap_export_stage_duration_seconds_count{stage="total"}'
+    assert total not in before
+    assert f"{total} 1.0" in after
+
+
+def test_export_records_an_entered_stage_when_the_stage_raises() -> None:
+    class FailingSourceRepository(MemoryRepository):
+        def get_job_capture(self, job_id: str) -> bytes | None:
+            raise RuntimeError(f"source read failed for {job_id}")
+
+    repository = FailingSourceRepository()
+    client = TestClient(
+        create_app(Settings(environment="test"), repository), raise_server_exceptions=False
+    )
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Stage failure", "filename": "stage-failure.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    ).json()
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": upload["id"]})
+    metrics = client.get("/api/v1/metrics").text
+
+    assert response.status_code == 500
+    for stage in ("source_read", "total"):
+        assert (
+            f'c2hunter_pcap_export_stage_duration_seconds_count{{stage="{stage}"}} 1.0' in metrics
+        )
+    for stage in ("hash", "frame", "decode", "filter", "write", "save"):
+        assert (
+            f'c2hunter_pcap_export_stage_duration_seconds_count{{stage="{stage}"}}' not in metrics
+        )
+
+
+def test_metric_failures_preserve_successful_artifact_and_original_early_error(
+    monkeypatch: Any,
+) -> None:
+    repository = MemoryRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Metric faults", "filename": "metric-faults.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    ).json()
+    original_observe = controller_app.Histogram.observe
+    original_inc = controller_app.Counter.inc
+    injected_failures = {"observe": 0, "inc": 0}
+
+    def fail_export_observe(metric: Any, amount: float) -> None:
+        if metric._name == "c2hunter_pcap_export_stage_duration_seconds":
+            injected_failures["observe"] += 1
+            raise RuntimeError("stage metric unavailable")
+        original_observe(metric, amount)
+
+    def fail_export_inc(metric: Any, amount: int = 1) -> None:
+        if metric._name in {
+            "c2hunter_pcap_export_packets",
+            "c2hunter_pcap_export_bytes",
+        }:
+            injected_failures["inc"] += 1
+            raise RuntimeError("volume metric unavailable")
+        original_inc(metric, amount)
+
+    monkeypatch.setattr(controller_app.Histogram, "observe", fail_export_observe)
+    monkeypatch.setattr(controller_app.Counter, "inc", fail_export_inc)
+
+    successful = client.post("/api/v1/pcap-exports", json={"job_id": upload["id"]})
+    missing = client.post("/api/v1/pcap-exports", json={"job_id": "missing-job"})
+
+    assert successful.status_code == 201
+    assert injected_failures["observe"] > 0
+    assert injected_failures["inc"] > 0
+    stored = repository.get_export(successful.json()["id"])
+    assert stored is not None
+    assert (
+        stored[1] == client.get(f"/api/v1/pcap-exports/{successful.json()['id']}/download").content
+    )
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "JOB_NOT_FOUND"

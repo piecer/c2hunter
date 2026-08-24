@@ -7,8 +7,9 @@ import logging
 import secrets
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Annotated, Any, Literal, cast
@@ -791,6 +792,18 @@ def _raw_packet_hex_size(value: Any) -> int:
     return len(raw_packet) // 2
 
 
+PCAP_EXPORT_STAGES = ("source_read", "hash", "frame", "decode", "filter", "write", "save")
+
+
+@contextmanager
+def _measure_pcap_export_stage(stage_seconds: dict[str, float], stage: str) -> Iterator[None]:
+    started = perf_counter()
+    try:
+        yield
+    finally:
+        stage_seconds[stage] = stage_seconds.get(stage, 0.0) + perf_counter() - started
+
+
 def create_app(
     settings: Settings | None = None,
     repository: Repository | None = None,
@@ -1056,6 +1069,24 @@ def create_app(
     latency = Histogram(
         "c2hunter_api_request_duration_seconds", "API request latency", ["path"], registry=registry
     )
+    pcap_export_stage_duration = Histogram(
+        "c2hunter_pcap_export_stage_duration_seconds",
+        "PCAP export stage duration",
+        ["stage"],
+        registry=registry,
+    )
+    pcap_export_packets = Counter(
+        "c2hunter_pcap_export_packets_total",
+        "PCAP export packet volume",
+        ["kind"],
+        registry=registry,
+    )
+    pcap_export_bytes = Counter(
+        "c2hunter_pcap_export_bytes_total",
+        "PCAP export byte volume",
+        ["kind"],
+        registry=registry,
+    )
     ai_enqueue_latency = Histogram(
         "c2hunter_ai_enqueue_duration_seconds",
         "Controller AI Run enqueue duration",
@@ -1088,6 +1119,22 @@ def create_app(
         except Exception:
             # Telemetry must not alter a persisted Run, feedback record, or original exception.
             logger.debug("AI metric update failed", exc_info=True)
+
+    def safe_pcap_export_metric(operation: Callable[[], None]) -> None:
+        try:
+            operation()
+        except Exception:
+            # Export telemetry must never alter artifact generation or the original exception.
+            logger.debug("PCAP export metric update failed", exc_info=True)
+
+    def observe_pcap_export_stage(stage: str, seconds: float) -> None:
+        safe_pcap_export_metric(lambda: pcap_export_stage_duration.labels(stage).observe(seconds))
+
+    def increment_pcap_export_packets(kind: str, count: int) -> None:
+        safe_pcap_export_metric(lambda: pcap_export_packets.labels(kind).inc(count))
+
+    def increment_pcap_export_bytes(kind: str, count: int) -> None:
+        safe_pcap_export_metric(lambda: pcap_export_bytes.labels(kind).inc(count))
 
     app.state.ai_metrics = {
         "enqueue_latency": ai_enqueue_latency,
@@ -3932,7 +3979,9 @@ def create_app(
             raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
         return {"deleted": True, "candidate_id": candidate_id}
 
-    def _create_pcap_export(payload: PcapExportCreate) -> dict[str, Any]:
+    def _create_pcap_export(
+        payload: PcapExportCreate, stage_seconds: dict[str, float]
+    ) -> dict[str, Any]:
         job = repo.get_job(payload.job_id)
         if job is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
@@ -3973,7 +4022,8 @@ def create_app(
             if isinstance(source_metadata, dict) and source_metadata.get("packet_bytes_retained"):
                 canonical_capture_metadata = source_metadata
                 break
-            retained_capture = repo.get_job_capture(source_job_id)
+            with _measure_pcap_export_stage(stage_seconds, "source_read"):
+                retained_capture = repo.get_job_capture(source_job_id)
             if retained_capture is not None:
                 break
             segment_metadata = sorted(
@@ -4075,14 +4125,16 @@ def create_app(
                 break
             is_canonical = descriptor.get("_canonical") is True
             if is_canonical:
-                capture_content = repo.get_job_capture(source_job_id)
+                with _measure_pcap_export_stage(stage_seconds, "source_read"):
+                    capture_content = repo.get_job_capture(source_job_id)
                 if capture_content is None:
                     raise ApiError(
                         409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained canonical PCAP missing"
                     )
                 stored_metadata = descriptor
             elif retained_content is None:
-                stored_segment = repo.get_sensor_pcap(str(descriptor["id"]))
+                with _measure_pcap_export_stage(stage_seconds, "source_read"):
+                    stored_segment = repo.get_sensor_pcap(str(descriptor["id"]))
                 if stored_segment is None:
                     raise ApiError(
                         409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP segment missing"
@@ -4120,7 +4172,8 @@ def create_app(
                 raise ApiError(
                     409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP metadata mismatch"
                 )
-            digest = hashlib.sha256(capture_content).hexdigest()
+            with _measure_pcap_export_stage(stage_seconds, "hash"):
+                digest = hashlib.sha256(capture_content).hexdigest()
             expected_digest = stored_metadata.get("sha256")
             if expected_digest and not hmac.compare_digest(str(expected_digest), digest):
                 raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP digest mismatch")
@@ -4128,11 +4181,12 @@ def create_app(
                 raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP digest missing")
             source_manifest.append({"id": str(stored_metadata["id"]), "sha256": digest})
             try:
-                bounded_prefix = bounded_pcap_prefix(
-                    capture_content,
-                    remaining_source_bytes,
-                    max_packets=remaining_packets,
-                )
+                with _measure_pcap_export_stage(stage_seconds, "frame"):
+                    bounded_prefix = bounded_pcap_prefix(
+                        capture_content,
+                        remaining_source_bytes,
+                        max_packets=remaining_packets,
+                    )
                 if bounded_prefix.packet_count == 0 and bounded_prefix.truncated:
                     scanned_source_bytes += bounded_prefix.scanned_bytes
                     if bounded_prefix.byte_limited:
@@ -4140,15 +4194,16 @@ def create_app(
                     if bounded_prefix.packet_limited:
                         source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
                     break
-                parsed = parse_pcap(
-                    bounded_prefix.content,
-                    sensor_id=str(stored_metadata["sensor_id"]),
-                    internal_networks=list(job["internal_networks"]),
-                    max_packets=remaining_packets,
-                    retain_packet_bytes=True,
-                    retain_packet_bytes_as_bytes=True,
-                    allow_no_supported_packets=True,
-                )
+                with _measure_pcap_export_stage(stage_seconds, "decode"):
+                    parsed = parse_pcap(
+                        bounded_prefix.content,
+                        sensor_id=str(stored_metadata["sensor_id"]),
+                        internal_networks=list(job["internal_networks"]),
+                        max_packets=remaining_packets,
+                        retain_packet_bytes=True,
+                        retain_packet_bytes_as_bytes=True,
+                        allow_no_supported_packets=True,
+                    )
             except PcapParseError as exc:
                 raise ApiError(422, exc.code, str(exc)) from exc
             scanned_source_bytes += bounded_prefix.scanned_bytes
@@ -4190,14 +4245,16 @@ def create_app(
         scanned_packet_count = (
             scan_max_packets - remaining_packets if source_descriptors else len(source_records)
         )
-        records = filter_records(
-            source_records,
-            normalized,
-            internal_networks=list(job["internal_networks"]),
-        )
+        with _measure_pcap_export_stage(stage_seconds, "filter"):
+            records = filter_records(
+                source_records,
+                normalized,
+                internal_networks=list(job["internal_networks"]),
+            )
         try:
             max_output_bytes = cast(int, config.pcap_export_max_bytes)
-            capture_result = build_capture_result(records, max_output_bytes=max_output_bytes)
+            with _measure_pcap_export_stage(stage_seconds, "write"):
+                capture_result = build_capture_result(records, max_output_bytes=max_output_bytes)
         except ValueError as exc:
             raise ApiError(413, "PCAP_EXPORT_LIMIT_EXCEEDED", str(exc)) from exc
         content = capture_result.content
@@ -4249,7 +4306,7 @@ def create_app(
             "truncated": bool(truncation_reasons),
             "truncation_reasons": truncation_reasons,
             "size_bytes": len(content),
-            "sha256": hashlib.sha256(content).hexdigest(),
+            "sha256": "",
             "capture_format": capture_format,
             "filename": (f"c2hunter-{safe_job_id}-filtered{completeness}-{export_id}.{extension}"),
             "filter": normalized,
@@ -4267,7 +4324,10 @@ def create_app(
             "error_code": error_code,
             "error": error_message,
         }
-        stored_export = repo.save_export(metadata, content)
+        with _measure_pcap_export_stage(stage_seconds, "hash"):
+            metadata["sha256"] = hashlib.sha256(content).hexdigest()
+        with _measure_pcap_export_stage(stage_seconds, "save"):
+            stored_export = repo.save_export(metadata, content)
         if stored_export is None:
             raise ApiError(
                 409,
@@ -4284,9 +4344,30 @@ def create_app(
                 "PCAP_EXPORT_BUSY",
                 "PCAP export capacity is busy; retry after an active export completes",
             )
+        stage_seconds: dict[str, float] = {}
+        started = perf_counter()
         try:
-            return _create_pcap_export(payload)
+            result = _create_pcap_export(payload, stage_seconds)
+            packet_counts = {
+                "scanned": int(result["scanned_packet_count"]),
+                "matched": int(result["matched_packet_count"]),
+                "exported": int(result["exported_packet_count"]),
+                "omitted": int(result["omitted_packet_count"]),
+            }
+            byte_counts = {
+                "source": int(result["scanned_source_bytes"]),
+                "output": int(result["size_bytes"]),
+            }
+            for kind, count in packet_counts.items():
+                increment_pcap_export_packets(kind, count)
+            for kind, count in byte_counts.items():
+                increment_pcap_export_bytes(kind, count)
+            return result
         finally:
+            stage_seconds["total"] = perf_counter() - started
+            for stage in (*PCAP_EXPORT_STAGES, "total"):
+                if stage in stage_seconds:
+                    observe_pcap_export_stage(stage, stage_seconds[stage])
             pcap_export_slots.release()
 
     @app.get("/api/v1/pcap-exports/{export_id}", response_model=PcapExportResponse)
