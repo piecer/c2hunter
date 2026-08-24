@@ -31,6 +31,19 @@ class PcapParseResult:
 
 
 @dataclass(frozen=True)
+class PcapBytePrefix:
+    content: bytes
+    scanned_bytes: int
+    packet_count: int
+    byte_limited: bool
+    packet_limited: bool
+
+    @property
+    def truncated(self) -> bool:
+        return self.byte_limited or self.packet_limited
+
+
+@dataclass(frozen=True)
 class _CapturedPacket:
     timestamp: datetime
     link_type: int
@@ -59,6 +72,103 @@ _CLASSIC_MAGIC: dict[bytes, tuple[str, float]] = {
 }
 _PCAPNG_SECTION = b"\x0a\x0d\x0d\x0a"
 _MAX_CAPTURED_PACKET_BYTES = 16 * 1024 * 1024
+
+
+def bounded_pcap_prefix(
+    content: bytes, max_bytes: int, *, max_packets: int | None = None
+) -> PcapBytePrefix:
+    """Return the largest complete capture prefix within inclusive limits."""
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be positive")
+    if max_packets is not None and max_packets < 1:
+        raise ValueError("max_packets must be positive")
+    if content[:4] in _CLASSIC_MAGIC:
+        if len(content) < 24:
+            raise PcapParseError("classic PCAP global header is truncated")
+        if max_bytes < 24:
+            return PcapBytePrefix(
+                content=b"",
+                scanned_bytes=0,
+                packet_count=0,
+                byte_limited=True,
+                packet_limited=False,
+            )
+        endian, _resolution = _CLASSIC_MAGIC[content[:4]]
+        offset = 24
+        packet_count = 0
+        byte_limited = False
+        packet_limited = False
+        source_exceeds_limit = len(content) > max_bytes
+        while offset < len(content):
+            if source_exceeds_limit and max_bytes - offset < 16:
+                byte_limited = True
+                break
+            packet_limited = max_packets is not None and packet_count >= max_packets
+            if packet_limited:
+                break
+            if len(content) - offset < 16:
+                raise PcapParseError("classic PCAP packet header is truncated")
+            captured_length = struct.unpack_from(f"{endian}I", content, offset + 8)[0]
+            packet_end = offset + 16 + captured_length
+            if source_exceeds_limit and packet_end > max_bytes:
+                byte_limited = True
+                break
+            if captured_length > _MAX_CAPTURED_PACKET_BYTES or packet_end > len(content):
+                raise PcapParseError("classic PCAP packet data is truncated or oversized")
+            packet_count += 1
+            offset = packet_end
+        scanned_bytes = min(offset, len(content))
+        return PcapBytePrefix(
+            content=content[:scanned_bytes],
+            scanned_bytes=scanned_bytes,
+            packet_count=packet_count,
+            byte_limited=byte_limited,
+            packet_limited=packet_limited,
+        )
+    if content[:4] == _PCAPNG_SECTION:
+        offset = 0
+        endian = "<"
+        packet_count = 0
+        byte_limited = False
+        packet_limited = False
+        source_exceeds_limit = len(content) > max_bytes
+        while offset < len(content):
+            if source_exceeds_limit and max_bytes - offset < 12:
+                byte_limited = True
+                break
+            if len(content) - offset < 12:
+                raise PcapParseError("PCAPNG block header is truncated")
+            is_section = content[offset : offset + 4] == _PCAPNG_SECTION
+            if is_section:
+                endian = _pcapng_endian(content, offset)
+            block_type, block_length = struct.unpack_from(f"{endian}II", content, offset)
+            is_packet = block_type in {2, 6}
+            packet_limited = is_packet and max_packets is not None and packet_count >= max_packets
+            if packet_limited:
+                break
+            if block_length < 12 or block_length % 4:
+                raise PcapParseError("PCAPNG block length is invalid")
+            block_end = offset + block_length
+            if source_exceeds_limit and block_end > max_bytes:
+                byte_limited = True
+                break
+            if block_end > len(content):
+                raise PcapParseError("PCAPNG block length is invalid")
+            trailing_length = struct.unpack_from(f"{endian}I", content, block_end - 4)[0]
+            if trailing_length != block_length:
+                raise PcapParseError("PCAPNG block length trailer does not match")
+            if is_packet:
+                packet_count += 1
+            offset = block_end
+        scanned_bytes = min(offset, len(content))
+        return PcapBytePrefix(
+            content=content[:scanned_bytes],
+            scanned_bytes=scanned_bytes,
+            packet_count=packet_count,
+            byte_limited=byte_limited,
+            packet_limited=packet_limited,
+        )
+    raise PcapParseError("file is not a classic PCAP or PCAPNG capture")
 
 
 def parse_pcap(

@@ -14,7 +14,12 @@ from time import perf_counter
 from typing import Annotated, Any, Literal, cast
 from urllib.parse import urlsplit
 
-from c2hunter_analysis.pcap import PcapParseError, find_pcap_record, parse_pcap
+from c2hunter_analysis.pcap import (
+    PcapParseError,
+    bounded_pcap_prefix,
+    find_pcap_record,
+    parse_pcap,
+)
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
@@ -4061,11 +4066,12 @@ def create_app(
         source_truncation_reasons: list[str] = []
         for source_order, (descriptor, retained_content) in enumerate(source_descriptors):
             declared_size = declared_source_sizes[source_order]
-            if scanned_source_bytes + declared_size > scan_max_bytes:
-                source_truncation_reasons.append("SOURCE_BYTE_LIMIT")
-                break
             if remaining_packets < 1:
                 source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
+                break
+            remaining_source_bytes = scan_max_bytes - scanned_source_bytes
+            if remaining_source_bytes < 1:
+                source_truncation_reasons.append("SOURCE_BYTE_LIMIT")
                 break
             is_canonical = descriptor.get("_canonical") is True
             if is_canonical:
@@ -4114,9 +4120,6 @@ def create_app(
                 raise ApiError(
                     409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP metadata mismatch"
                 )
-            if scanned_source_bytes + len(capture_content) > scan_max_bytes:
-                source_truncation_reasons.append("SOURCE_BYTE_LIMIT")
-                break
             digest = hashlib.sha256(capture_content).hexdigest()
             expected_digest = stored_metadata.get("sha256")
             if expected_digest and not hmac.compare_digest(str(expected_digest), digest):
@@ -4125,26 +4128,40 @@ def create_app(
                 raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP digest missing")
             source_manifest.append({"id": str(stored_metadata["id"]), "sha256": digest})
             try:
-                parsed = parse_pcap(
+                bounded_prefix = bounded_pcap_prefix(
                     capture_content,
+                    remaining_source_bytes,
+                    max_packets=remaining_packets,
+                )
+                if bounded_prefix.packet_count == 0 and bounded_prefix.truncated:
+                    scanned_source_bytes += bounded_prefix.scanned_bytes
+                    if bounded_prefix.byte_limited:
+                        source_truncation_reasons.append("SOURCE_BYTE_LIMIT")
+                    if bounded_prefix.packet_limited:
+                        source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
+                    break
+                parsed = parse_pcap(
+                    bounded_prefix.content,
                     sensor_id=str(stored_metadata["sensor_id"]),
                     internal_networks=list(job["internal_networks"]),
                     max_packets=remaining_packets,
                     retain_packet_bytes=True,
                     retain_packet_bytes_as_bytes=True,
                     allow_no_supported_packets=True,
-                    truncate_at_max_packets=True,
                 )
             except PcapParseError as exc:
                 raise ApiError(422, exc.code, str(exc)) from exc
-            scanned_source_bytes += len(capture_content)
+            scanned_source_bytes += bounded_prefix.scanned_bytes
             scanned_source_capture_count += 1
             remaining_packets -= parsed.captured_packet_count
             source_records.extend(
                 {**record, "raw_packet_source_order": source_order} for record in parsed.records
             )
-            if parsed.truncated:
+            if bounded_prefix.byte_limited:
+                source_truncation_reasons.append("SOURCE_BYTE_LIMIT")
+            if bounded_prefix.packet_limited:
                 source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
+            if bounded_prefix.truncated:
                 break
 
         if not source_descriptors:
@@ -4200,7 +4217,7 @@ def create_app(
             error_message = "output byte limit cannot fit a complete matched packet"
         elif source_truncation_reasons and not scanned_packet_count:
             error_code = "PCAP_SOURCE_SCAN_LIMIT_TOO_SMALL"
-            error_message = "source scan byte limit cannot fit the first retained capture"
+            error_message = "source scan byte limit cannot fit the first complete packet"
         elif source_truncation_reasons:
             error_code = "PCAP_SOURCE_SCAN_INCOMPLETE"
             error_message = "no packets matched in the incomplete source prefix"

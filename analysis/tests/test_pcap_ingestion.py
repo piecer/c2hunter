@@ -5,7 +5,12 @@ import struct
 
 import pytest
 
-from c2hunter_analysis.pcap import PcapParseError, find_pcap_record, parse_pcap
+from c2hunter_analysis.pcap import (
+    PcapParseError,
+    bounded_pcap_prefix,
+    find_pcap_record,
+    parse_pcap,
+)
 
 
 def udp_packet() -> bytes:
@@ -205,6 +210,198 @@ def test_parse_pcap_prefix_is_complete_at_exact_packet_limit(capture: bytes) -> 
 
     assert result.captured_packet_count == 2
     assert result.truncated is False
+
+
+def test_classic_pcap_source_byte_limit_includes_only_complete_packet_records() -> None:
+    packet = udp_packet()
+    capture = classic_pcap(packet, count=2)
+    first_packet_boundary = 24 + 16 + len(packet)
+
+    exact = bounded_pcap_prefix(capture, first_packet_boundary)
+    below = bounded_pcap_prefix(capture, first_packet_boundary - 1)
+
+    assert exact.content == capture[:first_packet_boundary]
+    assert exact.scanned_bytes == first_packet_boundary
+    assert exact.packet_count == 1
+    assert exact.byte_limited is True
+    assert exact.packet_limited is False
+    assert exact.truncated is True
+    assert below.content == capture[:24]
+    assert below.scanned_bytes == 24
+    assert below.packet_count == 0
+    assert below.byte_limited is True
+    assert below.packet_limited is False
+    assert below.truncated is True
+    reparsed = parse_pcap(
+        exact.content,
+        sensor_id="uploaded",
+        internal_networks=["10.0.0.0/8"],
+    )
+    assert reparsed.captured_packet_count == 1
+    assert reparsed.truncated is False
+
+
+def test_bounded_prefix_distinguishes_packet_limit_from_byte_limit() -> None:
+    packet = udp_packet()
+    capture = classic_pcap(packet, count=2)
+    first_packet_boundary = 24 + 16 + len(packet)
+
+    prefix = bounded_pcap_prefix(capture, len(capture), max_packets=1)
+
+    assert prefix.content == capture[:first_packet_boundary]
+    assert prefix.scanned_bytes == first_packet_boundary
+    assert prefix.packet_count == 1
+    assert prefix.packet_limited is True
+    assert prefix.byte_limited is False
+    assert prefix.truncated is True
+
+
+def test_strict_classic_parse_rejects_malformed_tail_after_valid_packet() -> None:
+    capture = classic_pcap(udp_packet(), count=2)
+
+    with pytest.raises(PcapParseError, match="truncated"):
+        parse_pcap(
+            capture[:-1],
+            sensor_id="uploaded",
+            internal_networks=["10.0.0.0/8"],
+        )
+
+
+def test_pcapng_source_byte_limit_includes_only_complete_blocks() -> None:
+    packet = udp_packet()
+    one_packet = pcapng(packet)
+    capture = pcapng(packet, count=2)
+    first_packet_boundary = len(one_packet)
+    header_blocks_boundary = len(one_packet) - (32 + ((len(packet) + 3) & ~3))
+
+    exact = bounded_pcap_prefix(capture, first_packet_boundary)
+    below = bounded_pcap_prefix(capture, first_packet_boundary - 1)
+
+    assert exact.content == capture[:first_packet_boundary]
+    assert exact.scanned_bytes == first_packet_boundary
+    assert exact.packet_count == 1
+    assert exact.truncated is True
+    assert below.content == capture[:header_blocks_boundary]
+    assert below.scanned_bytes == header_blocks_boundary
+    assert below.packet_count == 0
+    assert below.truncated is True
+    reparsed = parse_pcap(
+        exact.content,
+        sensor_id="uploaded",
+        internal_networks=["10.0.0.0/8"],
+    )
+    assert reparsed.captured_packet_count == 1
+    assert reparsed.truncated is False
+
+
+def test_strict_pcapng_parse_rejects_malformed_tail_after_valid_packet() -> None:
+    capture = pcapng(udp_packet(), count=2)
+
+    with pytest.raises(PcapParseError, match="block length"):
+        parse_pcap(
+            capture[:-1],
+            sensor_id="uploaded",
+            internal_networks=["10.0.0.0/8"],
+        )
+
+
+@pytest.mark.parametrize(
+    ("valid_prefix", "malformed_tail"),
+    [
+        (classic_pcap(udp_packet()), b"\0" * 15),
+        (
+            classic_pcap(udp_packet()),
+            struct.pack("<IIII", 1_784_544_001, 500_000, 8, 8) + b"x",
+        ),
+        (pcapng(udp_packet()), b"\0" * 11),
+        (pcapng(udp_packet()), struct.pack("<II", 6, 32) + b"\0" * 4),
+    ],
+    ids=[
+        "classic-partial-next-header",
+        "classic-declared-packet-data-truncated",
+        "pcapng-partial-next-header",
+        "pcapng-declared-block-truncated",
+    ],
+)
+def test_bounded_prefix_ignores_malformed_tail_outside_exact_byte_limit(
+    valid_prefix: bytes, malformed_tail: bytes
+) -> None:
+    malformed = valid_prefix + malformed_tail
+
+    prefix = bounded_pcap_prefix(malformed, len(valid_prefix))
+
+    assert prefix.content == valid_prefix
+    assert prefix.scanned_bytes == len(valid_prefix)
+    assert prefix.packet_count == 1
+    assert prefix.byte_limited is True
+    assert prefix.packet_limited is False
+    with pytest.raises(PcapParseError):
+        bounded_pcap_prefix(malformed, len(malformed) + 1)
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [classic_pcap(udp_packet(), count=2)[:-1], pcapng(udp_packet(), count=2)[:-1]],
+)
+def test_bounded_prefix_rejects_malformed_tail_when_limit_covers_full_source(
+    malformed: bytes,
+) -> None:
+    with pytest.raises(PcapParseError):
+        bounded_pcap_prefix(malformed, len(malformed))
+
+
+@pytest.mark.parametrize(
+    ("valid_prefix", "malformed_next_packet"),
+    [
+        (
+            classic_pcap(udp_packet()),
+            struct.pack("<IIII", 1_784_544_001, 500_000, 8, 8) + b"x",
+        ),
+        (
+            pcapng(udp_packet()),
+            struct.pack("<II", 6, 32) + b"\0" * 4,
+        ),
+    ],
+    ids=["classic-declared-data-unavailable", "pcapng-declared-block-unavailable"],
+)
+def test_packet_limit_stops_before_malformed_next_packet(
+    valid_prefix: bytes, malformed_next_packet: bytes
+) -> None:
+    malformed = valid_prefix + malformed_next_packet
+
+    prefix = bounded_pcap_prefix(malformed, len(malformed), max_packets=1)
+
+    assert prefix.content == valid_prefix
+    assert prefix.scanned_bytes == len(valid_prefix)
+    assert prefix.packet_count == 1
+    assert prefix.packet_limited is True
+    assert prefix.byte_limited is False
+    with pytest.raises(PcapParseError):
+        bounded_pcap_prefix(malformed, len(malformed))
+    with pytest.raises(PcapParseError):
+        bounded_pcap_prefix(malformed, len(malformed), max_packets=2)
+
+
+def test_pcapng_packet_limit_keeps_valid_non_packet_blocks_before_malformed_packet() -> None:
+    valid_prefix = pcapng(udp_packet())
+    non_packet_body = b"metadata"
+    non_packet_body += b"\0" * (-len(non_packet_body) % 4)
+    non_packet_length = 12 + len(non_packet_body)
+    non_packet = (
+        struct.pack("<II", 4, non_packet_length)
+        + non_packet_body
+        + struct.pack("<I", non_packet_length)
+    )
+    malformed_next_packet = struct.pack("<II", 6, 32) + b"\0" * 4
+    malformed = valid_prefix + non_packet + malformed_next_packet
+
+    prefix = bounded_pcap_prefix(malformed, len(malformed), max_packets=1)
+
+    assert prefix.content == valid_prefix + non_packet
+    assert prefix.scanned_bytes == len(valid_prefix + non_packet)
+    assert prefix.packet_count == 1
+    assert prefix.packet_limited is True
+    assert prefix.byte_limited is False
 
 
 def test_malformed_and_non_ip_captures_are_rejected() -> None:

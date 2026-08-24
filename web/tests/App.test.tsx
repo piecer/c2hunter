@@ -524,6 +524,40 @@ describe('C2Hunter UI', () => {
     expect(screen.queryByText(/Partial filtered capture downloaded/)).not.toBeInTheDocument();
   });
 
+  it('explains when a filtered export cannot scan a complete first packet', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/v1/pcap-exports' && init?.method === 'POST') {
+        return new Response(JSON.stringify({
+          id: 'filtered-export-too-small',
+          status: 'FAILED',
+          matched_packet_count: 0,
+          exported_packet_count: 0,
+          truncated: true,
+          truncation_reasons: ['SOURCE_BYTE_LIMIT'],
+          error_code: 'PCAP_SOURCE_SCAN_LIMIT_TOO_SMALL',
+          error: 'source scan byte limit cannot fit the first complete packet',
+        }), { status: 201 });
+      }
+      if (path.includes('/flows?')) {
+        return new Response(JSON.stringify(responses['/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&include_filter=%7B%22has_payload%22%3Atrue%7D']), { status: 200 });
+      }
+      return new Response(JSON.stringify(responses[path] ?? { items: [] }), { status: responses[path] ? 200 : 404 });
+    });
+    renderAt('/analyses/job-1', fetchMock);
+
+    await screen.findByRole('table', { name: 'Analysis flows' });
+    await userEvent.click(screen.getByRole('button', { name: 'Download filtered capture' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'source scan byte limit cannot fit the first complete packet (source scan byte limit reached)',
+    );
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      '/api/v1/pcap-exports/filtered-export-too-small/download',
+      expect.anything(),
+    );
+  });
+
   it('limits include and exclude filter groups to the API contract', async () => {
     renderAt('/analyses/job-1');
     const user = userEvent.setup();

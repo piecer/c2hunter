@@ -59,6 +59,14 @@ def _pcap() -> bytes:
     return bytes(content)
 
 
+def _pcap_for_packets(packets: list[bytes]) -> bytes:
+    content = bytearray(struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
+    for index, packet in enumerate(packets):
+        content.extend(struct.pack("<IIII", 1_700_000_000 + index, 0, len(packet), len(packet)))
+        content.extend(packet)
+    return bytes(content)
+
+
 def _legacy_packet_record(packet: bytes, index: int) -> dict[str, Any]:
     timestamp = datetime(2026, 7, 20, 12, 0, index, tzinfo=UTC).isoformat()
     return {
@@ -601,6 +609,64 @@ def test_live_export_preserves_scanned_prefix_when_source_byte_limit_is_reached(
     assert exported["truncation_reasons"] == ["SOURCE_BYTE_LIMIT"]
 
 
+def test_live_export_scans_packet_prefix_from_oversized_first_segment() -> None:
+    repository = MemoryRepository()
+    first_packet = _udp_packet("10.0.0.1", "203.0.113.77", 50001, 1)
+    second_packet = _udp_packet("10.0.0.1", "203.0.113.88", 50001, 2)
+    capture = _pcap_for_packets([first_packet, second_packet])
+    first_packet_boundary = 24 + 16 + len(first_packet)
+    client = TestClient(
+        create_app(
+            Settings(environment="test", pcap_export_scan_max_bytes=first_packet_boundary),
+            repository,
+        )
+    )
+    repository.create_job(
+        {
+            "id": "oversized-first-live-segment",
+            "idempotency_key": "oversized-first-live-segment-key",
+            "status": "COMPLETED",
+            "mode": "LIVE",
+            "source_type": "SENSOR_CAPTURE",
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "capture": {"store_pcap": True},
+            "flow_records": [],
+            "created_at": "2026-08-21T09:00:00+00:00",
+        }
+    )
+    repository.save_sensor_pcap(
+        {
+            "id": "oversized-first-segment",
+            "sensor_id": "sensor-a",
+            "analysis_job_id": "oversized-first-live-segment",
+            "filename": "oversized-first.pcap",
+            "size_bytes": len(capture),
+            "sha256": hashlib.sha256(capture).hexdigest(),
+            "uploaded_at": "2026-08-21T09:01:00+00:00",
+        },
+        capture,
+    )
+
+    response = client.post(
+        "/api/v1/pcap-exports",
+        json={
+            "job_id": "oversized-first-live-segment",
+            "include_filters": [{"candidate_ip": "203.0.113.77"}],
+        },
+    )
+
+    assert response.status_code == 201
+    exported = response.json()
+    assert exported["status"] == "COMPLETED"
+    assert exported["matched_packet_count"] == 1
+    assert exported["scanned_source_bytes"] == first_packet_boundary
+    assert exported["scanned_packet_count"] == 1
+    assert exported["scanned_source_capture_count"] == 1
+    assert exported["omitted_source_capture_count"] == 0
+    assert exported["truncation_reasons"] == ["SOURCE_BYTE_LIMIT"]
+
+
 def test_pcap_upload_validates_media_format_size_and_packet_limit() -> None:
     assert Settings(environment="test").pcap_upload_max_bytes == 500 * 1024 * 1024
     client = api()
@@ -706,20 +772,15 @@ def test_sqlite_job_delete_cascades_candidates_and_exports(tmp_path: Any) -> Non
     assert repository.delete_job("job-1") is False
 
 
-def test_canonical_capture_over_scan_limit_is_not_materialized() -> None:
-    class GuardedRepository(MemoryRepository):
-        reject_reads = False
-
-        def get_job_capture(self, job_id: str) -> bytes | None:
-            if self.reject_reads:
-                raise AssertionError("oversized canonical capture was materialized")
-            return super().get_job_capture(job_id)
-
-    repository = GuardedRepository()
-    capture = _pcap()
+def test_canonical_filtered_export_scans_complete_packet_prefix_within_byte_limit() -> None:
+    repository = MemoryRepository()
+    first_packet = _udp_packet("10.0.0.1", "203.0.113.77", 50001, 1)
+    second_packet = _udp_packet("10.0.0.1", "203.0.113.88", 50001, 2)
+    capture = _pcap_for_packets([first_packet, second_packet])
+    first_packet_boundary = 24 + 16 + len(first_packet)
     client = TestClient(
         create_app(
-            Settings(environment="test", pcap_export_scan_max_bytes=len(capture) - 1),
+            Settings(environment="test", pcap_export_scan_max_bytes=first_packet_boundary),
             repository,
         )
     )
@@ -730,7 +791,126 @@ def test_canonical_capture_over_scan_limit_is_not_materialized() -> None:
         headers={"content-type": "application/vnd.tcpdump.pcap"},
     )
     assert upload.status_code == 201
-    repository.reject_reads = True
+
+    response = client.post(
+        "/api/v1/pcap-exports",
+        json={
+            "job_id": upload.json()["id"],
+            "include_filters": [{"candidate_ip": "203.0.113.77"}],
+        },
+    )
+
+    assert response.status_code == 201
+    exported = response.json()
+    assert exported["status"] == "COMPLETED"
+    assert exported["matched_packet_count"] == 1
+    assert exported["exported_packet_count"] == 1
+    assert exported["omitted_packet_count"] == 0
+    assert exported["source_total_bytes"] == len(capture)
+    assert exported["scanned_source_bytes"] == first_packet_boundary
+    assert exported["scanned_packet_count"] == 1
+    assert exported["scanned_source_capture_count"] == 1
+    assert exported["omitted_source_capture_count"] == 0
+    assert exported["truncated"] is True
+    assert exported["truncation_reasons"] == ["SOURCE_BYTE_LIMIT"]
+
+
+def test_canonical_candidate_export_matches_within_source_byte_prefix() -> None:
+    repository = MemoryRepository()
+    first_packet = _udp_packet("10.0.0.1", "203.0.113.77", 50001, 1)
+    second_packet = _udp_packet("10.0.0.1", "203.0.113.88", 50001, 2)
+    capture = _pcap_for_packets([first_packet, second_packet])
+    first_packet_boundary = 24 + 16 + len(first_packet)
+    client = TestClient(
+        create_app(
+            Settings(environment="test", pcap_export_scan_max_bytes=first_packet_boundary),
+            repository,
+        )
+    )
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Candidate prefix", "filename": "candidate-prefix.pcap"},
+        content=capture,
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+    job_id = upload.json()["id"]
+    repository.save_candidates(
+        job_id,
+        [{"id": "candidate-prefix", "candidate_ip": "203.0.113.77"}],
+    )
+
+    response = client.post(
+        "/api/v1/pcap-exports",
+        json={"job_id": job_id, "candidate_id": "candidate-prefix"},
+    )
+
+    assert response.status_code == 201
+    exported = response.json()
+    assert exported["status"] == "COMPLETED"
+    assert exported["candidate_id"] == "candidate-prefix"
+    assert exported["matched_packet_count"] == 1
+    assert exported["scanned_source_bytes"] == first_packet_boundary
+    assert exported["scanned_packet_count"] == 1
+    assert exported["truncation_reasons"] == ["SOURCE_BYTE_LIMIT"]
+
+
+def test_candidate_after_source_byte_prefix_reports_incomplete_scan() -> None:
+    repository = MemoryRepository()
+    first_packet = _udp_packet("10.0.0.1", "203.0.113.77", 50001, 1)
+    second_packet = _udp_packet("10.0.0.1", "203.0.113.88", 50001, 2)
+    capture = _pcap_for_packets([first_packet, second_packet])
+    first_packet_boundary = 24 + 16 + len(first_packet)
+    client = TestClient(
+        create_app(
+            Settings(environment="test", pcap_export_scan_max_bytes=first_packet_boundary),
+            repository,
+        )
+    )
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Late candidate", "filename": "late-candidate.pcap"},
+        content=capture,
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+    job_id = upload.json()["id"]
+    repository.save_candidates(
+        job_id,
+        [{"id": "candidate-after-prefix", "candidate_ip": "203.0.113.88"}],
+    )
+
+    response = client.post(
+        "/api/v1/pcap-exports",
+        json={"job_id": job_id, "candidate_id": "candidate-after-prefix"},
+    )
+
+    assert response.status_code == 201
+    exported = response.json()
+    assert exported["status"] == "FAILED"
+    assert exported["error_code"] == "PCAP_SOURCE_SCAN_INCOMPLETE"
+    assert exported["matched_packet_count"] == 0
+    assert exported["exported_packet_count"] == 0
+    assert exported["scanned_source_bytes"] == first_packet_boundary
+    assert exported["scanned_packet_count"] == 1
+    assert exported["truncation_reasons"] == ["SOURCE_BYTE_LIMIT"]
+
+
+def test_source_byte_limit_below_first_packet_reports_limit_too_small() -> None:
+    repository = MemoryRepository()
+    packet = _udp_packet("10.0.0.1", "203.0.113.77", 50001, 1)
+    capture = _pcap_for_packets([packet])
+    first_packet_boundary = 24 + 16 + len(packet)
+    client = TestClient(
+        create_app(
+            Settings(environment="test", pcap_export_scan_max_bytes=first_packet_boundary - 1),
+            repository,
+        )
+    )
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Too small prefix", "filename": "too-small.pcap"},
+        content=capture,
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
 
     response = client.post("/api/v1/pcap-exports", json={"job_id": upload.json()["id"]})
 
@@ -738,7 +918,10 @@ def test_canonical_capture_over_scan_limit_is_not_materialized() -> None:
     exported = response.json()
     assert exported["status"] == "FAILED"
     assert exported["error_code"] == "PCAP_SOURCE_SCAN_LIMIT_TOO_SMALL"
-    assert exported["scanned_source_bytes"] == 0
+    assert exported["error"] == "source scan byte limit cannot fit the first complete packet"
+    assert exported["scanned_source_bytes"] == 24
+    assert exported["scanned_packet_count"] == 0
+    assert exported["truncation_reasons"] == ["SOURCE_BYTE_LIMIT"]
 
 
 def test_export_is_not_saved_after_its_parent_job_is_deleted() -> None:
