@@ -21,6 +21,7 @@ from c2hunter_analysis.pcap import (
     find_pcap_record,
     parse_pcap,
 )
+from c2hunter_analysis.pcap_export import open_export_capture
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
@@ -81,10 +82,16 @@ from .jobs import (
 from .logging import install_access_log_redaction
 from .operations_api import operations_router
 from .payload_signatures_api import payload_signature_router
-from .pcap import build_capture_result, filter_records
+from .pcap import build_capture_result, compile_packet_predicate, filter_records
+from .pcap_stream import (
+    CaptureIntegrityError,
+    MatchedPacketRecord,
+    VerifiedMatchedPackets,
+    open_bounded_verified_capture,
+)
 from .production import MinioBlobStore, PostgresRepository
 from .queueing import ControllerQueue, MemoryControllerQueue, RedisControllerQueue
-from .repositories import MemoryRepository, Repository
+from .repositories import CaptureSource, MemoryRepository, Repository
 from .schemas import (
     AIAnalysisRunCancel,
     AIAnalysisRunCreate,
@@ -790,6 +797,23 @@ def _raw_packet_hex_size(value: Any) -> int:
     ):
         raise ValueError("retained raw packet is not valid hexadecimal data")
     return len(raw_packet) // 2
+
+
+def _is_sha256_hex_digest(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdefABCDEF" for character in value)
+    )
+
+
+def _close_capture_source_preserving_primary(source: CaptureSource, context: str) -> None:
+    if source.closed:
+        return
+    try:
+        source.close()
+    except BaseException:
+        logger.debug("%s; preserving primary failure", context, exc_info=True)
 
 
 PCAP_EXPORT_STAGES = ("source_read", "hash", "frame", "decode", "filter", "write", "save")
@@ -4043,6 +4067,7 @@ def create_app(
             source_job = parent
 
         source_records: list[dict[str, Any]] = []
+        matched_records: list[MatchedPacketRecord] = []
         source_manifest: list[dict[str, str]] = []
         sensor_ids = source_job.get("sensor_ids") or ["uploaded"]
         if canonical_capture_metadata is not None:
@@ -4075,6 +4100,9 @@ def create_app(
             source_descriptors = [(segment, None) for segment in segment_metadata]
 
         source_capture_count = len(source_descriptors)
+        use_streaming_pipeline = config.pcap_export_pipeline == "streaming" and all(
+            content is None for _descriptor, content in source_descriptors
+        )
         try:
             declared_source_sizes = []
             for descriptor, _content in source_descriptors:
@@ -4094,6 +4122,13 @@ def create_app(
                 "PCAP_SOURCE_INTEGRITY_ERROR",
                 "retained PCAP size metadata is invalid",
             )
+        for descriptor, _content in source_descriptors:
+            if not _is_sha256_hex_digest(descriptor.get("sha256")):
+                raise ApiError(
+                    409,
+                    "PCAP_SOURCE_INTEGRITY_ERROR",
+                    "retained PCAP digest metadata is invalid",
+                )
         source_total_bytes = sum(declared_source_sizes)
         scan_max_bytes = cast(int, config.pcap_export_scan_max_bytes)
         scan_max_packets = cast(int, config.pcap_export_scan_max_packets)
@@ -4101,7 +4136,194 @@ def create_app(
         scanned_source_capture_count = 0
         remaining_packets = scan_max_packets
         source_truncation_reasons: list[str] = []
-        for source_order, (descriptor, retained_content) in enumerate(source_descriptors):
+        if use_streaming_pipeline and source_descriptors:
+            predicate = compile_packet_predicate(
+                normalized, internal_networks=list(job["internal_networks"])
+            )
+            for source_order, (descriptor, _retained_content) in enumerate(source_descriptors):
+                if remaining_packets < 1:
+                    source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
+                    break
+                remaining_source_bytes = scan_max_bytes - scanned_source_bytes
+                if remaining_source_bytes < 1:
+                    source_truncation_reasons.append("SOURCE_BYTE_LIMIT")
+                    break
+                expected_digest = descriptor.get("sha256")
+                if not expected_digest:
+                    raise ApiError(
+                        409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP digest missing"
+                    )
+                is_canonical = descriptor.get("_canonical") is True
+                if is_canonical:
+                    with _measure_pcap_export_stage(stage_seconds, "source_read"):
+                        opened_source = repo.open_job_capture(source_job_id)
+                    if opened_source is None:
+                        raise ApiError(
+                            409,
+                            "PCAP_SOURCE_INTEGRITY_ERROR",
+                            "retained canonical PCAP missing",
+                        )
+                    stored_metadata = descriptor
+                    source = opened_source
+                else:
+                    with _measure_pcap_export_stage(stage_seconds, "source_read"):
+                        opened_segment = repo.open_sensor_pcap(str(descriptor["id"]))
+                    if opened_segment is None:
+                        raise ApiError(
+                            409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP segment missing"
+                        )
+                    stored_metadata, source = opened_segment
+                    stored_size_value = stored_metadata.get("size_bytes")
+                    try:
+                        if isinstance(stored_size_value, bool) or not isinstance(
+                            stored_size_value, int | str
+                        ):
+                            raise ValueError
+                        stored_size = int(stored_size_value)
+                    except (TypeError, ValueError) as exc:
+                        _close_capture_source_preserving_primary(
+                            source,
+                            "Capture source close failed after invalid retained size metadata",
+                        )
+                        raise ApiError(
+                            409,
+                            "PCAP_SOURCE_INTEGRITY_ERROR",
+                            "retained PCAP size metadata is invalid",
+                        ) from exc
+                    stored_digest = stored_metadata.get("sha256")
+                    if not _is_sha256_hex_digest(stored_digest):
+                        _close_capture_source_preserving_primary(
+                            source,
+                            "Capture source close failed after invalid retained digest metadata",
+                        )
+                        raise ApiError(
+                            409,
+                            "PCAP_SOURCE_INTEGRITY_ERROR",
+                            "retained PCAP digest metadata is invalid",
+                        )
+                    if (
+                        str(stored_metadata.get("id", "")) != str(descriptor.get("id", ""))
+                        or str(stored_metadata.get("sensor_id", ""))
+                        != str(descriptor.get("sensor_id", ""))
+                        or stored_metadata.get("analysis_job_id") != source_job_id
+                        or stored_size != declared_source_sizes[source_order]
+                        or stored_digest != descriptor.get("sha256")
+                    ):
+                        _close_capture_source_preserving_primary(
+                            source,
+                            "Capture source close failed after retained metadata mismatch",
+                        )
+                        raise ApiError(
+                            409,
+                            "PCAP_SOURCE_INTEGRITY_ERROR",
+                            "retained PCAP metadata mismatch",
+                        )
+                try:
+                    session = open_bounded_verified_capture(
+                        source,
+                        expected_size=declared_source_sizes[source_order],
+                        expected_sha256=str(expected_digest),
+                        max_admitted_bytes=remaining_source_bytes,
+                        max_admitted_packets=remaining_packets,
+                        stage_seconds=stage_seconds,
+                    )
+                except BaseException:
+                    # A successful factory call transfers ownership to the session.
+                    # On failure, this guard covers factories that did not take it.
+                    _close_capture_source_preserving_primary(
+                        source,
+                        "Capture source close failed after bounded capture factory failure",
+                    )
+                    raise
+                provisional: list[MatchedPacketRecord] = []
+                provisional_packets = 0
+                parse_error: PcapParseError | None = None
+                try:
+                    try:
+                        decoder = open_export_capture(
+                            session.reader,
+                            source_id=source.version_id,
+                            source_order=source_order,
+                            internal_networks=list(job["internal_networks"]),
+                        )
+                        packets = iter(decoder.iter_packets())
+                        while True:
+                            source_before = stage_seconds.get("source_read", 0.0)
+                            hash_before = stage_seconds.get("hash", 0.0)
+                            frame_before = stage_seconds.get("frame", 0.0)
+                            started_decode = perf_counter()
+                            try:
+                                packet = next(packets)
+                            except StopIteration:
+                                break
+                            finally:
+                                nested = (
+                                    stage_seconds.get("source_read", 0.0)
+                                    - source_before
+                                    + stage_seconds.get("hash", 0.0)
+                                    - hash_before
+                                    + stage_seconds.get("frame", 0.0)
+                                    - frame_before
+                                )
+                                stage_seconds["decode"] = stage_seconds.get("decode", 0.0) + max(
+                                    0.0, perf_counter() - started_decode - nested
+                                )
+                            provisional_packets += 1
+                            if not packet.supported:
+                                continue
+                            with _measure_pcap_export_stage(stage_seconds, "filter"):
+                                matched = predicate.matches(
+                                    packet, sensor_id=str(stored_metadata["sensor_id"])
+                                )
+                            if not matched:
+                                continue
+                            provisional.append(
+                                MatchedPacketRecord.from_export_packet(
+                                    packet, sensor_id=str(stored_metadata["sensor_id"])
+                                )
+                            )
+                    except PcapParseError as exc:
+                        parse_error = exc
+                    except CaptureIntegrityError:
+                        # The session remembers the primary read failure; finalization
+                        # closes the source and re-raises it with integrity precedence.
+                        pass
+                    try:
+                        scan = session.drain_and_verify()
+                    except CaptureIntegrityError as exc:
+                        raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", str(exc)) from exc
+                    if parse_error is not None and not (
+                        parse_error.code == "EMPTY_PCAP"
+                        and scan.admitted_packets == 0
+                        and (scan.byte_limited or scan.packet_limited)
+                    ):
+                        raise ApiError(422, parse_error.code, str(parse_error)) from parse_error
+                    source_manifest.append(
+                        {"id": str(stored_metadata["id"]), "sha256": scan.actual_sha256}
+                    )
+                    scanned_source_bytes += scan.admitted_bytes
+                    remaining_packets -= scan.admitted_packets
+                    if provisional_packets:
+                        scanned_source_capture_count += 1
+                    matched_records.extend(provisional)
+                    if scan.byte_limited:
+                        source_truncation_reasons.append("SOURCE_BYTE_LIMIT")
+                    if scan.packet_limited:
+                        source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
+                    if scan.byte_limited or scan.packet_limited:
+                        break
+                finally:
+                    try:
+                        session.close()
+                    except BaseException:
+                        logger.debug(
+                            "Capture session close failed after export processing; "
+                            "preserving primary failure",
+                            exc_info=True,
+                        )
+        for source_order, (descriptor, retained_content) in enumerate(
+            source_descriptors if not use_streaming_pipeline else []
+        ):
             declared_size = declared_source_sizes[source_order]
             if remaining_packets < 1:
                 source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
@@ -4221,7 +4443,12 @@ def create_app(
                 raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", str(exc)) from exc
             source_total_bytes = sum(fallback_sizes)
             source_records = []
-            for record, packet_size in zip(fallback_records, fallback_sizes, strict=True):
+            predicate = compile_packet_predicate(
+                normalized, internal_networks=list(job["internal_networks"])
+            )
+            for fallback_packet_index, (record, packet_size) in enumerate(
+                zip(fallback_records, fallback_sizes, strict=True)
+            ):
                 if scanned_source_bytes + packet_size > scan_max_bytes:
                     source_truncation_reasons.append("SOURCE_BYTE_LIMIT")
                     break
@@ -4230,15 +4457,29 @@ def create_app(
                     break
                 source_records.append(record)
                 scanned_source_bytes += packet_size
+                matched_record = MatchedPacketRecord.from_legacy_record(
+                    record,
+                    source_job_id=source_job_id,
+                    fallback_packet_index=fallback_packet_index,
+                    default_sensor_id=str(sensor_ids[0]),
+                )
+                with _measure_pcap_export_stage(stage_seconds, "filter"):
+                    matched = predicate.matches(matched_record, sensor_id=matched_record.sensor_id)
+                if matched:
+                    matched_records.append(matched_record)
         scanned_packet_count = (
             scan_max_packets - remaining_packets if source_descriptors else len(source_records)
         )
-        with _measure_pcap_export_stage(stage_seconds, "filter"):
-            records = filter_records(
-                source_records,
-                normalized,
-                internal_networks=list(job["internal_networks"]),
-            )
+        if use_streaming_pipeline and source_descriptors or not source_descriptors:
+            verified_matches = VerifiedMatchedPackets(tuple(matched_records))
+            records = [record.to_writer_record() for record in verified_matches]
+        else:
+            with _measure_pcap_export_stage(stage_seconds, "filter"):
+                records = filter_records(
+                    source_records,
+                    normalized,
+                    internal_networks=list(job["internal_networks"]),
+                )
         try:
             max_output_bytes = cast(int, config.pcap_export_max_bytes)
             with _measure_pcap_export_stage(stage_seconds, "write"):

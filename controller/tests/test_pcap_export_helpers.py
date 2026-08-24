@@ -5,7 +5,12 @@ from datetime import UTC, datetime
 
 from c2hunter_analysis.pcap import parse_pcap
 
-from c2hunter_controller.pcap import build_capture, build_capture_result, filter_records
+from c2hunter_controller.pcap import (
+    build_capture,
+    build_capture_result,
+    compile_packet_predicate,
+    filter_records,
+)
 
 
 def _record(
@@ -35,6 +40,39 @@ def _record(
         "raw_packet_index": packet_index,
         "raw_packet_interface_id": interface_id,
     }
+
+
+def test_compiled_predicate_is_differential_with_materialized_filter() -> None:
+    records = [
+        _record(),
+        {
+            **_record(packet_index=1),
+            "source_ip": "198.51.100.9",
+            "destination_ip": "10.0.0.9",
+            "source_port": 8443,
+            "destination_port": 52000,
+            "direction": "INBOUND",
+            "payload_hash": None,
+        },
+    ]
+    cases = [
+        {"candidate_ip": "10.0.0.8", "port": 51000},
+        {"include_filters": [{"candidate_ip": "198.51.100.0/24", "port": 8443}]},
+        {
+            "include_filters": [{"protocol": "tcp"}],
+            "exclude_filters": [{"has_payload": False}],
+        },
+        {"include_filters": [{"source_port": 51000, "destination_port": 443}]},
+    ]
+    for filters in cases:
+        expected = filter_records(records, filters, internal_networks=["10.0.0.0/8"])
+        predicate = compile_packet_predicate(filters, internal_networks=["10.0.0.0/8"])
+        actual = [
+            record
+            for record in records
+            if predicate.matches(record, sensor_id=str(record["sensor_id"]))
+        ]
+        assert actual == expected
 
 
 def test_build_capture_preserves_single_link_type_and_packet_lengths() -> None:

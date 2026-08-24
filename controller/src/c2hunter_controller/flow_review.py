@@ -181,6 +181,53 @@ def filter_flows(
     return result
 
 
+def compile_packet_filter_groups(
+    include_filters: list[dict[str, Any]] | None,
+    exclude_filters: list[dict[str, Any]] | None,
+) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+    """Normalize request-local packet groups once for incremental matching."""
+    return (
+        tuple(_normalize_filter(item) for item in include_filters or []),
+        tuple(_normalize_filter(item) for item in exclude_filters or []),
+    )
+
+
+def matches_compiled_packet_groups(
+    record: dict[str, Any],
+    *,
+    internal_networks: list[str],
+    include_filters: tuple[dict[str, Any], ...],
+    exclude_filters: tuple[dict[str, Any], ...],
+) -> bool:
+    """Match normalized groups without flow IDs, payload hashes, or feature extraction."""
+    source_ip = str(record["source_ip"])
+    destination_ip = str(record["destination_ip"])
+    direction = str(record.get("direction") or "UNKNOWN").upper()
+    service_port = None
+    if direction == "OUTBOUND":
+        service_port = record.get("destination_port")
+    elif direction == "INBOUND":
+        service_port = record.get("source_port")
+    else:
+        source_internal = _is_internal(source_ip, internal_networks)
+        destination_internal = _is_internal(destination_ip, internal_networks)
+        if source_internal != destination_internal:
+            service_port = record.get("destination_port" if source_internal else "source_port")
+    view = {
+        **record,
+        "source_ip": source_ip,
+        "destination_ip": destination_ip,
+        "direction": direction,
+        "service_port": service_port,
+        "has_payload": bool(record.get("has_payload", record.get("payload_hash"))),
+    }
+    include_match = not include_filters or any(
+        _matches_filter(view, **packet_filter) for packet_filter in include_filters
+    )
+    exclude_match = any(_matches_filter(view, **packet_filter) for packet_filter in exclude_filters)
+    return include_match and not exclude_match
+
+
 def filter_packet_records(
     records: list[dict[str, Any]],
     *,

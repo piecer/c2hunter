@@ -679,7 +679,7 @@ def test_decoder_is_lazy_borrows_reader_and_streams_unknown_blocks() -> None:
     assert max(ng_reader.read_sizes) <= 64 * 1024
 
 
-def test_export_decoder_import_and_production_isolation() -> None:
+def test_export_decoder_import_isolation_and_controller_integration() -> None:
     module_path = __file__.replace(
         "tests/test_pcap_export_decoder.py", "src/c2hunter_analysis/pcap_export.py"
     )
@@ -738,5 +738,5 @@ def test_export_decoder_import_and_production_isolation() -> None:
         ),
         encoding="utf-8",
     ).read()
-    assert "c2hunter_analysis.pcap_export" not in controller_source
+    assert "from c2hunter_analysis.pcap_export import open_export_capture" in controller_source
     assert "from c2hunter_analysis import pcap_export" not in controller_source

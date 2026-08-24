@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import math
 import struct
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from .flow_review import filter_packet_records
+from .flow_review import (
+    compile_packet_filter_groups,
+    filter_packet_records,
+    matches_compiled_packet_groups,
+)
 
 
 @dataclass(frozen=True)
@@ -18,6 +23,85 @@ class CaptureBuildResult:
     omitted_packet_count: int
     truncated: bool
     truncation_reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CompiledPacketPredicate:
+    candidate_ip: str | None
+    internal_host_ip: str | None
+    start: datetime | None
+    end: datetime | None
+    port: int | None
+    protocol: str | None
+    direction: str | None
+    sensor: str | None
+    internal_networks: tuple[str, ...]
+    include_filters: tuple[dict[str, Any], ...]
+    exclude_filters: tuple[dict[str, Any], ...]
+
+    def matches(self, packet: Any, *, sensor_id: str) -> bool:
+        def value(name: str, default: Any = None) -> Any:
+            if isinstance(packet, Mapping):
+                return packet.get(name, default)
+            return getattr(packet, name, default)
+
+        source_ip = value("source_ip")
+        destination_ip = value("destination_ip")
+        timestamp = value("timestamp")
+        if not isinstance(timestamp, datetime):
+            timestamp = datetime.fromisoformat(str(timestamp))
+        if self.candidate_ip not in {None, source_ip, destination_ip}:
+            return False
+        if self.internal_host_ip not in {None, source_ip, destination_ip}:
+            return False
+        if (self.start and timestamp < self.start) or (self.end and timestamp > self.end):
+            return False
+        if self.port not in {None, value("source_port"), value("destination_port")}:
+            return False
+        if self.protocol and str(value("protocol")).upper() != self.protocol:
+            return False
+        if self.direction and value("direction") != self.direction:
+            return False
+        if self.sensor and sensor_id != self.sensor:
+            return False
+        record = {
+            "source_ip": source_ip,
+            "destination_ip": destination_ip,
+            "source_port": value("source_port"),
+            "destination_port": value("destination_port"),
+            "protocol": value("protocol"),
+            "direction": value("direction"),
+            "has_payload": value("has_payload", bool(value("payload_hash"))),
+        }
+        return matches_compiled_packet_groups(
+            record,
+            internal_networks=list(self.internal_networks),
+            include_filters=self.include_filters,
+            exclude_filters=self.exclude_filters,
+        )
+
+
+def compile_packet_predicate(
+    filters: Mapping[str, Any], *, internal_networks: Sequence[str]
+) -> CompiledPacketPredicate:
+    copied = dict(filters)
+    includes, excludes = compile_packet_filter_groups(
+        [dict(item) for item in copied.get("include_filters", [])],
+        [dict(item) for item in copied.get("exclude_filters", [])],
+    )
+    return CompiledPacketPredicate(
+        str(copied["candidate_ip"]) if copied.get("candidate_ip") is not None else None,
+        str(copied["internal_host_ip"]) if copied.get("internal_host_ip") is not None else None,
+        datetime.fromisoformat(str(copied["start_time"])) if copied.get("start_time") else None,
+        datetime.fromisoformat(str(copied["end_time"])) if copied.get("end_time") else None,
+        int(copied["port"]) if copied.get("port") is not None else None,
+        str(copied["protocol"]).upper() if copied.get("protocol") else None,
+        str(copied["direction"]) if copied.get("direction") else None,
+        str(copied["sensor_id"]) if copied.get("sensor_id") else None,
+        tuple(str(item) for item in internal_networks),
+        includes,
+        excludes,
+    )
 
 
 def filter_records(

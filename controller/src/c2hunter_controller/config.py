@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     pcap_export_scan_max_bytes: int | None = Field(default=None, gt=0)
     pcap_export_scan_max_packets: int | None = Field(default=None, gt=0)
     pcap_export_max_concurrent: int = Field(default=1, ge=1, le=16)
+    pcap_export_pipeline: Literal["streaming", "legacy"] = "streaming"
     inline_flow_records_enabled: bool | None = None
     # This only enables the explicitly limited development token minting endpoint.
     # Production deployments should use pre-hashed static tokens or a future OIDC integration.

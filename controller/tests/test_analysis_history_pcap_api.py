@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import ipaddress
 import struct
 import threading
@@ -15,7 +16,8 @@ from test_analysis_job_api import api, payload, synthetic_flows
 import c2hunter_controller.app as controller_app
 from c2hunter_controller.app import create_app
 from c2hunter_controller.config import Settings
-from c2hunter_controller.repositories import MemoryRepository, SQLiteRepository
+from c2hunter_controller.pcap import build_capture_result, filter_records
+from c2hunter_controller.repositories import CaptureSource, MemoryRepository, SQLiteRepository
 
 
 def _checksum(data: bytes) -> int:
@@ -84,6 +86,118 @@ def _legacy_packet_record(packet: bytes, index: int) -> dict[str, Any]:
         "raw_packet_link_type": 1,
         "raw_packet_original_length": len(packet),
     }
+
+
+def test_streaming_export_uses_open_source_without_materializing(monkeypatch: Any) -> None:
+    repository = MemoryRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "streamed", "filename": "streamed.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+    assert upload.status_code == 201
+    opened = 0
+    original_open = repository.open_job_capture
+
+    def counted_open(job_id: str):
+        nonlocal opened
+        opened += 1
+        return original_open(job_id)
+
+    monkeypatch.setattr(repository, "open_job_capture", counted_open)
+    monkeypatch.setattr(
+        repository,
+        "get_job_capture",
+        lambda _job_id: (_ for _ in ()).throw(AssertionError("materialized source read")),
+    )
+    response = client.post("/api/v1/pcap-exports", json={"job_id": upload.json()["id"]})
+    assert response.status_code == 201
+    assert response.json()["matched_packet_count"] == 18
+    assert opened == 1
+
+
+def test_streaming_and_legacy_rollout_paths_are_byte_for_byte_differential() -> None:
+    repository = MemoryRepository()
+    streaming = TestClient(create_app(Settings(environment="test"), repository))
+    upload = streaming.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "rollout", "filename": "rollout.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    ).json()
+    legacy = TestClient(
+        create_app(Settings(environment="test", pcap_export_pipeline="legacy"), repository)
+    )
+
+    streamed = streaming.post(
+        "/api/v1/pcap-exports",
+        json={"job_id": upload["id"], "include_filters": [{"source_port": 50002}]},
+    ).json()
+    materialized = legacy.post(
+        "/api/v1/pcap-exports",
+        json={"job_id": upload["id"], "include_filters": [{"source_port": 50002}]},
+    ).json()
+
+    assert (
+        streaming.get(f"/api/v1/pcap-exports/{streamed['id']}/download").content
+        == legacy.get(f"/api/v1/pcap-exports/{materialized['id']}/download").content
+    )
+    for field in (
+        "status",
+        "matched_packet_count",
+        "exported_packet_count",
+        "omitted_packet_count",
+        "scanned_source_bytes",
+        "scanned_packet_count",
+        "capture_format",
+        "sha256",
+        "truncation_reasons",
+    ):
+        assert streamed[field] == materialized[field]
+
+
+def test_streaming_read_fault_does_not_publish_or_retry_legacy() -> None:
+    class FailsAtEof(io.BytesIO):
+        def read(self, size: int | None = -1) -> bytes:
+            chunk = super().read(size)
+            if not chunk:
+                raise OSError("drain fault")
+            return chunk
+
+    class FaultingRepository(MemoryRepository):
+        fault_reads = False
+
+        def open_job_capture(self, job_id: str) -> CaptureSource | None:
+            content = self.job_captures.get(job_id)
+            if content is None:
+                return None
+            if self.fault_reads:
+                return CaptureSource(FailsAtEof(content), "faulting-source-v1")
+            return super().open_job_capture(job_id)
+
+        def get_job_capture(self, job_id: str) -> bytes | None:
+            if self.fault_reads:
+                raise AssertionError(f"legacy retry attempted for {job_id}")
+            return super().get_job_capture(job_id)
+
+    repository = FaultingRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "fault", "filename": "fault.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    ).json()
+    repository.fault_reads = True
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": upload["id"]})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PCAP_SOURCE_INTEGRITY_ERROR"
+    assert repository.exports == {}
+    assert repository.export_content == {}
 
 
 def test_analysis_history_can_update_metadata_and_delete_terminal_job() -> None:
@@ -366,16 +480,226 @@ def test_pcap_export_rejects_canonical_capture_without_a_trusted_digest() -> Non
     assert response.json()["error"]["code"] == "PCAP_SOURCE_INTEGRITY_ERROR"
 
 
+def test_streaming_export_rejects_invalid_canonical_digest_without_leaking_source() -> None:
+    class TrackingRepository(MemoryRepository):
+        opened_source: CaptureSource | None = None
+
+        def open_job_capture(self, job_id: str):
+            self.opened_source = super().open_job_capture(job_id)
+            return self.opened_source
+
+    repository = TrackingRepository()
+    client = TestClient(
+        create_app(Settings(environment="test"), repository), raise_server_exceptions=False
+    )
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Invalid digest", "filename": "invalid-digest.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+    job_id = upload.json()["id"]
+    job = repository.get_job(job_id)
+    assert job is not None
+    job["source"]["sha256"] = "short"
+    repository.save_job(job)
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": job_id})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PCAP_SOURCE_INTEGRITY_ERROR"
+    assert repository.opened_source is None or repository.opened_source.closed
+    assert repository.exports == {}
+
+
+def test_streaming_factory_failure_closes_once_without_masking_primary(
+    monkeypatch: Any,
+) -> None:
+    class CloseFails(io.BytesIO):
+        close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            raise OSError("close failure")
+
+    repository = MemoryRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Factory failure", "filename": "factory-failure.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+    job_id = upload.json()["id"]
+    stream = CloseFails(repository.job_captures[job_id])
+    source = CaptureSource(stream, "factory-failure-v1")
+    monkeypatch.setattr(repository, "open_job_capture", lambda _job_id: source)
+
+    def fail_factory(*args: Any, **kwargs: Any) -> Any:
+        raise controller_app.ApiError(
+            409, "PCAP_SOURCE_INTEGRITY_ERROR", "factory validation failed"
+        )
+
+    monkeypatch.setattr(controller_app, "open_bounded_verified_capture", fail_factory)
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": job_id})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["message"] == "factory validation failed"
+    assert source.closed
+    assert stream.close_calls == 1
+    assert repository.exports == {}
+
+
+def test_streaming_decoder_factory_failure_closes_source_once_without_publication(
+    monkeypatch: Any,
+) -> None:
+    class CountedClose(io.BytesIO):
+        close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            super().close()
+
+    repository = MemoryRepository()
+    upload_client = TestClient(create_app(Settings(environment="test"), repository))
+    upload = upload_client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Decoder failure", "filename": "decoder-failure.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+    job_id = upload.json()["id"]
+    stream = CountedClose(repository.job_captures[job_id])
+    source = CaptureSource(stream, "decoder-failure-v1")
+    monkeypatch.setattr(repository, "open_job_capture", lambda _job_id: source)
+    monkeypatch.setattr(
+        controller_app,
+        "open_export_capture",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("decoder dependency failed")),
+    )
+    client = TestClient(
+        create_app(Settings(environment="test"), repository), raise_server_exceptions=False
+    )
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": job_id})
+
+    assert response.status_code == 500
+    assert source.closed
+    assert stream.close_calls == 1
+    assert repository.exports == {}
+    assert repository.export_content == {}
+
+
+def test_streaming_predicate_failure_closes_source_once_without_publication(
+    monkeypatch: Any,
+) -> None:
+    class CountedClose(io.BytesIO):
+        close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            super().close()
+
+    repository = MemoryRepository()
+    upload_client = TestClient(create_app(Settings(environment="test"), repository))
+    upload = upload_client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Predicate failure", "filename": "predicate-failure.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+    job_id = upload.json()["id"]
+    stream = CountedClose(repository.job_captures[job_id])
+    source = CaptureSource(stream, "predicate-failure-v1")
+    monkeypatch.setattr(repository, "open_job_capture", lambda _job_id: source)
+    original_compile = controller_app.compile_packet_predicate
+
+    def failing_compile(*args: Any, **kwargs: Any) -> Any:
+        predicate = original_compile(*args, **kwargs)
+
+        def fail_matches(*match_args: Any, **match_kwargs: Any) -> bool:
+            raise RuntimeError("predicate evaluation failed")
+
+        object.__setattr__(predicate, "matches", fail_matches)
+        return predicate
+
+    monkeypatch.setattr(controller_app, "compile_packet_predicate", failing_compile)
+    client = TestClient(
+        create_app(Settings(environment="test"), repository), raise_server_exceptions=False
+    )
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": job_id})
+
+    assert response.status_code == 500
+    assert source.closed
+    assert stream.close_calls == 1
+    assert repository.exports == {}
+    assert repository.export_content == {}
+
+
+def test_streaming_export_rejects_invalid_opened_sensor_digest_and_closes_source() -> None:
+    capture = _pcap()
+    digest = hashlib.sha256(capture).hexdigest()
+
+    class InvalidOpenedMetadataRepository(MemoryRepository):
+        opened_source: CaptureSource | None = None
+
+        def open_sensor_pcap(self, segment_id: str):
+            opened = super().open_sensor_pcap(segment_id)
+            assert opened is not None
+            metadata, source = opened
+            metadata["sha256"] = "short"
+            self.opened_source = source
+            return metadata, source
+
+    repository = InvalidOpenedMetadataRepository()
+    repository.create_job(
+        {
+            "id": "invalid-opened-digest",
+            "idempotency_key": "invalid-opened-digest-key",
+            "status": "COMPLETED",
+            "mode": "LIVE",
+            "source_type": "SENSOR_CAPTURE",
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "capture": {"store_pcap": True},
+            "flow_records": [],
+            "created_at": "2026-08-21T09:00:00+00:00",
+        }
+    )
+    repository.save_sensor_pcap(
+        {
+            "id": "invalid-opened-digest-segment",
+            "sensor_id": "sensor-a",
+            "analysis_job_id": "invalid-opened-digest",
+            "filename": "segment.pcap",
+            "size_bytes": len(capture),
+            "sha256": digest,
+            "uploaded_at": "2026-08-21T09:01:00+00:00",
+        },
+        capture,
+    )
+    client = TestClient(create_app(Settings(environment="test"), repository))
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": "invalid-opened-digest"})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PCAP_SOURCE_INTEGRITY_ERROR"
+    assert repository.opened_source is not None and repository.opened_source.closed
+    assert repository.exports == {}
+
+
 def test_pcap_export_rejects_concurrent_memory_intensive_requests() -> None:
     entered = threading.Event()
     release = threading.Event()
 
     class BlockingRepository(MemoryRepository):
-        def get_job_capture(self, job_id: str) -> bytes | None:
-            content = super().get_job_capture(job_id)
+        def open_job_capture(self, job_id: str) -> CaptureSource | None:
+            source = super().open_job_capture(job_id)
             entered.set()
             release.wait(timeout=5)
-            return content
+            return source
 
     repository = BlockingRepository()
     client = TestClient(
@@ -447,6 +771,139 @@ def test_legacy_pcap_export_preserves_packet_prefix_at_scan_byte_limit() -> None
     assert exported["scanned_packet_count"] == 1
     assert exported["truncated"] is True
     assert exported["truncation_reasons"] == ["SOURCE_BYTE_LIMIT"]
+
+
+def test_legacy_fallback_calls_compiled_predicate_once_per_admitted_packet(
+    monkeypatch: Any,
+) -> None:
+    repository = MemoryRepository()
+    packets = [
+        _udp_packet("10.0.0.1", "203.0.113.77", 50001, 1),
+        _udp_packet("10.0.0.2", "203.0.113.77", 50002, 2),
+    ]
+    repository.create_job(
+        {
+            "id": "legacy-predicate-count",
+            "idempotency_key": "legacy-predicate-count-key",
+            "status": "COMPLETED",
+            "mode": "LIVE",
+            "source_type": "SENSOR_CAPTURE",
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "capture": {"store_pcap": False},
+            "flow_records": [
+                _legacy_packet_record(packet, index) for index, packet in enumerate(packets)
+            ],
+            "created_at": "2026-08-21T09:00:00+00:00",
+        }
+    )
+    original_compile = controller_app.compile_packet_predicate
+    predicate_calls = 0
+
+    def counted_compile(*args: Any, **kwargs: Any) -> Any:
+        predicate = original_compile(*args, **kwargs)
+        original_matches = predicate.matches
+
+        def counted_matches(*match_args: Any, **match_kwargs: Any) -> bool:
+            nonlocal predicate_calls
+            predicate_calls += 1
+            return original_matches(*match_args, **match_kwargs)
+
+        object.__setattr__(predicate, "matches", counted_matches)
+        return predicate
+
+    monkeypatch.setattr(controller_app, "compile_packet_predicate", counted_compile)
+    client = TestClient(create_app(Settings(environment="test"), repository))
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": "legacy-predicate-count"})
+
+    assert response.status_code == 201
+    assert response.json()["matched_packet_count"] == 2
+    assert predicate_calls == 2
+
+
+def test_legacy_fallback_matches_materialized_filter_bytes_for_nested_candidate() -> None:
+    repository = MemoryRepository()
+    packets = [
+        _udp_packet("10.0.0.1", "203.0.113.77", 50001, 1),
+        _udp_packet("10.0.0.2", "203.0.113.77", 50002, 2),
+    ]
+    records = [_legacy_packet_record(packet, index) for index, packet in enumerate(packets)]
+    records[1]["source_ip"] = "10.0.0.2"
+    records[1]["source_port"] = 50002
+    repository.create_job(
+        {
+            "id": "legacy-filter-differential",
+            "idempotency_key": "legacy-filter-differential-key",
+            "status": "COMPLETED",
+            "mode": "LIVE",
+            "source_type": "SENSOR_CAPTURE",
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "capture": {"store_pcap": False},
+            "flow_records": records,
+            "created_at": "2026-08-21T09:00:00+00:00",
+        }
+    )
+    repository.save_candidates(
+        "legacy-filter-differential",
+        [{"id": "legacy-candidate", "candidate_ip": "203.0.113.77"}],
+    )
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    request_filter = {
+        "job_id": "legacy-filter-differential",
+        "candidate_id": "legacy-candidate",
+        "include_filters": [{"candidate_ip": "10.0.0.0/8", "destination_port": 443}],
+        "exclude_filters": [{"source_port": 50001}],
+    }
+
+    response = client.post("/api/v1/pcap-exports", json=request_filter)
+
+    assert response.status_code == 201
+    exported = response.json()
+    expected_records = filter_records(
+        records,
+        {
+            "candidate_ip": "203.0.113.77",
+            "include_filters": request_filter["include_filters"],
+            "exclude_filters": request_filter["exclude_filters"],
+        },
+        internal_networks=["10.0.0.0/8"],
+    )
+    expected = build_capture_result(expected_records).content
+    download = client.get(f"/api/v1/pcap-exports/{exported['id']}/download")
+    assert download.content == expected
+    assert exported["matched_packet_count"] == len(expected_records) == 1
+
+
+def test_legacy_fallback_preserves_invalid_raw_hex_integrity_error() -> None:
+    repository = MemoryRepository()
+    record = _legacy_packet_record(b"valid", 0)
+    record["raw_packet_hex"] = "not-hex"
+    repository.create_job(
+        {
+            "id": "legacy-invalid-hex",
+            "idempotency_key": "legacy-invalid-hex-key",
+            "status": "COMPLETED",
+            "mode": "LIVE",
+            "source_type": "SENSOR_CAPTURE",
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "capture": {"store_pcap": False},
+            "flow_records": [record],
+            "created_at": "2026-08-21T09:00:00+00:00",
+        }
+    )
+    client = TestClient(create_app(Settings(environment="test"), repository))
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": "legacy-invalid-hex"})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PCAP_SOURCE_INTEGRITY_ERROR"
+    assert response.json()["error"]["message"] == (
+        "retained raw packet is not valid hexadecimal data"
+    )
+    assert repository.exports == {}
 
 
 def test_pcap_export_reports_when_output_limit_cannot_fit_a_packet() -> None:
@@ -1051,7 +1508,7 @@ def test_missing_job_export_records_only_total_stage_metric() -> None:
 
 def test_export_records_an_entered_stage_when_the_stage_raises() -> None:
     class FailingSourceRepository(MemoryRepository):
-        def get_job_capture(self, job_id: str) -> bytes | None:
+        def open_job_capture(self, job_id: str) -> CaptureSource | None:
             raise RuntimeError(f"source read failed for {job_id}")
 
     repository = FailingSourceRepository()
