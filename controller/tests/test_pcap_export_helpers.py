@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import random
 import struct
 from datetime import UTC, datetime
 
 from c2hunter_analysis.pcap import parse_pcap
 
 from c2hunter_controller.pcap import (
+    _legacy_build_capture_result,
     build_capture,
     build_capture_result,
     compile_packet_predicate,
@@ -290,6 +292,46 @@ def test_build_capture_result_adds_pcapng_interfaces_only_when_needed() -> None:
         allow_no_supported_packets=True,
     )
     assert reparsed.captured_packet_count == 1
+
+
+def test_spooled_writer_randomized_differential_matches_materialized_oracle() -> None:
+    rng = random.Random(20260824)
+    timestamps = [
+        datetime(1969, 12, 31, 23, 59, 59, 500000, tzinfo=UTC),
+        datetime(2026, 8, 24, 1, 2, 3, 456789, tzinfo=UTC),
+        datetime(2107, 1, 1, 0, 0, 0, 999999, tzinfo=UTC),
+    ]
+    for case in range(40):
+        records: list[dict[str, object]] = []
+        source_count = 2 if case % 3 == 0 else 1
+        per_source_index = [0] * source_count
+        for item_index in range(rng.randrange(0, 12)):
+            payload = rng.randbytes(rng.randrange(0, 40))
+            source_order = item_index % source_count
+            packet_index = per_source_index[source_order]
+            per_source_index[source_order] += 1
+            records.append(
+                {
+                    **_record(
+                        timestamp=timestamps[case % len(timestamps)],
+                        source_order=source_order,
+                        packet_index=packet_index,
+                        interface_id=0,
+                        original_length=len(payload) + rng.randrange(0, 8),
+                    ),
+                    "source_id": f"source-{source_order}",
+                    "raw_packet_bytes": payload,
+                    "raw_packet_hex": payload.hex(),
+                }
+            )
+        rng.shuffle(records)
+        full = _legacy_build_capture_result(records)
+        for limit in {len(full.content) - 1, len(full.content), len(full.content) + 1}:
+            if limit < 24:
+                continue
+            expected = _legacy_build_capture_result(records, max_output_bytes=limit)
+            actual = build_capture_result(records, max_output_bytes=limit)
+            assert actual == expected
 
 
 def test_filter_records_applies_nested_include_and_exclude_groups() -> None:

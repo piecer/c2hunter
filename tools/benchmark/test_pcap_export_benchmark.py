@@ -74,13 +74,22 @@ class PcapExportBenchmarkTest(unittest.TestCase):
             report = benchmark.run(packet_count=64, output_dir=Path(directory), seed=17)
 
             self.assertEqual(report["schema_version"], 1)
-            self.assertEqual(report["implementation"], "classic-materialized-v1")
+            self.assertEqual(report["implementation"], "spooled-boundary-aware-v1")
             self.assertEqual(report["workload"]["seed"], 17)
             self.assertEqual(report["counters"]["packets"]["source"], 64)
             self.assertEqual(report["counters"]["packets"]["exported"], 64)
             self.assertGreater(report["counters"]["bytes"]["source"], 0)
             self.assertGreater(report["counters"]["bytes"]["output"], 0)
             self.assertGreater(report["peak_rss_bytes"], 0)
+            self.assertEqual(report["writer"]["input_passes"], 1)
+            self.assertTrue(report["writer"]["rolled_over"])
+            self.assertEqual(
+                report["writer"]["artifact_sha256"], report["workload"]["output_sha256"]
+            )
+            self.assertEqual(
+                report["writer"]["artifact_size_bytes"],
+                report["counters"]["bytes"]["output"],
+            )
             self.assertEqual(
                 list(report["stages"]),
                 [

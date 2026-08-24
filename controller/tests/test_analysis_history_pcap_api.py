@@ -14,7 +14,10 @@ from fastapi.testclient import TestClient
 from test_analysis_job_api import api, payload, synthetic_flows
 
 import c2hunter_controller.app as controller_app
+import c2hunter_controller.capture_sink as controller_capture_sink
+import c2hunter_controller.pcap as controller_pcap
 from c2hunter_controller.app import create_app
+from c2hunter_controller.capture_sink import CaptureStorageError
 from c2hunter_controller.config import Settings
 from c2hunter_controller.pcap import build_capture_result, filter_records
 from c2hunter_controller.repositories import CaptureSource, MemoryRepository, SQLiteRepository
@@ -1403,6 +1406,95 @@ def test_export_is_not_saved_after_its_parent_job_is_deleted() -> None:
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "PCAP_SOURCE_UNAVAILABLE"
     assert repository.get_job(job_id) is None
+    assert repository.exports == {}
+    assert repository.export_content == {}
+
+
+def test_spool_storage_failure_is_sanitized_and_never_saved(monkeypatch: Any) -> None:
+    class SaveTrackingRepository(MemoryRepository):
+        save_calls = 0
+
+        def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any] | None:
+            self.save_calls += 1
+            return super().save_export(export, content)
+
+    repository = SaveTrackingRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Spool failure", "filename": "spool-failure.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+
+    def fail_writer(*args: Any, **kwargs: Any) -> Any:
+        raise CaptureStorageError("private host path")
+
+    monkeypatch.setattr(controller_app, "build_capture_to_sink", fail_writer)
+    response = client.post("/api/v1/pcap-exports", json={"job_id": upload.json()["id"]})
+
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "PCAP_EXPORT_STORAGE_ERROR"
+    assert response.json()["error"]["message"] == "temporary PCAP export storage failed"
+    assert "private" not in response.text
+    assert repository.save_calls == 0
+    assert repository.exports == {}
+
+
+def test_neutral_payload_read_fault_is_sanitized_and_never_published(monkeypatch: Any) -> None:
+    class SaveTrackingRepository(MemoryRepository):
+        save_calls = 0
+
+        def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any] | None:
+            self.save_calls += 1
+            return super().save_export(export, content)
+
+    class TrackingSpool(io.BytesIO):
+        def __init__(self, *, fail_payload_read: bool = False, fail_close: bool = False) -> None:
+            super().__init__()
+            self.fail_payload_read = fail_payload_read
+            self.fail_close = fail_close
+            self.close_calls = 0
+
+        def read(self, size: int | None = -1) -> bytes:
+            if (
+                self.fail_payload_read
+                and size is not None
+                and size > len(controller_pcap._SPOOL_MAGIC)
+            ):
+                raise OSError(5, "/private/neutral-spool")
+            return super().read(size)
+
+        def close(self) -> None:
+            self.close_calls += 1
+            super().close()
+            if self.fail_close:
+                raise OSError(5, "/private/close")
+
+    repository = SaveTrackingRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Neutral fault", "filename": "neutral-fault.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+    output = TrackingSpool(fail_close=True)
+    neutral = TrackingSpool(fail_payload_read=True, fail_close=True)
+    created = iter((output, neutral))
+    monkeypatch.setattr(
+        controller_capture_sink.tempfile, "SpooledTemporaryFile", lambda **_: next(created)
+    )
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": upload.json()["id"]})
+
+    assert response.status_code == 500
+    error = response.json()["error"]
+    assert error["code"] == "PCAP_EXPORT_STORAGE_ERROR"
+    assert error["message"] == "temporary PCAP export storage failed"
+    assert "private" not in response.text
+    assert output.close_calls == neutral.close_calls == 1
+    assert repository.save_calls == 0
     assert repository.exports == {}
     assert repository.export_content == {}
 

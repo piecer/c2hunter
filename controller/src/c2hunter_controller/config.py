@@ -2,7 +2,7 @@ from ipaddress import ip_address, ip_network
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     pcap_export_scan_max_bytes: int | None = Field(default=None, gt=0)
     pcap_export_scan_max_packets: int | None = Field(default=None, gt=0)
     pcap_export_max_concurrent: int = Field(default=1, ge=1, le=16)
+    # Threshold is per spool; neutral + output replay can approach twice this memory.
+    pcap_export_spool_max_memory_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
+    pcap_export_spool_directory: str | None = None
     pcap_export_pipeline: Literal["streaming", "legacy"] = "streaming"
     inline_flow_records_enabled: bool | None = None
     # This only enables the explicitly limited development token minting endpoint.
@@ -69,6 +72,13 @@ class Settings(BaseSettings):
     misp_api_key: SecretStr = SecretStr("")
     misp_verify_tls: bool = True
     misp_default_event_id: str = Field(default="", max_length=100)
+
+    @field_validator("pcap_export_spool_directory", mode="before")
+    @classmethod
+    def normalize_blank_spool_directory(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @property
     def trusted_proxy_networks(self) -> tuple[str, ...]:

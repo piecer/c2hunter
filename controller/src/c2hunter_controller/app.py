@@ -52,6 +52,7 @@ from .ai_queueing import (
 from .allowlist_api import allowlist_router
 from .api_errors import ApiError
 from .capture_limits import allocate_sensor_limit, limit_flow_records
+from .capture_sink import CaptureLimitTooSmall, CaptureRecordError, CaptureStorageError
 from .config import Settings
 from .detection_guidance import build_detection_guidance
 from .detector_weight_presets_api import detector_weight_preset_router
@@ -82,7 +83,13 @@ from .jobs import (
 from .logging import install_access_log_redaction
 from .operations_api import operations_router
 from .payload_signatures_api import payload_signature_router
-from .pcap import build_capture_result, compile_packet_predicate, filter_records
+from .pcap import (
+    ExportPacketRecord,
+    build_capture_result,
+    build_capture_to_sink,
+    compile_packet_predicate,
+    filter_records,
+)
 from .pcap_stream import (
     CaptureIntegrityError,
     MatchedPacketRecord,
@@ -4470,23 +4477,59 @@ def create_app(
         scanned_packet_count = (
             scan_max_packets - remaining_packets if source_descriptors else len(source_records)
         )
-        if use_streaming_pipeline and source_descriptors or not source_descriptors:
-            verified_matches = VerifiedMatchedPackets(tuple(matched_records))
-            records = [record.to_writer_record() for record in verified_matches]
-        else:
-            with _measure_pcap_export_stage(stage_seconds, "filter"):
-                records = filter_records(
-                    source_records,
-                    normalized,
-                    internal_networks=list(job["internal_networks"]),
-                )
+        artifact = None
+        capture_result: Any
         try:
             max_output_bytes = cast(int, config.pcap_export_max_bytes)
             with _measure_pcap_export_stage(stage_seconds, "write"):
-                capture_result = build_capture_result(records, max_output_bytes=max_output_bytes)
+                if use_streaming_pipeline and source_descriptors or not source_descriptors:
+                    verified_matches = VerifiedMatchedPackets(tuple(matched_records))
+                    export_records = (
+                        ExportPacketRecord(
+                            record.timestamp,
+                            record.source_id,
+                            record.source_order,
+                            record.packet_index,
+                            record.section_index,
+                            record.interface_id,
+                            record.interface_ordinal,
+                            record.link_type,
+                            record.raw_packet_bytes,
+                            record.captured_length,
+                            record.original_length,
+                        )
+                        for record in verified_matches
+                    )
+                    artifact = build_capture_to_sink(
+                        export_records,
+                        max_output_bytes=max_output_bytes,
+                        spool_max_memory_bytes=config.pcap_export_spool_max_memory_bytes,
+                        spool_directory=config.pcap_export_spool_directory,
+                    )
+                    capture_result = artifact
+                else:
+                    with _measure_pcap_export_stage(stage_seconds, "filter"):
+                        records = filter_records(
+                            source_records,
+                            normalized,
+                            internal_networks=list(job["internal_networks"]),
+                        )
+                    capture_result = build_capture_result(
+                        records, max_output_bytes=max_output_bytes
+                    )
+        except CaptureStorageError as exc:
+            raise ApiError(
+                500,
+                "PCAP_EXPORT_STORAGE_ERROR",
+                "temporary PCAP export storage failed",
+            ) from exc
+        except CaptureRecordError as exc:
+            raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", str(exc)) from exc
+        except CaptureLimitTooSmall as exc:
+            raise ApiError(413, "PCAP_EXPORT_LIMIT_EXCEEDED", str(exc)) from exc
         except ValueError as exc:
             raise ApiError(413, "PCAP_EXPORT_LIMIT_EXCEEDED", str(exc)) from exc
-        content = capture_result.content
+        content_size = artifact.size_bytes if artifact is not None else len(capture_result.content)
         packet_count = capture_result.exported_packet_count
         capture_format = capture_result.capture_format
         truncation_reasons = list(
@@ -4534,7 +4577,7 @@ def create_app(
             "omitted_packet_count": capture_result.omitted_packet_count,
             "truncated": bool(truncation_reasons),
             "truncation_reasons": truncation_reasons,
-            "size_bytes": len(content),
+            "size_bytes": content_size,
             "sha256": "",
             "capture_format": capture_format,
             "filename": (f"c2hunter-{safe_job_id}-filtered{completeness}-{export_id}.{extension}"),
@@ -4553,10 +4596,25 @@ def create_app(
             "error_code": error_code,
             "error": error_message,
         }
-        with _measure_pcap_export_stage(stage_seconds, "hash"):
-            metadata["sha256"] = hashlib.sha256(content).hexdigest()
-        with _measure_pcap_export_stage(stage_seconds, "save"):
-            stored_export = repo.save_export(metadata, content)
+        if artifact is not None:
+            metadata["sha256"] = artifact.sha256
+            try:
+                with artifact:
+                    with _measure_pcap_export_stage(stage_seconds, "save"):
+                        # Stage 6 keeps byte persistence; materialize exactly once here.
+                        stored_export = repo.save_export(metadata, artifact.read_bytes())
+            except CaptureStorageError as exc:
+                raise ApiError(
+                    500,
+                    "PCAP_EXPORT_STORAGE_ERROR",
+                    "temporary PCAP export storage failed",
+                ) from exc
+        else:
+            content = capture_result.content
+            with _measure_pcap_export_stage(stage_seconds, "hash"):
+                metadata["sha256"] = hashlib.sha256(content).hexdigest()
+            with _measure_pcap_export_stage(stage_seconds, "save"):
+                stored_export = repo.save_export(metadata, content)
         if stored_export is None:
             raise ApiError(
                 409,

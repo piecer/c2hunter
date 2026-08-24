@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic Classic PCAP export baseline and report comparator."""
+"""Deterministic spooled PCAP export benchmark and report comparator."""
 
 from __future__ import annotations
 
@@ -18,10 +18,14 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from c2hunter_analysis.pcap import bounded_pcap_prefix, parse_pcap
-from c2hunter_controller.pcap import build_capture_result, filter_records
+from c2hunter_controller.pcap import (
+    ExportPacketRecord,
+    build_capture_to_sink,
+    filter_records,
+)
 
 STAGES = ("source_read", "hash", "frame", "decode", "filter", "write", "save", "total")
-IMPLEMENTATION = "classic-materialized-v1"
+IMPLEMENTATION = "spooled-boundary-aware-v1"
 DEFAULT_SEED = 20260720
 _T = TypeVar("_T")
 
@@ -177,32 +181,70 @@ def run(
         packets=parsed.captured_packet_count,
         bytes_count=prefix.scanned_bytes,
     )
-    capture = _stage(
+    input_passes = 0
+
+    def writer_records() -> Any:
+        nonlocal input_passes
+        input_passes += 1
+        for index, record in enumerate(records):
+            packet = record["raw_packet_bytes"]
+            timestamp = record["timestamp"]
+            if not isinstance(packet, bytes) or not isinstance(timestamp, datetime):
+                raise RuntimeError("benchmark parser returned an invalid writer record")
+            yield ExportPacketRecord(
+                timestamp=timestamp,
+                source_id="benchmark-source",
+                source_order=0,
+                packet_index=index,
+                section_index=int(record.get("section_index", 0)),
+                interface_id=int(record.get("raw_packet_interface_local_id", 0)),
+                interface_ordinal=int(record.get("raw_packet_interface_id", 0)),
+                link_type=int(record.get("raw_packet_link_type", 1)),
+                packet_bytes=packet,
+                captured_length=len(packet),
+                original_length=int(
+                    record.get("raw_packet_original_length", len(packet))
+                ),
+            )
+
+    capture_artifact = _stage(
         stages,
         "write",
-        lambda: build_capture_result(records, max_output_bytes=len(content)),
+        lambda: build_capture_to_sink(
+            writer_records(),
+            max_output_bytes=len(content),
+            spool_max_memory_bytes=1_024,
+        ),
         packets=len(records),
     )
+    with capture_artifact:
+        capture_content = capture_artifact.read_bytes()
+        capture_matched = capture_artifact.matched_packet_count
+        capture_exported = capture_artifact.exported_packet_count
+        capture_omitted = capture_artifact.omitted_packet_count
+        capture_size = capture_artifact.size_bytes
+        capture_sha256 = capture_artifact.sha256
+        capture_rolled = capture_artifact.rolled
     output_digest = _stage(
         stages,
         "hash",
-        lambda: hashlib.sha256(capture.content).hexdigest(),
-        bytes_count=len(capture.content),
+        lambda: hashlib.sha256(capture_content).hexdigest(),
+        bytes_count=len(capture_content),
     )
     artifact = output_dir / "pcap-export-baseline.pcap"
     _stage(
         stages,
         "save",
-        lambda: artifact.write_bytes(capture.content),
-        packets=capture.exported_packet_count,
-        bytes_count=len(capture.content),
+        lambda: artifact.write_bytes(capture_content),
+        packets=capture_exported,
+        bytes_count=len(capture_content),
     )
     total_elapsed = time.perf_counter() - total_started
-    stages["write"]["bytes"] = len(capture.content)
+    stages["write"]["bytes"] = len(capture_content)
     stages["total"] = {
         "duration_seconds": total_elapsed,
-        "packets": capture.exported_packet_count,
-        "bytes": len(capture.content),
+        "packets": capture_exported,
+        "bytes": len(capture_content),
         "rss_bytes": _rss_bytes(),
     }
 
@@ -226,11 +268,17 @@ def run(
             "packets": {
                 "source": packet_count,
                 "scanned": parsed.captured_packet_count,
-                "matched": capture.matched_packet_count,
-                "exported": capture.exported_packet_count,
-                "omitted": capture.omitted_packet_count,
+                "matched": capture_matched,
+                "exported": capture_exported,
+                "omitted": capture_omitted,
             },
-            "bytes": {"source": len(content), "output": len(capture.content)},
+            "bytes": {"source": len(content), "output": len(capture_content)},
+        },
+        "writer": {
+            "input_passes": input_passes,
+            "rolled_over": capture_rolled,
+            "artifact_size_bytes": capture_size,
+            "artifact_sha256": capture_sha256,
         },
         "peak_rss_bytes": _rss_bytes(),
     }
