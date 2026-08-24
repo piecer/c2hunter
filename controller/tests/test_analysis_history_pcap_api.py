@@ -1125,3 +1125,132 @@ def test_metric_failures_preserve_successful_artifact_and_original_early_error(
     )
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "JOB_NOT_FOUND"
+
+
+class _NarrowExportRepository(MemoryRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.full_job_reads: list[str] = []
+        self.segment_job_reads: list[str] = []
+
+    def get_job(self, job_id: str) -> dict[str, Any] | None:
+        self.full_job_reads.append(job_id)
+        return super().get_job(job_id)
+
+    def get_candidates(self, job_id: str) -> list[dict[str, Any]]:
+        raise AssertionError(f"candidate export scanned all candidates for {job_id}")
+
+    def list_sensor_pcaps(self) -> list[dict[str, Any]]:
+        raise AssertionError("PCAP export scanned every retained segment")
+
+    def list_sensor_pcaps_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        self.segment_job_reads.append(job_id)
+        return super().list_sensor_pcaps_for_job(job_id)
+
+
+def test_retained_segment_candidate_export_uses_only_narrow_metadata_reads() -> None:
+    repository = _NarrowExportRepository()
+    capture = _pcap()
+    repository.create_job(
+        {
+            "id": "narrow-live-source",
+            "idempotency_key": "narrow-live-source-key",
+            "status": "COMPLETED",
+            "mode": "LIVE",
+            "source_type": "SENSOR_CAPTURE",
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "capture": {"store_pcap": True},
+            "flow_records": [{"large": "must not hydrate"}],
+            "payload_signatures": [{"id": "must-not-hydrate"}],
+        }
+    )
+    repository.create_job(
+        {
+            "id": "narrow-live-export",
+            "idempotency_key": "narrow-live-export-key",
+            "status": "COMPLETED",
+            "mode": "REANALYSIS",
+            "parent_job_id": "narrow-live-source",
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "flow_records": [{"large": "also must not hydrate"}],
+        }
+    )
+    repository.save_candidates(
+        "narrow-live-export",
+        [{"id": "narrow-candidate", "candidate_ip": "203.0.113.77"}],
+    )
+    repository.save_sensor_pcap(
+        {
+            "id": "narrow-segment",
+            "sensor_id": "sensor-a",
+            "analysis_job_id": "narrow-live-source",
+            "filename": "narrow.pcap",
+            "size_bytes": len(capture),
+            "sha256": hashlib.sha256(capture).hexdigest(),
+            "uploaded_at": "2026-08-21T09:01:00+00:00",
+        },
+        capture,
+    )
+    client = TestClient(create_app(Settings(environment="test"), repository))
+
+    response = client.post(
+        "/api/v1/pcap-exports",
+        json={"job_id": "narrow-live-export", "candidate_id": "narrow-candidate"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "COMPLETED"
+    assert repository.full_job_reads == []
+    assert repository.segment_job_reads == ["narrow-live-export", "narrow-live-source"]
+
+
+def test_candidate_export_rejects_candidate_owned_by_another_job() -> None:
+    repository = MemoryRepository()
+    for job_id in ("requested-job", "owner-job"):
+        repository.create_job(
+            {
+                "id": job_id,
+                "idempotency_key": f"{job_id}-key",
+                "status": "COMPLETED",
+                "mode": "LIVE",
+                "internal_networks": ["10.0.0.0/8"],
+            }
+        )
+    repository.save_candidates(
+        "owner-job", [{"id": "foreign-candidate", "candidate_ip": "203.0.113.77"}]
+    )
+    client = TestClient(create_app(Settings(environment="test"), repository))
+
+    response = client.post(
+        "/api/v1/pcap-exports",
+        json={"job_id": "requested-job", "candidate_id": "foreign-candidate"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "CANDIDATE_NOT_FOUND"
+
+
+def test_legacy_export_hydrates_full_job_only_after_sources_are_absent() -> None:
+    repository = _NarrowExportRepository()
+    packet = _udp_packet("10.0.0.1", "203.0.113.77", 50001, 1)
+    repository.create_job(
+        {
+            "id": "legacy-lazy-export",
+            "idempotency_key": "legacy-lazy-export-key",
+            "status": "COMPLETED",
+            "mode": "LIVE",
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "flow_records": [_legacy_packet_record(packet, 0)],
+        }
+    )
+    client = TestClient(create_app(Settings(environment="test"), repository))
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": "legacy-lazy-export"})
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "COMPLETED"
+    assert repository.segment_job_reads == ["legacy-lazy-export"]
+    assert repository.full_job_reads == ["legacy-lazy-export"]

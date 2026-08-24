@@ -172,6 +172,10 @@ class PostgresRepository:
                         CREATE INDEX IF NOT EXISTS controller_objects_active_live_jobs
                           ON controller_objects ((data->>'status'))
                           WHERE kind='job' AND data->>'mode'='LIVE';
+                        CREATE INDEX IF NOT EXISTS controller_objects_sensor_pcap_job_uploaded_id
+                          ON controller_objects (
+                            (data->>'analysis_job_id'),(data->>'uploaded_at'),id
+                          ) WHERE kind='sensor_pcap';
 
                         INSERT INTO job_flow_records(job_id,data)
                           SELECT id,data->'flow_records'
@@ -1692,6 +1696,17 @@ class PostgresRepository:
 
     def list_sensor_pcaps(self) -> list[dict[str, Any]]:
         return self._list("sensor_pcap")
+
+    def list_sensor_pcaps_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='sensor_pcap' "
+                "AND data->>'analysis_job_id'=%s ORDER BY data->>'uploaded_at',id",
+                (job_id,),
+            )
+            rows = cursor.fetchall()
+            self.connection.commit()
+        return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
 
     def create_enrollment(self, enrollment: dict[str, Any]) -> dict[str, Any]:
         return self._put("enrollment", enrollment["enrollment_id"], enrollment)

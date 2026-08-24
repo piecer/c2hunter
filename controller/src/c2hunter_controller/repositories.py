@@ -214,6 +214,7 @@ class Repository(Protocol):
     ) -> tuple[dict[str, Any] | None, str]: ...
     def get_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], bytes] | None: ...
     def list_sensor_pcaps(self) -> list[dict[str, Any]]: ...
+    def list_sensor_pcaps_for_job(self, job_id: str) -> list[dict[str, Any]]: ...
     def create_enrollment(self, enrollment: dict[str, Any]) -> dict[str, Any]: ...
     def get_enrollment(self, enrollment_id: str) -> dict[str, Any] | None: ...
     def list_enrollments(self) -> list[dict[str, Any]]: ...
@@ -871,6 +872,21 @@ class MemoryRepository:
     def list_sensor_pcaps(self) -> list[dict[str, Any]]:
         return deepcopy(list(self.sensor_pcaps.values()))
 
+    def list_sensor_pcaps_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        return deepcopy(
+            sorted(
+                (
+                    segment
+                    for segment in self.sensor_pcaps.values()
+                    if segment.get("analysis_job_id") == job_id
+                ),
+                key=lambda segment: (
+                    str(segment.get("uploaded_at", "")),
+                    str(segment.get("id", "")),
+                ),
+            )
+        )
+
     def create_enrollment(self, enrollment: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             self.enrollments[enrollment["enrollment_id"]] = deepcopy(enrollment)
@@ -1064,6 +1080,12 @@ class SQLiteRepository:
             CREATE TABLE IF NOT EXISTS sensor_pcap_blobs (
               segment_id TEXT PRIMARY KEY, content BLOB NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS objects_sensor_pcap_job_uploaded_id
+              ON objects(
+                json_extract(data, '$.analysis_job_id'),
+                json_extract(data, '$.uploaded_at'),
+                id
+              ) WHERE kind='sensor_pcap';
         """)
         candidate_columns = {
             str(row[1]) for row in self.connection.execute("PRAGMA table_info(candidate_records)")
@@ -1971,6 +1993,16 @@ class SQLiteRepository:
 
     def list_sensor_pcaps(self) -> list[dict[str, Any]]:
         return self._list("sensor_pcap")
+
+    def list_sensor_pcaps_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT data FROM objects WHERE kind='sensor_pcap' "
+                "AND json_extract(data, '$.analysis_job_id')=? "
+                "ORDER BY json_extract(data, '$.uploaded_at'),id",
+                (job_id,),
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
 
     def create_enrollment(self, enrollment: dict[str, Any]) -> dict[str, Any]:
         return self._put("enrollment", enrollment["enrollment_id"], enrollment)

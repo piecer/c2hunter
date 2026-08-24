@@ -650,3 +650,56 @@ def test_postgres_export_save_cleans_blob_when_parent_is_missing() -> None:
     assert deleted == ["exports/export-1.pcap"]
     assert any("FOR UPDATE" in query for query in connection.queries)
     assert not any("INSERT INTO controller_objects" in query for query in connection.queries)
+
+
+class SensorPcapListCursor(FakeCursor):
+    def execute(self, query: str, params: tuple | None = None) -> None:
+        super().execute(query, params)
+        connection = cast(SensorPcapListConnection, self.connection)
+        connection.params.append(params)
+        if "kind='sensor_pcap'" in query and query.lstrip().startswith("SELECT data"):
+            self._rows = [
+                ({"id": "segment-a", "uploaded_at": "2026-08-21T09:00:00+00:00"},),
+                ({"id": "segment-b", "uploaded_at": "2026-08-21T09:00:00+00:00"},),
+            ]
+
+
+class SensorPcapListConnection(FakeConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.params: list[tuple | None] = []
+
+    def cursor(self) -> SensorPcapListCursor:
+        return SensorPcapListCursor(self)
+
+
+def test_postgres_sensor_pcap_lookup_is_job_scoped_parameterized_and_indexed() -> None:
+    repository = PostgresRepository("postgresql://controller", cast(MinioBlobStore, object()))
+    connection = SensorPcapListConnection()
+    repository._connection = connection
+
+    segments = repository.list_sensor_pcaps_for_job("job-a")
+
+    query = connection.queries[-1]
+    assert "kind='sensor_pcap'" in query
+    assert "data->>'analysis_job_id'=%s" in query
+    assert "ORDER BY data->>'uploaded_at',id" in query
+    assert connection.params[-1] == ("job-a",)
+    assert [segment["id"] for segment in segments] == ["segment-a", "segment-b"]
+
+
+def test_postgres_schema_indexes_sensor_pcaps_by_job_and_export_order(monkeypatch: Any) -> None:
+    connection = FakeConnection()
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg",
+        SimpleNamespace(connect=lambda *_args, **_kwargs: connection),
+    )
+    repository = PostgresRepository("postgresql://controller", cast(MinioBlobStore, object()))
+
+    _ = repository.connection
+
+    schema = connection.queries[0]
+    assert "controller_objects_sensor_pcap_job_uploaded_id" in schema
+    assert "data->>'analysis_job_id'" in schema
+    assert "data->>'uploaded_at'" in schema

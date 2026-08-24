@@ -168,3 +168,41 @@ def test_sqlite_sensor_pcap_admission_rejects_terminal_job(tmp_path) -> None:
     assert stored is None
     assert status == "JOB_CLOSED"
     assert repository.list_sensor_pcaps() == []
+
+
+@pytest.mark.parametrize("repository_kind", ["memory", "sqlite"])
+def test_sensor_pcaps_for_job_are_scoped_and_deterministically_ordered(
+    tmp_path, repository_kind: str
+) -> None:
+    repository = (
+        MemoryRepository()
+        if repository_kind == "memory"
+        else SQLiteRepository(tmp_path / "job-segments.db")
+    )
+    for segment_id, job_id, uploaded_at in (
+        ("segment-b", "job-a", "2026-08-21T09:00:00+00:00"),
+        ("segment-c", "job-b", "2026-08-21T08:00:00+00:00"),
+        ("segment-a", "job-a", "2026-08-21T09:00:00+00:00"),
+        ("segment-d", "job-a", "2026-08-21T10:00:00+00:00"),
+    ):
+        repository.save_sensor_pcap(
+            {
+                "id": segment_id,
+                "sensor_id": "sensor-a",
+                "analysis_job_id": job_id,
+                "uploaded_at": uploaded_at,
+                "size_bytes": 1,
+                "sha256": "digest",
+            },
+            b"x",
+        )
+
+    assert [segment["id"] for segment in repository.list_sensor_pcaps_for_job("job-a")] == [
+        "segment-a",
+        "segment-b",
+        "segment-d",
+    ]
+
+    if isinstance(repository, SQLiteRepository):
+        indexes = repository.connection.execute("PRAGMA index_list(objects)").fetchall()
+        assert any(row[1] == "objects_sensor_pcap_job_uploaded_id" for row in indexes)

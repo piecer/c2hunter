@@ -3982,7 +3982,7 @@ def create_app(
     def _create_pcap_export(
         payload: PcapExportCreate, stage_seconds: dict[str, float]
     ) -> dict[str, Any]:
-        job = repo.get_job(payload.job_id)
+        job = repo.get_job_summary(payload.job_id)
         if job is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
         if job.get("mode") == "LIVE" and job.get("status") != JobState.COMPLETED:
@@ -3993,16 +3993,10 @@ def create_app(
             )
         candidate_ip = None
         if payload.candidate_id:
-            candidate = next(
-                (
-                    item
-                    for item in repo.get_candidates(payload.job_id)
-                    if item["id"] == payload.candidate_id
-                ),
-                None,
-            )
-            if candidate is None:
+            found_candidate = repo.get_candidate(payload.candidate_id)
+            if found_candidate is None or found_candidate[0] != payload.job_id:
                 raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
+            candidate = found_candidate[1]
             candidate_ip = candidate["candidate_ip"]
         normalized = payload.model_dump(mode="json", exclude_none=True)
         normalized["candidate_ip"] = candidate_ip
@@ -4026,14 +4020,7 @@ def create_app(
                 retained_capture = repo.get_job_capture(source_job_id)
             if retained_capture is not None:
                 break
-            segment_metadata = sorted(
-                (
-                    item
-                    for item in repo.list_sensor_pcaps()
-                    if item.get("analysis_job_id") == source_job_id
-                ),
-                key=lambda item: (str(item.get("uploaded_at", "")), str(item.get("id", ""))),
-            )
+            segment_metadata = repo.list_sensor_pcaps_for_job(source_job_id)
             if segment_metadata:
                 if (
                     source_job.get("mode") == "LIVE"
@@ -4048,7 +4035,7 @@ def create_app(
             parent_id = source_job.get("parent_job_id")
             if not parent_id:
                 break
-            parent = repo.get_job(str(parent_id))
+            parent = repo.get_job_summary(str(parent_id))
             if parent is None:
                 raise ApiError(
                     409, "PCAP_SOURCE_PROVENANCE_INVALID", "PCAP source analysis missing"
@@ -4220,9 +4207,10 @@ def create_app(
                 break
 
         if not source_descriptors:
+            hydrated_source_job = repo.get_job(source_job_id)
             fallback_records = [
                 dict(record)
-                for record in source_job.get("flow_records", [])
+                for record in (hydrated_source_job or {}).get("flow_records", [])
                 if record.get("raw_packet_hex")
             ]
             try:
