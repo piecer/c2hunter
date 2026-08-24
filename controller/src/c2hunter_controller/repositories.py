@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +13,88 @@ from typing import Any, Protocol
 
 _AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 _JOB_TERMINAL_STATUSES = {"COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELLED"}
+_DEFAULT_CAPTURE_CHUNK_SIZE = 64 * 1024
+
+
+class _CaptureStream(Protocol):
+    def read(self, size: int | None = -1, /) -> bytes: ...
+    def close(self) -> None: ...
+
+
+class CaptureSource:
+    """An owned stream for one immutable capture version.
+
+    ``read()`` is always bounded: omitted, ``None``, and non-positive sizes read at
+    most one 64 KiB chunk. Positive sizes are forwarded exactly, and EOF is
+    reported as ``b""``. Use :meth:`iter_chunks` or a compatibility adapter to
+    drain the stream.
+    """
+
+    def __init__(
+        self, stream: _CaptureStream, version_id: str, *, release_conn: Any = None
+    ) -> None:
+        if not version_id:
+            raise ValueError("capture source requires an immutable version identity")
+        self._stream = stream
+        self._version_id = version_id
+        self._release_conn = release_conn
+        self._closed = False
+
+    @property
+    def version_id(self) -> str:
+        return self._version_id
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def read(self, size: int | None = -1) -> bytes:
+        """Read one bounded chunk without requesting an unbounded backend read."""
+        if self._closed:
+            raise ValueError("I/O operation on closed capture source")
+        bounded_size = size if size is not None and size > 0 else _DEFAULT_CAPTURE_CHUNK_SIZE
+        chunk = self._stream.read(bounded_size)
+        if not isinstance(chunk, bytes):
+            raise TypeError("capture stream read must return bytes")
+        return chunk
+
+    def iter_chunks(self, chunk_size: int = _DEFAULT_CAPTURE_CHUNK_SIZE) -> Iterator[bytes]:
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        while (chunk := self.read(chunk_size)) != b"":
+            yield chunk
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close_error: BaseException | None = None
+        try:
+            self._stream.close()
+        except BaseException as exc:
+            close_error = exc
+        try:
+            if self._release_conn is not None:
+                self._release_conn()
+        except BaseException:
+            if close_error is None:
+                raise
+        if close_error is not None:
+            raise close_error
+
+    def __enter__(self) -> CaptureSource:
+        if self._closed:
+            raise ValueError("I/O operation on closed capture source")
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+
+def _bytes_source(content: bytes) -> CaptureSource:
+    snapshot = bytes(content)
+    digest = hashlib.sha256(snapshot).hexdigest()
+    return CaptureSource(io.BytesIO(snapshot), f"sha256:{digest}")
 
 
 def _valid_candidate_decision_record(decision: dict[str, Any]) -> bool:
@@ -111,6 +196,7 @@ class Repository(Protocol):
     def list_active_live_jobs(self) -> list[dict[str, Any]]: ...
     def delete_job(self, job_id: str) -> bool: ...
     def save_job_capture(self, job_id: str, content: bytes) -> None: ...
+    def open_job_capture(self, job_id: str) -> CaptureSource | None: ...
     def get_job_capture(self, job_id: str) -> bytes | None: ...
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None: ...
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]: ...
@@ -213,6 +299,7 @@ class Repository(Protocol):
         require_open_job: bool = False,
     ) -> tuple[dict[str, Any] | None, str]: ...
     def get_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], bytes] | None: ...
+    def open_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], CaptureSource] | None: ...
     def list_sensor_pcaps(self) -> list[dict[str, Any]]: ...
     def list_sensor_pcaps_for_job(self, job_id: str) -> list[dict[str, Any]]: ...
     def create_enrollment(self, enrollment: dict[str, Any]) -> dict[str, Any]: ...
@@ -417,9 +504,17 @@ class MemoryRepository:
         with self._lock:
             self.job_captures[job_id] = bytes(content)
 
+    def open_job_capture(self, job_id: str) -> CaptureSource | None:
+        with self._lock:
+            content = self.job_captures.get(job_id)
+            return _bytes_source(content) if content is not None else None
+
     def get_job_capture(self, job_id: str) -> bytes | None:
-        content = self.job_captures.get(job_id)
-        return bytes(content) if content is not None else None
+        source = self.open_job_capture(job_id)
+        if source is None:
+            return None
+        with source:
+            return b"".join(source.iter_chunks())
 
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None:
         with self._lock:
@@ -865,9 +960,20 @@ class MemoryRepository:
             return deepcopy(segment), "OK"
 
     def get_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], bytes] | None:
-        if segment_id not in self.sensor_pcaps:
+        opened = self.open_sensor_pcap(segment_id)
+        if opened is None:
             return None
-        return deepcopy(self.sensor_pcaps[segment_id]), bytes(self.sensor_pcap_content[segment_id])
+        metadata, source = opened
+        with source:
+            return metadata, b"".join(source.iter_chunks())
+
+    def open_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], CaptureSource] | None:
+        with self._lock:
+            metadata = self.sensor_pcaps.get(segment_id)
+            content = self.sensor_pcap_content.get(segment_id)
+            if metadata is None or content is None:
+                return None
+            return deepcopy(metadata), _bytes_source(content)
 
     def list_sensor_pcaps(self) -> list[dict[str, Any]]:
         return deepcopy(list(self.sensor_pcaps.values()))
@@ -1233,7 +1339,8 @@ class SQLiteRepository:
             return False
 
     def close(self) -> None:
-        self.connection.close()
+        with self._lock:
+            self.connection.close()
 
     def upsert_sensor(self, sensor: dict[str, Any]) -> dict[str, Any]:
         return self._put("sensor", sensor["sensor_id"], sensor)
@@ -1401,10 +1508,18 @@ class SQLiteRepository:
             self.connection.commit()
 
     def get_job_capture(self, job_id: str) -> bytes | None:
-        row = self.connection.execute(
-            "SELECT content FROM job_capture_blobs WHERE job_id=?", (job_id,)
-        ).fetchone()
-        return bytes(row[0]) if row else None
+        source = self.open_job_capture(job_id)
+        if source is None:
+            return None
+        with source:
+            return b"".join(source.iter_chunks())
+
+    def open_job_capture(self, job_id: str) -> CaptureSource | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT content FROM job_capture_blobs WHERE job_id=?", (job_id,)
+            ).fetchone()
+            return _bytes_source(bytes(row[0])) if row else None
 
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None:
         with self._lock:
@@ -1985,11 +2100,24 @@ class SQLiteRepository:
                 raise
 
     def get_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], bytes] | None:
-        metadata = self._get("sensor_pcap", segment_id)
-        row = self.connection.execute(
-            "SELECT content FROM sensor_pcap_blobs WHERE segment_id=?", (segment_id,)
-        ).fetchone()
-        return (metadata, bytes(row[0])) if metadata is not None and row else None
+        opened = self.open_sensor_pcap(segment_id)
+        if opened is None:
+            return None
+        metadata, source = opened
+        with source:
+            return metadata, b"".join(source.iter_chunks())
+
+    def open_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], CaptureSource] | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT objects.data,sensor_pcap_blobs.content FROM objects "
+                "JOIN sensor_pcap_blobs ON sensor_pcap_blobs.segment_id=objects.id "
+                "WHERE objects.kind='sensor_pcap' AND objects.id=?",
+                (segment_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return json.loads(row[0]), _bytes_source(bytes(row[1]))
 
     def list_sensor_pcaps(self) -> list[dict[str, Any]]:
         return self._list("sensor_pcap")

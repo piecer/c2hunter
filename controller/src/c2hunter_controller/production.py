@@ -10,9 +10,19 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
+from c2hunter_controller.repositories import CaptureSource
+
 _AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 _JOB_TERMINAL_STATUSES = {"COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELLED"}
 logger = logging.getLogger(__name__)
+
+_MISSING_OBJECT_CODES = {"NoSuchKey", "NoSuchObject", "NoSuchVersion"}
+
+
+def _is_missing_object_error(exc: Exception) -> bool:
+    return isinstance(exc, FileNotFoundError | KeyError) or getattr(exc, "code", None) in (
+        _MISSING_OBJECT_CODES
+    )
 
 
 class MinioBlobStore:
@@ -50,12 +60,45 @@ class MinioBlobStore:
         )
 
     def get(self, key: str) -> bytes:
+        source = self.open(key)
+        with source:
+            return b"".join(source.iter_chunks())
+
+    def open(self, key: str) -> CaptureSource:
         response = self.client.get_object(self.bucket, key)
         try:
-            return bytes(response.read())
-        finally:
-            response.close()
-            response.release_conn()
+            headers = getattr(response, "headers", {})
+            normalized_headers = {str(name).lower(): str(value) for name, value in headers.items()}
+            object_version = normalized_headers.get("x-amz-version-id", "").strip()
+            version_id = (
+                f"s3-version:{object_version}"
+                if object_version and object_version.lower() != "null"
+                else None
+            )
+            if version_id is None:
+                etag = normalized_headers.get("etag", "").strip().strip('"').strip()
+                version_id = f"etag:{etag}" if etag else None
+            if version_id is None:
+                raise ValueError("object response lacks immutable version identity")
+            release_conn = response.release_conn
+            return CaptureSource(response, version_id, release_conn=release_conn)
+        except Exception:
+            try:
+                response.close()
+            except Exception:
+                logger.debug(
+                    "Capture response close failed during cleanup; preserving primary open error",
+                    exc_info=True,
+                )
+            try:
+                response.release_conn()
+            except Exception:
+                logger.debug(
+                    "Capture response connection release failed during cleanup; "
+                    "preserving primary open error",
+                    exc_info=True,
+                )
+            raise
 
     def delete(self, key: str) -> None:
         self.client.remove_object(self.bucket, key)
@@ -828,13 +871,17 @@ class PostgresRepository:
         self.blob_store.put(self._capture_key(job_id), content)
 
     def get_job_capture(self, job_id: str) -> bytes | None:
+        source = self.open_job_capture(job_id)
+        if source is None:
+            return None
+        with source:
+            return b"".join(source.iter_chunks())
+
+    def open_job_capture(self, job_id: str) -> CaptureSource | None:
         try:
-            return self.blob_store.get(self._capture_key(job_id))
+            return self.blob_store.open(self._capture_key(job_id))
         except Exception as exc:
-            if isinstance(exc, FileNotFoundError | KeyError) or getattr(exc, "code", None) in {
-                "NoSuchKey",
-                "NoSuchObject",
-            }:
+            if _is_missing_object_error(exc):
                 return None
             raise
 
@@ -1689,10 +1736,24 @@ class PostgresRepository:
                 raise
 
     def get_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], bytes] | None:
+        opened = self.open_sensor_pcap(segment_id)
+        if opened is None:
+            return None
+        metadata, source = opened
+        with source:
+            return metadata, b"".join(source.iter_chunks())
+
+    def open_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], CaptureSource] | None:
         metadata = self._get("sensor_pcap", segment_id)
         if metadata is None:
             return None
-        return metadata, self.blob_store.get(str(metadata["object_key"]))
+        try:
+            source = self.blob_store.open(str(metadata["object_key"]))
+        except Exception as exc:
+            if _is_missing_object_error(exc):
+                return None
+            raise
+        return deepcopy(metadata), source
 
     def list_sensor_pcaps(self) -> list[dict[str, Any]]:
         return self._list("sensor_pcap")

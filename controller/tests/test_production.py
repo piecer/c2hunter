@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import logging
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -8,7 +10,9 @@ from typing import Any, cast
 
 import pytest
 
+import c2hunter_controller.production as production
 from c2hunter_controller.production import MinioBlobStore, PostgresRepository
+from c2hunter_controller.repositories import CaptureSource
 
 
 class FakeCursor:
@@ -703,3 +707,162 @@ def test_postgres_schema_indexes_sensor_pcaps_by_job_and_export_order(monkeypatc
     assert "controller_objects_sensor_pcap_job_uploaded_id" in schema
     assert "data->>'analysis_job_id'" in schema
     assert "data->>'uploaded_at'" in schema
+
+
+class TrackingObjectResponse:
+    def __init__(self, content: bytes, headers: dict[str, str]) -> None:
+        self.content = content
+        self.headers = headers
+        self.offset = 0
+        self.read_sizes: list[int] = []
+        self.close_count = 0
+        self.release_count = 0
+
+    def read(self, size: int = -1) -> bytes:
+        self.read_sizes.append(size)
+        if size < 0:
+            raise AssertionError("streaming source used an unbounded response.read")
+        chunk = self.content[self.offset : self.offset + size]
+        self.offset += len(chunk)
+        return chunk
+
+    def close(self) -> None:
+        self.close_count += 1
+
+    def release_conn(self) -> None:
+        self.release_count += 1
+
+
+def _blob_store_with_response(response: TrackingObjectResponse) -> MinioBlobStore:
+    store = MinioBlobStore.__new__(MinioBlobStore)
+    store.bucket = "captures"
+    store.client = SimpleNamespace(get_object=lambda bucket, key: response)
+    return store
+
+
+def test_minio_open_is_lazy_bounded_and_releases_connection_once() -> None:
+    response = TrackingObjectResponse(b"abcdefgh", {"x-amz-version-id": "version-7"})
+    store = _blob_store_with_response(response)
+
+    source = store.open("captures/job-a.pcap")
+
+    assert response.read_sizes == []
+    assert source.version_id == "s3-version:version-7"
+    assert list(source.iter_chunks(3)) == [b"abc", b"def", b"gh"]
+    assert response.read_sizes == [3, 3, 3, 3]
+    source.close()
+    source.close()
+    assert response.close_count == 1
+    assert response.release_count == 1
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        (
+            {"x-amz-version-id": "immutable-version", "etag": '"ignored"'},
+            "s3-version:immutable-version",
+        ),
+        ({"ETag": '"opaque-etag"'}, "etag:opaque-etag"),
+        ({"x-amz-version-id": "", "ETag": ' "empty-fallback" '}, "etag:empty-fallback"),
+        ({"x-amz-version-id": "null", "ETag": '"null-fallback"'}, "etag:null-fallback"),
+        ({"x-amz-version-id": " NuLl ", "ETag": '"case-fallback"'}, "etag:case-fallback"),
+    ],
+)
+def test_minio_version_identity_prefers_version_and_normalizes_etag(
+    headers: dict[str, str], expected: str
+) -> None:
+    response = TrackingObjectResponse(b"payload", headers)
+    source = _blob_store_with_response(response).open("mutable-key")
+
+    assert source.version_id == expected
+    source.close()
+
+
+def test_minio_open_without_version_identity_closes_response_and_fails() -> None:
+    response = TrackingObjectResponse(b"payload", {})
+
+    with pytest.raises(ValueError, match="version identity") as raised:
+        _blob_store_with_response(response).open("mutable-key")
+
+    assert not isinstance(raised.value, KeyError)
+    assert response.read_sizes == []
+    assert response.close_count == 1
+    assert response.release_count == 1
+
+
+def test_minio_open_releases_response_when_source_construction_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = TrackingObjectResponse(b"payload", {"etag": '"etag-a"'})
+
+    def fail_construction(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("construction failed")
+
+    monkeypatch.setattr(production, "CaptureSource", fail_construction)
+
+    with pytest.raises(RuntimeError, match="construction failed"):
+        _blob_store_with_response(response).open("mutable-key")
+
+    assert response.read_sizes == []
+    assert response.close_count == 1
+    assert response.release_count == 1
+
+
+def test_minio_cleanup_failures_are_logged_without_masking_primary_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    class CleanupFailingResponse(TrackingObjectResponse):
+        def close(self) -> None:
+            super().close()
+            raise RuntimeError("close cleanup failed")
+
+        def release_conn(self) -> None:
+            super().release_conn()
+            raise RuntimeError("release cleanup failed")
+
+    response = CleanupFailingResponse(b"payload", {"etag": '"etag-a"'})
+
+    def fail_construction(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("primary construction failed")
+
+    monkeypatch.setattr(production, "CaptureSource", fail_construction)
+    caplog.set_level(logging.DEBUG, logger=production.__name__)
+
+    with pytest.raises(RuntimeError, match="primary construction failed"):
+        _blob_store_with_response(response).open("mutable-key")
+
+    assert response.close_count == 1
+    assert response.release_count == 1
+    assert "close cleanup failed" in caplog.text
+    assert "release cleanup failed" in caplog.text
+
+
+def test_minio_compatibility_get_drains_and_closes_stream() -> None:
+    response = TrackingObjectResponse(b"legacy-bytes", {"etag": '"etag-a"'})
+
+    assert _blob_store_with_response(response).get("key") == b"legacy-bytes"
+    assert response.close_count == 1
+    assert response.release_count == 1
+
+
+def test_postgres_sensor_open_uses_metadata_object_key_and_returns_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = {"id": "segment-a", "object_key": "custom/object.pcap", "nested": {"a": 1}}
+    opened_keys: list[str] = []
+    source = CaptureSource(io.BytesIO(b"sensor"), "object-version")
+    blob_store = SimpleNamespace(open=lambda key: (opened_keys.append(key), source)[1])
+    repository = PostgresRepository.__new__(PostgresRepository)
+    repository.blob_store = blob_store
+    monkeypatch.setattr(repository, "_get", lambda kind, object_id: metadata)
+
+    opened = repository.open_sensor_pcap("segment-a")
+
+    assert opened is not None
+    opened_metadata, opened_source = opened
+    metadata["nested"]["a"] = 2
+    assert opened_keys == ["custom/object.pcap"]
+    assert opened_metadata["nested"] == {"a": 1}
+    assert opened_source.version_id == "object-version"
+    opened_source.close()
