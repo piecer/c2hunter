@@ -14,12 +14,23 @@ from functools import wraps
 from typing import Any, BinaryIO, cast
 from uuid import uuid4
 
+from c2hunter_analysis.pcap_index import StructuralInterfaceEntry, StructuralPacketEntry
+
 from c2hunter_controller.pcap_export_store import (
     TERMINAL_EXPORT_STATES,
     ExportPrincipalLimitError,
     ExportQueueFullError,
     ExportQueueStorageError,
     ExportSourceChangedError,
+)
+from c2hunter_controller.pcap_offset_index import (
+    CaptureSourceVersion,
+    IndexAvailability,
+    SourceIndexBinding,
+    StructuralIndexLookup,
+    StructuralIndexSnapshot,
+    structural_index_digest,
+    validate_structural_index,
 )
 from c2hunter_controller.repositories import (
     ArtifactAlreadyExistsError,
@@ -28,6 +39,7 @@ from c2hunter_controller.repositories import (
     ArtifactStorageError,
     ArtifactWriteResult,
     CaptureSource,
+    _job_matches_structural_binding,
     _pcap_export_snapshot,
 )
 
@@ -1499,6 +1511,71 @@ class PostgresRepository:
                           artifact_size_bytes bigint,
                           data jsonb NOT NULL
                         );
+                        CREATE TABLE IF NOT EXISTS pcap_capture_source_versions (
+                          source_kind text NOT NULL CHECK(source_kind='PCAP_UPLOAD'),
+                          source_id text NOT NULL,
+                          object_key text NOT NULL,
+                          source_version_id text NOT NULL,
+                          source_size_bytes bigint NOT NULL CHECK(source_size_bytes>=0),
+                          source_sha256 text NOT NULL,
+                          updated_at timestamptz NOT NULL,
+                          PRIMARY KEY(source_kind,source_id)
+                        );
+                        CREATE TABLE IF NOT EXISTS pcap_offset_index_generations (
+                          build_id text PRIMARY KEY,
+                          source_kind text NOT NULL CHECK(source_kind='PCAP_UPLOAD'),
+                          source_id text NOT NULL,
+                          source_version_id text NOT NULL,
+                          source_size_bytes bigint NOT NULL CHECK(source_size_bytes>=0),
+                          source_sha256 text NOT NULL,
+                          capture_format text NOT NULL CHECK(capture_format IN ('PCAP','PCAPNG')),
+                          schema_version integer NOT NULL,
+                          parser_contract_version integer NOT NULL,
+                          state text NOT NULL CHECK(state IN ('STAGING','READY')),
+                          created_at timestamptz NOT NULL,
+                          packet_count bigint,
+                          interface_count integer,
+                          index_sha256 text
+                        );
+                        CREATE TABLE IF NOT EXISTS pcap_offset_index_interfaces (
+                          build_id text NOT NULL
+                            REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
+                          interface_ordinal integer NOT NULL,
+                          section_index integer NOT NULL,
+                          interface_id integer NOT NULL,
+                          link_type integer NOT NULL,
+                          snaplen bigint NOT NULL,
+                          timestamp_resolution_numerator bigint NOT NULL,
+                          timestamp_resolution_denominator bigint NOT NULL,
+                          timestamp_offset_seconds bigint NOT NULL,
+                          PRIMARY KEY(build_id,interface_ordinal)
+                        );
+                        CREATE TABLE IF NOT EXISTS pcap_offset_index_packets (
+                          build_id text NOT NULL
+                            REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
+                          packet_index bigint NOT NULL,
+                          record_offset bigint NOT NULL,
+                          data_offset bigint NOT NULL,
+                          captured_length bigint NOT NULL,
+                          original_length bigint NOT NULL,
+                          framed_length bigint NOT NULL,
+                          section_index integer NOT NULL,
+                          interface_id integer NOT NULL,
+                          interface_ordinal integer NOT NULL,
+                          raw_timestamp_ticks numeric(20,0) NOT NULL,
+                          PRIMARY KEY(build_id,packet_index)
+                        );
+                        CREATE TABLE IF NOT EXISTS pcap_offset_index_owners (
+                          source_kind text NOT NULL,
+                          source_id text NOT NULL,
+                          build_id text NOT NULL UNIQUE
+                            REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
+                          PRIMARY KEY(source_kind,source_id)
+                        );
+                        CREATE INDEX IF NOT EXISTS pcap_offset_index_generations_staging
+                          ON pcap_offset_index_generations(state,created_at,build_id);
+                        CREATE INDEX IF NOT EXISTS pcap_offset_index_packets_lookup
+                          ON pcap_offset_index_packets(build_id,packet_index);
                         CREATE UNIQUE INDEX IF NOT EXISTS pcap_export_jobs_principal_idempotency
                           ON pcap_export_jobs(principal_scope,idempotency_key)
                           WHERE idempotency_key IS NOT NULL;
@@ -2197,6 +2274,14 @@ class PostgresRepository:
             cursor.execute("DELETE FROM job_flow_record_chunks WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM job_flow_records WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM job_payload_signatures WHERE job_id=%s", (job_id,))
+            cursor.execute(
+                "DELETE FROM pcap_offset_index_generations WHERE source_id=%s", (job_id,)
+            )
+            cursor.execute(
+                "DELETE FROM pcap_capture_source_versions WHERE source_kind='PCAP_UPLOAD' "
+                "AND source_id=%s",
+                (job_id,),
+            )
             cursor.execute("DELETE FROM job_idempotency WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM controller_objects WHERE kind='job' AND id=%s", (job_id,))
             self._audit("job-delete", job_id, {"id": job_id})
@@ -2232,8 +2317,124 @@ class PostgresRepository:
     def _capture_key(job_id: str) -> str:
         return f"captures/{job_id}.pcap"
 
+    def _cleanup_failed_capture_upload(self, job_id: str, object_key: str) -> None:
+        cleanup_id = self._pcap_cleanup_id(f"capture-upload:{job_id}", object_key)
+        try:
+            with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT source_version_id FROM pcap_capture_source_versions "
+                    "WHERE source_kind='PCAP_UPLOAD' AND source_id=%s FOR UPDATE",
+                    (job_id,),
+                )
+                if cursor.fetchone() is not None:
+                    self.connection.commit()
+                    return
+                cursor.execute(
+                    "INSERT INTO controller_objects(kind,id,data) "
+                    "VALUES('pcap_export_cleanup',%s,%s::jsonb) "
+                    "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                    (
+                        cleanup_id,
+                        self._json(
+                            {
+                                "object_key": object_key,
+                                "created_at": datetime.now(UTC).isoformat(),
+                            }
+                        ),
+                    ),
+                )
+                self.connection.commit()
+        except Exception as exc:
+            raise ArtifactStorageError("capture cleanup intent unavailable") from exc
+        try:
+            self.blob_store.delete(object_key)
+        except Exception:
+            logger.warning(
+                "Failed to delete unowned capture upload %s; cleanup remains queued",
+                object_key,
+                exc_info=True,
+            )
+            return
+        try:
+            with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM controller_objects WHERE kind='pcap_export_cleanup' AND id=%s "
+                    "AND data->>'object_key'=%s",
+                    (cleanup_id, object_key),
+                )
+                self.connection.commit()
+        except Exception:
+            logger.warning(
+                "Failed to acknowledge capture upload cleanup %s",
+                object_key,
+                exc_info=True,
+            )
+
     def save_job_capture(self, job_id: str, content: bytes) -> None:
-        self.blob_store.put(self._capture_key(job_id), content)
+        object_key = self._capture_key(job_id)
+        expected_size = len(content)
+        expected_sha256 = hashlib.sha256(content).hexdigest()
+        try:
+            self.blob_store.put(object_key, content)
+            source = self.blob_store.open(object_key)
+            with source:
+                digest = hashlib.sha256()
+                actual_size = 0
+                for chunk in source.iter_chunks():
+                    actual_size += len(chunk)
+                    digest.update(chunk)
+                source_version_id = source.version_id
+        except ArtifactStorageError:
+            raise
+        except Exception as exc:
+            raise ArtifactStorageError("MinIO capture upload verification failed") from exc
+        if actual_size != expected_size or digest.hexdigest() != expected_sha256:
+            raise ArtifactStorageError("MinIO capture upload verification mismatch")
+
+        try:
+            with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT data FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
+                    (job_id,),
+                )
+                row = cursor.fetchone()
+                job = None
+                if row is not None:
+                    job = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+                source_metadata = job.get("source") if isinstance(job, dict) else None
+                if (
+                    not isinstance(job, dict)
+                    or job.get("id") != job_id
+                    or job.get("mode") != "PCAP_UPLOAD"
+                    or not isinstance(source_metadata, dict)
+                    or source_metadata.get("packet_bytes_retained") is not True
+                    or int(source_metadata.get("size_bytes", -1)) != expected_size
+                    or source_metadata.get("sha256") != expected_sha256
+                ):
+                    self.connection.rollback()
+                    raise ArtifactStorageError("canonical capture metadata does not match upload")
+                cursor.execute(
+                    "INSERT INTO pcap_capture_source_versions("
+                    "source_kind,source_id,object_key,source_version_id,source_size_bytes,"
+                    "source_sha256,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s) "
+                    "ON CONFLICT(source_kind,source_id) DO UPDATE SET "
+                    "object_key=excluded.object_key,source_version_id=excluded.source_version_id,"
+                    "source_size_bytes=excluded.source_size_bytes,source_sha256=excluded.source_sha256,"
+                    "updated_at=excluded.updated_at",
+                    (
+                        "PCAP_UPLOAD",
+                        job_id,
+                        object_key,
+                        source_version_id,
+                        expected_size,
+                        expected_sha256,
+                        datetime.now(UTC),
+                    ),
+                )
+                self.connection.commit()
+        except Exception as exc:
+            self._cleanup_failed_capture_upload(job_id, object_key)
+            raise ArtifactStorageError("capture version persistence failed") from exc
 
     def get_job_capture(self, job_id: str) -> bytes | None:
         source = self.open_job_capture(job_id)
@@ -2249,6 +2450,378 @@ class PostgresRepository:
             if _is_missing_object_error(exc):
                 return None
             raise
+
+    def get_capture_source_version(self, job_id: str) -> CaptureSourceVersion | None:
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT source_kind,source_id,object_key,source_version_id,"
+                "source_size_bytes,source_sha256 FROM pcap_capture_source_versions "
+                "WHERE source_kind='PCAP_UPLOAD' AND source_id=%s",
+                (job_id,),
+            )
+            row = cursor.fetchone()
+            self.connection.commit()
+        if row is None:
+            return None
+        return CaptureSourceVersion(
+            source_kind=row[0],
+            source_id=str(row[1]),
+            object_key=str(row[2]),
+            source_version_id=str(row[3]),
+            source_size_bytes=int(row[4]),
+            source_sha256=str(row[5]),
+        )
+
+    def begin_structural_index(
+        self, build_id: str, binding: SourceIndexBinding, created_at: datetime
+    ) -> None:
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO pcap_offset_index_generations("
+                "build_id,source_kind,source_id,source_version_id,source_size_bytes,"
+                "source_sha256,capture_format,schema_version,parser_contract_version,"
+                "state,created_at) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,'STAGING',%s)",
+                (
+                    build_id,
+                    binding.source_kind,
+                    binding.source_id,
+                    binding.source_version_id,
+                    binding.source_size_bytes,
+                    binding.source_sha256,
+                    binding.capture_format,
+                    binding.schema_version,
+                    binding.parser_contract_version,
+                    created_at,
+                ),
+            )
+            self.connection.commit()
+
+    def stage_structural_index_packets(
+        self, build_id: str, packets: tuple[StructuralPacketEntry, ...]
+    ) -> None:
+        if not packets:
+            return
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT build_id FROM pcap_offset_index_generations "
+                "WHERE build_id=%s AND state='STAGING' FOR UPDATE",
+                (build_id,),
+            )
+            generation = cursor.fetchone()
+            if generation is None or str(generation[0]) != build_id:
+                raise ValueError("structural index build is not staging")
+            cursor.execute(
+                "SELECT COALESCE(MAX(packet_index)+1,0) FROM pcap_offset_index_packets "
+                "WHERE build_id=%s",
+                (build_id,),
+            )
+            row = cursor.fetchone()
+            if row is None or int(row[0]) != packets[0].packet_index:
+                raise ValueError("structural packet rows are not contiguous")
+            cursor.executemany(
+                "INSERT INTO pcap_offset_index_packets("
+                "build_id,packet_index,record_offset,data_offset,captured_length,original_length,"
+                "framed_length,section_index,interface_id,interface_ordinal,raw_timestamp_ticks) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                [
+                    (
+                        build_id,
+                        packet.packet_index,
+                        packet.record_offset,
+                        packet.data_offset,
+                        packet.captured_length,
+                        packet.original_length,
+                        packet.framed_length,
+                        packet.section_index,
+                        packet.interface_id,
+                        packet.interface_ordinal,
+                        packet.raw_timestamp_ticks,
+                    )
+                    for packet in packets
+                ],
+            )
+            self.connection.commit()
+
+    @staticmethod
+    def _structural_binding_from_row(row: tuple[Any, ...]) -> SourceIndexBinding:
+        return SourceIndexBinding(
+            source_kind=row[0],
+            source_id=str(row[1]),
+            source_version_id=str(row[2]),
+            source_size_bytes=int(row[3]),
+            source_sha256=str(row[4]),
+            capture_format=row[5],
+            schema_version=int(row[6]),
+            parser_contract_version=int(row[7]),
+        )
+
+    @classmethod
+    def _load_structural_snapshot(
+        cls, cursor: Any, build_id: str
+    ) -> StructuralIndexSnapshot | None:
+        cursor.execute(
+            "SELECT source_kind,source_id,source_version_id,source_size_bytes,source_sha256,"
+            "capture_format,schema_version,parser_contract_version,created_at,index_sha256,"
+            "packet_count,interface_count "
+            "FROM pcap_offset_index_generations WHERE build_id=%s AND state='READY'",
+            (build_id,),
+        )
+        generation = cursor.fetchone()
+        if generation is None or generation[9] is None:
+            return None
+        cursor.execute(
+            "SELECT section_index,interface_id,interface_ordinal,link_type,snaplen,"
+            "timestamp_resolution_numerator,timestamp_resolution_denominator,"
+            "timestamp_offset_seconds FROM pcap_offset_index_interfaces "
+            "WHERE build_id=%s ORDER BY interface_ordinal",
+            (build_id,),
+        )
+        interfaces = tuple(StructuralInterfaceEntry(*row) for row in cursor.fetchall())
+        cursor.execute(
+            "SELECT packet_index,record_offset,data_offset,captured_length,original_length,"
+            "framed_length,section_index,interface_id,interface_ordinal,raw_timestamp_ticks "
+            "FROM pcap_offset_index_packets WHERE build_id=%s ORDER BY packet_index",
+            (build_id,),
+        )
+        packets = tuple(
+            StructuralPacketEntry(
+                int(row[0]),
+                int(row[1]),
+                int(row[2]),
+                int(row[3]),
+                int(row[4]),
+                int(row[5]),
+                int(row[6]),
+                int(row[7]),
+                int(row[8]),
+                int(row[9]),
+            )
+            for row in cursor.fetchall()
+        )
+        if generation[10] is None or generation[11] is None:
+            raise ValueError("ready structural index counts are missing")
+        if int(generation[10]) != len(packets) or int(generation[11]) != len(interfaces):
+            raise ValueError("ready structural index counts do not match child rows")
+        return StructuralIndexSnapshot(
+            build_id,
+            cls._structural_binding_from_row(generation[:8]),
+            generation[8],
+            str(generation[9]),
+            interfaces,
+            packets,
+        )
+
+    @classmethod
+    def _capture_source_row_matches(
+        cls, row: tuple[Any, ...] | None, binding: SourceIndexBinding
+    ) -> bool:
+        return row is not None and (
+            str(row[0]),
+            str(row[1]),
+            str(row[2]),
+            str(row[3]),
+            int(row[4]),
+            str(row[5]),
+        ) == (
+            binding.source_kind,
+            binding.source_id,
+            cls._capture_key(binding.source_id),
+            binding.source_version_id,
+            binding.source_size_bytes,
+            binding.source_sha256,
+        )
+
+    def publish_structural_index(
+        self,
+        build_id: str,
+        binding: SourceIndexBinding,
+        interfaces: tuple[StructuralInterfaceEntry, ...],
+        packet_count: int,
+    ) -> bool:
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
+                (binding.source_id,),
+            )
+            job_row = cursor.fetchone()
+            job = None
+            if job_row is not None:
+                job = job_row[0] if isinstance(job_row[0], dict) else json.loads(job_row[0])
+            cursor.execute(
+                "SELECT source_kind,source_id,object_key,source_version_id,"
+                "source_size_bytes,source_sha256 FROM pcap_capture_source_versions "
+                "WHERE source_kind=%s AND source_id=%s FOR UPDATE",
+                (binding.source_kind, binding.source_id),
+            )
+            source_version_row = cursor.fetchone()
+            if not _job_matches_structural_binding(
+                job, binding
+            ) or not self._capture_source_row_matches(source_version_row, binding):
+                self.connection.rollback()
+                return False
+            cursor.execute(
+                "SELECT source_kind,source_id,source_version_id,source_size_bytes,source_sha256,"
+                "capture_format,schema_version,parser_contract_version,created_at "
+                "FROM pcap_offset_index_generations "
+                "WHERE build_id=%s AND state='STAGING' FOR UPDATE",
+                (build_id,),
+            )
+            generation = cursor.fetchone()
+            cursor.execute(
+                "SELECT COUNT(*) FROM pcap_offset_index_packets WHERE build_id=%s", (build_id,)
+            )
+            count_row = cursor.fetchone()
+            if (
+                generation is None
+                or self._structural_binding_from_row(generation[:8]) != binding
+                or count_row is None
+                or int(count_row[0]) != packet_count
+                or not _job_matches_structural_binding(job, binding)
+            ):
+                self.connection.rollback()
+                return False
+            cursor.execute(
+                "SELECT packet_index,record_offset,data_offset,captured_length,original_length,"
+                "framed_length,section_index,interface_id,interface_ordinal,raw_timestamp_ticks "
+                "FROM pcap_offset_index_packets WHERE build_id=%s ORDER BY packet_index",
+                (build_id,),
+            )
+            packets = tuple(StructuralPacketEntry(*row) for row in cursor.fetchall())
+            snapshot = StructuralIndexSnapshot(
+                build_id,
+                binding,
+                generation[8],
+                structural_index_digest(binding, interfaces, packets),
+                interfaces,
+                packets,
+            )
+            if not validate_structural_index(snapshot):
+                self.connection.rollback()
+                return False
+            cursor.executemany(
+                "INSERT INTO pcap_offset_index_interfaces("
+                "build_id,interface_ordinal,section_index,interface_id,link_type,snaplen,"
+                "timestamp_resolution_numerator,timestamp_resolution_denominator,"
+                "timestamp_offset_seconds) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                [
+                    (
+                        build_id,
+                        interface.interface_ordinal,
+                        interface.section_index,
+                        interface.interface_id,
+                        interface.link_type,
+                        interface.snaplen,
+                        interface.timestamp_resolution_numerator,
+                        interface.timestamp_resolution_denominator,
+                        interface.timestamp_offset_seconds,
+                    )
+                    for interface in interfaces
+                ],
+            )
+            cursor.execute(
+                "SELECT build_id FROM pcap_offset_index_owners "
+                "WHERE source_kind=%s AND source_id=%s FOR UPDATE",
+                (binding.source_kind, binding.source_id),
+            )
+            owner = cursor.fetchone()
+            cursor.execute(
+                "UPDATE pcap_offset_index_generations SET state='READY',packet_count=%s,"
+                "interface_count=%s,index_sha256=%s WHERE build_id=%s AND state='STAGING'",
+                (packet_count, len(interfaces), snapshot.index_sha256, build_id),
+            )
+            cursor.execute(
+                "INSERT INTO pcap_offset_index_owners(source_kind,source_id,build_id) "
+                "VALUES(%s,%s,%s) ON CONFLICT(source_kind,source_id) "
+                "DO UPDATE SET build_id=excluded.build_id",
+                (binding.source_kind, binding.source_id, build_id),
+            )
+            if owner is not None and str(owner[0]) != build_id:
+                cursor.execute(
+                    "DELETE FROM pcap_offset_index_generations WHERE build_id=%s", (owner[0],)
+                )
+            self.connection.commit()
+            return True
+
+    def abort_structural_index(self, build_id: str) -> None:
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM pcap_offset_index_generations WHERE build_id=%s AND state='STAGING'",
+                (build_id,),
+            )
+            self.connection.commit()
+
+    def get_structural_index(self, binding: SourceIndexBinding) -> StructuralIndexLookup:
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT build_id FROM pcap_offset_index_owners "
+                "WHERE source_kind=%s AND source_id=%s",
+                (binding.source_kind, binding.source_id),
+            )
+            owner = cursor.fetchone()
+            if owner is None:
+                self.connection.commit()
+                return StructuralIndexLookup(IndexAvailability.MISSING)
+            try:
+                snapshot = self._load_structural_snapshot(cursor, str(owner[0]))
+            except (TypeError, ValueError, KeyError):
+                self.connection.rollback()
+                return StructuralIndexLookup(IndexAvailability.CORRUPT)
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='job' AND id=%s",
+                (binding.source_id,),
+            )
+            job_row = cursor.fetchone()
+            cursor.execute(
+                "SELECT source_kind,source_id,object_key,source_version_id,"
+                "source_size_bytes,source_sha256 FROM pcap_capture_source_versions "
+                "WHERE source_kind=%s AND source_id=%s",
+                (binding.source_kind, binding.source_id),
+            )
+            source_version_row = cursor.fetchone()
+            self.connection.commit()
+        if snapshot is None:
+            return StructuralIndexLookup(IndexAvailability.CORRUPT)
+        if (
+            snapshot.binding.schema_version != binding.schema_version
+            or snapshot.binding.parser_contract_version != binding.parser_contract_version
+        ):
+            return StructuralIndexLookup(IndexAvailability.UNSUPPORTED_SCHEMA)
+        if snapshot.binding != binding:
+            return StructuralIndexLookup(IndexAvailability.STALE)
+        job = None
+        if job_row is not None:
+            job = job_row[0] if isinstance(job_row[0], dict) else json.loads(job_row[0])
+        if not _job_matches_structural_binding(
+            job, binding
+        ) or not self._capture_source_row_matches(source_version_row, binding):
+            return StructuralIndexLookup(IndexAvailability.STALE)
+        if not validate_structural_index(snapshot):
+            return StructuralIndexLookup(IndexAvailability.CORRUPT)
+        return StructuralIndexLookup(IndexAvailability.READY, snapshot)
+
+    def delete_structural_indexes_for_source(self, source_id: str) -> None:
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM pcap_offset_index_generations WHERE source_id=%s", (source_id,)
+            )
+            self.connection.commit()
+
+    def cleanup_stale_structural_indexes(self, *, before: datetime, limit: int) -> int:
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "WITH selected AS (SELECT build_id FROM pcap_offset_index_generations "
+                "WHERE state='STAGING' AND created_at<=%s ORDER BY created_at,build_id "
+                "FOR UPDATE SKIP LOCKED LIMIT %s) DELETE FROM pcap_offset_index_generations g "
+                "USING selected WHERE g.build_id=selected.build_id RETURNING g.build_id",
+                (before, limit),
+            )
+            deleted = len(cursor.fetchall())
+            self.connection.commit()
+            return deleted
+
+    def delete_retained_source(self, job_id: str) -> bool:
+        return self.delete_job(job_id)
 
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None:
         connection = self.connection

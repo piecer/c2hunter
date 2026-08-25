@@ -53,6 +53,12 @@ Durations and RSS are measurements, not deterministic values. Capture bytes, has
 
 The sequence is immutable for this initiative. Reordering, combining stages, changing metric labels, or removing the fallback requires updating this plan in a dedicated review commit before implementation.
 
+### Stage 9 implementation closeout boundary
+
+The implemented Stage 9 boundary is an offline, canonical-`PCAP_UPLOAD`-only structural index. It is derived and best-effort: upload success does not depend on index success, and an idempotent upload replay does not rebuild. Each generation is bound to the authoritative durable capture-source-version row (source/job ID, exact object key, immutable backend version ID, verified byte size/SHA-256), capture format, index schema version, and parser contract version. The builder reads and verifies the full retained source before an atomic metadata-owner publication makes the whole interface/packet generation visible; source deletion owns removal of READY and staging generations.
+
+There is no public REST/OpenAPI schema for the index. Both synchronous and asynchronous exports intentionally perform zero index lookups and remain on the existing fallback until Stage 12. Stage 9 adds no LIVE or reanalysis indexing, posting index, selected-offset reads, range coalescing, or any other Stage 10–12 behavior. Focused local tests and static gates cover this closeout; the PostgreSQL+MinIO path is an explicit environment-gated integration test and must be reported as skipped unless those live services were actually enabled.
+
 ## Per-stage verification gate
 
 For every stage:

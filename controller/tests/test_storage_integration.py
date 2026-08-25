@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import os
+import struct
 import sys
 import threading
 import uuid
@@ -16,6 +18,11 @@ from c2hunter_controller.pcap_export_queue import (
     ExportPrincipalLimitError,
     ExportQueueFullError,
     ExportSourceChangedError,
+)
+from c2hunter_controller.pcap_offset_index import (
+    IndexAvailability,
+    SourceIndexBinding,
+    build_offline_upload_index,
 )
 from c2hunter_controller.production import MinioBlobStore, PostgresRepository
 from c2hunter_controller.queueing import RedisControllerQueue
@@ -36,6 +43,32 @@ _postgres_integration = pytest.mark.skipif(
         "for real PostgreSQL integration tests"
     ),
 )
+
+_postgres_minio_integration = pytest.mark.skipif(
+    os.getenv("C2HUNTER_RUN_STORAGE_INTEGRATION") != "1"
+    or not all(
+        os.getenv(name)
+        for name in (
+            "C2HUNTER_DATABASE_URL",
+            "C2HUNTER_S3_ENDPOINT",
+            "C2HUNTER_S3_ACCESS_KEY",
+            "C2HUNTER_S3_SECRET_KEY",
+        )
+    ),
+    reason=(
+        "set C2HUNTER_RUN_STORAGE_INTEGRATION=1 with PostgreSQL and MinIO "
+        "connection variables for the live structural-index integration test"
+    ),
+)
+
+
+def _stage9_capture() -> bytes:
+    payload = b"stage9-live"
+    return (
+        struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65_535, 1)
+        + struct.pack("<IIII", 1_700_000_000, 123, len(payload), len(payload))
+        + payload
+    )
 
 
 def _pcap_export_job(
@@ -379,3 +412,78 @@ def test_real_postgres_source_delete_and_enqueue_are_atomic() -> None:
         finally:
             for repository in repositories:
                 repository.close()
+
+
+@_postgres_minio_integration
+def test_real_postgres_minio_structural_index_publication_read_and_source_delete() -> None:
+    suffix = uuid.uuid4().hex
+    job_id = f"stage9-structural-index-{suffix}"
+    capture = _stage9_capture()
+    capture_sha256 = hashlib.sha256(capture).hexdigest()
+    blob = MinioBlobStore(
+        os.environ["C2HUNTER_S3_ENDPOINT"],
+        os.environ["C2HUNTER_S3_ACCESS_KEY"],
+        os.environ["C2HUNTER_S3_SECRET_KEY"],
+        os.getenv("C2HUNTER_S3_BUCKET", "c2hunter"),
+    )
+    assert blob.ready()
+    repository = PostgresRepository(os.environ["C2HUNTER_DATABASE_URL"], blob)
+    created = False
+    try:
+        stored, was_created = repository.create_job(
+            {
+                "id": job_id,
+                "idempotency_key": f"stage9-structural-index-{suffix}",
+                "status": "COMPLETED",
+                "mode": "PCAP_UPLOAD",
+                "sensor_ids": ["uploaded"],
+                "source": {
+                    "packet_bytes_retained": True,
+                    "size_bytes": len(capture),
+                    "sha256": capture_sha256,
+                    "packet_count": 1,
+                    "capture_format": "PCAP",
+                },
+            }
+        )
+        assert was_created and stored["id"] == job_id
+        created = True
+        repository.save_job_capture(job_id, capture)
+        durable_version = repository.get_capture_source_version(job_id)
+        assert durable_version is not None
+        assert durable_version.object_key == f"captures/{job_id}.pcap"
+        assert durable_version.source_size_bytes == len(capture)
+        assert durable_version.source_sha256 == capture_sha256
+        binding = SourceIndexBinding(
+            source_kind="PCAP_UPLOAD",
+            source_id=job_id,
+            source_version_id=durable_version.source_version_id,
+            source_size_bytes=len(capture),
+            source_sha256=capture_sha256,
+            capture_format="PCAP",
+        )
+
+        assert build_offline_upload_index(
+            repository,
+            job_id,
+            max_packets=10,
+            max_interfaces=4,
+            batch_size=2,
+        )
+        lookup = repository.get_structural_index(binding)
+        assert lookup.availability is IndexAvailability.READY
+        assert lookup.snapshot is not None
+        assert lookup.snapshot.binding == binding
+        assert len(lookup.snapshot.interfaces) == 1
+        assert len(lookup.snapshot.packets) == 1
+
+        assert repository.delete_retained_source(job_id)
+        created = False
+        assert repository.get_job_summary(job_id) is None
+        assert repository.open_job_capture(job_id) is None
+        assert repository.get_capture_source_version(job_id) is None
+        assert repository.get_structural_index(binding).availability is IndexAvailability.MISSING
+    finally:
+        if created:
+            repository.delete_retained_source(job_id)
+        repository.close()

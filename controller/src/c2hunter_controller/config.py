@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     flow_ingestion_grace_seconds: int = Field(default=65, ge=0)
     pcap_upload_max_bytes: int = Field(default=500 * 1024 * 1024, gt=0)
     pcap_upload_max_packets: int = Field(default=2_000_000, gt=0)
+    pcap_offset_index_max_packets: int | None = Field(default=None, gt=0)
+    pcap_offset_index_max_interfaces: int = Field(default=4_096, gt=0, le=1_000_000)
+    pcap_offset_index_batch_size: int = Field(default=1_000, gt=0, le=10_000)
+    pcap_offset_index_staging_max_age_seconds: int = Field(default=3_600, gt=0)
+    pcap_offset_index_cleanup_batch_size: int = Field(default=100, gt=0, le=10_000)
     pcap_export_max_bytes: int | None = Field(default=None, ge=24)
     pcap_export_scan_max_bytes: int | None = Field(default=None, gt=0)
     pcap_export_scan_max_packets: int | None = Field(default=None, gt=0)
@@ -126,6 +131,8 @@ class Settings(BaseSettings):
             self.api_auth_required = self.environment != "test"
         if self.pcap_export_max_bytes is None:
             self.pcap_export_max_bytes = self.pcap_upload_max_bytes
+        if self.pcap_offset_index_max_packets is None:
+            self.pcap_offset_index_max_packets = self.pcap_upload_max_packets
         if self.pcap_export_scan_max_bytes is None:
             self.pcap_export_scan_max_bytes = self.pcap_upload_max_bytes
         if self.pcap_export_scan_max_packets is None:

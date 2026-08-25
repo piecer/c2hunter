@@ -436,6 +436,11 @@ def test_delete_job_cascades_ai_ledgers_before_run(monkeypatch: Any) -> None:
     assert "DELETE FROM ai_analysis_runs" in sql
     assert "VALUES('pcap_export_cleanup'" in sql
     assert "DELETE FROM pcap_export_jobs WHERE parent_job_id=%s" in sql
+    assert "DELETE FROM pcap_offset_index_generations WHERE source_id=%s" in sql
+    assert "DELETE FROM pcap_capture_source_versions WHERE source_kind='PCAP_UPLOAD'" in sql
+    assert sql.index("DELETE FROM pcap_offset_index_generations") < sql.index(
+        "DELETE FROM pcap_capture_source_versions"
+    )
     assert sql.index("DELETE FROM ai_feedback") < sql.index("DELETE FROM ai_analysis_runs")
     assert sql.index("VALUES('pcap_export_cleanup'") < sql.index(
         "DELETE FROM controller_objects WHERE kind='export'"

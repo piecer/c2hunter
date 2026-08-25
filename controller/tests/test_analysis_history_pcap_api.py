@@ -725,6 +725,7 @@ def test_unkeyed_sync_busy_rejection_allocates_nothing_and_does_not_open_source(
         content=_pcap(),
         headers={"content-type": "application/vnd.tcpdump.pcap"},
     ).json()
+    repository.opens = 0
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(client.post, "/api/v1/pcap-exports", json={"job_id": upload["id"]})

@@ -8,12 +8,23 @@ import threading
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, cast
 
+from c2hunter_analysis.pcap_index import StructuralInterfaceEntry, StructuralPacketEntry
+
 from .pcap_export_store import ExportQueueStorageError, RepositoryQueueStore
+from .pcap_offset_index import (
+    CaptureSourceVersion,
+    IndexAvailability,
+    SourceIndexBinding,
+    StructuralIndexLookup,
+    StructuralIndexSnapshot,
+    structural_index_digest,
+    validate_structural_index,
+)
 
 _AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 _JOB_TERMINAL_STATUSES = {"COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELLED"}
@@ -305,6 +316,21 @@ def _bytes_source(content: bytes) -> CaptureSource:
     return CaptureSource(io.BytesIO(snapshot), f"sha256:{digest}")
 
 
+def _job_matches_structural_binding(
+    job: dict[str, Any] | None, binding: SourceIndexBinding
+) -> bool:
+    if job is None or job.get("id") != binding.source_id or job.get("mode") != "PCAP_UPLOAD":
+        return False
+    source = job.get("source")
+    return bool(
+        isinstance(source, dict)
+        and source.get("packet_bytes_retained") is True
+        and source.get("size_bytes") == binding.source_size_bytes
+        and source.get("sha256") == binding.source_sha256
+        and source.get("capture_format") == binding.capture_format
+    )
+
+
 def _valid_candidate_decision_record(decision: dict[str, Any]) -> bool:
     if not all(
         isinstance(decision.get(field), str) and bool(decision.get(field))
@@ -479,9 +505,28 @@ class Repository(Protocol):
     def list_jobs(self) -> list[dict[str, Any]]: ...
     def list_active_live_jobs(self) -> list[dict[str, Any]]: ...
     def delete_job(self, job_id: str) -> bool: ...
+    def delete_retained_source(self, job_id: str) -> bool: ...
     def save_job_capture(self, job_id: str, content: bytes) -> None: ...
     def open_job_capture(self, job_id: str) -> CaptureSource | None: ...
+    def get_capture_source_version(self, job_id: str) -> CaptureSourceVersion | None: ...
     def get_job_capture(self, job_id: str) -> bytes | None: ...
+    def begin_structural_index(
+        self, build_id: str, binding: SourceIndexBinding, created_at: datetime
+    ) -> None: ...
+    def stage_structural_index_packets(
+        self, build_id: str, packets: tuple[StructuralPacketEntry, ...]
+    ) -> None: ...
+    def publish_structural_index(
+        self,
+        build_id: str,
+        binding: SourceIndexBinding,
+        interfaces: tuple[StructuralInterfaceEntry, ...],
+        packet_count: int,
+    ) -> bool: ...
+    def abort_structural_index(self, build_id: str) -> None: ...
+    def get_structural_index(self, binding: SourceIndexBinding) -> StructuralIndexLookup: ...
+    def delete_structural_indexes_for_source(self, source_id: str) -> None: ...
+    def cleanup_stale_structural_indexes(self, *, before: datetime, limit: int) -> int: ...
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None: ...
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]: ...
     def get_candidate(self, candidate_id: str) -> tuple[str, dict[str, Any]] | None: ...
@@ -626,6 +671,7 @@ class MemoryRepository:
         self.candidate_misp_actions: dict[str, dict[str, Any]] = {}
         self.integration_settings: dict[str, Any] | None = None
         self.job_captures: dict[str, bytes] = {}
+        self.capture_source_versions: dict[str, CaptureSourceVersion] = {}
         self.flow_labels: dict[str, dict[str, Any]] = {}
         self.payload_signatures: dict[str, dict[str, Any]] = {}
         self.allowlist: dict[str, dict[str, Any]] = {}
@@ -637,6 +683,11 @@ class MemoryRepository:
         self.sensor_pcap_content: dict[str, bytes] = {}
         self.enrollments: dict[str, dict[str, Any]] = {}
         self.sensor_credentials: dict[str, dict[str, Any]] = {}
+        self.structural_index_staging: dict[
+            str, tuple[SourceIndexBinding, datetime, list[StructuralPacketEntry]]
+        ] = {}
+        self.structural_index_generations: dict[str, StructuralIndexSnapshot] = {}
+        self.structural_index_owners: dict[str, str] = {}
         self._lock = threading.RLock()
 
     def ready(self) -> bool:
@@ -1016,6 +1067,8 @@ class MemoryRepository:
             self.idempotency_keys.pop(str(job["idempotency_key"]), None)
             self.candidates.pop(job_id, None)
             self.job_captures.pop(job_id, None)
+            self.capture_source_versions.pop(job_id, None)
+            self.delete_structural_indexes_for_source(job_id)
             export_ids = [
                 export_id
                 for export_id, metadata in self.exports.items()
@@ -1032,9 +1085,27 @@ class MemoryRepository:
                 lifecycle_jobs.pop(export_id, None)
             return True
 
+    def delete_retained_source(self, job_id: str) -> bool:
+        """Retention seam: metadata/index deletion shares the canonical job transaction."""
+        return self.delete_job(job_id)
+
     def save_job_capture(self, job_id: str, content: bytes) -> None:
         with self._lock:
-            self.job_captures[job_id] = bytes(content)
+            snapshot = bytes(content)
+            digest = hashlib.sha256(snapshot).hexdigest()
+            self.job_captures[job_id] = snapshot
+            self.capture_source_versions[job_id] = CaptureSourceVersion(
+                "PCAP_UPLOAD",
+                job_id,
+                f"captures/{job_id}.pcap",
+                f"sha256:{digest}",
+                len(snapshot),
+                digest,
+            )
+
+    def get_capture_source_version(self, job_id: str) -> CaptureSourceVersion | None:
+        with self._lock:
+            return self.capture_source_versions.get(job_id)
 
     def open_job_capture(self, job_id: str) -> CaptureSource | None:
         with self._lock:
@@ -1047,6 +1118,133 @@ class MemoryRepository:
             return None
         with source:
             return b"".join(source.iter_chunks())
+
+    def begin_structural_index(
+        self, build_id: str, binding: SourceIndexBinding, created_at: datetime
+    ) -> None:
+        with self._lock:
+            if build_id in self.structural_index_staging:
+                raise ValueError("structural index build already exists")
+            self.structural_index_staging[build_id] = (binding, created_at, [])
+
+    def stage_structural_index_packets(
+        self, build_id: str, packets: tuple[StructuralPacketEntry, ...]
+    ) -> None:
+        with self._lock:
+            binding, created_at, stored = self.structural_index_staging[build_id]
+            if packets and packets[0].packet_index != len(stored):
+                raise ValueError("structural packet rows are not contiguous")
+            stored.extend(packets)
+            self.structural_index_staging[build_id] = (binding, created_at, stored)
+
+    def publish_structural_index(
+        self,
+        build_id: str,
+        binding: SourceIndexBinding,
+        interfaces: tuple[StructuralInterfaceEntry, ...],
+        packet_count: int,
+    ) -> bool:
+        with self._lock:
+            staged = self.structural_index_staging.get(build_id)
+            source_version = self.capture_source_versions.get(binding.source_id)
+            expected_version = CaptureSourceVersion(
+                binding.source_kind,
+                binding.source_id,
+                f"captures/{binding.source_id}.pcap",
+                binding.source_version_id,
+                binding.source_size_bytes,
+                binding.source_sha256,
+            )
+            if (
+                staged is None
+                or staged[0] != binding
+                or len(staged[2]) != packet_count
+                or not _job_matches_structural_binding(self.jobs.get(binding.source_id), binding)
+                or source_version != expected_version
+            ):
+                return False
+            snapshot = StructuralIndexSnapshot(
+                build_id,
+                binding,
+                staged[1],
+                structural_index_digest(binding, interfaces, staged[2]),
+                interfaces,
+                tuple(staged[2]),
+            )
+            if not validate_structural_index(snapshot):
+                return False
+            previous = self.structural_index_owners.get(binding.source_id)
+            self.structural_index_generations[build_id] = snapshot
+            self.structural_index_owners[binding.source_id] = build_id
+            self.structural_index_staging.pop(build_id, None)
+            if previous is not None and previous != build_id:
+                self.structural_index_generations.pop(previous, None)
+            return True
+
+    def abort_structural_index(self, build_id: str) -> None:
+        with self._lock:
+            self.structural_index_staging.pop(build_id, None)
+
+    def get_structural_index(self, binding: SourceIndexBinding) -> StructuralIndexLookup:
+        with self._lock:
+            build_id = self.structural_index_owners.get(binding.source_id)
+            if build_id is None:
+                return StructuralIndexLookup(IndexAvailability.MISSING)
+            snapshot = self.structural_index_generations.get(build_id)
+            if snapshot is None:
+                return StructuralIndexLookup(IndexAvailability.CORRUPT)
+            if (
+                snapshot.binding.schema_version != binding.schema_version
+                or snapshot.binding.parser_contract_version != binding.parser_contract_version
+            ):
+                return StructuralIndexLookup(IndexAvailability.UNSUPPORTED_SCHEMA)
+            if snapshot.binding != binding:
+                return StructuralIndexLookup(IndexAvailability.STALE)
+            expected_version = CaptureSourceVersion(
+                binding.source_kind,
+                binding.source_id,
+                f"captures/{binding.source_id}.pcap",
+                binding.source_version_id,
+                binding.source_size_bytes,
+                binding.source_sha256,
+            )
+            if (
+                not _job_matches_structural_binding(self.jobs.get(binding.source_id), binding)
+                or self.capture_source_versions.get(binding.source_id) != expected_version
+            ):
+                return StructuralIndexLookup(IndexAvailability.STALE)
+            if not validate_structural_index(snapshot):
+                return StructuralIndexLookup(IndexAvailability.CORRUPT)
+            return StructuralIndexLookup(IndexAvailability.READY, deepcopy(snapshot))
+
+    def delete_structural_indexes_for_source(self, source_id: str) -> None:
+        with self._lock:
+            self.structural_index_owners.pop(source_id, None)
+            for build_id, snapshot in list(self.structural_index_generations.items()):
+                if snapshot.binding.source_id == source_id:
+                    self.structural_index_generations.pop(build_id, None)
+            for build_id, (binding, _created_at, _packets) in list(
+                self.structural_index_staging.items()
+            ):
+                if binding.source_id == source_id:
+                    self.structural_index_staging.pop(build_id, None)
+
+    def cleanup_stale_structural_indexes(self, *, before: datetime, limit: int) -> int:
+        with self._lock:
+            selected = sorted(
+                (
+                    (created_at, build_id)
+                    for build_id, (
+                        _binding,
+                        created_at,
+                        _packets,
+                    ) in self.structural_index_staging.items()
+                    if created_at <= before
+                )
+            )[:limit]
+            for _created_at, build_id in selected:
+                self.structural_index_staging.pop(build_id, None)
+            return len(selected)
 
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None:
         with self._lock:
@@ -1685,6 +1883,7 @@ class SQLiteRepository:
 
     def __init__(self, path: str | Path) -> None:
         self.connection = sqlite3.connect(str(path), check_same_thread=False)
+        self.connection.execute("PRAGMA foreign_keys=ON")
         self._lock = threading.RLock()
         self.connection.executescript("""
             CREATE TABLE IF NOT EXISTS objects (
@@ -1759,6 +1958,15 @@ class SQLiteRepository:
             CREATE TABLE IF NOT EXISTS job_capture_blobs (
               job_id TEXT PRIMARY KEY, content BLOB NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS pcap_capture_source_versions (
+              source_kind TEXT NOT NULL CHECK(source_kind='PCAP_UPLOAD'),
+              source_id TEXT NOT NULL,
+              object_key TEXT NOT NULL,
+              source_version_id TEXT NOT NULL,
+              source_size_bytes INTEGER NOT NULL CHECK(source_size_bytes>=0),
+              source_sha256 TEXT NOT NULL,
+              PRIMARY KEY(source_kind,source_id)
+            );
             CREATE TABLE IF NOT EXISTS export_blobs (
               export_id TEXT PRIMARY KEY, content BLOB NOT NULL
             );
@@ -1786,6 +1994,39 @@ class SQLiteRepository:
             CREATE TABLE IF NOT EXISTS sensor_pcap_blobs (
               segment_id TEXT PRIMARY KEY, content BLOB NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS pcap_offset_index_generations (
+              build_id TEXT PRIMARY KEY,
+              source_id TEXT NOT NULL,
+              state TEXT NOT NULL CHECK(state IN ('STAGING','READY')),
+              binding TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              packet_count INTEGER,
+              interface_count INTEGER,
+              index_sha256 TEXT
+            );
+            CREATE TABLE IF NOT EXISTS pcap_offset_index_interfaces (
+              build_id TEXT NOT NULL REFERENCES pcap_offset_index_generations(build_id)
+                ON DELETE CASCADE,
+              interface_ordinal INTEGER NOT NULL,
+              data TEXT NOT NULL,
+              PRIMARY KEY(build_id,interface_ordinal)
+            );
+            CREATE TABLE IF NOT EXISTS pcap_offset_index_packets (
+              build_id TEXT NOT NULL REFERENCES pcap_offset_index_generations(build_id)
+                ON DELETE CASCADE,
+              packet_index INTEGER NOT NULL,
+              data TEXT NOT NULL,
+              PRIMARY KEY(build_id,packet_index)
+            );
+            CREATE TABLE IF NOT EXISTS pcap_offset_index_owners (
+              source_id TEXT PRIMARY KEY,
+              build_id TEXT NOT NULL UNIQUE REFERENCES pcap_offset_index_generations(build_id)
+                ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS pcap_offset_index_packets_lookup
+              ON pcap_offset_index_packets(build_id,packet_index);
+            CREATE INDEX IF NOT EXISTS pcap_offset_index_generations_staging
+              ON pcap_offset_index_generations(state,created_at,build_id);
             CREATE INDEX IF NOT EXISTS objects_sensor_pcap_job_uploaded_id
               ON objects(
                 json_extract(data, '$.analysis_job_id'),
@@ -2378,7 +2619,15 @@ class SQLiteRepository:
             self.connection.execute("DELETE FROM candidate_records WHERE job_id=?", (job_id,))
             self.connection.execute("DELETE FROM job_flow_records WHERE job_id=?", (job_id,))
             self.connection.execute("DELETE FROM job_payload_signatures WHERE job_id=?", (job_id,))
+            self.connection.execute(
+                "DELETE FROM pcap_offset_index_generations WHERE source_id=?", (job_id,)
+            )
             self.connection.execute("DELETE FROM job_capture_blobs WHERE job_id=?", (job_id,))
+            self.connection.execute(
+                "DELETE FROM pcap_capture_source_versions WHERE source_kind='PCAP_UPLOAD' "
+                "AND source_id=?",
+                (job_id,),
+            )
             self.connection.execute("DELETE FROM idempotency WHERE job_id=?", (job_id,))
             self.connection.execute(
                 "DELETE FROM pcap_export_jobs WHERE json_extract(data,'$.job_id')=?", (job_id,)
@@ -2389,14 +2638,38 @@ class SQLiteRepository:
             self.connection.commit()
             return cursor.rowcount > 0
 
+    def delete_retained_source(self, job_id: str) -> bool:
+        """Retention seam: metadata/index deletion shares the canonical job transaction."""
+        return self.delete_job(job_id)
+
     def save_job_capture(self, job_id: str, content: bytes) -> None:
         with self._lock:
+            digest = hashlib.sha256(content).hexdigest()
             self.connection.execute(
                 "INSERT INTO job_capture_blobs(job_id,content) VALUES(?,?) "
                 "ON CONFLICT(job_id) DO UPDATE SET content=excluded.content",
                 (job_id, content),
             )
+            self.connection.execute(
+                "INSERT INTO pcap_capture_source_versions("
+                "source_kind,source_id,object_key,source_version_id,source_size_bytes,source_sha256"
+                ") VALUES('PCAP_UPLOAD',?,?,?,?,?) "
+                "ON CONFLICT(source_kind,source_id) DO UPDATE SET "
+                "object_key=excluded.object_key,source_version_id=excluded.source_version_id,"
+                "source_size_bytes=excluded.source_size_bytes,source_sha256=excluded.source_sha256",
+                (job_id, f"captures/{job_id}.pcap", f"sha256:{digest}", len(content), digest),
+            )
             self.connection.commit()
+
+    def get_capture_source_version(self, job_id: str) -> CaptureSourceVersion | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT source_kind,source_id,object_key,source_version_id,source_size_bytes,"
+                "source_sha256 FROM pcap_capture_source_versions "
+                "WHERE source_kind='PCAP_UPLOAD' AND source_id=?",
+                (job_id,),
+            ).fetchone()
+        return CaptureSourceVersion(*row) if row is not None else None
 
     def get_job_capture(self, job_id: str) -> bytes | None:
         source = self.open_job_capture(job_id)
@@ -2411,6 +2684,250 @@ class SQLiteRepository:
                 "SELECT content FROM job_capture_blobs WHERE job_id=?", (job_id,)
             ).fetchone()
             return _bytes_source(bytes(row[0])) if row else None
+
+    def begin_structural_index(
+        self, build_id: str, binding: SourceIndexBinding, created_at: datetime
+    ) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                "INSERT INTO pcap_offset_index_generations("
+                "build_id,source_id,state,binding,created_at) VALUES(?,?,'STAGING',?,?)",
+                (
+                    build_id,
+                    binding.source_id,
+                    self._serialize(asdict(binding)),
+                    created_at.isoformat(),
+                ),
+            )
+
+    def stage_structural_index_packets(
+        self, build_id: str, packets: tuple[StructuralPacketEntry, ...]
+    ) -> None:
+        if not packets:
+            return
+        with self._lock, self.connection:
+            row = self.connection.execute(
+                "SELECT COALESCE(MAX(packet_index)+1,0) FROM pcap_offset_index_packets "
+                "WHERE build_id=?",
+                (build_id,),
+            ).fetchone()
+            if row is None or int(row[0]) != packets[0].packet_index:
+                raise ValueError("structural packet rows are not contiguous")
+            self.connection.executemany(
+                "INSERT INTO pcap_offset_index_packets(build_id,packet_index,data) VALUES(?,?,?)",
+                [
+                    (build_id, packet.packet_index, self._serialize(asdict(packet)))
+                    for packet in packets
+                ],
+            )
+
+    def _load_structural_snapshot(self, build_id: str) -> StructuralIndexSnapshot | None:
+        row = self.connection.execute(
+            "SELECT binding,created_at,index_sha256,packet_count,interface_count "
+            "FROM pcap_offset_index_generations "
+            "WHERE build_id=? AND state='READY'",
+            (build_id,),
+        ).fetchone()
+        if row is None or row[2] is None:
+            return None
+        binding = SourceIndexBinding(**json.loads(row[0]))
+        interfaces = tuple(
+            StructuralInterfaceEntry(**json.loads(item[0]))
+            for item in self.connection.execute(
+                "SELECT data FROM pcap_offset_index_interfaces WHERE build_id=? "
+                "ORDER BY interface_ordinal",
+                (build_id,),
+            ).fetchall()
+        )
+        packets = tuple(
+            StructuralPacketEntry(**json.loads(item[0]))
+            for item in self.connection.execute(
+                "SELECT data FROM pcap_offset_index_packets WHERE build_id=? ORDER BY packet_index",
+                (build_id,),
+            ).fetchall()
+        )
+        if row[3] is None or row[4] is None:
+            raise ValueError("ready structural index counts are missing")
+        if int(row[3]) != len(packets) or int(row[4]) != len(interfaces):
+            raise ValueError("ready structural index counts do not match child rows")
+        return StructuralIndexSnapshot(
+            build_id,
+            binding,
+            datetime.fromisoformat(str(row[1])),
+            str(row[2]),
+            interfaces,
+            packets,
+        )
+
+    def publish_structural_index(
+        self,
+        build_id: str,
+        binding: SourceIndexBinding,
+        interfaces: tuple[StructuralInterfaceEntry, ...],
+        packet_count: int,
+    ) -> bool:
+        with self._lock:
+            try:
+                self.connection.execute("BEGIN IMMEDIATE")
+                generation = self.connection.execute(
+                    "SELECT binding FROM pcap_offset_index_generations "
+                    "WHERE build_id=? AND state='STAGING'",
+                    (build_id,),
+                ).fetchone()
+                job = self.get_job_summary(binding.source_id)
+                source_version = self.connection.execute(
+                    "SELECT source_kind,source_id,object_key,source_version_id,source_size_bytes,"
+                    "source_sha256 FROM pcap_capture_source_versions "
+                    "WHERE source_kind='PCAP_UPLOAD' AND source_id=?",
+                    (binding.source_id,),
+                ).fetchone()
+                stored_count = int(
+                    self.connection.execute(
+                        "SELECT COUNT(*) FROM pcap_offset_index_packets WHERE build_id=?",
+                        (build_id,),
+                    ).fetchone()[0]
+                )
+                if (
+                    generation is None
+                    or SourceIndexBinding(**json.loads(generation[0])) != binding
+                    or stored_count != packet_count
+                    or not _job_matches_structural_binding(job, binding)
+                    or source_version is None
+                    or tuple(source_version)
+                    != (
+                        binding.source_kind,
+                        binding.source_id,
+                        f"captures/{binding.source_id}.pcap",
+                        binding.source_version_id,
+                        binding.source_size_bytes,
+                        binding.source_sha256,
+                    )
+                ):
+                    self.connection.rollback()
+                    return False
+                packets = tuple(
+                    StructuralPacketEntry(**json.loads(item[0]))
+                    for item in self.connection.execute(
+                        "SELECT data FROM pcap_offset_index_packets WHERE build_id=? "
+                        "ORDER BY packet_index",
+                        (build_id,),
+                    ).fetchall()
+                )
+                snapshot = StructuralIndexSnapshot(
+                    build_id,
+                    binding,
+                    datetime.now().astimezone(),
+                    structural_index_digest(binding, interfaces, packets),
+                    interfaces,
+                    packets,
+                )
+                if not validate_structural_index(snapshot):
+                    self.connection.rollback()
+                    return False
+                self.connection.executemany(
+                    "INSERT INTO pcap_offset_index_interfaces(build_id,interface_ordinal,data) "
+                    "VALUES(?,?,?)",
+                    [
+                        (build_id, interface.interface_ordinal, self._serialize(asdict(interface)))
+                        for interface in interfaces
+                    ],
+                )
+                previous = self.connection.execute(
+                    "SELECT build_id FROM pcap_offset_index_owners WHERE source_id=?",
+                    (binding.source_id,),
+                ).fetchone()
+                self.connection.execute(
+                    "UPDATE pcap_offset_index_generations SET state='READY',packet_count=?,"
+                    "interface_count=?,index_sha256=? WHERE build_id=?",
+                    (packet_count, len(interfaces), snapshot.index_sha256, build_id),
+                )
+                self.connection.execute(
+                    "INSERT INTO pcap_offset_index_owners(source_id,build_id) VALUES(?,?) "
+                    "ON CONFLICT(source_id) DO UPDATE SET build_id=excluded.build_id",
+                    (binding.source_id, build_id),
+                )
+                if previous is not None and str(previous[0]) != build_id:
+                    self.connection.execute(
+                        "DELETE FROM pcap_offset_index_generations WHERE build_id=?",
+                        (str(previous[0]),),
+                    )
+                self.connection.commit()
+                return True
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def abort_structural_index(self, build_id: str) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                "DELETE FROM pcap_offset_index_generations WHERE build_id=? AND state='STAGING'",
+                (build_id,),
+            )
+
+    def get_structural_index(self, binding: SourceIndexBinding) -> StructuralIndexLookup:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT build_id FROM pcap_offset_index_owners WHERE source_id=?",
+                (binding.source_id,),
+            ).fetchone()
+            if row is None:
+                return StructuralIndexLookup(IndexAvailability.MISSING)
+            try:
+                snapshot = self._load_structural_snapshot(str(row[0]))
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+                return StructuralIndexLookup(IndexAvailability.CORRUPT)
+            if snapshot is None:
+                return StructuralIndexLookup(IndexAvailability.CORRUPT)
+            if (
+                snapshot.binding.schema_version != binding.schema_version
+                or snapshot.binding.parser_contract_version != binding.parser_contract_version
+            ):
+                return StructuralIndexLookup(IndexAvailability.UNSUPPORTED_SCHEMA)
+            if snapshot.binding != binding:
+                return StructuralIndexLookup(IndexAvailability.STALE)
+            job = self.get_job_summary(binding.source_id)
+            source_version = self.connection.execute(
+                "SELECT source_kind,source_id,object_key,source_version_id,source_size_bytes,"
+                "source_sha256 FROM pcap_capture_source_versions "
+                "WHERE source_kind='PCAP_UPLOAD' AND source_id=?",
+                (binding.source_id,),
+            ).fetchone()
+            if (
+                not _job_matches_structural_binding(job, binding)
+                or source_version is None
+                or tuple(source_version)
+                != (
+                    binding.source_kind,
+                    binding.source_id,
+                    f"captures/{binding.source_id}.pcap",
+                    binding.source_version_id,
+                    binding.source_size_bytes,
+                    binding.source_sha256,
+                )
+            ):
+                return StructuralIndexLookup(IndexAvailability.STALE)
+            if not validate_structural_index(snapshot):
+                return StructuralIndexLookup(IndexAvailability.CORRUPT)
+            return StructuralIndexLookup(IndexAvailability.READY, snapshot)
+
+    def delete_structural_indexes_for_source(self, source_id: str) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                "DELETE FROM pcap_offset_index_generations WHERE source_id=?", (source_id,)
+            )
+
+    def cleanup_stale_structural_indexes(self, *, before: datetime, limit: int) -> int:
+        with self._lock, self.connection:
+            rows = self.connection.execute(
+                "SELECT build_id FROM pcap_offset_index_generations "
+                "WHERE state='STAGING' AND created_at<=? ORDER BY created_at,build_id LIMIT ?",
+                (before.isoformat(), limit),
+            ).fetchall()
+            self.connection.executemany(
+                "DELETE FROM pcap_offset_index_generations WHERE build_id=?",
+                rows,
+            )
+            return len(rows)
 
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None:
         with self._lock:

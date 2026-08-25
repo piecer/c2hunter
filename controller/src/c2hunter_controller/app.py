@@ -106,6 +106,7 @@ from .pcap_export_service import (
     public_job,
     request_fingerprint,
 )
+from .pcap_offset_index import build_offline_upload_index
 from .pcap_stream import (
     open_bounded_verified_capture,
 )
@@ -2842,6 +2843,13 @@ def create_app(
                 "PCAP_STORAGE_UNAVAILABLE",
                 "업로드한 PCAP 원본을 저장하지 못했습니다",
             ) from exc
+        build_offline_upload_index(
+            repo,
+            str(job["id"]),
+            max_packets=cast(int, config.pcap_offset_index_max_packets),
+            max_interfaces=config.pcap_offset_index_max_interfaces,
+            batch_size=config.pcap_offset_index_batch_size,
+        )
         del uploaded_bytes
         if isinstance(work_queue, MemoryControllerQueue):
             return _public_job(execute_analysis(job))
