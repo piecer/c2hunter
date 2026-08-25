@@ -90,7 +90,15 @@ Payload/PCAP retention is opt-in and shortest-necessary. Prefer flow statistics 
 
 Offline uploads are untrusted binary input. The Controller enforces a byte limit before buffering, a packet-count limit while parsing, validates PCAP/PCAPNG block lengths and timestamps, supports only explicit link types, and strips client path components from the displayed filename. Keep the defaults conservative, reject unsupported media types, and never invoke external packet tools or contact addresses found in a capture. Uploaded packet bytes are restricted evidence and follow the analysis-result retention policy.
 
-Analysis metadata edits cannot alter source data, time range, detector settings, evidence, or scores. Job deletion is limited to terminal jobs and removes the associated candidates and generated exports; require an explicit UI confirmation and retain the append-only deletion audit in production.
+Analysis metadata edits cannot alter source data, time range, detector settings, evidence, or scores. Job deletion is limited to terminal jobs and removes the associated candidates and generated exports; an analysis job with a queued/running export is protected by `409 JOB_HAS_ACTIVE_PCAP_EXPORT`. Require an explicit UI confirmation and retain the append-only deletion audit in production.
+
+### Durable export security boundary
+
+Async admission preserves the same ANALYST authorization, requested-job/candidate ownership, trusted-proxy identity, and endpoint rate limit as sync execution. The immutable request fingerprint is scoped to the authenticated principal and includes canonical filters, requested/resolved source, source generation, effective limits, and policy version; it excludes secrets and storage keys. Header/body idempotency conflicts fail before work allocation, and principal-scoped replay/coalescing precedes queue-capacity rejection.
+
+Unknown work is never guessed small: only trusted estimates at or below 32 MiB and 100,000 packets use sync. Queue capacity, per-principal active limit, worker concurrency, lease/deadline/retry bounds, existing scan/output limits, and construction/download spools remain defense-in-depth against resource exhaustion. Every progress/publication mutation requires matching running state, attempt and random lease token, preventing recovered stale workers from publishing.
+
+Cancellation is cooperative and checked between bounded phases; responses never claim that an in-flight CPU/object-store call was forcibly terminated. Public active responses do not disclose or fabricate artifact metadata. Publication verifies source and completed artifact integrity, uses immutable attempt-owned staging keys, verifies remote size, then commits metadata and `COMPLETED` last. Cleanup is reference-aware: losing attempts delete only their own objects and orphan cleanup deletes only old unreferenced staging keys. Public errors remain sanitized and never expose source filename/path, object key, SQL, credentials, lease token, or raw exception text.
 
 ## Input and resource defenses
 

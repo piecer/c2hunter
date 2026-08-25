@@ -613,6 +613,7 @@ class PcapExportCreate(BaseModel):
     sensor_id: str | None = None
     include_filters: list[PcapFlowFilter] = Field(default_factory=list, max_length=20)
     exclude_filters: list[PcapFlowFilter] = Field(default_factory=list, max_length=20)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
 
     @model_validator(mode="after")
     def valid_range(self) -> PcapExportCreate:
@@ -626,6 +627,142 @@ class PcapExportCreate(BaseModel):
 class PcapExportSource(BaseModel):
     id: str
     sha256: str
+
+
+class PcapExportProgress(BaseModel):
+    phase: Literal[
+        "QUEUED",
+        "SNAPSHOT_VALIDATION",
+        "SOURCE_FETCH",
+        "SOURCE_SCAN",
+        "FILTER",
+        "SERIALIZE",
+        "PUBLISH",
+        "TERMINAL",
+    ]
+    percent: int = Field(ge=0, le=100)
+    scanned_source_bytes: int = Field(ge=0)
+    scanned_packet_count: int = Field(ge=0)
+    matched_packet_count: int = Field(ge=0)
+    exported_packet_count: int = Field(ge=0)
+
+
+class PcapExportJobResponse(BaseModel):
+    """Truthful state-conditional lifecycle response for sync and async exports."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {"properties": {"status": {"const": "COMPLETED"}}},
+                    "then": {
+                        "required": [
+                            "download_url",
+                            "matched_packet_count",
+                            "exported_packet_count",
+                            "omitted_packet_count",
+                            "truncated",
+                            "truncation_reasons",
+                            "size_bytes",
+                            "sha256",
+                            "capture_format",
+                            "filename",
+                            "filter",
+                            "source_capture_count",
+                            "scanned_source_capture_count",
+                            "omitted_source_capture_count",
+                            "source_total_bytes",
+                            "scanned_source_bytes",
+                            "scanned_packet_count",
+                            "output_byte_limit",
+                            "source_scan_byte_limit",
+                            "source_scan_packet_limit",
+                            "source_manifest",
+                        ]
+                    },
+                }
+            ]
+        }
+    )
+
+    id: str
+    job_id: str
+    candidate_id: str | None
+    status: Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"]
+    execution_mode: Literal["SYNC", "ASYNC"]
+    progress: PcapExportProgress
+    cancellation_requested: bool
+    attempt: int = Field(ge=0)
+    max_attempts: int = Field(ge=1)
+    queued_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    next_attempt_at: datetime | None = None
+    status_url: str
+    download_url: str | None = None
+    error_code: str | None = None
+    error: str | None = None
+    matched_packet_count: int | None = None
+    exported_packet_count: int | None = None
+    omitted_packet_count: int | None = None
+    truncated: bool | None = None
+    truncation_reasons: list[str] | None = None
+    size_bytes: int | None = None
+    sha256: str | None = None
+    capture_format: Literal["PCAP", "PCAPNG"] | None = None
+    filename: str | None = None
+    filter: dict[str, Any] | None = None
+    source_capture_count: int | None = None
+    scanned_source_capture_count: int | None = None
+    omitted_source_capture_count: int | None = None
+    source_total_bytes: int | None = None
+
+    scanned_source_bytes: int | None = None
+    scanned_packet_count: int | None = None
+    output_byte_limit: int | None = None
+    source_scan_byte_limit: int | None = None
+    source_scan_packet_limit: int | None = None
+    source_manifest: list[PcapExportSource] | None = None
+
+    @model_validator(mode="after")
+    def artifact_state_is_truthful(self) -> PcapExportJobResponse:
+        terminal_fields = (
+            self.download_url,
+            self.matched_packet_count,
+            self.exported_packet_count,
+            self.omitted_packet_count,
+            self.truncated,
+            self.truncation_reasons,
+            self.size_bytes,
+            self.sha256,
+            self.capture_format,
+            self.filename,
+            self.filter,
+            self.source_capture_count,
+            self.scanned_source_capture_count,
+            self.omitted_source_capture_count,
+            self.source_total_bytes,
+            self.scanned_source_bytes,
+            self.scanned_packet_count,
+            self.output_byte_limit,
+            self.source_scan_byte_limit,
+            self.source_scan_packet_limit,
+            self.source_manifest,
+        )
+        if self.status in {"QUEUED", "RUNNING", "CANCELLED"} and any(
+            value is not None for value in terminal_fields
+        ):
+            raise ValueError("active or cancelled exports cannot expose artifact metadata")
+        if self.status == "COMPLETED" and any(value is None for value in terminal_fields):
+            raise ValueError("completed exports require every terminal field")
+        return self
+
+
+class PcapExportCancel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str | None = Field(default=None, min_length=1, max_length=500)
 
 
 class PcapExportResponse(BaseModel):

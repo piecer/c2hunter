@@ -23,7 +23,14 @@ from c2hunter_controller.app import create_app
 from c2hunter_controller.capture_sink import CaptureStorageError
 from c2hunter_controller.config import Settings
 from c2hunter_controller.pcap import build_capture_result, filter_records
-from c2hunter_controller.repositories import CaptureSource, MemoryRepository, SQLiteRepository
+from c2hunter_controller.pcap_export_store import ExportQueueStorageError
+from c2hunter_controller.pcap_export_worker import create_pcap_export_worker
+from c2hunter_controller.repositories import (
+    ArtifactStorageError,
+    CaptureSource,
+    MemoryRepository,
+    SQLiteRepository,
+)
 
 
 def _checksum(data: bytes) -> int:
@@ -219,7 +226,7 @@ def test_streaming_read_fault_does_not_publish_or_retry_legacy() -> None:
 
 
 def test_analysis_history_can_update_metadata_and_delete_terminal_job() -> None:
-    client = api()
+    client = api(settings=Settings(environment="test", pcap_export_execution_mode="sync_only"))
     job = client.post(
         "/api/v1/analysis-jobs",
         json=payload(flows=synthetic_flows(), key="history-completed"),
@@ -252,6 +259,517 @@ def test_analysis_history_can_update_metadata_and_delete_terminal_job() -> None:
     assert client.delete(f"/api/v1/analysis-jobs/{job['id']}").status_code == 204
     assert client.get(f"/api/v1/analysis-jobs/{job['id']}").status_code == 404
     assert client.get(f"/api/v1/pcap-exports/{export['id']}").status_code == 404
+
+
+def test_hybrid_queued_export_blocks_parent_delete_until_cancelled() -> None:
+    repository = MemoryRepository()
+    client = api(repository)
+    job = client.post(
+        "/api/v1/analysis-jobs",
+        json=payload(flows=synthetic_flows(), key="history-async-delete"),
+    ).json()
+
+    export = client.post("/api/v1/pcap-exports", json={"job_id": job["id"]})
+    assert export.status_code == 202
+    blocked = client.delete(f"/api/v1/analysis-jobs/{job['id']}")
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "JOB_HAS_ACTIVE_PCAP_EXPORT"
+
+    cancelled = client.post(f"/api/v1/pcap-exports/{export.json()['id']}/cancel", json={})
+    assert cancelled.status_code == 200
+    assert client.delete(f"/api/v1/analysis-jobs/{job['id']}").status_code == 204
+    assert client.get(f"/api/v1/pcap-exports/{export.json()['id']}").status_code == 404
+
+
+def test_async_export_contract_headers_idempotency_alias_and_active_fields() -> None:
+    repository = MemoryRepository()
+    settings = Settings(environment="test")
+    client = api(repository, settings=settings)
+    job = client.post(
+        "/api/v1/analysis-jobs",
+        json=payload(flows=synthetic_flows(), key="async-contract"),
+    ).json()
+    repository.jobs[job["id"]]["flow_records"] = [
+        _legacy_packet_record(_udp_packet("10.0.0.1", "203.0.113.77", 50001, 1), 0)
+    ]
+
+    conflict = client.post(
+        "/api/v1/pcap-exports",
+        headers={"Idempotency-Key": "header-key"},
+        json={"job_id": job["id"], "idempotency_key": "body-key"},
+    )
+    assert conflict.status_code == 422
+    assert conflict.json()["error"]["code"] == "PCAP_EXPORT_IDEMPOTENCY_KEY_CONFLICT"
+
+    accepted = client.post(
+        "/api/v1/pcap-exports",
+        headers={"Idempotency-Key": "same-key"},
+        json={"job_id": job["id"], "idempotency_key": "same-key"},
+    )
+    body = accepted.json()
+    assert accepted.status_code == 202
+    assert accepted.headers["location"] == f"/api/v1/pcap-exports/{body['id']}"
+    assert accepted.headers["retry-after"] == "1"
+    assert body["status"] == "QUEUED"
+    assert body["execution_mode"] == "ASYNC"
+    assert body["status_url"] == accepted.headers["location"]
+    assert body["download_url"] is None
+    for field in ("sha256", "size_bytes", "capture_format", "filename"):
+        assert body[field] is None
+
+    status = client.get(accepted.headers["location"])
+    assert status.status_code == 200
+    assert status.json() == body
+
+    assert create_pcap_export_worker(repository, settings).run_once() is True
+    completed = client.get(accepted.headers["location"])
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "COMPLETED"
+    assert completed.json()["download_url"] == f"{accepted.headers['location']}/download"
+    download = client.get(completed.json()["download_url"])
+    assert download.status_code == 200
+    assert download.content
+
+
+def test_queue_full_rejects_only_new_work_after_replay_lookup() -> None:
+    client = api(
+        MemoryRepository(),
+        settings=Settings(
+            environment="test",
+            pcap_export_queue_capacity=1,
+            pcap_export_async_worker_concurrency=1,
+            pcap_export_per_principal_active_limit=2,
+        ),
+    )
+    first_job = client.post(
+        "/api/v1/analysis-jobs",
+        json=payload(flows=synthetic_flows(), key="queue-first"),
+    ).json()
+    second_job = client.post(
+        "/api/v1/analysis-jobs",
+        json=payload(flows=synthetic_flows(), key="queue-second"),
+    ).json()
+    first = client.post(
+        "/api/v1/pcap-exports",
+        headers={"Idempotency-Key": "replay-key"},
+        json={"job_id": first_job["id"]},
+    )
+    replay = client.post(
+        "/api/v1/pcap-exports",
+        headers={"Idempotency-Key": "replay-key"},
+        json={"job_id": first_job["id"]},
+    )
+    rejected = client.post("/api/v1/pcap-exports", json={"job_id": second_job["id"]})
+
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    assert replay.json()["id"] == first.json()["id"]
+    assert replay.headers["location"] == first.headers["location"]
+    assert rejected.status_code == 429
+    assert rejected.headers["retry-after"] == "1"
+    assert rejected.json()["error"]["code"] == "PCAP_EXPORT_QUEUE_FULL"
+
+
+def test_async_idempotent_replay_bypasses_source_snapshot_outage() -> None:
+    class SnapshotOutageAfterAdmissionRepository(MemoryRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.snapshot_calls = 0
+
+        def snapshot_pcap_export_source(
+            self,
+            job_id: str,
+            canonical_request: dict[str, Any],
+            effective_limits: dict[str, int],
+        ) -> dict[str, Any] | None:
+            self.snapshot_calls += 1
+            if self.snapshot_calls > 1:
+                raise ExportQueueStorageError("snapshot unavailable")
+            return super().snapshot_pcap_export_source(job_id, canonical_request, effective_limits)
+
+    repository = SnapshotOutageAfterAdmissionRepository()
+    client = api(repository)
+    job = client.post(
+        "/api/v1/analysis-jobs",
+        json=payload(flows=synthetic_flows(), key="async-replay-snapshot-outage"),
+    ).json()
+    request = {"job_id": job["id"], "idempotency_key": "async-replay-snapshot-outage"}
+
+    accepted = client.post("/api/v1/pcap-exports", json=request)
+    replay = client.post("/api/v1/pcap-exports", json=request)
+
+    assert accepted.status_code == 202
+    assert replay.status_code == 202
+    assert replay.json()["id"] == accepted.json()["id"]
+    assert replay.headers["location"] == accepted.headers["location"]
+    assert replay.headers["retry-after"] == "1"
+    assert repository.snapshot_calls == 1
+
+    cancelled = client.post(f"{accepted.headers['location']}/cancel", json={})
+    assert cancelled.status_code == 200
+    terminal_replay = client.post("/api/v1/pcap-exports", json=request)
+
+    assert terminal_replay.status_code == 200
+    assert terminal_replay.json()["id"] == accepted.json()["id"]
+    assert terminal_replay.json()["status"] == "CANCELLED"
+    assert terminal_replay.headers["location"] == accepted.headers["location"]
+    assert "retry-after" not in terminal_replay.headers
+    assert repository.snapshot_calls == 1
+
+
+def test_async_idempotent_replay_survives_source_deletion() -> None:
+    repository = MemoryRepository()
+    client = api(repository)
+    job = client.post(
+        "/api/v1/analysis-jobs",
+        json=payload(flows=synthetic_flows(), key="async-replay-source-deleted"),
+    ).json()
+    request = {"job_id": job["id"], "idempotency_key": "async-replay-source-deleted"}
+    accepted = client.post("/api/v1/pcap-exports", json=request)
+    repository.jobs.pop(job["id"])
+
+    replay = client.post("/api/v1/pcap-exports", json=request)
+
+    assert replay.status_code == 202
+    assert replay.json()["id"] == accepted.json()["id"]
+    assert replay.headers["location"] == accepted.headers["location"]
+    assert replay.headers["retry-after"] == "1"
+
+
+def test_async_idempotent_lookup_storage_outage_is_sanitized() -> None:
+    class LookupOutageRepository(MemoryRepository):
+        fail_lookup = False
+
+        def find_pcap_export_job(
+            self,
+            principal_scope: str,
+            idempotency_key: str,
+            request_fingerprint: str,
+        ) -> dict[str, Any] | None:
+            if self.fail_lookup:
+                raise ExportQueueStorageError("private lifecycle storage failure")
+            return super().find_pcap_export_job(
+                principal_scope, idempotency_key, request_fingerprint
+            )
+
+    repository = LookupOutageRepository()
+    client = api(repository)
+    job = client.post(
+        "/api/v1/analysis-jobs",
+        json=payload(flows=synthetic_flows(), key="async-replay-lookup-outage"),
+    ).json()
+    request = {"job_id": job["id"], "idempotency_key": "async-replay-lookup-outage"}
+    assert client.post("/api/v1/pcap-exports", json=request).status_code == 202
+    repository.fail_lookup = True
+
+    replay = client.post("/api/v1/pcap-exports", json=request)
+
+    assert replay.status_code == 503
+    assert replay.json()["error"]["code"] == "PCAP_EXPORT_STORAGE_ERROR"
+    assert "private" not in replay.text
+
+
+def test_sync_idempotency_replays_completed_artifact_without_second_execution() -> None:
+    class CountingRepository(MemoryRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.saves = 0
+            self.reads = 0
+
+        def save_export_stream(
+            self, export: dict[str, Any], chunks: Iterable[bytes], *, size_hint: int
+        ) -> dict[str, Any] | None:
+            self.saves += 1
+            return super().save_export_stream(export, chunks, size_hint=size_hint)
+
+        def open_export_stream(self, *args: Any, **kwargs: Any) -> Any:
+            self.reads += 1
+            return super().open_export_stream(*args, **kwargs)
+
+    repository = CountingRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Sync idem", "filename": "sync-idem.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    ).json()
+    request = {"job_id": upload["id"], "idempotency_key": "sync-idem"}
+
+    first = client.post("/api/v1/pcap-exports", json=request)
+    replay = client.post("/api/v1/pcap-exports", json=request)
+    conflict = client.post(
+        "/api/v1/pcap-exports",
+        json={**request, "protocol": "UDP"},
+    )
+
+    assert first.status_code == replay.status_code == 201
+    assert replay.json()["id"] == first.json()["id"]
+    assert replay.json()["sha256"] == first.json()["sha256"]
+    assert repository.saves == 1
+    assert repository.reads == 0
+    assert conflict.status_code == 422
+    assert conflict.json()["error"]["code"] == "PCAP_EXPORT_IDEMPOTENCY_CONFLICT"
+
+
+def test_sync_storage_failure_terminalizes_lifecycle_and_keyed_replay_is_immediate() -> None:
+    class FailingRepository(MemoryRepository):
+        def save_export_stream(
+            self, export: dict[str, Any], chunks: Iterable[bytes], *, size_hint: int
+        ) -> dict[str, Any] | None:
+            raise ArtifactStorageError("private storage outage")
+
+    repository = FailingRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Sync failure", "filename": "sync-failure.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    ).json()
+    request = {"job_id": upload["id"], "idempotency_key": "sync-failure"}
+
+    failed = client.post("/api/v1/pcap-exports", json=request)
+    assert failed.status_code == 503
+    assert failed.json()["error"]["code"] == "PCAP_EXPORT_STORAGE_ERROR"
+    assert repository.count_pcap_export_jobs_by_status() == {"QUEUED": 0, "RUNNING": 0}
+    lifecycle = next(iter(repository.pcap_export_jobs.values()))
+    assert lifecycle["status"] == "FAILED"
+    assert lifecycle["lease_token"] is None
+    assert lifecycle["lease_expires_at"] is None
+    assert repository.exports == {}
+
+    replay = client.post("/api/v1/pcap-exports", json=request)
+    assert replay.status_code == 201
+    assert replay.json()["status"] == "FAILED"
+    assert replay.json()["error_code"] == "PCAP_EXPORT_STORAGE_ERROR"
+
+
+def test_sync_cancellation_winning_completion_compensates_staged_artifact() -> None:
+    class CancellationRaceRepository(MemoryRepository):
+        def complete_pcap_export_job(self, export_id: str, **kwargs: Any) -> bool:
+            with self._lock:
+                self.pcap_export_jobs[export_id]["cancellation_requested"] = True
+            return super().complete_pcap_export_job(export_id, **kwargs)
+
+    repository = CancellationRaceRepository()
+    client = TestClient(
+        create_app(Settings(environment="test", pcap_export_execution_mode="sync_only"), repository)
+    )
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Sync cancellation race", "filename": "sync-cancel.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    ).json()
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": upload["id"]})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PCAP_EXPORT_CANCELLED"
+    lifecycle = next(iter(repository.pcap_export_jobs.values()))
+    assert lifecycle["status"] == "CANCELLED"
+    assert repository.exports == {}
+    assert repository.export_content == {}
+
+
+def test_sync_unexpected_completion_failure_compensates_staged_artifact() -> None:
+    class CompletionFailureRepository(MemoryRepository):
+        def complete_pcap_export_job(self, _export_id: str, **_kwargs: Any) -> bool:
+            raise RuntimeError("unexpected completion failure")
+
+    repository = CompletionFailureRepository()
+    client = TestClient(
+        create_app(
+            Settings(environment="test", pcap_export_execution_mode="sync_only"), repository
+        ),
+        raise_server_exceptions=False,
+    )
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Sync completion failure", "filename": "sync-failure.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    ).json()
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": upload["id"]})
+
+    assert response.status_code == 500
+    lifecycle = next(iter(repository.pcap_export_jobs.values()))
+    assert lifecycle["status"] == "FAILED"
+    assert repository.exports == {}
+    assert repository.export_content == {}
+
+
+def test_sync_admission_maps_source_deleted_after_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = MemoryRepository()
+    original_enqueue = repository.enqueue_pcap_export_job
+
+    def delete_then_enqueue(job: dict[str, Any], **kwargs: Any):
+        assert repository.delete_job(str(job["job_id"])) is True
+        return original_enqueue(job, **kwargs)
+
+    monkeypatch.setattr(repository, "enqueue_pcap_export_job", delete_then_enqueue)
+    client = api(repository)
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Sync admission race", "filename": "sync-admission.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    ).json()
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": upload["id"]})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PCAP_SOURCE_GENERATION_CHANGED"
+    assert repository.pcap_export_jobs == {}
+    assert repository.exports == {}
+
+
+@pytest.mark.parametrize("repository_kind", ["memory", "sqlite"])
+def test_async_admission_rejects_source_deleted_after_snapshot(
+    repository_kind: str, tmp_path, monkeypatch
+) -> None:
+    repository: Any = (
+        MemoryRepository()
+        if repository_kind == "memory"
+        else SQLiteRepository(tmp_path / "admission-race.db")
+    )
+    original_enqueue = repository.enqueue_pcap_export_job
+
+    def delete_then_enqueue(job: dict[str, Any], **kwargs: Any):
+        assert repository.delete_job(str(job["job_id"])) is True
+        return original_enqueue(job, **kwargs)
+
+    monkeypatch.setattr(repository, "enqueue_pcap_export_job", delete_then_enqueue)
+    client = api(repository)  # type: ignore[arg-type]
+    job = client.post(
+        "/api/v1/analysis-jobs",
+        json=payload(flows=synthetic_flows(), key=f"admission-race-{repository_kind}"),
+    ).json()
+
+    response = client.post("/api/v1/pcap-exports", json={"job_id": job["id"]})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PCAP_SOURCE_GENERATION_CHANGED"
+    assert repository.get_pcap_export_job(response.json().get("id", "missing")) is None
+    assert repository.count_pcap_export_jobs_by_status() == {"QUEUED": 0, "RUNNING": 0}
+
+
+def test_concurrent_keyed_sync_requests_execute_once() -> None:
+    class BlockingRepository(MemoryRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.saves = 0
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def save_export_stream(
+            self, export: dict[str, Any], chunks: Iterable[bytes], *, size_hint: int
+        ) -> dict[str, Any] | None:
+            self.saves += 1
+            self.entered.set()
+            assert self.release.wait(5)
+            return super().save_export_stream(export, chunks, size_hint=size_hint)
+
+    repository = BlockingRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Concurrent sync", "filename": "concurrent-sync.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    ).json()
+    request = {"job_id": upload["id"], "idempotency_key": "concurrent-sync"}
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(client.post, "/api/v1/pcap-exports", json=request)
+        assert repository.entered.wait(5)
+        second = pool.submit(client.post, "/api/v1/pcap-exports", json=request)
+        repository.release.set()
+        responses = [first.result(timeout=5), second.result(timeout=5)]
+
+    assert [item.status_code for item in responses] == [201, 201]
+    assert responses[0].json()["id"] == responses[1].json()["id"]
+    assert repository.saves == 1
+
+
+def test_unkeyed_sync_busy_rejection_allocates_nothing_and_does_not_open_source() -> None:
+    class BlockingRepository(MemoryRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.opens = 0
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def open_job_capture(self, job_id: str) -> CaptureSource | None:
+            self.opens += 1
+            return super().open_job_capture(job_id)
+
+        def save_export_stream(
+            self, export: dict[str, Any], chunks: Iterable[bytes], *, size_hint: int
+        ) -> dict[str, Any] | None:
+            self.entered.set()
+            assert self.release.wait(5)
+            return super().save_export_stream(export, chunks, size_hint=size_hint)
+
+    repository = BlockingRepository()
+    client = TestClient(
+        create_app(Settings(environment="test", pcap_export_max_concurrent=1), repository)
+    )
+    upload = client.post(
+        "/api/v1/pcap-analysis-jobs",
+        params={"name": "Busy sync", "filename": "busy-sync.pcap"},
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    ).json()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(client.post, "/api/v1/pcap-exports", json={"job_id": upload["id"]})
+        assert repository.entered.wait(5)
+        rejected = client.post("/api/v1/pcap-exports", json={"job_id": upload["id"]})
+        assert rejected.status_code == 429
+        assert rejected.json()["error"]["code"] == "PCAP_EXPORT_BUSY"
+        assert len(repository.pcap_export_jobs) == 1
+        assert repository.opens == 1
+        repository.release.set()
+        assert first.result(timeout=5).status_code == 201
+
+
+def test_async_cancel_and_download_are_state_conditional() -> None:
+    client = api(MemoryRepository())
+    job = client.post(
+        "/api/v1/analysis-jobs",
+        json=payload(flows=synthetic_flows(), key="async-cancel-download"),
+    ).json()
+    accepted = client.post("/api/v1/pcap-exports", json={"job_id": job["id"]})
+    export_id = accepted.json()["id"]
+
+    pending_download = client.get(f"/api/v1/pcap-exports/{export_id}/download")
+    assert pending_download.status_code == 409
+    pending_error = pending_download.json()["error"]
+    assert pending_error["code"] == "PCAP_EXPORT_NOT_READY"
+    assert pending_error["message"] == "PCAP export is not ready"
+    assert pending_error["details"] == {"status": "QUEUED"}
+
+    cancelled = client.post(
+        f"/api/v1/pcap-exports/{export_id}/cancel",
+        json={"reason": "no longer needed"},
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json() == {
+        "cancelled": True,
+        "cancellation_requested": True,
+        "status": "CANCELLED",
+    }
+    repeated = client.post(f"/api/v1/pcap-exports/{export_id}/cancel", json={})
+    assert repeated.status_code == 200
+    assert repeated.json() == cancelled.json()
+    cancelled_download = client.get(f"/api/v1/pcap-exports/{export_id}/download")
+    assert cancelled_download.status_code == 409
+    assert cancelled_download.json()["error"]["code"] == "PCAP_EXPORT_CANCELLED"
 
 
 def test_analysis_history_rejects_immutable_updates_and_active_deletion() -> None:
@@ -1090,7 +1608,11 @@ def test_legacy_pcap_export_preserves_packet_prefix_at_scan_byte_limit() -> None
     second_packet = _udp_packet("10.0.0.1", "203.0.113.77", 50001, 2)
     client = TestClient(
         create_app(
-            Settings(environment="test", pcap_export_scan_max_bytes=len(first_packet)),
+            Settings(
+                environment="test",
+                pcap_export_execution_mode="sync_only",
+                pcap_export_scan_max_bytes=len(first_packet),
+            ),
             repository,
         )
     )
@@ -1166,7 +1688,9 @@ def test_legacy_fallback_calls_compiled_predicate_once_per_admitted_packet(
         return predicate
 
     monkeypatch.setattr(controller_app, "compile_packet_predicate", counted_compile)
-    client = TestClient(create_app(Settings(environment="test"), repository))
+    client = TestClient(
+        create_app(Settings(environment="test", pcap_export_execution_mode="sync_only"), repository)
+    )
 
     response = client.post("/api/v1/pcap-exports", json={"job_id": "legacy-predicate-count"})
 
@@ -1202,7 +1726,9 @@ def test_legacy_fallback_matches_materialized_filter_bytes_for_nested_candidate(
         "legacy-filter-differential",
         [{"id": "legacy-candidate", "candidate_ip": "203.0.113.77"}],
     )
-    client = TestClient(create_app(Settings(environment="test"), repository))
+    client = TestClient(
+        create_app(Settings(environment="test", pcap_export_execution_mode="sync_only"), repository)
+    )
     request_filter = {
         "job_id": "legacy-filter-differential",
         "candidate_id": "legacy-candidate",
@@ -1247,7 +1773,9 @@ def test_legacy_fallback_preserves_invalid_raw_hex_integrity_error() -> None:
             "created_at": "2026-08-21T09:00:00+00:00",
         }
     )
-    client = TestClient(create_app(Settings(environment="test"), repository))
+    client = TestClient(
+        create_app(Settings(environment="test", pcap_export_execution_mode="sync_only"), repository)
+    )
 
     response = client.post("/api/v1/pcap-exports", json={"job_id": "legacy-invalid-hex"})
 
@@ -1744,7 +2272,12 @@ def test_export_is_not_saved_after_its_parent_job_is_deleted() -> None:
             *,
             size_hint: int,
         ) -> dict[str, Any] | None:
-            assert self.delete_job(str(export["job_id"]))
+            job_id = str(export["job_id"])
+            with self._lock:
+                # Simulate an external source-generation deletion that bypasses
+                # the API's active-export guard after execution has started.
+                assert self.jobs.pop(job_id, None) is not None
+                self.job_captures.pop(job_id, None)
             return super().save_export_stream(export, chunks, size_hint=size_hint)
 
     repository = DeletingRepository()
@@ -1860,7 +2393,14 @@ def test_legacy_partial_scan_without_match_reports_incomplete_prefix() -> None:
     first_packet = _udp_packet("10.0.0.1", "203.0.113.77", 50001, 1)
     second_packet = _udp_packet("10.0.0.1", "203.0.113.88", 50001, 2)
     client = TestClient(
-        create_app(Settings(environment="test", pcap_export_scan_max_packets=1), repository)
+        create_app(
+            Settings(
+                environment="test",
+                pcap_export_execution_mode="sync_only",
+                pcap_export_scan_max_packets=1,
+            ),
+            repository,
+        )
     )
     repository.create_job(
         {
@@ -2108,7 +2648,8 @@ def test_retained_segment_candidate_export_uses_only_narrow_metadata_reads() -> 
     assert response.status_code == 201
     assert response.json()["status"] == "COMPLETED"
     assert repository.full_job_reads == []
-    assert repository.segment_job_reads == ["narrow-live-export", "narrow-live-source"]
+    # Snapshotting uses the lock-safe narrow storage view directly.
+    assert repository.segment_job_reads == []
 
 
 def test_candidate_export_rejects_candidate_owned_by_another_job() -> None:
@@ -2151,11 +2692,13 @@ def test_legacy_export_hydrates_full_job_only_after_sources_are_absent() -> None
             "flow_records": [_legacy_packet_record(packet, 0)],
         }
     )
-    client = TestClient(create_app(Settings(environment="test"), repository))
+    client = TestClient(
+        create_app(Settings(environment="test", pcap_export_execution_mode="sync_only"), repository)
+    )
 
     response = client.post("/api/v1/pcap-exports", json={"job_id": "legacy-lazy-export"})
 
     assert response.status_code == 201
     assert response.json()["status"] == "COMPLETED"
-    assert repository.segment_job_reads == ["legacy-lazy-export"]
+    assert repository.segment_job_reads == []
     assert repository.full_job_reads == ["legacy-lazy-export"]

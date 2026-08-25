@@ -4,14 +4,23 @@ import hashlib
 import io
 import json
 import logging
+import secrets
 import threading
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
-from datetime import UTC, datetime
-from typing import Any, BinaryIO
+from datetime import UTC, datetime, timedelta
+from functools import wraps
+from typing import Any, BinaryIO, cast
 from uuid import uuid4
 
+from c2hunter_controller.pcap_export_store import (
+    TERMINAL_EXPORT_STATES,
+    ExportPrincipalLimitError,
+    ExportQueueFullError,
+    ExportQueueStorageError,
+    ExportSourceChangedError,
+)
 from c2hunter_controller.repositories import (
     ArtifactAlreadyExistsError,
     ArtifactMissingError,
@@ -19,6 +28,7 @@ from c2hunter_controller.repositories import (
     ArtifactStorageError,
     ArtifactWriteResult,
     CaptureSource,
+    _pcap_export_snapshot,
 )
 
 _AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
@@ -26,6 +36,18 @@ _JOB_TERMINAL_STATUSES = {"COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELL
 logger = logging.getLogger(__name__)
 
 _MISSING_OBJECT_CODES = {"NoSuchKey", "NoSuchObject", "NoSuchVersion"}
+
+
+def _serialize_shared_connection[**P, R](method: Callable[P, R]) -> Callable[P, R]:
+    """Keep commit/rollback inside one facade-wide shared-connection critical section."""
+
+    @wraps(method)
+    def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        repository = cast(Any, args[0])
+        with repository._lock:
+            return method(*args, **kwargs)
+
+    return wrapped
 
 
 def _is_missing_object_error(exc: Exception) -> bool:
@@ -148,7 +170,25 @@ class MinioBlobStore:
                 content_type=content_type,
                 part_size=5 * 1024 * 1024,
             )
-            return bounded_reader.finish()
+            result = bounded_reader.finish()
+            try:
+                remote = self.client.stat_object(self.bucket, key)
+                if remote.size is None:
+                    raise ArtifactStorageError("MinIO artifact size unavailable")
+                remote_size = int(remote.size)
+            except Exception as exc:
+                try:
+                    self.client.remove_object(self.bucket, key)
+                except Exception:
+                    logger.warning("Failed to clean up unverifiable artifact object %s", key)
+                raise ArtifactStorageError("MinIO artifact verification failed") from exc
+            if remote_size != result.size_bytes:
+                try:
+                    self.client.remove_object(self.bucket, key)
+                except Exception:
+                    logger.warning("Failed to clean up mismatched artifact object %s", key)
+                raise ArtifactStorageError("MinIO artifact remote size mismatch")
+            return result
         except ArtifactProducerError:
             raise
         except Exception as exc:
@@ -291,6 +331,1059 @@ class PostgresRepository:
         self.blob_store = blob_store
         self._lock = threading.RLock()
 
+    @_serialize_shared_connection
+    def snapshot_pcap_export_source(
+        self,
+        job_id: str,
+        canonical_request: dict[str, Any],
+        effective_limits: dict[str, int],
+    ) -> dict[str, Any] | None:
+        connection = self.connection
+        with self._lock, self._rollback_on_error(), connection.cursor() as cursor:
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+
+            class AtomicSnapshotView:
+                def get_job_summary(self, value: str) -> dict[str, Any] | None:
+                    cursor.execute(
+                        "SELECT data FROM controller_objects WHERE kind='job' AND id=%s",
+                        (value,),
+                    )
+                    row = cursor.fetchone()
+                    if row is None:
+                        return None
+                    data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+                    return {key: item for key, item in data.items() if key != "flow_records"}
+
+                def list_sensor_pcaps_for_job(self, value: str) -> list[dict[str, Any]]:
+                    cursor.execute(
+                        "SELECT data FROM controller_objects WHERE kind='sensor_pcap' "
+                        "AND data->>'analysis_job_id'=%s ORDER BY data->>'uploaded_at',id",
+                        (value,),
+                    )
+                    return [
+                        row[0] if isinstance(row[0], dict) else json.loads(row[0])
+                        for row in cursor.fetchall()
+                    ]
+
+            snapshot = _pcap_export_snapshot(
+                AtomicSnapshotView(), job_id, canonical_request, effective_limits
+            )
+            connection.commit()
+            return snapshot
+
+    def validate_pcap_export_admission(self, job: dict[str, Any]) -> bool:
+        if "canonical_request" not in job:
+            return True
+        snapshot = self.snapshot_pcap_export_source(
+            str(job["job_id"]),
+            dict(job.get("canonical_request", {})),
+            dict(job.get("effective_limits", {})),
+        )
+        return bool(
+            snapshot is not None
+            and snapshot["source_generation"] == job.get("source_generation")
+            and snapshot["source_manifest"] == job.get("source_manifest", [])
+        )
+
+    @staticmethod
+    def _queue_row(row: Any) -> dict[str, Any]:
+        value = row[-1]
+        return value if isinstance(value, dict) else json.loads(value)
+
+    @staticmethod
+    def _rollback_pcap_queue(connection: Any) -> None:
+        try:
+            connection.rollback()
+        except Exception:
+            logger.debug(
+                "PCAP export queue rollback failed; preserving primary error", exc_info=True
+            )
+
+    @_serialize_shared_connection
+    def enqueue_pcap_export_job(
+        self, job: dict[str, Any], *, capacity: int, per_principal_limit: int
+    ) -> tuple[dict[str, Any], bool]:
+        connection = self.connection
+        try:
+            with self._lock, connection.cursor() as cursor:
+                # One transaction-scoped lock serializes replay/conflict/coalescing,
+                # both capacity counters, and insertion across all API processes.
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                    ("pcap-export-admission",),
+                )
+                key = job.get("idempotency_key")
+                if key is not None:
+                    cursor.execute(
+                        "SELECT data FROM pcap_export_jobs "
+                        "WHERE principal_scope=%s AND idempotency_key=%s FOR UPDATE",
+                        (job["principal_scope"], key),
+                    )
+                    row = cursor.fetchone()
+                    if row is not None:
+                        existing = self._queue_row(row)
+                        if existing["request_fingerprint"] != job["request_fingerprint"]:
+                            raise ValueError("idempotency_conflict")
+                        connection.commit()
+                        return existing, False
+                cursor.execute(
+                    "SELECT data FROM pcap_export_jobs "
+                    "WHERE principal_scope=%s AND coalesce_fingerprint=%s "
+                    "AND status IN ('QUEUED','RUNNING','COMPLETED') FOR UPDATE",
+                    (job["principal_scope"], job["coalesce_fingerprint"]),
+                )
+                row = cursor.fetchone()
+                if row is not None:
+                    connection.commit()
+                    return self._queue_row(row), False
+                cursor.execute(
+                    "SELECT COUNT(*),COUNT(*) FILTER (WHERE principal_scope=%s) "
+                    "FROM pcap_export_jobs WHERE status IN ('QUEUED','RUNNING')",
+                    (job["principal_scope"],),
+                )
+                counts = cursor.fetchone() or (0, 0)
+                if int(counts[0]) >= capacity:
+                    raise ExportQueueFullError("pcap export queue is full")
+                if int(counts[1]) >= per_principal_limit:
+                    raise ExportPrincipalLimitError("principal PCAP export limit reached")
+                if "canonical_request" in job:
+
+                    class AdmissionSnapshotView:
+                        def get_job_summary(self, value: str) -> dict[str, Any] | None:
+                            cursor.execute(
+                                "SELECT data FROM controller_objects "
+                                "WHERE kind='job' AND id=%s FOR UPDATE",
+                                (value,),
+                            )
+                            row = cursor.fetchone()
+                            if row is None:
+                                return None
+                            data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+                            return {
+                                key: item for key, item in data.items() if key != "flow_records"
+                            }
+
+                        def list_sensor_pcaps_for_job(self, value: str) -> list[dict[str, Any]]:
+                            cursor.execute(
+                                "SELECT data FROM controller_objects "
+                                "WHERE kind='sensor_pcap' "
+                                "AND data->>'analysis_job_id'=%s "
+                                "ORDER BY data->>'uploaded_at',id FOR SHARE",
+                                (value,),
+                            )
+                            return [
+                                row[0] if isinstance(row[0], dict) else json.loads(row[0])
+                                for row in cursor.fetchall()
+                            ]
+
+                    current_snapshot = _pcap_export_snapshot(
+                        AdmissionSnapshotView(),
+                        str(job["job_id"]),
+                        dict(job.get("canonical_request", {})),
+                        dict(job.get("effective_limits", {})),
+                    )
+                    if (
+                        current_snapshot is None
+                        or current_snapshot["source_generation"] != job.get("source_generation")
+                        or current_snapshot["source_manifest"] != job.get("source_manifest", [])
+                    ):
+                        raise ExportSourceChangedError(
+                            "PCAP export source changed before admission"
+                        )
+                cursor.execute(
+                    "INSERT INTO pcap_export_jobs("
+                    "export_id,principal_scope,idempotency_key,request_fingerprint,"
+                    "coalesce_fingerprint,parent_job_id,source_job_id,source_generation,status,"
+                    "attempt,lease_token,lease_expires_at,next_attempt_at,queued_at,data) VALUES("
+                    "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                    (
+                        job["id"],
+                        job["principal_scope"],
+                        key,
+                        job["request_fingerprint"],
+                        job["coalesce_fingerprint"],
+                        job["job_id"],
+                        job["source_job_id"],
+                        job["source_generation"],
+                        job["status"],
+                        job.get("attempt", 0),
+                        job.get("lease_token"),
+                        job.get("lease_expires_at"),
+                        job.get("next_attempt_at"),
+                        job["queued_at"],
+                        self._json(job),
+                    ),
+                )
+                connection.commit()
+                return deepcopy(job), True
+        except (
+            ValueError,
+            ExportQueueFullError,
+            ExportPrincipalLimitError,
+            ExportSourceChangedError,
+        ):
+            self._rollback_pcap_queue(connection)
+            raise
+        except Exception as exc:
+            self._rollback_pcap_queue(connection)
+            # A uniqueness race can still be observed during rolling upgrades or
+            # if an older writer does not take the admission lock. Reconcile by
+            # rereading the winner and applying the same exact replay semantics.
+            try:
+                with self._lock, connection.cursor() as cursor:
+                    key = job.get("idempotency_key")
+                    if key is not None:
+                        cursor.execute(
+                            "SELECT data FROM pcap_export_jobs WHERE principal_scope=%s "
+                            "AND idempotency_key=%s",
+                            (job["principal_scope"], key),
+                        )
+                        row = cursor.fetchone()
+                        if row is not None:
+                            existing = self._queue_row(row)
+                            connection.commit()
+                            if existing["request_fingerprint"] != job["request_fingerprint"]:
+                                raise ValueError("idempotency_conflict") from exc
+                            return existing, False
+                    cursor.execute(
+                        "SELECT data FROM pcap_export_jobs WHERE principal_scope=%s "
+                        "AND coalesce_fingerprint=%s "
+                        "AND status IN ('QUEUED','RUNNING','COMPLETED')",
+                        (job["principal_scope"], job["coalesce_fingerprint"]),
+                    )
+                    row = cursor.fetchone()
+                    if row is not None:
+                        connection.commit()
+                        return self._queue_row(row), False
+                    connection.rollback()
+            except ValueError:
+                raise
+            except Exception:
+                self._rollback_pcap_queue(connection)
+            raise ExportQueueStorageError("PCAP export lifecycle storage unavailable") from exc
+
+    @_serialize_shared_connection
+    def get_pcap_export_job(self, export_id: str) -> dict[str, Any] | None:
+        try:
+            with self._lock, self.connection.cursor() as cursor:
+                cursor.execute("SELECT data FROM pcap_export_jobs WHERE export_id=%s", (export_id,))
+                row = cursor.fetchone()
+                self.connection.commit()
+            return self._queue_row(row) if row is not None else None
+        except Exception as exc:
+            self._rollback_pcap_queue(self.connection)
+            raise ExportQueueStorageError("PCAP export lifecycle storage unavailable") from exc
+
+    @_serialize_shared_connection
+    def find_pcap_export_job(
+        self, principal_scope: str, idempotency_key: str, request_fingerprint: str
+    ) -> dict[str, Any] | None:
+        try:
+            with self._lock, self.connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT data FROM pcap_export_jobs WHERE principal_scope=%s "
+                    "AND idempotency_key=%s",
+                    (principal_scope, idempotency_key),
+                )
+                row = cursor.fetchone()
+                self.connection.commit()
+            found = self._queue_row(row) if row is not None else None
+            if found is not None and found.get("request_fingerprint") != request_fingerprint:
+                raise ValueError("idempotency_conflict")
+            return found
+        except ValueError:
+            raise
+        except Exception as exc:
+            self._rollback_pcap_queue(self.connection)
+            raise ExportQueueStorageError("PCAP export lifecycle storage unavailable") from exc
+
+    @_serialize_shared_connection
+    def count_pcap_export_jobs_by_status(self) -> dict[str, int]:
+        try:
+            with self._lock, self.connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT status,COUNT(*) FROM pcap_export_jobs "
+                    "WHERE status IN ('QUEUED','RUNNING') GROUP BY status"
+                )
+                found = {str(status): int(value) for status, value in cursor.fetchall()}
+                self.connection.commit()
+            return {status: found.get(status, 0) for status in ("QUEUED", "RUNNING")}
+        except Exception as exc:
+            self._rollback_pcap_queue(self.connection)
+            raise ExportQueueStorageError("PCAP export lifecycle storage unavailable") from exc
+
+    @_serialize_shared_connection
+    def claim_pcap_export_job(
+        self, *, now: datetime | None = None, lease_seconds: int = 120
+    ) -> dict[str, Any] | None:
+        connection = self.connection
+        current = now or datetime.now(UTC)
+        try:
+            with self._lock, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT export_id,data FROM pcap_export_jobs "
+                    "WHERE status='QUEUED' AND (next_attempt_at IS NULL OR next_attempt_at<=%s) "
+                    "ORDER BY queued_at,export_id FOR UPDATE SKIP LOCKED LIMIT 1",
+                    (current,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    connection.commit()
+                    return None
+                job = self._queue_row(row)
+                token = secrets.token_urlsafe(32)
+                job.update(
+                    status="RUNNING",
+                    attempt=int(job.get("attempt", 0)) + 1,
+                    lease_token=token,
+                    lease_expires_at=(current + timedelta(seconds=lease_seconds)).isoformat(),
+                    started_at=job.get("started_at") or current.isoformat(),
+                    updated_at=current.isoformat(),
+                )
+                job["progress"] = {**job.get("progress", {}), "phase": "SNAPSHOT_VALIDATION"}
+                cursor.execute(
+                    "UPDATE pcap_export_jobs SET status='RUNNING',attempt=%s,lease_token=%s,"
+                    "lease_expires_at=%s,data=%s::jsonb WHERE export_id=%s AND status='QUEUED'",
+                    (
+                        job["attempt"],
+                        token,
+                        current + timedelta(seconds=lease_seconds),
+                        self._json(job),
+                        job["id"],
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    connection.rollback()
+                    return None
+                connection.commit()
+                return job
+        except Exception as exc:
+            connection.rollback()
+            if isinstance(exc, ExportQueueStorageError):
+                raise
+            raise ExportQueueStorageError("PCAP export lifecycle storage unavailable") from exc
+
+    @_serialize_shared_connection
+    def _guarded_pcap_update(
+        self,
+        export_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        mutate: Callable[[dict[str, Any]], bool],
+    ) -> bool:
+        connection = self.connection
+        try:
+            with self._lock, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT data FROM pcap_export_jobs WHERE export_id=%s FOR UPDATE",
+                    (export_id,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    connection.commit()
+                    return False
+                job = self._queue_row(row)
+                if (
+                    job.get("status") != "RUNNING"
+                    or int(job.get("attempt", 0)) != attempt
+                    or not secrets.compare_digest(str(job.get("lease_token", "")), lease_token)
+                    or not mutate(job)
+                ):
+                    connection.commit()
+                    return False
+                job["updated_at"] = datetime.now(UTC).isoformat()
+                cursor.execute(
+                    "UPDATE pcap_export_jobs SET status=%s,lease_token=%s,lease_expires_at=%s,"
+                    "next_attempt_at=%s,completed_at=%s,artifact_size_bytes=%s,data=%s::jsonb "
+                    "WHERE export_id=%s AND status='RUNNING' AND attempt=%s AND lease_token=%s",
+                    (
+                        job["status"],
+                        job.get("lease_token"),
+                        job.get("lease_expires_at"),
+                        job.get("next_attempt_at"),
+                        job.get("completed_at"),
+                        job.get("size_bytes"),
+                        self._json(job),
+                        export_id,
+                        attempt,
+                        lease_token,
+                    ),
+                )
+                won = bool(cursor.rowcount == 1)
+                connection.commit()
+                return won
+        except Exception as exc:
+            connection.rollback()
+            raise ExportQueueStorageError("PCAP export lifecycle storage unavailable") from exc
+
+    def heartbeat_pcap_export_job(
+        self, export_id: str, *, attempt: int, lease_token: str, lease_seconds: int
+    ) -> bool:
+        def mutate(job: dict[str, Any]) -> bool:
+            job["lease_expires_at"] = (
+                datetime.now(UTC) + timedelta(seconds=lease_seconds)
+            ).isoformat()
+            return True
+
+        return self._guarded_pcap_update(
+            export_id, attempt=attempt, lease_token=lease_token, mutate=mutate
+        )
+
+    def progress_pcap_export_job(
+        self,
+        export_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        progress: dict[str, Any],
+    ) -> bool:
+        def mutate(job: dict[str, Any]) -> bool:
+            current = dict(job.get("progress", {}))
+            for key, value in progress.items():
+                if key == "phase":
+                    current[key] = str(value)
+                elif key in {
+                    "percent",
+                    "scanned_source_bytes",
+                    "scanned_packet_count",
+                    "matched_packet_count",
+                    "exported_packet_count",
+                }:
+                    limit = 99 if key == "percent" else int(value)
+                    current[key] = max(int(current.get(key, 0)), min(limit, int(value)))
+            job["progress"] = current
+            return True
+
+        return self._guarded_pcap_update(
+            export_id, attempt=attempt, lease_token=lease_token, mutate=mutate
+        )
+
+    def complete_pcap_export_job(
+        self,
+        export_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        artifact: dict[str, Any],
+    ) -> bool:
+        artifact_accepted = False
+
+        def mutate(job: dict[str, Any]) -> bool:
+            nonlocal artifact_accepted
+            now = datetime.now(UTC).isoformat()
+            artifact_status = str(artifact.get("status", "COMPLETED"))
+            if artifact_status not in {"COMPLETED", "FAILED"}:
+                return False
+            if job.get("cancellation_requested"):
+                job.update(
+                    status="CANCELLED",
+                    completed_at=now,
+                    error_code="PCAP_EXPORT_CANCELLED",
+                    error="PCAP export was cancelled",
+                )
+            elif artifact_status == "COMPLETED":
+                with self.connection.cursor() as publication_cursor:
+                    publication_cursor.execute(
+                        "SELECT 1 FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
+                        (str(job["job_id"]),),
+                    )
+                    if publication_cursor.fetchone() is None:
+                        return False
+
+                    class CompletionSnapshotView:
+                        def get_job_summary(self, value: str) -> dict[str, Any] | None:
+                            publication_cursor.execute(
+                                "SELECT data FROM controller_objects "
+                                "WHERE kind='job' AND id=%s FOR UPDATE",
+                                (value,),
+                            )
+                            row = publication_cursor.fetchone()
+                            if row is None:
+                                return None
+                            data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+                            return {
+                                key: item for key, item in data.items() if key != "flow_records"
+                            }
+
+                        def list_sensor_pcaps_for_job(self, value: str) -> list[dict[str, Any]]:
+                            publication_cursor.execute(
+                                "SELECT data FROM controller_objects WHERE kind='sensor_pcap' "
+                                "AND data->>'analysis_job_id'=%s "
+                                "ORDER BY data->>'uploaded_at',id FOR SHARE",
+                                (value,),
+                            )
+                            return [
+                                row[0] if isinstance(row[0], dict) else json.loads(row[0])
+                                for row in publication_cursor.fetchall()
+                            ]
+
+                    current_snapshot = _pcap_export_snapshot(
+                        CompletionSnapshotView(),
+                        str(job["job_id"]),
+                        dict(job.get("canonical_request", {})),
+                        dict(job.get("effective_limits", {})),
+                    )
+                    if (
+                        current_snapshot is None
+                        or current_snapshot["source_generation"] != job.get("source_generation")
+                        or current_snapshot["source_manifest"] != job.get("source_manifest", [])
+                    ):
+                        return False
+                if artifact.get("published") is False:
+                    with self.connection.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT data FROM controller_objects "
+                            "WHERE kind='export' AND id=%s FOR UPDATE",
+                            (export_id,),
+                        )
+                        row = cursor.fetchone()
+                        value = row[0] if row is not None else None
+                        stored = (
+                            value
+                            if isinstance(value, dict)
+                            else json.loads(value)
+                            if value
+                            else None
+                        )
+                        if (
+                            stored is None
+                            or stored.get("attempt") != attempt
+                            or stored.get("lease_token") != lease_token
+                            or stored.get("object_key") != artifact.get("object_key")
+                        ):
+                            return False
+                        object_key = str(artifact.get("object_key", ""))
+                        cleanup_id = self._pcap_cleanup_id(f"publication:{export_id}", object_key)
+                        cursor.execute(
+                            "SELECT id,data FROM controller_objects "
+                            "WHERE kind='pcap_export_cleanup' "
+                            "AND data->>'object_key'=%s FOR UPDATE",
+                            (object_key,),
+                        )
+                        cleanup_rows = cursor.fetchall()
+                        cleanup_row = cleanup_rows[0] if len(cleanup_rows) == 1 else None
+                        cleanup_row_id = cleanup_row[0] if cleanup_row is not None else None
+                        cleanup_value = cleanup_row[1] if cleanup_row is not None else None
+                        cleanup = (
+                            cleanup_value
+                            if isinstance(cleanup_value, dict)
+                            else json.loads(cleanup_value)
+                            if cleanup_value
+                            else None
+                        )
+                        if (
+                            cleanup is None
+                            or cleanup_row_id != cleanup_id
+                            or cleanup.get("object_key") != object_key
+                            or cleanup.get("state") != "STAGED"
+                        ):
+                            return False
+                        stored["published"] = True
+                        cursor.execute(
+                            "UPDATE controller_objects SET data=%s::jsonb "
+                            "WHERE kind='export' AND id=%s",
+                            (self._json(stored), export_id),
+                        )
+                        cursor.execute(
+                            "DELETE FROM controller_objects "
+                            "WHERE kind='pcap_export_cleanup' AND id=%s "
+                            "AND data->>'object_key'=%s AND data->>'state'='STAGED'",
+                            (cleanup_id, object_key),
+                        )
+                        if cursor.rowcount != 1:
+                            raise ExportQueueStorageError(
+                                "PCAP export cleanup publication CAS failed"
+                            )
+                    artifact["published"] = True
+                job.update(artifact)
+                job.update(status="COMPLETED", completed_at=now, error_code=None, error=None)
+                job["progress"] = {
+                    **job.get("progress", {}),
+                    "phase": "TERMINAL",
+                    "percent": 100,
+                }
+            else:
+                job.update(artifact)
+                job.update(status="FAILED", completed_at=now)
+                job["progress"] = {
+                    **job.get("progress", {}),
+                    "phase": "TERMINAL",
+                    "percent": min(99, int(job.get("progress", {}).get("percent", 0))),
+                }
+            artifact_accepted = not job.get("cancellation_requested")
+            job.update(lease_token=None, lease_expires_at=None)
+            return True
+
+        updated = self._guarded_pcap_update(
+            export_id, attempt=attempt, lease_token=lease_token, mutate=mutate
+        )
+        return updated and artifact_accepted
+
+    def retry_pcap_export_job(
+        self,
+        export_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        transient: bool,
+        error_code: str,
+        error: str,
+        retry_base_seconds: int = 5,
+    ) -> bool:
+        def mutate(job: dict[str, Any]) -> bool:
+            now = datetime.now(UTC)
+            if job.get("cancellation_requested"):
+                job.update(
+                    status="CANCELLED",
+                    completed_at=now.isoformat(),
+                    error_code="PCAP_EXPORT_CANCELLED",
+                    error="PCAP export was cancelled",
+                )
+            elif transient and attempt < int(job.get("max_attempts", 3)):
+                job.update(
+                    status="QUEUED",
+                    next_attempt_at=(
+                        now + timedelta(seconds=retry_base_seconds * 2 ** (attempt - 1))
+                    ).isoformat(),
+                )
+            else:
+                job.update(
+                    status="FAILED",
+                    completed_at=now.isoformat(),
+                    error_code="PCAP_EXPORT_RETRY_EXHAUSTED" if transient else error_code,
+                    error=error,
+                )
+            job.update(lease_token=None, lease_expires_at=None)
+            return True
+
+        return self._guarded_pcap_update(
+            export_id, attempt=attempt, lease_token=lease_token, mutate=mutate
+        )
+
+    @_serialize_shared_connection
+    def cancel_pcap_export_job(
+        self, export_id: str, *, reason: str | None = None
+    ) -> dict[str, Any]:
+        connection = self.connection
+        try:
+            with self._lock, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT data FROM pcap_export_jobs WHERE export_id=%s FOR UPDATE",
+                    (export_id,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise KeyError(export_id)
+                job = self._queue_row(row)
+                if job["status"] not in TERMINAL_EXPORT_STATES:
+                    now = datetime.now(UTC).isoformat()
+                    job.update(
+                        cancellation_requested=True,
+                        cancellation_requested_at=now,
+                        cancellation_reason=reason,
+                        updated_at=now,
+                    )
+                    if job["status"] == "QUEUED":
+                        job.update(
+                            status="CANCELLED",
+                            completed_at=now,
+                            error_code="PCAP_EXPORT_CANCELLED",
+                            error="PCAP export was cancelled",
+                        )
+                    cursor.execute(
+                        "UPDATE pcap_export_jobs SET status=%s,completed_at=%s,data=%s::jsonb "
+                        "WHERE export_id=%s AND status IN ('QUEUED','RUNNING')",
+                        (job["status"], job.get("completed_at"), self._json(job), export_id),
+                    )
+                connection.commit()
+                return job
+        except KeyError:
+            connection.rollback()
+            raise
+        except Exception as exc:
+            connection.rollback()
+            raise ExportQueueStorageError("PCAP export lifecycle storage unavailable") from exc
+
+    @_serialize_shared_connection
+    def recover_pcap_export_jobs(self, *, now: datetime | None = None) -> int:
+        current = now or datetime.now(UTC)
+        connection = self.connection
+        try:
+            with self._lock, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT export_id,data FROM pcap_export_jobs WHERE status='RUNNING' "
+                    "AND lease_expires_at<=%s FOR UPDATE SKIP LOCKED",
+                    (current,),
+                )
+                rows = cursor.fetchall()
+                for row in rows:
+                    job = self._queue_row(row)
+                    if job.get("cancellation_requested"):
+                        job.update(
+                            status="CANCELLED",
+                            completed_at=current.isoformat(),
+                            error_code="PCAP_EXPORT_CANCELLED",
+                            error="PCAP export was cancelled",
+                        )
+                    elif int(job.get("attempt", 0)) >= int(job.get("max_attempts", 3)):
+                        job.update(
+                            status="FAILED",
+                            completed_at=current.isoformat(),
+                            error_code="PCAP_EXPORT_RETRY_EXHAUSTED",
+                            error="PCAP export retry attempts were exhausted",
+                        )
+                    else:
+                        job.update(status="QUEUED", next_attempt_at=current.isoformat())
+                    job.update(
+                        lease_token=None,
+                        lease_expires_at=None,
+                        updated_at=current.isoformat(),
+                    )
+                    cursor.execute(
+                        "UPDATE pcap_export_jobs SET status=%s,lease_token=NULL,"
+                        "lease_expires_at=NULL,next_attempt_at=%s,completed_at=%s,data=%s::jsonb "
+                        "WHERE export_id=%s AND status='RUNNING'",
+                        (
+                            job["status"],
+                            job.get("next_attempt_at"),
+                            job.get("completed_at"),
+                            self._json(job),
+                            job["id"],
+                        ),
+                    )
+                connection.commit()
+                return len(rows)
+        except Exception as exc:
+            connection.rollback()
+            raise ExportQueueStorageError("PCAP export lifecycle storage unavailable") from exc
+
+    @_serialize_shared_connection
+    def has_active_pcap_exports(self, job_id: str) -> bool:
+        connection = self.connection
+        try:
+            with self._lock, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT 1 FROM pcap_export_jobs WHERE (parent_job_id=%s "
+                    "OR source_job_id=%s OR data->'provenance_job_ids' ? %s) "
+                    "AND status IN ('QUEUED','RUNNING') LIMIT 1",
+                    (job_id, job_id, job_id),
+                )
+                active = cursor.fetchone() is not None
+            connection.commit()
+            return active
+        except Exception as exc:
+            connection.rollback()
+            raise ExportQueueStorageError("PCAP export lifecycle storage unavailable") from exc
+
+    def validate_pcap_export_source(self, job: dict[str, Any]) -> bool:
+        if "canonical_request" not in job:
+            return True
+        snapshot = self.snapshot_pcap_export_source(
+            str(job["job_id"]),
+            dict(job.get("canonical_request", {})),
+            dict(job.get("effective_limits", {})),
+        )
+        return bool(
+            snapshot is not None
+            and snapshot["source_generation"] == job.get("source_generation")
+            and snapshot["source_manifest"] == job.get("source_manifest", [])
+        )
+
+    @staticmethod
+    def _pcap_cleanup_id(scope: str, object_key: str) -> str:
+        digest = hashlib.sha256(object_key.encode()).hexdigest()[:16]
+        return f"{scope}:{digest}"
+
+    def compensate_pcap_export_artifact(
+        self,
+        export_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        artifact: dict[str, Any],
+    ) -> None:
+        object_key = artifact.get("object_key")
+        if not object_key:
+            return
+        cleanup_id = self._pcap_cleanup_id(f"publication:{export_id}", str(object_key))
+        connection = self.connection
+        try:
+            with self._lock, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT data->>'object_key' FROM pcap_export_jobs "
+                    "WHERE export_id=%s FOR UPDATE",
+                    (export_id,),
+                )
+                row = cursor.fetchone()
+                cursor.execute(
+                    "SELECT id FROM controller_objects "
+                    "WHERE kind='pcap_export_cleanup' AND data->>'object_key'=%s FOR UPDATE",
+                    (object_key,),
+                )
+                cleanup_exists = bool(cursor.fetchall())
+                if row is not None and row[0] == object_key:
+                    cursor.execute(
+                        "DELETE FROM controller_objects "
+                        "WHERE kind='pcap_export_cleanup' AND data->>'object_key'=%s",
+                        (object_key,),
+                    )
+                    connection.commit()
+                    return
+                cursor.execute(
+                    "DELETE FROM controller_objects WHERE kind='export' AND id=%s "
+                    "AND data->>'object_key'=%s AND data->>'attempt'=%s "
+                    "AND data->>'lease_token'=%s",
+                    (export_id, object_key, str(attempt), lease_token),
+                )
+                if cursor.rowcount != 1 and not cleanup_exists:
+                    connection.commit()
+                    return
+                cursor.execute(
+                    "DELETE FROM controller_objects "
+                    "WHERE kind='pcap_export_cleanup' AND data->>'object_key'=%s AND id<>%s",
+                    (object_key, cleanup_id),
+                )
+                cursor.execute(
+                    "INSERT INTO controller_objects(kind,id,data) "
+                    "VALUES('pcap_export_cleanup',%s,%s::jsonb) "
+                    "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                    (
+                        cleanup_id,
+                        self._json(
+                            {
+                                "object_key": object_key,
+                                "created_at": datetime.now(UTC).isoformat(),
+                                "state": "READY",
+                                "export_id": export_id,
+                                "attempt": attempt,
+                                "lease_token": lease_token,
+                            }
+                        ),
+                    ),
+                )
+                connection.commit()
+            self.blob_store.delete(str(object_key))
+            with self._lock, connection.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM controller_objects WHERE kind='pcap_export_cleanup' AND id=%s "
+                    "AND data->>'object_key'=%s",
+                    (cleanup_id, str(object_key)),
+                )
+                connection.commit()
+        except Exception as exc:
+            connection.rollback()
+            raise ExportQueueStorageError("PCAP export artifact compensation failed") from exc
+
+    def cleanup_pcap_export_orphans(
+        self, *, now: datetime, max_age_seconds: int, limit: int
+    ) -> list[str]:
+        """Delete a bounded batch via the durable cleanup outbox without locking across MinIO."""
+        connection = self.connection
+        cutoff = now - timedelta(seconds=max_age_seconds)
+        try:
+            with self._lock, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT id,data->>'object_key' FROM controller_objects "
+                    "WHERE kind='pcap_export_cleanup' "
+                    "AND (COALESCE(data->>'state','READY') IN ('READY','DELETING') "
+                    "OR (data->>'state'='UPLOADING' "
+                    "AND (data->>'created_at')::timestamptz<=%s "
+                    "AND NOT EXISTS (SELECT 1 FROM pcap_export_jobs AS active "
+                    "WHERE active.export_id=(controller_objects.data->>'export_id') "
+                    "AND active.status='RUNNING' "
+                    "AND active.attempt=COALESCE("
+                    "(controller_objects.data->>'attempt')::integer,-1) "
+                    "AND active.lease_token=(controller_objects.data->>'lease_token'))) "
+                    "AND NOT EXISTS (SELECT 1 FROM pcap_export_jobs AS published "
+                    "WHERE published.status='COMPLETED' "
+                    "AND published.data->>'object_key'=controller_objects.data->>'object_key') "
+                    "ORDER BY id "
+                    "FOR UPDATE SKIP LOCKED LIMIT %s",
+                    (cutoff, limit),
+                )
+                candidates = [(str(item[0]), str(item[1])) for item in cursor.fetchall() if item[1]]
+                pending: list[tuple[str, str]] = []
+                for cleanup_id, object_key in candidates:
+                    cursor.execute(
+                        "UPDATE controller_objects "
+                        "SET data=jsonb_set(data,'{state}','\"DELETING\"'::jsonb) "
+                        "WHERE kind='pcap_export_cleanup' AND id=%s "
+                        "AND data->>'object_key'=%s "
+                        "AND (COALESCE(data->>'state','READY') IN ('READY','DELETING') "
+                        "OR (data->>'state'='UPLOADING' "
+                        "AND (data->>'created_at')::timestamptz<=%s "
+                        "AND NOT EXISTS (SELECT 1 FROM pcap_export_jobs AS active "
+                        "WHERE active.export_id=(controller_objects.data->>'export_id') "
+                        "AND active.status='RUNNING' "
+                        "AND active.attempt=COALESCE("
+                        "(controller_objects.data->>'attempt')::integer,-1) "
+                        "AND active.lease_token=(controller_objects.data->>'lease_token'))) "
+                        "AND NOT EXISTS (SELECT 1 FROM pcap_export_jobs AS published "
+                        "WHERE published.status='COMPLETED' "
+                        "AND published.data->>'object_key'=controller_objects.data->>'object_key')",
+                        (cleanup_id, object_key, cutoff),
+                    )
+                    if cursor.rowcount == 1:
+                        pending.append((cleanup_id, object_key))
+                remaining = max(0, limit - len(pending))
+                if remaining:
+                    cursor.execute(
+                        "SELECT id,data->>'object_key' FROM controller_objects AS artifact "
+                        "WHERE kind='export' AND data->>'published'='false' "
+                        "AND (data->>'created_at')::timestamptz<=%s "
+                        "AND NOT EXISTS (SELECT 1 FROM pcap_export_jobs AS job "
+                        "WHERE job.data->>'object_key'=artifact.data->>'object_key') "
+                        "AND NOT EXISTS (SELECT 1 FROM pcap_export_jobs AS active "
+                        "WHERE active.export_id=artifact.id AND active.status='RUNNING' "
+                        "AND active.attempt=COALESCE((artifact.data->>'attempt')::integer,-1) "
+                        "AND active.lease_token=artifact.data->>'lease_token') "
+                        "ORDER BY (data->>'created_at')::timestamptz,id "
+                        "FOR UPDATE SKIP LOCKED LIMIT %s",
+                        (cutoff, remaining),
+                    )
+                    fresh_artifacts = [
+                        (str(item[0]), str(item[1])) for item in cursor.fetchall() if item[1]
+                    ]
+                    fresh: list[tuple[str, str]] = []
+                    for artifact_id, object_key in fresh_artifacts:
+                        cleanup_id = self._pcap_cleanup_id(f"orphan:{artifact_id}", object_key)
+                        cursor.execute(
+                            "INSERT INTO controller_objects(kind,id,data) "
+                            "VALUES('pcap_export_cleanup',%s,%s::jsonb) "
+                            "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                            (
+                                cleanup_id,
+                                self._json(
+                                    {
+                                        "object_key": object_key,
+                                        "created_at": now.isoformat(),
+                                        "state": "DELETING",
+                                    }
+                                ),
+                            ),
+                        )
+                        cursor.execute(
+                            "DELETE FROM controller_objects WHERE kind='export' AND id=%s "
+                            "AND data->>'published'='false' AND data->>'object_key'=%s",
+                            (artifact_id, object_key),
+                        )
+                        fresh.append((cleanup_id, object_key))
+                    pending.extend(fresh)
+                connection.commit()
+            removed: list[str] = []
+            for cleanup_id, object_key in pending:
+                try:
+                    self.blob_store.delete(object_key)
+                    with self._lock, connection.cursor() as cursor:
+                        cursor.execute(
+                            "DELETE FROM controller_objects "
+                            "WHERE kind='pcap_export_cleanup' AND id=%s "
+                            "AND data->>'object_key'=%s",
+                            (cleanup_id, object_key),
+                        )
+                        connection.commit()
+                    removed.append(object_key)
+                except Exception:
+                    with self._lock:
+                        connection.rollback()
+                    logger.warning("Deferred PCAP orphan cleanup failed", exc_info=True)
+            return removed
+        except Exception as exc:
+            with self._lock:
+                self._rollback_pcap_queue(connection)
+            raise ExportQueueStorageError("PCAP export orphan cleanup failed") from exc
+
+    def retain_pcap_export_jobs(
+        self,
+        *,
+        now: datetime,
+        max_age_seconds: int,
+        max_count: int,
+        max_artifact_bytes: int,
+    ) -> list[str]:
+        connection = self.connection
+        try:
+            with self._lock, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT export_id,data FROM pcap_export_jobs "
+                    "WHERE status IN ('COMPLETED','FAILED','CANCELLED') "
+                    "ORDER BY completed_at,export_id FOR UPDATE",
+                )
+                rows = cursor.fetchall()
+                jobs = [self._queue_row(row) for row in rows]
+                selected: set[str] = {
+                    str(job["id"])
+                    for job in jobs
+                    if job.get("completed_at")
+                    and datetime.fromisoformat(str(job["completed_at"]))
+                    < now - timedelta(seconds=max_age_seconds)
+                }
+                survivors = [job for job in jobs if str(job["id"]) not in selected]
+                while len(survivors) > max_count:
+                    selected.add(str(survivors.pop(0)["id"]))
+                retained_bytes = sum(int(job.get("size_bytes", 0) or 0) for job in survivors)
+                while survivors and retained_bytes > max_artifact_bytes:
+                    removed = survivors.pop(0)
+                    retained_bytes -= int(removed.get("size_bytes", 0) or 0)
+                    selected.add(str(removed["id"]))
+                ordered = [str(job["id"]) for job in jobs if str(job["id"]) in selected]
+                cleanup: list[tuple[str, str]] = []
+                if ordered:
+                    cleanup = [
+                        (
+                            self._pcap_cleanup_id(f"retention:{job['id']}", str(job["object_key"])),
+                            str(job["object_key"]),
+                        )
+                        for job in jobs
+                        if str(job["id"]) in selected and job.get("object_key")
+                    ]
+                    for cleanup_id, object_key in cleanup:
+                        cursor.execute(
+                            "INSERT INTO controller_objects(kind,id,data) "
+                            "VALUES('pcap_export_cleanup',%s,%s::jsonb) "
+                            "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                            (
+                                cleanup_id,
+                                self._json(
+                                    {
+                                        "object_key": object_key,
+                                        "created_at": now.isoformat(),
+                                    }
+                                ),
+                            ),
+                        )
+                    cursor.execute(
+                        "DELETE FROM controller_objects WHERE kind='export' AND id=ANY(%s)",
+                        (ordered,),
+                    )
+                    cursor.execute(
+                        "DELETE FROM pcap_export_jobs WHERE export_id=ANY(%s)", (ordered,)
+                    )
+                connection.commit()
+            # Public references are gone before any irreversible object delete.
+            # Failed deletes remain in the durable cleanup outbox for maintenance.
+            for cleanup_id, object_key in cleanup:
+                try:
+                    self.blob_store.delete(object_key)
+                    with self._lock, connection.cursor() as cursor:
+                        cursor.execute(
+                            "DELETE FROM controller_objects "
+                            "WHERE kind='pcap_export_cleanup' AND id=%s "
+                            "AND data->>'object_key'=%s",
+                            (cleanup_id, object_key),
+                        )
+                        connection.commit()
+                except Exception:
+                    with self._lock:
+                        connection.rollback()
+                    logger.warning("Deferred PCAP artifact cleanup failed", exc_info=True)
+            return ordered
+        except Exception as exc:
+            with self._lock:
+                self._rollback_pcap_queue(connection)
+            raise ExportQueueStorageError("PCAP export lifecycle storage unavailable") from exc
+
     @contextmanager
     def _rollback_on_error(self) -> Iterator[None]:
         try:
@@ -387,6 +1480,37 @@ class PostgresRepository:
                           object_id text NOT NULL,
                           occurred_at timestamptz NOT NULL, data jsonb NOT NULL
                         );
+                        CREATE TABLE IF NOT EXISTS pcap_export_jobs (
+                          export_id text PRIMARY KEY,
+                          principal_scope text NOT NULL,
+                          idempotency_key text,
+                          request_fingerprint text NOT NULL,
+                          coalesce_fingerprint text NOT NULL,
+                          parent_job_id text NOT NULL,
+                          source_job_id text NOT NULL,
+                          source_generation text NOT NULL,
+                          status text NOT NULL,
+                          attempt integer NOT NULL DEFAULT 0,
+                          lease_token text,
+                          lease_expires_at timestamptz,
+                          next_attempt_at timestamptz,
+                          queued_at timestamptz NOT NULL,
+                          completed_at timestamptz,
+                          artifact_size_bytes bigint,
+                          data jsonb NOT NULL
+                        );
+                        CREATE UNIQUE INDEX IF NOT EXISTS pcap_export_jobs_principal_idempotency
+                          ON pcap_export_jobs(principal_scope,idempotency_key)
+                          WHERE idempotency_key IS NOT NULL;
+                        CREATE UNIQUE INDEX IF NOT EXISTS pcap_export_jobs_reusable_coalesce
+                          ON pcap_export_jobs(principal_scope,coalesce_fingerprint)
+                          WHERE status IN ('QUEUED','RUNNING','COMPLETED');
+                        CREATE INDEX IF NOT EXISTS pcap_export_jobs_claim
+                          ON pcap_export_jobs(status,next_attempt_at,queued_at);
+                        CREATE INDEX IF NOT EXISTS pcap_export_jobs_lease
+                          ON pcap_export_jobs(status,lease_expires_at);
+                        CREATE INDEX IF NOT EXISTS pcap_export_jobs_parent
+                          ON pcap_export_jobs(parent_job_id,status);
                         CREATE INDEX IF NOT EXISTS controller_objects_active_live_jobs
                           ON controller_objects ((data->>'status'))
                           WHERE kind='job' AND data->>'mode'='LIVE';
@@ -791,7 +1915,7 @@ class PostgresRepository:
                         "WHERE kind='detector-weight-preset' AND id=%s",
                         (preset_id,),
                     )
-                    deleted = cursor.rowcount > 0
+                    deleted = bool(cursor.rowcount > 0)
                 connection.commit()
                 return deleted
             except Exception:
@@ -972,6 +2096,19 @@ class PostgresRepository:
     def delete_job(self, job_id: str) -> bool:
         with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
             cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("pcap-export-admission",),
+            )
+            cursor.execute(
+                "SELECT 1 FROM pcap_export_jobs WHERE (parent_job_id=%s "
+                "OR source_job_id=%s OR data->'provenance_job_ids' ? %s) "
+                "AND status IN ('QUEUED','RUNNING') FOR UPDATE",
+                (job_id, job_id, job_id),
+            )
+            if cursor.fetchone() is not None:
+                self.connection.commit()
+                return False
+            cursor.execute(
                 "SELECT data FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
                 (job_id,),
             )
@@ -987,11 +2124,46 @@ class PostgresRepository:
                 self.connection.commit()
                 return False
             cursor.execute(
-                "SELECT data->>'object_key' FROM controller_objects "
+                "SELECT id,data->>'object_key' FROM controller_objects "
                 "WHERE kind='export' AND data->>'job_id'=%s",
                 (job_id,),
             )
-            object_keys = [str(item[0]) for item in cursor.fetchall() if item[0]]
+            export_objects = [(str(item[0]), str(item[1])) for item in cursor.fetchall() if item[1]]
+            cleanup: list[tuple[str, str]] = []
+            for export_id, object_key in export_objects:
+                cleanup_id = self._pcap_cleanup_id(f"job-delete:{job_id}:{export_id}", object_key)
+                cleanup.append((cleanup_id, object_key))
+                cursor.execute(
+                    "INSERT INTO controller_objects(kind,id,data) "
+                    "VALUES('pcap_export_cleanup',%s,%s::jsonb) "
+                    "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                    (
+                        cleanup_id,
+                        self._json(
+                            {
+                                "object_key": object_key,
+                                "created_at": datetime.now(UTC).isoformat(),
+                            }
+                        ),
+                    ),
+                )
+            capture_key = self._capture_key(job_id)
+            capture_cleanup_id = self._pcap_cleanup_id(f"job-delete:{job_id}:capture", capture_key)
+            cleanup.append((capture_cleanup_id, capture_key))
+            cursor.execute(
+                "INSERT INTO controller_objects(kind,id,data) "
+                "VALUES('pcap_export_cleanup',%s,%s::jsonb) "
+                "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                (
+                    capture_cleanup_id,
+                    self._json(
+                        {
+                            "object_key": capture_key,
+                            "created_at": datetime.now(UTC).isoformat(),
+                        }
+                    ),
+                ),
+            )
             cursor.execute(
                 "DELETE FROM ai_feedback WHERE assessment_id IN "
                 "(SELECT assessment_id FROM ai_candidate_assessments "
@@ -1016,6 +2188,10 @@ class PostgresRepository:
                 "DELETE FROM controller_objects WHERE kind='export' AND data->>'job_id'=%s",
                 (job_id,),
             )
+            cursor.execute(
+                "DELETE FROM pcap_export_jobs WHERE parent_job_id=%s",
+                (job_id,),
+            )
             cursor.execute("DELETE FROM job_candidates WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM candidate_records WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM job_flow_record_chunks WHERE job_id=%s", (job_id,))
@@ -1025,17 +2201,31 @@ class PostgresRepository:
             cursor.execute("DELETE FROM controller_objects WHERE kind='job' AND id=%s", (job_id,))
             self._audit("job-delete", job_id, {"id": job_id})
             self.connection.commit()
-        for object_key in object_keys:
+        for cleanup_id, object_key in cleanup:
             try:
                 self.blob_store.delete(object_key)
             except Exception:
-                # Metadata deletion remains authoritative; object-store lifecycle policies
-                # provide a second cleanup path if the immediate removal is unavailable.
-                logger.warning("Failed to delete blob %s after job deletion", object_key)
-        try:
-            self.blob_store.delete(self._capture_key(job_id))
-        except Exception:
-            logger.warning("Failed to delete capture blob for deleted job %s", job_id)
+                logger.warning(
+                    "Failed to delete blob %s after job deletion; cleanup remains queued",
+                    object_key,
+                )
+                continue
+            try:
+                with self._lock, self.connection.cursor() as cursor:
+                    cursor.execute(
+                        "DELETE FROM controller_objects WHERE kind='pcap_export_cleanup' AND id=%s "
+                        "AND data->>'object_key'=%s",
+                        (cleanup_id, object_key),
+                    )
+                    self.connection.commit()
+            except Exception:
+                with self._lock:
+                    self.connection.rollback()
+                logger.warning(
+                    "Failed to acknowledge blob cleanup %s after job deletion",
+                    object_key,
+                    exc_info=True,
+                )
         return True
 
     @staticmethod
@@ -1607,7 +2797,7 @@ class PostgresRepository:
                         "ON CONFLICT(kind,id) DO NOTHING",
                         (action["id"], self._json(action)),
                     )
-                    claimed = cursor.rowcount > 0
+                    claimed = bool(cursor.rowcount > 0)
                 connection.commit()
                 return claimed
             except Exception:
@@ -1752,7 +2942,7 @@ class PostgresRepository:
                 "DELETE FROM controller_objects WHERE kind='payload_signature' AND id=%s",
                 (signature_id,),
             )
-            deleted = cursor.rowcount > 0
+            deleted = bool(cursor.rowcount > 0)
             if deleted:
                 self._audit("payload_signature-delete", signature_id, {"id": signature_id})
                 self.connection.commit()
@@ -1788,9 +2978,103 @@ class PostgresRepository:
             if export.get("capture_format") == "PCAPNG"
             else "application/vnd.tcpdump.pcap"
         )
-        result = self.blob_store.put_stream(
-            key, chunks, size_hint=size_hint, content_type=content_type
-        )
+        cleanup_id = self._pcap_cleanup_id(f"publication:{export['id']}", key)
+        connection = self.connection
+
+        def rollback_quietly() -> None:
+            try:
+                connection.rollback()
+            except Exception:
+                logger.warning("Failed to roll back export publication for %s", export["id"])
+
+        try:
+            with self._lock, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT data FROM controller_objects WHERE kind='export' AND id=%s FOR UPDATE",
+                    (str(export["id"]),),
+                )
+                existing_row = cursor.fetchone()
+                existing_value = existing_row[0] if existing_row is not None else None
+                existing = (
+                    existing_value
+                    if isinstance(existing_value, dict)
+                    else json.loads(existing_value)
+                    if existing_value
+                    else None
+                )
+                if existing is not None and existing.get("published") is not False:
+                    raise ArtifactAlreadyExistsError(f"export already exists: {export['id']}")
+                if existing is not None and existing.get("object_key"):
+                    stale_key = str(existing["object_key"])
+                    stale_cleanup_id = self._pcap_cleanup_id(
+                        f"publication:{export['id']}", stale_key
+                    )
+                    cursor.execute(
+                        "INSERT INTO controller_objects(kind,id,data) "
+                        "VALUES('pcap_export_cleanup',%s,%s::jsonb) "
+                        "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                        (
+                            stale_cleanup_id,
+                            self._json(
+                                {
+                                    "object_key": stale_key,
+                                    "created_at": datetime.now(UTC).isoformat(),
+                                    "state": "READY",
+                                }
+                            ),
+                        ),
+                    )
+                    cursor.execute(
+                        "DELETE FROM controller_objects "
+                        "WHERE kind='export' AND id=%s "
+                        "AND data->>'published'='false' AND data->>'object_key'=%s",
+                        (str(export["id"]), stale_key),
+                    )
+                cursor.execute(
+                    "INSERT INTO controller_objects(kind,id,data) "
+                    "VALUES('pcap_export_cleanup',%s,%s::jsonb) "
+                    "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                    (
+                        cleanup_id,
+                        self._json(
+                            {
+                                "object_key": key,
+                                "created_at": datetime.now(UTC).isoformat(),
+                                "state": "UPLOADING",
+                                "export_id": str(export["id"]),
+                                "attempt": int(export.get("attempt", -1)),
+                                "lease_token": str(export.get("lease_token", "")),
+                            }
+                        ),
+                    ),
+                )
+                connection.commit()
+        except ArtifactAlreadyExistsError:
+            rollback_quietly()
+            raise
+        except Exception as exc:
+            rollback_quietly()
+            raise ArtifactStorageError("PostgreSQL cleanup intent unavailable") from exc
+        try:
+            result = self.blob_store.put_stream(
+                key, chunks, size_hint=size_hint, content_type=content_type
+            )
+        except Exception:
+            try:
+                with self._lock, connection.cursor() as cursor:
+                    cursor.execute(
+                        "UPDATE controller_objects "
+                        "SET data=jsonb_set(data,'{state}','\"READY\"'::jsonb) "
+                        "WHERE kind='pcap_export_cleanup' AND id=%s "
+                        "AND data->>'object_key'=%s "
+                        "AND data->>'state' IN ('UPLOADING','STAGED')",
+                        (cleanup_id, key),
+                    )
+                    connection.commit()
+            except Exception:
+                rollback_quietly()
+                logger.warning("Failed to ready cleanup intent after export upload failure")
+            raise
         stored = {
             **export,
             "object_key": key,
@@ -1799,12 +3083,6 @@ class PostgresRepository:
         }
         primary: Exception | None = None
         parent_missing = False
-
-        def rollback_quietly() -> None:
-            try:
-                self.connection.rollback()
-            except Exception:
-                logger.warning("Failed to roll back export publication for %s", export["id"])
 
         try:
             with self._lock, self.connection.cursor() as cursor:
@@ -1832,7 +3110,16 @@ class PostgresRepository:
                         "VALUES('export',%s,%s,%s::jsonb)",
                         (export["id"], datetime.now(UTC), self._json(stored)),
                     )
-                    self.connection.commit()
+                    cursor.execute(
+                        "UPDATE controller_objects "
+                        "SET data=jsonb_set(data,'{state}','\"STAGED\"'::jsonb) "
+                        "WHERE kind='pcap_export_cleanup' AND id=%s "
+                        "AND data->>'object_key'=%s AND data->>'state'='UPLOADING'",
+                        (cleanup_id, key),
+                    )
+                    if cursor.rowcount != 1:
+                        raise ArtifactStorageError("PCAP export cleanup intent was lost")
+                    connection.commit()
                     return deepcopy(stored)
         except ArtifactAlreadyExistsError as exc:
             rollback_quietly()
@@ -1843,9 +3130,36 @@ class PostgresRepository:
             primary.__cause__ = exc
 
         try:
+            with self._lock, connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE controller_objects "
+                    "SET data=jsonb_set(data,'{state}','\"READY\"'::jsonb) "
+                    "WHERE kind='pcap_export_cleanup' AND id=%s "
+                    "AND data->>'object_key'=%s "
+                    "AND data->>'state' IN ('UPLOADING','STAGED')",
+                    (cleanup_id, key),
+                )
+                connection.commit()
+        except Exception:
+            rollback_quietly()
+            logger.warning("Failed to ready cleanup intent after export publication failure")
+        try:
             self.blob_store.delete(key)
         except Exception:
             logger.warning("Failed to delete orphaned export blob %s", key)
+        else:
+            try:
+                with self._lock, connection.cursor() as cursor:
+                    cursor.execute(
+                        "DELETE FROM controller_objects "
+                        "WHERE kind='pcap_export_cleanup' AND id=%s "
+                        "AND data->>'object_key'=%s",
+                        (cleanup_id, key),
+                    )
+                    connection.commit()
+            except Exception:
+                rollback_quietly()
+                logger.warning("Failed to acknowledge orphaned export cleanup", exc_info=True)
         if primary is not None:
             raise primary
         if parent_missing:
@@ -1854,7 +3168,8 @@ class PostgresRepository:
 
     def get_export_metadata(self, export_id: str) -> dict[str, Any] | None:
         try:
-            return self._get("export", export_id)
+            metadata = self._get("export", export_id)
+            return None if metadata is not None and metadata.get("published") is False else metadata
         except ArtifactStorageError:
             raise
         except Exception as exc:

@@ -520,8 +520,39 @@ describe('C2Hunter UI', () => {
       exclude_filters: [{ candidate_ip: '198.51.100.0/24' }],
     });
     expect(await screen.findByRole('status')).toHaveTextContent('Partial filtered capture downloaded (8 of 12 matched packets; output byte limit reached)');
+    expect(fetchMock.mock.calls.filter(([url]: [RequestInfo | URL, RequestInit?]) => String(url).endsWith('/cancel'))).toHaveLength(0);
     await user.click(screen.getByRole('button', { name: 'Reset' }));
     expect(screen.queryByText(/Partial filtered capture downloaded/)).not.toBeInTheDocument();
+  });
+
+  it('cancels an acknowledged active export exactly once when the component unmounts', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/v1/pcap-exports' && init?.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'active-export', status: 'QUEUED', progress: { percent: 0 } }), { status: 202 });
+      }
+      if (path === '/api/v1/pcap-exports/active-export/cancel' && init?.method === 'POST') {
+        return new Response(JSON.stringify({ cancelled: true, status: 'CANCELLED' }), { status: 200 });
+      }
+      if (path.includes('/flows?')) {
+        return new Response(JSON.stringify(responses['/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&include_filter=%7B%22has_payload%22%3Atrue%7D']), { status: 200 });
+      }
+      return new Response(JSON.stringify(responses[path] ?? { items: [] }), { status: responses[path] ? 200 : 404 });
+    });
+    const rendered = renderAt('/analyses/job-1', fetchMock);
+    await screen.findByRole('table', { name: 'Analysis flows' });
+    await userEvent.click(screen.getByRole('button', { name: 'Download filtered capture' }));
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Filtered capture queued'));
+
+    rendered.unmount();
+
+    await waitFor(() => {
+      const cancellations = fetchMock.mock.calls.filter(([url, init]: [RequestInfo | URL, RequestInit?]) =>
+        String(url) === '/api/v1/pcap-exports/active-export/cancel' && init?.method === 'POST');
+      expect(cancellations).toHaveLength(1);
+      expect(cancellations[0][1]?.signal).toBeUndefined();
+    }, { timeout: 2500 });
+    expect(screen.queryByText(/Filtered capture completed/)).not.toBeInTheDocument();
   });
 
   it('explains when a filtered export cannot scan a complete first packet', async () => {

@@ -15,9 +15,9 @@ from c2hunter_controller.repositories import MemoryRepository
 START = datetime(2026, 7, 20, tzinfo=UTC)
 
 
-def api(repository: MemoryRepository | None = None) -> TestClient:
+def api(repository: MemoryRepository | None = None, settings: Settings | None = None) -> TestClient:
     repository = repository or MemoryRepository()
-    app = create_app(Settings(environment="test"), repository)
+    app = create_app(settings or Settings(environment="test"), repository)
     client = TestClient(app)
     token = "analysis-test-token"
     repository.upsert_sensor({"sensor_id": "s1"})

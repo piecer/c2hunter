@@ -38,6 +38,23 @@ class Settings(BaseSettings):
     pcap_artifact_io: Literal["streaming", "legacy"] = "streaming"
     pcap_download_spool_max_memory_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
     pcap_download_spool_directory: str | None = None
+    pcap_export_execution_mode: Literal["hybrid", "sync_only"] = "hybrid"
+    pcap_export_sync_max_source_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
+    pcap_export_sync_max_packets: int = Field(default=100_000, gt=0)
+    pcap_export_async_worker_concurrency: int = Field(default=2, gt=0, le=64)
+    pcap_export_queue_capacity: int = Field(default=100, gt=0)
+    pcap_export_per_principal_active_limit: int = Field(default=10, gt=0)
+    pcap_export_lease_seconds: int = Field(default=120, gt=1)
+    pcap_export_lease_renew_seconds: int = Field(default=30, gt=0)
+    pcap_export_max_attempts: int = Field(default=3, ge=1, le=20)
+    pcap_export_retry_base_seconds: int = Field(default=5, gt=0)
+    pcap_export_job_timeout_seconds: int = Field(default=1800, gt=0)
+    pcap_export_terminal_retention_seconds: int = Field(default=604_800, gt=0)
+    pcap_export_terminal_max_count: int = Field(default=10_000, gt=0)
+    pcap_export_terminal_max_artifact_bytes: int = Field(default=100 * 1024**3, gt=0)
+    pcap_export_orphan_max_age_seconds: int = Field(default=3600, gt=0)
+    pcap_export_orphan_cleanup_batch_size: int = Field(default=100, gt=0, le=10_000)
+    pcap_export_metrics_port: int = Field(default=9103, ge=1024, le=65535)
     inline_flow_records_enabled: bool | None = None
     # This only enables the explicitly limited development token minting endpoint.
     # Production deployments should use pre-hashed static tokens or a future OIDC integration.
@@ -113,6 +130,12 @@ class Settings(BaseSettings):
             self.pcap_export_scan_max_bytes = self.pcap_upload_max_bytes
         if self.pcap_export_scan_max_packets is None:
             self.pcap_export_scan_max_packets = self.pcap_upload_max_packets
+        if self.pcap_export_lease_renew_seconds * 2 > self.pcap_export_lease_seconds:
+            raise ValueError("pcap export lease renewal must be at most half the lease duration")
+        if self.pcap_export_job_timeout_seconds <= self.pcap_export_lease_seconds:
+            raise ValueError("pcap export timeout must exceed the lease duration")
+        if self.pcap_export_async_worker_concurrency > self.pcap_export_queue_capacity:
+            raise ValueError("pcap export worker concurrency must not exceed queue capacity")
         return self
 
     @model_validator(mode="after")

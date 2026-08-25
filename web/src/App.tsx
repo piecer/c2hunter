@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { api } from './api';
 import AnalysisConfiguration, { StructuredValue } from './AnalysisConfiguration';
+import { runPcapExportLifecycle, type PcapExportLifecycleResult } from './pcapExportLifecycle';
 import './styles.css';
 
 type WorkflowCounts = { needs_review: number; in_review: number; action_required: number; action_in_progress: number; action_completed: number; false_positive: number; done: number };
@@ -79,25 +80,15 @@ type DashboardData = {
 };
 type AllowEntry = { id: string; type: string; value: string; description?: string; expires_at?: string };
 const PCAP_UPLOAD_MAX_BYTES = 500 * 1024 * 1024;
-type PcapExportResult = {
-  id: string;
-  status: string;
-  matched_packet_count: number;
-  exported_packet_count?: number;
-  omitted_packet_count?: number;
-  omitted_source_capture_count?: number;
-  truncated?: boolean;
-  truncation_reasons?: string[];
-  filename?: string;
-  error?: string | null;
-};
+type PcapExportResult = PcapExportLifecycleResult;
 const pcapTruncationReasonLabels: Record<string, string> = {
   OUTPUT_BYTE_LIMIT: 'output byte limit reached',
   SOURCE_BYTE_LIMIT: 'source scan byte limit reached',
   SOURCE_PACKET_LIMIT: 'source scan packet limit reached',
 };
 const pcapDownloadNotice = (exported: PcapExportResult, label: 'filtered capture' | 'candidate PCAP') => {
-  const exportedPackets = exported.exported_packet_count ?? exported.matched_packet_count;
+  const matchedPackets = exported.matched_packet_count ?? 0;
+  const exportedPackets = exported.exported_packet_count ?? matchedPackets;
   if (!exported.truncated) {
     const title = label === 'filtered capture' ? 'Filtered capture' : 'Candidate PCAP';
     return `${title} downloaded (${exportedPackets} packets).`;
@@ -106,13 +97,7 @@ const pcapDownloadNotice = (exported: PcapExportResult, label: 'filtered capture
   const sourceOmission = exported.omitted_source_capture_count
     ? `, ${exported.omitted_source_capture_count} source capture(s) omitted`
     : '';
-  return `Partial ${label} downloaded (${exportedPackets} of ${exported.matched_packet_count} matched packets; ${reasons || 'configured limit reached'}${sourceOmission}).`;
-};
-const pcapExportFailure = (exported: PcapExportResult, fallback: string) => {
-  const message = exported.error || fallback;
-  if (!exported.truncated) return message;
-  const reasons = (exported.truncation_reasons ?? []).map(reason => pcapTruncationReasonLabels[reason] ?? reason).join(', ');
-  return `${message} (${reasons || 'configured source limit reached'}).`;
+  return `Partial ${label} downloaded (${exportedPackets} of ${matchedPackets} matched packets; ${reasons || 'configured limit reached'}${sourceOmission}).`;
 };
 type DetectorWeights = Record<string, number>;
 type DetectorWeightPreset = { id: string; name: string; description?: string; detector_weights: DetectorWeights; is_default: boolean };
@@ -854,6 +839,8 @@ function CandidateDetail() {
   const navigate = useNavigate();
   const [notice, setNotice] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const exportGeneration = useRef(0);
+  useEffect(() => () => { exportGeneration.current += 1; }, []);
   const q = useQuery<Candidate, Error>({
     queryKey: ['candidate', id],
     queryFn: () => api.get(`/candidates/${id}`),
@@ -861,10 +848,22 @@ function CandidateDetail() {
   });
   const exportPcap = useMutation({
     mutationFn: async () => {
-      const created = await api.post<PcapExportResult>('/pcap-exports', { job_id: q.data?.job_id, candidate_id: id });
-      if (created.status !== 'COMPLETED') throw new Error(pcapExportFailure(created, 'PCAP export is not available'));
-      await api.download(`/pcap-exports/${created.id}/download`, created.filename || `c2hunter-${created.id}.pcap`);
-      return created;
+      const generation = ++exportGeneration.current;
+      return runPcapExportLifecycle(
+        { job_id: q.data?.job_id, candidate_id: id },
+        {
+          create: body => api.post('/pcap-exports', body),
+          poll: path => api.get(path),
+          cancel: path => api.post(path, {}),
+          download: api.download,
+          isCurrent: () => generation === exportGeneration.current,
+          onStatus: value => {
+            if (generation !== exportGeneration.current) return;
+            const progress = value.progress?.percent;
+            setNotice(`Candidate PCAP ${value.status.toLowerCase()}${progress === undefined ? '' : ` (${progress}%)`}.`);
+          },
+        },
+      );
     },
     onSuccess: created => setNotice(pcapDownloadNotice(created, 'candidate PCAP')),
   });
@@ -948,12 +947,19 @@ function JobFlowReviewPanel({ jobId }: { jobId: string }) {
   const [exporting, setExporting] = useState(false);
   const [exportNotice, setExportNotice] = useState('');
   const [exportError, setExportError] = useState('');
+  const exportGeneration = useRef(0);
   useEffect(() => {
+    exportGeneration.current += 1;
     setDraft(defaultFlowFilters());
     setFilters(defaultFlowFilters());
     setPage(1);
     setExportNotice('');
     setExportError('');
+    return () => {
+      // Invalidate every request-local callback. The lifecycle's shared
+      // cancel-once guard then acknowledges and cancels an active export once.
+      exportGeneration.current += 1;
+    };
   }, [jobId]);
   const query = useQuery<Page<FlowRecordReview>, Error>({
     queryKey: ['job-flows', jobId, filters, page],
@@ -980,23 +986,35 @@ function JobFlowReviewPanel({ jobId }: { jobId: string }) {
   };
   const filtersDirty = JSON.stringify(draft) !== JSON.stringify(filters);
   const downloadFilteredCapture = async () => {
+    const generation = ++exportGeneration.current;
     setExporting(true);
     setExportNotice('');
     setExportError('');
     try {
       const includeFilters = filters.include.map(serializedFlowFilter).filter(filter => Object.keys(filter).length);
       const excludeFilters = filters.exclude.map(serializedFlowFilter).filter(filter => Object.keys(filter).length);
-      const exported = await api.post<PcapExportResult>(
-        '/pcap-exports',
+      const exported = await runPcapExportLifecycle(
         { job_id: jobId, include_filters: includeFilters, exclude_filters: excludeFilters },
+        {
+          create: body => api.post('/pcap-exports', body),
+          poll: path => api.get(path),
+          cancel: path => api.post(path, {}),
+          download: api.download,
+          isCurrent: () => generation === exportGeneration.current,
+          onStatus: value => {
+            if (generation !== exportGeneration.current) return;
+            const progress = value.progress?.percent;
+            setExportNotice(`Filtered capture ${value.status.toLowerCase()}${progress === undefined ? '' : ` (${progress}%)`}.`);
+          },
+        },
       );
-      if (exported.status !== 'COMPLETED') throw new Error(pcapExportFailure(exported, 'No packets matched the applied filters.'));
-      await api.download(`/pcap-exports/${exported.id}/download`, exported.filename || `c2hunter-${jobId}-filtered.pcap`);
+      if (generation !== exportGeneration.current) return;
       setExportNotice(pcapDownloadNotice(exported, 'filtered capture'));
     } catch (error) {
+      if (generation !== exportGeneration.current) return;
       setExportError(error instanceof Error ? error.message : 'Filtered capture download failed.');
     } finally {
-      setExporting(false);
+      if (generation === exportGeneration.current) setExporting(false);
     }
   };
   return <section className="panel compact"><h2>All analysis flows</h2><p className="muted">Build a focused review queue, then remove known noise. Conditions inside each group are combined.</p><form className="flow-filter-builder" onSubmit={applyFilters}><section className="flow-filter-section include"><div className="flow-filter-heading"><div><span className="flow-filter-eyebrow">MATCH ANY GROUP</span><h3>Include flows</h3><p className="muted">Narrow the review queue to relevant traffic. Up to 20 groups.</p></div><button type="button" className="flow-filter-add" aria-label="Add filter" disabled={draft.include.length >= 20} onClick={() => setDraft(current => ({ ...current, include: [...current.include, newFlowFilter()] }))}><span>+</span> Add group</button></div>{draft.include.map((filter, index) => <FlowFilterGroup key={`include-${index}`} kind="Filter" index={index} filter={filter} onChange={updated => setDraft(current => ({ ...current, include: current.include.map((item, itemIndex) => itemIndex === index ? updated : item) }))} onRemove={() => setDraft(current => ({ ...current, include: current.include.filter((_, itemIndex) => itemIndex !== index) }))} />)}{draft.include.length === 0 && <div className="flow-filter-empty"><strong>No include filters</strong><span>All flows will be considered before exclusions.</span></div>}</section><section className="flow-filter-section exclude"><div className="flow-filter-heading"><div><span className="flow-filter-eyebrow">REMOVE ANY MATCH</span><h3>Filter out patterns</h3><p className="muted">Hide known noise, infrastructure, or reviewed traffic. Up to 20 patterns.</p></div><button type="button" className="flow-filter-add exclude" aria-label="Add filter out" disabled={draft.exclude.length >= 20} onClick={() => setDraft(current => ({ ...current, exclude: [...current.exclude, newFlowFilter()] }))}><span>+</span> Add pattern</button></div>{draft.exclude.map((filter, index) => <FlowFilterGroup key={`exclude-${index}`} kind="Filter out" index={index} filter={filter} onChange={updated => setDraft(current => ({ ...current, exclude: current.exclude.map((item, itemIndex) => itemIndex === index ? updated : item) }))} onRemove={() => setDraft(current => ({ ...current, exclude: current.exclude.filter((_, itemIndex) => itemIndex !== index) }))} />)}{draft.exclude.length === 0 && <div className="flow-filter-empty exclude"><strong>No filter-out patterns configured</strong><span>Add trusted IPs, CIDRs, or protocol patterns to remove noise.</span></div>}</section><div className="flow-filter-toolbar"><div><span className={`flow-filter-state ${filtersDirty ? 'dirty' : ''}`}>{filtersDirty ? 'Unapplied changes' : 'Filters applied'}</span><small>{draft.include.length} include · {draft.exclude.length} exclude groups</small></div><div className="actions"><button type="button" className="secondary" onClick={resetFilters}>Reset</button><button disabled={!filtersDirty}>Apply filters</button></div></div></form><div className="flow-export-actions"><div><strong>Filtered packet capture</strong><p className="muted">Exports decoded packets using the last applied filters. Payload-only applies per packet.</p></div><button type="button" disabled={exporting} onClick={downloadFilteredCapture}>{exporting ? 'Preparing capture…' : 'Download filtered capture'}</button></div>{exportNotice && <p role="status" className="success">{exportNotice}</p>}{exportError && <p role="alert" className="error">{exportError}</p>}<AsyncState query={query} empty={data => items(data).length === 0}>{data => <><div className="table-wrap"><table aria-label="Analysis flows"><thead><tr><th>Observed</th><th>Direction</th><th>Endpoints</th><th>Protocol</th><th>Volume</th><th>Payload features</th><th>Current label</th><th>Review</th></tr></thead><tbody>{items(data).map(flow => <FlowReviewRow key={flow.flow_id} flow={flow} />)}</tbody></table></div><FlowPagination data={data} page={page} onPage={setPage}/></>}</AsyncState></section>;

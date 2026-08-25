@@ -21,10 +21,14 @@ from c2hunter_controller.retention import RetentionPolicy
 START = datetime(2026, 7, 20, tzinfo=UTC)
 
 
-def configured_client() -> TestClient:
+def configured_client(*, pcap_export_mode: str = "hybrid") -> TestClient:
     repository = MemoryRepository()
     repository.upsert_sensor({"sensor_id": "s1", "name": "sensor", "derived_status": "ONLINE"})
-    return TestClient(create_app(Settings(environment="test"), repository))
+    return TestClient(
+        create_app(
+            Settings(environment="test", pcap_export_execution_mode=pcap_export_mode), repository
+        )
+    )
 
 
 def test_artifact_streaming_settings_have_separate_download_spool() -> None:
@@ -515,7 +519,7 @@ def test_flow_review_filters_external_source_and_destination_ports_independently
 
 
 def test_pcap_export_applies_all_filters_and_streams_pcap() -> None:
-    client = configured_client()
+    client = configured_client(pcap_export_mode="sync_only")
     job = client.post("/api/v1/analysis-jobs", json=job_payload()).json()
     candidate = client.get(f"/api/v1/analysis-jobs/{job['id']}/candidates").json()["items"][0]
     export = client.post(

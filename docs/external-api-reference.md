@@ -547,15 +547,27 @@ Content-Type: application/vnd.tcpdump.pcap    // raw PCAP data
 
 | Method | Path | Status | 설명 |
 |--------|------|--------|------|
-| `POST` | `/api/v1/pcap-exports` | 201 | 필터 기반 PCAP export 생성 |
-| `GET` | `/api/v1/pcap-exports/{id}` | 200 | Export 상태 조회 |
-| `GET` | `/api/v1/pcap-exports/{id}/download` | 200 | Export 파일 다운로드 |
+| `POST` | `/api/v1/pcap-exports` | 201/202/200 | sync 생성, active async 접수/재사용, retained terminal async 재사용 |
+| `GET` | `/api/v1/pcap-exports/{id}` | 200 | 모든 lifecycle 상태 조회 |
+| `POST` | `/api/v1/pcap-exports/{id}/cancel` | 200/202/409 | queued 취소, running cooperative 취소 요청, terminal 충돌 |
+| `GET` | `/api/v1/pcap-exports/{id}/download` | 200/409 | 완료 artifact 다운로드 또는 상태별 충돌 |
 
-`POST`는 동기식으로 retained source를 해석하고 `COMPLETED` 또는 호환 가능한 `FAILED` export metadata를 반환한다. Upload 분석은 canonical capture, 완료된 LIVE 분석은 고정된 sensor-PCAP segment 집합, reanalysis는 parent provenance를 사용한다. Active LIVE 분석은 `409`, validation 실패는 `422`, rate limit 초과는 `429`다. 정상 설정에서 source scan/output 한도 도달은 `413`이 아니라 packet/block 경계의 `COMPLETED` partial export다. 필수 PCAP/PCAPNG header조차 수용하지 못하는 output 설정만 `413 PCAP_EXPORT_LIMIT_EXCEEDED`다.
+기본 `hybrid` admission은 trusted source work가 **32 MiB 이하이면서 100,000 packet 이하**일 때만 기존 bounded sync path를 선택한다(경계 포함). 어느 estimate든 unknown이거나 threshold를 초과하면 durable async job이다. `sync_only`는 새 요청만 sync로 되돌리며 이미 접수한 async status/cancel/download와 worker는 drain 완료까지 계속 동작한다.
 
-Artifact save는 기본적으로 repository에 chunk stream으로 전달되며, metadata 조회는 blob을 열지 않는다. Download는 repository stream 전체를 로컬 bounded spool에 먼저 저장하면서 크기와 SHA-256을 검증한 뒤에만 `200` headers를 만든다. 성공 응답은 정확한 `Content-Length`, `X-Content-Type-Options: nosniff`, 정제된 server filename을 포함한다. `Range`는 지원하지 않고 무시하여 전체 body를 `200`으로 반환하며 `Accept-Ranges`/`Content-Range`는 보내지 않는다. Missing/corrupt artifact는 `409 PCAP_EXPORT_INTEGRITY_ERROR`, pre-response backend/spool 장애는 sanitized `503 PCAP_EXPORT_STORAGE_ERROR`, `FAILED` artifact download는 `409 PCAP_NOT_AVAILABLE`이다.
+`Idempotency-Key` header와 호환 body `idempotency_key`는 선택 사항이며 최대 128자다. 둘이 다르면 `422 PCAP_EXPORT_IDEMPOTENCY_KEY_CONFLICT`다. Principal-scoped idempotency/coalescing lookup은 새-job queue/per-principal capacity 검사보다 먼저 수행되므로 queue가 가득 차도 replay는 성공한다. 새 work만 `429 PCAP_EXPORT_QUEUE_FULL`과 양의 `Retry-After`를 받는다.
 
-기존 scalar 조건은 모두 AND다. `include_filters`와 `exclude_filters`는 각각 최대 20개 group이며, group 내부 active field는 AND, 각 group 목록은 OR로 평가한다. Nested `candidate_ip`는 exact IP/CIDR, `port`는 inferred external service port, `source_port`/`destination_port`는 transport port, `has_payload`는 aggregated flow가 아닌 개별 packet payload를 의미한다.
+- Small sync 결과: `201`, `execution_mode=SYNC`, 기존 terminal `COMPLETED|FAILED` schema와 즉시 download 호환성을 유지한다. Process-local sync semaphore 초과는 `429 PCAP_EXPORT_BUSY`다.
+- 새 또는 재사용 active async 결과: `202`, `Location: /api/v1/pcap-exports/{id}`, `Retry-After: 1`.
+- Retained terminal async replay: `200`과 `Location`. Sync replay는 `201` 호환성을 유지한다.
+- `GET status`: 모든 상태에서 `200`; absent/expired는 `404 PCAP_EXPORT_NOT_FOUND`.
+
+Active `QUEUED|RUNNING` 응답에는 ID, status/execution mode, progress phase/percent/counters, cancellation flag, attempt/max attempts, source generation, timestamps, `status_url`, nullable `download_url`/error만 의미 있게 존재한다. `sha256`, `size_bytes`, `capture_format`, `filename`과 기타 artifact metadata는 absent/null이며 만들지 않는다. `COMPLETED`만 기존 export metadata 전체와 non-null `download_url`을 제공한다. Progress는 retry를 가로질러 monotonic high-water mark이며 active/unsuccessful terminal은 0..99, verified completion만 100이다.
+
+Cancellation body는 `{"reason":"optional 1..500 characters"}`다. Queued는 `200 {"cancelled":true,"cancellation_requested":true,"status":"CANCELLED"}`, running은 `202 {"cancelled":false,"cancellation_requested":true,"status":"RUNNING"}`, already-cancelled는 idempotent `200`, completed/failed는 `409`와 `reason=already_finished`다. 실행 중 CPU/object call을 강제 종료했다고 주장하지 않는다.
+
+Download는 `COMPLETED`만 Stage 7 validated streaming `200`을 반환한다. `QUEUED|RUNNING`은 `409 PCAP_EXPORT_NOT_READY`와 현재 status detail, `CANCELLED`는 `409 PCAP_EXPORT_CANCELLED`, `FAILED`는 저장된 stable error code다. 성공 응답은 정확한 `Content-Length`, `X-Content-Type-Options: nosniff`, 정제된 server filename을 포함한다. `Range`는 무시하고 전체 body를 `200`으로 반환한다.
+
+기존 scalar 조건은 모두 AND다. `include_filters`와 `exclude_filters`는 각각 최대 20개 group이며, group 내부 active field는 AND, 각 group 목록은 OR로 평가한다. Nested `candidate_ip`는 exact IP/CIDR, `port`는 inferred external service port, `source_port`/`destination_port`는 transport port, `has_payload`는 개별 packet payload를 의미한다.
 
 ```jsonc
 {
@@ -563,19 +575,13 @@ Artifact save는 기본적으로 repository에 chunk stream으로 전달되며, 
   "candidate_id": null,
   "internal_host_ip": "10.0.0.12",
   "protocol": "TCP",
-  "include_filters": [
-    {
-      "candidate_ip": "203.0.113.0/24",
-      "destination_port": 443,
-      "direction": "OUTBOUND",
-      "has_payload": true
-    }
-  ],
-  "exclude_filters": []
+  "include_filters": [{"candidate_ip":"203.0.113.0/24","destination_port":443,"direction":"OUTBOUND","has_payload":true}],
+  "exclude_filters": [],
+  "idempotency_key": "optional-compatibility-alias"
 }
 ```
 
-성공 metadata에는 `source_job_id`, `source_capture_count`, `scanned_source_capture_count`, `omitted_source_capture_count`, `source_total_bytes`, `scanned_source_bytes`, `scanned_packet_count`, `output_byte_limit`, `source_scan_byte_limit`, `source_scan_packet_limit`, 검증 완료된 `source_manifest`, `matched_packet_count`, `exported_packet_count`, `omitted_packet_count`, `truncated`, `truncation_reasons`, `size_bytes`, artifact `sha256`, `capture_format`, server-generated `filename`이 포함된다. Stable reason은 `SOURCE_BYTE_LIMIT`, `SOURCE_PACKET_LIMIT`, `OUTPUT_BYTE_LIMIT`이다. Partial artifact의 filename에는 `-partial-` marker가 포함된다. 단일 link type은 `.pcap`, mixed interface/link type 또는 classic timestamp 범위 밖 packet은 `.pcapng`으로 생성되며 필요한 interface block만 packet과 함께 원자적으로 기록한다. Source 없음, scan ceiling이 첫 source/packet도 허용하지 않음, complete scan no-match, incomplete scan prefix no-match, matched packet 하나도 output에 들어가지 않는 경우는 각각 `FAILED/PCAP_SOURCE_UNAVAILABLE`, `FAILED/PCAP_SOURCE_SCAN_LIMIT_TOO_SMALL`, `FAILED/PCAP_NO_MATCH`, `FAILED/PCAP_SOURCE_SCAN_INCOMPLETE`, `FAILED/PCAP_OUTPUT_LIMIT_TOO_SMALL`로 저장되며 download는 `409 PCAP_NOT_AVAILABLE`을 반환한다. 저장된 source/artifact의 size 또는 SHA-256가 metadata와 다르면 각각 `409 PCAP_SOURCE_INTEGRITY_ERROR`/`409 PCAP_EXPORT_INTEGRITY_ERROR`를 반환한다. 동시 export admission 한도를 초과하면 `429 PCAP_EXPORT_BUSY`를 반환한다.
+완료 metadata에는 source manifest/count/scan limits와 counters, truncation, repository-computed size/SHA, capture format와 server filename이 포함된다. Artifact는 immutable staging upload와 remote-size verification 뒤 lifecycle transaction에서 metadata-last로 연결되고 `COMPLETED`가 마지막에 기록된다. 따라서 public metadata가 incomplete bytes를 가리키지 않는다. Missing/corrupt source/artifact, parser/limit semantics와 sanitized storage mappings은 기존 Stage 3–7 계약을 유지한다.
 
 ---
 
@@ -704,6 +710,14 @@ export_resp = requests.post(
 )
 export = export_resp.json()
 print(f"\nExport ID: {export['id']}, Status: {export['status']}")
+
+while export["status"] in {"QUEUED", "RUNNING"}:
+    time.sleep(int(export_resp.headers.get("Retry-After", "1")))
+    export_resp = requests.get(
+        f"{BASE}/api/v1/pcap-exports/{export['id']}", headers=headers
+    )
+    export_resp.raise_for_status()
+    export = export_resp.json()
 
 if export["status"] == "COMPLETED":
     download = requests.get(

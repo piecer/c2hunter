@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import sys
 import threading
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
 import c2hunter_controller.production as production
+from c2hunter_controller.pcap_export_queue import ExportQueueStorageError
 from c2hunter_controller.production import MinioBlobStore, PostgresRepository
 from c2hunter_controller.repositories import (
     ArtifactAlreadyExistsError,
@@ -27,6 +30,7 @@ class FakeCursor:
         self.connection = connection
         self._last_row: tuple[object, ...] | None = None
         self._rows: list[tuple[object, ...]] = []
+        self.rowcount = 1
 
     def __enter__(self) -> FakeCursor:
         return self
@@ -70,6 +74,43 @@ class FakeConnection:
 
     def close(self) -> None:
         self.closed = True
+
+
+class ActiveExportCursor(FakeCursor):
+    def execute(self, query: str, params: tuple | None = None) -> None:
+        super().execute(query, params)
+        connection = cast(ActiveExportConnection, self.connection)
+        connection.parameters.append(params)
+        if "FROM pcap_export_jobs" in query:
+            self._last_row = (1,) if connection.active else None
+
+
+class ActiveExportConnection(FakeConnection):
+    def __init__(self, *, active: bool, execute_error: Exception | None = None) -> None:
+        super().__init__(execute_error=execute_error)
+        self.active = active
+        self.parameters: list[tuple | None] = []
+
+    def cursor(self) -> ActiveExportCursor:
+        return ActiveExportCursor(self)
+
+
+def test_postgres_active_export_guard_is_parameterized_and_storage_faults_are_typed() -> None:
+    repository = PostgresRepository("postgresql://controller", cast(MinioBlobStore, object()))
+    connection = ActiveExportConnection(active=True)
+    repository._connection = connection
+
+    assert repository.has_active_pcap_exports("job-1") is True
+    assert "status IN ('QUEUED','RUNNING')" in connection.queries[-1]
+    assert "source_job_id=%s" in connection.queries[-1]
+    assert "provenance_job_ids" in connection.queries[-1]
+    assert connection.parameters[-1] == ("job-1", "job-1", "job-1")
+
+    failed = ActiveExportConnection(active=False, execute_error=RuntimeError("database path"))
+    repository._connection = failed
+    with pytest.raises(ExportQueueStorageError, match="lifecycle storage unavailable"):
+        repository.has_active_pcap_exports("job-1")
+    assert failed.rolled_back is True
 
 
 class FailingConcurrentIndexCursor(FakeCursor):
@@ -191,6 +232,14 @@ class PresetConnection(FakeConnection):
 class DeleteJobCursor(FakeCursor):
     def execute(self, query: str, params: tuple | None = None) -> None:
         super().execute(query, params)
+        connection = cast(DeleteJobConnection, self.connection)
+        if "VALUES('pcap_export_cleanup'" in query:
+            assert params is not None
+            payload = json.loads(str(params[1]))
+            connection.cleanup_entries[str(params[0])] = str(payload["object_key"])
+        elif "kind='pcap_export_cleanup' AND id=%s" in query and query.startswith("DELETE"):
+            assert params is not None
+            connection.cleanup_entries.pop(str(params[0]), None)
         self._last_row = (
             ({"id": "job-1", "idempotency_key": "job-key"},)
             if "kind='job' AND id=%s FOR UPDATE" in query
@@ -198,14 +247,25 @@ class DeleteJobCursor(FakeCursor):
         )
         if "data->>'status' FROM ai_analysis_runs" in query:
             self._rows = [("COMPLETED",)]
+        elif "WHERE kind='pcap_export_cleanup'" in query and "FOR UPDATE SKIP LOCKED" in query:
+            self._rows = list(connection.cleanup_entries.items())
+        elif "data->>'published'='false'" in query:
+            self._rows = []
+        elif "kind='export' AND data->>'job_id'=%s" in query:
+            self._rows = (
+                [("export-1", "exports/job-1.zip")]
+                if "SELECT id," in query
+                else [("exports/job-1.zip",)]
+            )
         else:
-            self._rows = [("exports/job-1.zip",)] if "data->>'object_key'" in query else []
+            self._rows = []
 
 
 class DeleteJobConnection(FakeConnection):
     def __init__(self) -> None:
         super().__init__()
         self.commit_count = 0
+        self.cleanup_entries: dict[str, str] = {}
 
     def cursor(self) -> DeleteJobCursor:
         return DeleteJobCursor(self)
@@ -374,9 +434,99 @@ def test_delete_job_cascades_ai_ledgers_before_run(monkeypatch: Any) -> None:
     assert "DELETE FROM ai_generated_artifacts" in sql
     assert "DELETE FROM ai_candidate_assessments" in sql
     assert "DELETE FROM ai_analysis_runs" in sql
+    assert "VALUES('pcap_export_cleanup'" in sql
+    assert "DELETE FROM pcap_export_jobs WHERE parent_job_id=%s" in sql
     assert sql.index("DELETE FROM ai_feedback") < sql.index("DELETE FROM ai_analysis_runs")
+    assert sql.index("VALUES('pcap_export_cleanup'") < sql.index(
+        "DELETE FROM controller_objects WHERE kind='export'"
+    )
+    assert sql.index("DELETE FROM pcap_export_jobs") < sql.index(
+        "DELETE FROM controller_objects WHERE kind='job'"
+    )
     assert connection.commit_count >= 2
     assert deleted == ["exports/job-1.zip", "captures/job-1.pcap"]
+
+
+def test_delete_job_retries_failed_export_blob_from_durable_cleanup_outbox(
+    monkeypatch: Any,
+) -> None:
+    connection = DeleteJobConnection()
+    deleted: list[str] = []
+    failed_once = False
+
+    def delete(object_key: str) -> None:
+        nonlocal failed_once
+        deleted.append(object_key)
+        if object_key == "exports/job-1.zip" and not failed_once:
+            failed_once = True
+            raise RuntimeError("forced MinIO delete failure")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg",
+        SimpleNamespace(connect=lambda *args, **kwargs: connection),
+    )
+    repository = PostgresRepository(
+        "postgresql://test",
+        cast(MinioBlobStore, SimpleNamespace(delete=delete)),
+    )
+    _ = repository.connection
+
+    assert repository.delete_job("job-1") is True
+    assert list(connection.cleanup_entries.values()) == ["exports/job-1.zip"]
+
+    removed = repository.cleanup_pcap_export_orphans(
+        now=datetime(2026, 8, 25, tzinfo=UTC), max_age_seconds=60, limit=10
+    )
+
+    assert removed == ["exports/job-1.zip"]
+    assert connection.cleanup_entries == {}
+    assert deleted == [
+        "exports/job-1.zip",
+        "captures/job-1.pcap",
+        "exports/job-1.zip",
+    ]
+
+
+def test_delete_job_retries_failed_canonical_capture_from_durable_cleanup_outbox(
+    monkeypatch: Any,
+) -> None:
+    connection = DeleteJobConnection()
+    deleted: list[str] = []
+    failed_once = False
+
+    def delete(object_key: str) -> None:
+        nonlocal failed_once
+        deleted.append(object_key)
+        if object_key == "captures/job-1.pcap" and not failed_once:
+            failed_once = True
+            raise RuntimeError("forced MinIO capture delete failure")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg",
+        SimpleNamespace(connect=lambda *args, **kwargs: connection),
+    )
+    repository = PostgresRepository(
+        "postgresql://test",
+        cast(MinioBlobStore, SimpleNamespace(delete=delete)),
+    )
+    _ = repository.connection
+
+    assert repository.delete_job("job-1") is True
+    assert list(connection.cleanup_entries.values()) == ["captures/job-1.pcap"]
+
+    removed = repository.cleanup_pcap_export_orphans(
+        now=datetime(2026, 8, 25, tzinfo=UTC), max_age_seconds=60, limit=10
+    )
+
+    assert removed == ["captures/job-1.pcap"]
+    assert connection.cleanup_entries == {}
+    assert deleted == [
+        "exports/job-1.zip",
+        "captures/job-1.pcap",
+        "captures/job-1.pcap",
+    ]
 
 
 def test_delete_job_refuses_active_postgresql_ai_run(monkeypatch: Any) -> None:
@@ -673,7 +823,7 @@ def test_postgres_export_save_cleans_blob_when_parent_is_missing() -> None:
     assert uploaded[0][1] == b"capture"
     assert deleted == [uploaded[0][0]]
     assert any("FOR UPDATE" in query for query in connection.queries)
-    assert not any("INSERT INTO controller_objects" in query for query in connection.queries)
+    assert not any("VALUES('export'" in query for query in connection.queries)
 
 
 class ExportPublicationCursor(FakeCursor):
@@ -683,8 +833,25 @@ class ExportPublicationCursor(FakeCursor):
         if "kind='job'" in query and "FOR UPDATE" in query:
             self._last_row = (1,)
         elif "kind='export'" in query and "FOR UPDATE" in query:
-            self._last_row = (1,) if connection.duplicate else None
-        if connection.fail_at and connection.fail_at in query:
+            self._last_row = (
+                (
+                    {
+                        "id": "immutable",
+                        "published": True,
+                        "object_key": "exports/immutable.pcap",
+                    },
+                )
+                if connection.duplicate
+                else None
+            )
+        if (
+            connection.fail_at
+            and connection.fail_at in query
+            and not (
+                connection.fail_at == "INSERT INTO controller_objects"
+                and "VALUES('pcap_export_cleanup'" in query
+            )
+        ):
             raise RuntimeError("private database fault")
 
 
@@ -702,12 +869,14 @@ class ExportPublicationConnection(FakeConnection):
         self.fail_at = fail_at
         self.fail_commit = fail_commit
         self.fail_rollback = fail_rollback
+        self.commit_count = 0
 
     def cursor(self) -> ExportPublicationCursor:
         return ExportPublicationCursor(self)
 
     def commit(self) -> None:
-        if self.fail_commit:
+        self.commit_count += 1
+        if self.fail_commit and self.commit_count >= 2:
             raise RuntimeError("private commit fault")
 
     def rollback(self) -> None:
@@ -772,8 +941,7 @@ def test_postgres_duplicate_cannot_replace_or_delete_published_object() -> None:
         )
 
     assert objects == {"exports/immutable.pcap": b"ORIGINAL"}
-    assert len(deleted) == 1
-    assert deleted[0] != "exports/immutable.pcap"
+    assert deleted == []
 
 
 def test_postgres_concurrent_duplicate_has_one_winner_and_no_orphan() -> None:
@@ -787,8 +955,10 @@ def test_postgres_concurrent_duplicate_has_one_winner_and_no_orphan() -> None:
             if "kind='job'" in query and "FOR UPDATE" in query:
                 self._last_row = (1,)
             elif "kind='export'" in query and "FOR UPDATE" in query:
-                self._last_row = (1,) if connection.published is not None else None
-            elif "INSERT INTO controller_objects" in query:
+                self._last_row = (
+                    (connection.published,) if connection.published is not None else None
+                )
+            elif "INSERT INTO controller_objects" in query and "VALUES('export'" in query:
                 assert params is not None
                 connection.published = __import__("json").loads(params[1])
 
@@ -853,9 +1023,7 @@ def test_postgres_duplicate_preserves_primary_when_rollback_and_cleanup_fail() -
             size_hint=7,
         )
 
-    assert len(deleted) == 1
-    assert deleted[0].startswith("exports/immutable/")
-    assert deleted[0].endswith(".pcap")
+    assert deleted == []
 
 
 @pytest.mark.parametrize(
@@ -886,6 +1054,52 @@ def test_postgres_publication_failure_compensates_uploaded_object(
     assert deleted[0].endswith(".pcap")
     assert any("kind='job'" in query and "FOR UPDATE" in query for query in connection.queries)
     assert any("kind='export'" in query and "FOR UPDATE" in query for query in connection.queries)
+
+
+def test_postgres_publication_fails_if_attempt_cleanup_intent_disappears() -> None:
+    class MissingIntentCursor(ExportPublicationCursor):
+        def execute(self, query: str, params: tuple | None = None) -> None:
+            super().execute(query, params)
+            if (
+                query.startswith("UPDATE controller_objects")
+                and "pcap_export_cleanup" in query
+                and "STAGED" in query
+            ):
+                self.rowcount = 0
+
+    class MissingIntentConnection(ExportPublicationConnection):
+        def cursor(self) -> MissingIntentCursor:
+            return MissingIntentCursor(self)
+
+    deleted: list[str] = []
+    repository = _postgres_export_repository(MissingIntentConnection(), deleted)
+
+    with pytest.raises(ArtifactStorageError, match="publication failed"):
+        repository.save_export_stream(
+            {"id": "lost-intent", "job_id": "job-1", "capture_format": "PCAP"},
+            iter((b"capture",)),
+            size_hint=7,
+        )
+
+    assert len(deleted) == 1
+
+
+def test_postgres_cleanup_intent_failure_preserves_typed_error_when_rollback_fails() -> None:
+    deleted: list[str] = []
+    repository = _postgres_export_repository(
+        ExportPublicationConnection(fail_at="VALUES('pcap_export_cleanup'", fail_rollback=True),
+        deleted,
+    )
+
+    with pytest.raises(ArtifactStorageError, match="cleanup intent unavailable") as caught:
+        repository.save_export_stream(
+            {"id": "cleanup-outage", "job_id": "job-1", "capture_format": "PCAP"},
+            iter((b"capture",)),
+            size_hint=7,
+        )
+
+    assert "private" not in str(caught.value)
+    assert deleted == []
 
 
 class SensorPcapListCursor(FakeCursor):
@@ -992,6 +1206,7 @@ def test_minio_put_stream_uses_known_size_and_rejects_unconsumed_extra_data() ->
     store.client = SimpleNamespace(
         bucket_exists=lambda _bucket: True,
         put_object=put_object,
+        stat_object=lambda _bucket, _key: SimpleNamespace(size=4),
         remove_object=lambda _bucket, key: removed.append(key),
     )
 

@@ -12,7 +12,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Annotated, Any, Literal, cast
 from urllib.parse import urlsplit
 
@@ -53,7 +53,6 @@ from .ai_queueing import (
 from .allowlist_api import allowlist_router
 from .api_errors import ApiError
 from .capture_limits import allocate_sensor_limit, limit_flow_records
-from .capture_sink import CaptureLimitTooSmall, CaptureRecordError, CaptureStorageError
 from .config import Settings
 from .detection_guidance import build_detection_guidance
 from .detector_weight_presets_api import detector_weight_preset_router
@@ -85,24 +84,35 @@ from .logging import install_access_log_redaction
 from .operations_api import operations_router
 from .payload_signatures_api import payload_signature_router
 from .pcap import (
-    ExportPacketRecord,
     build_capture_result,
     build_capture_to_sink,
     compile_packet_predicate,
     filter_records,
 )
+from .pcap_export_metrics import PcapExportMetrics
+from .pcap_export_queue import (
+    ExportPrincipalLimitError,
+    ExportQueueFullError,
+    ExportQueueStorageError,
+    ExportSourceChangedError,
+    PcapExportQueue,
+)
+from .pcap_export_service import (
+    PcapExportDependencies,
+    PcapExportExecutor,
+    adapt_sync_export,
+    build_async_job,
+    choose_execution_mode,
+    public_job,
+    request_fingerprint,
+)
 from .pcap_stream import (
-    CaptureIntegrityError,
-    MatchedPacketRecord,
-    VerifiedMatchedPackets,
     open_bounded_verified_capture,
 )
 from .production import MinioBlobStore, PostgresRepository
 from .queueing import ControllerQueue, MemoryControllerQueue, RedisControllerQueue
 from .repositories import (
-    ArtifactAlreadyExistsError,
     ArtifactMissingError,
-    ArtifactProducerError,
     ArtifactStorageError,
     CaptureSource,
     MemoryRepository,
@@ -132,7 +142,9 @@ from .schemas import (
     Heartbeat,
     IntegrationSettingsUpdate,
     MispExportCreate,
+    PcapExportCancel,
     PcapExportCreate,
+    PcapExportJobResponse,
     PcapExportResponse,
     ReanalysisRequest,
     SensorConfigurationResponse,
@@ -881,6 +893,24 @@ def create_app(
         )
     else:
         raise RuntimeError(f"unsupported database URL: {config.database_url.split(':', 1)[0]}")
+    pcap_export_queue = PcapExportQueue(repo)
+    pcap_export_executor = PcapExportExecutor(
+        repo,
+        config,
+        PcapExportDependencies(
+            bounded_source_factory=lambda *args, **kwargs: open_bounded_verified_capture(
+                *args, **kwargs
+            ),
+            decoder_factory=lambda *args, **kwargs: open_export_capture(*args, **kwargs),
+            predicate_compiler=lambda *args, **kwargs: compile_packet_predicate(*args, **kwargs),
+            capture_writer=lambda *args, **kwargs: build_capture_to_sink(*args, **kwargs),
+            legacy_prefix_builder=lambda *args, **kwargs: bounded_pcap_prefix(*args, **kwargs),
+            legacy_parser=lambda *args, **kwargs: parse_pcap(*args, **kwargs),
+            legacy_filter=lambda *args, **kwargs: filter_records(*args, **kwargs),
+            legacy_capture_builder=lambda *args, **kwargs: build_capture_result(*args, **kwargs),
+            clock=lambda: datetime.now(UTC),
+        ),
+    )
     if flow_store is not None:
         flows = flow_store
     elif config.clickhouse_url == "memory://":
@@ -1100,6 +1130,7 @@ def create_app(
     )
     rate_limiter = FixedWindowRateLimiter(config.rate_limit_window_seconds)
     registry = CollectorRegistry()
+    pcap_export_queue.metrics = PcapExportMetrics(registry)
     requests = Counter(
         "c2hunter_api_requests_total",
         "API requests",
@@ -1248,7 +1279,9 @@ def create_app(
 
     @app.exception_handler(ApiError)
     async def api_error(request: Request, exc: ApiError) -> JSONResponse:
-        return _error(request, exc.status, exc.code, exc.message, exc.details)
+        response = _error(request, exc.status, exc.code, exc.message, exc.details)
+        response.headers.update(exc.headers)
+        return response
 
     @app.post(
         "/api/v1/auth/dev-login",
@@ -3444,6 +3477,20 @@ def create_app(
             JobState.CANCELLED,
         }:
             raise ApiError(409, "JOB_NOT_TERMINAL", "진행 중인 분석 작업은 삭제할 수 없습니다")
+        try:
+            has_active_exports = repo.has_active_pcap_exports(job_id)
+        except ExportQueueStorageError as exc:
+            raise ApiError(
+                503,
+                "PCAP_EXPORT_STORAGE_ERROR",
+                "PCAP export storage is temporarily unavailable",
+            ) from exc
+        if has_active_exports:
+            raise ApiError(
+                409,
+                "JOB_HAS_ACTIVE_PCAP_EXPORT",
+                "활성 PCAP export가 있는 분석 작업은 삭제할 수 없습니다",
+            )
         if not repo.delete_job(job_id):
             if repo.get_job_summary(job_id) is not None:
                 raise ApiError(
@@ -4019,692 +4066,376 @@ def create_app(
             raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
         return {"deleted": True, "candidate_id": candidate_id}
 
-    def _create_pcap_export(
-        payload: PcapExportCreate, stage_seconds: dict[str, float]
+    @app.post(
+        "/api/v1/pcap-exports",
+        status_code=201,
+        response_model=PcapExportResponse | PcapExportJobResponse,
+    )
+    def create_pcap_export(
+        payload: PcapExportCreate,
+        request: Request,
+        response: Response,
+        idempotency_header: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     ) -> dict[str, Any]:
-        job = repo.get_job_summary(payload.job_id)
-        if job is None:
-            raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
-        if job.get("mode") == "LIVE" and job.get("status") != JobState.COMPLETED:
+        request_started = perf_counter()
+        if idempotency_header is not None and len(idempotency_header) > 128:
             raise ApiError(
-                409,
-                "PCAP_SOURCE_NOT_FINAL",
-                "LIVE analysis must be completed before PCAP export",
+                422, "VALIDATION_ERROR", "Idempotency-Key must not exceed 128 characters"
             )
-        candidate_ip = None
-        if payload.candidate_id:
-            found_candidate = repo.get_candidate(payload.candidate_id)
-            if found_candidate is None or found_candidate[0] != payload.job_id:
-                raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
-            candidate = found_candidate[1]
-            candidate_ip = candidate["candidate_ip"]
-        normalized = payload.model_dump(mode="json", exclude_none=True)
-        normalized["candidate_ip"] = candidate_ip
-        source_job = job
-        visited: set[str] = set()
-        retained_capture: bytes | None = None
-        canonical_capture_metadata: dict[str, Any] | None = None
-        segment_metadata: list[dict[str, Any]] = []
-        while True:
-            source_job_id = str(source_job["id"])
-            if source_job_id in visited:
-                raise ApiError(
-                    409, "PCAP_SOURCE_PROVENANCE_INVALID", "PCAP source provenance cycle"
-                )
-            visited.add(source_job_id)
-            source_metadata = source_job.get("source")
-            if isinstance(source_metadata, dict) and source_metadata.get("packet_bytes_retained"):
-                canonical_capture_metadata = source_metadata
-                break
-            with _measure_pcap_export_stage(stage_seconds, "source_read"):
-                retained_capture = repo.get_job_capture(source_job_id)
-            if retained_capture is not None:
-                break
-            segment_metadata = repo.list_sensor_pcaps_for_job(source_job_id)
-            if segment_metadata:
-                if (
-                    source_job.get("mode") == "LIVE"
-                    and source_job.get("status") != JobState.COMPLETED
-                ):
-                    raise ApiError(
-                        409,
-                        "PCAP_SOURCE_NOT_FINAL",
-                        "LIVE analysis must be completed before PCAP export",
-                    )
-                break
-            parent_id = source_job.get("parent_job_id")
-            if not parent_id:
-                break
-            parent = repo.get_job_summary(str(parent_id))
-            if parent is None:
-                raise ApiError(
-                    409, "PCAP_SOURCE_PROVENANCE_INVALID", "PCAP source analysis missing"
-                )
-            source_job = parent
-
-        source_records: list[dict[str, Any]] = []
-        matched_records: list[MatchedPacketRecord] = []
-        source_manifest: list[dict[str, str]] = []
-        sensor_ids = source_job.get("sensor_ids") or ["uploaded"]
-        if canonical_capture_metadata is not None:
-            source_descriptors: list[tuple[dict[str, Any], bytes | None]] = [
-                (
-                    {
-                        "id": source_job_id,
-                        "sensor_id": str(sensor_ids[0]),
-                        "size_bytes": canonical_capture_metadata.get("size_bytes"),
-                        "sha256": canonical_capture_metadata.get("sha256"),
-                        "_canonical": True,
-                    },
-                    None,
-                )
-            ]
-        elif retained_capture is not None:
-            expected_digest = (source_job.get("source") or {}).get("sha256")
-            source_descriptors = [
-                (
-                    {
-                        "id": source_job_id,
-                        "sensor_id": str(sensor_ids[0]),
-                        "size_bytes": len(retained_capture),
-                        "sha256": str(expected_digest or ""),
-                    },
-                    retained_capture,
-                )
-            ]
-        else:
-            source_descriptors = [(segment, None) for segment in segment_metadata]
-
-        source_capture_count = len(source_descriptors)
-        use_streaming_pipeline = config.pcap_export_pipeline == "streaming" and all(
-            content is None for _descriptor, content in source_descriptors
-        )
-        try:
-            declared_source_sizes = []
-            for descriptor, _content in source_descriptors:
-                size_value = descriptor.get("size_bytes")
-                if isinstance(size_value, bool) or not isinstance(size_value, int | str):
-                    raise ValueError
-                declared_source_sizes.append(int(size_value))
-        except (TypeError, ValueError) as exc:
-            raise ApiError(
-                409,
-                "PCAP_SOURCE_INTEGRITY_ERROR",
-                "retained PCAP size metadata is invalid",
-            ) from exc
-        if any(size < 0 for size in declared_source_sizes):
-            raise ApiError(
-                409,
-                "PCAP_SOURCE_INTEGRITY_ERROR",
-                "retained PCAP size metadata is invalid",
-            )
-        for descriptor, _content in source_descriptors:
-            if not _is_sha256_hex_digest(descriptor.get("sha256")):
-                raise ApiError(
-                    409,
-                    "PCAP_SOURCE_INTEGRITY_ERROR",
-                    "retained PCAP digest metadata is invalid",
-                )
-        source_total_bytes = sum(declared_source_sizes)
-        scan_max_bytes = cast(int, config.pcap_export_scan_max_bytes)
-        scan_max_packets = cast(int, config.pcap_export_scan_max_packets)
-        scanned_source_bytes = 0
-        scanned_source_capture_count = 0
-        remaining_packets = scan_max_packets
-        source_truncation_reasons: list[str] = []
-        if use_streaming_pipeline and source_descriptors:
-            predicate = compile_packet_predicate(
-                normalized, internal_networks=list(job["internal_networks"])
-            )
-            for source_order, (descriptor, _retained_content) in enumerate(source_descriptors):
-                if remaining_packets < 1:
-                    source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
-                    break
-                remaining_source_bytes = scan_max_bytes - scanned_source_bytes
-                if remaining_source_bytes < 1:
-                    source_truncation_reasons.append("SOURCE_BYTE_LIMIT")
-                    break
-                expected_digest = descriptor.get("sha256")
-                if not expected_digest:
-                    raise ApiError(
-                        409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP digest missing"
-                    )
-                is_canonical = descriptor.get("_canonical") is True
-                if is_canonical:
-                    with _measure_pcap_export_stage(stage_seconds, "source_read"):
-                        opened_source = repo.open_job_capture(source_job_id)
-                    if opened_source is None:
-                        raise ApiError(
-                            409,
-                            "PCAP_SOURCE_INTEGRITY_ERROR",
-                            "retained canonical PCAP missing",
-                        )
-                    stored_metadata = descriptor
-                    source = opened_source
-                else:
-                    with _measure_pcap_export_stage(stage_seconds, "source_read"):
-                        opened_segment = repo.open_sensor_pcap(str(descriptor["id"]))
-                    if opened_segment is None:
-                        raise ApiError(
-                            409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP segment missing"
-                        )
-                    stored_metadata, source = opened_segment
-                    stored_size_value = stored_metadata.get("size_bytes")
-                    try:
-                        if isinstance(stored_size_value, bool) or not isinstance(
-                            stored_size_value, int | str
-                        ):
-                            raise ValueError
-                        stored_size = int(stored_size_value)
-                    except (TypeError, ValueError) as exc:
-                        _close_capture_source_preserving_primary(
-                            source,
-                            "Capture source close failed after invalid retained size metadata",
-                        )
-                        raise ApiError(
-                            409,
-                            "PCAP_SOURCE_INTEGRITY_ERROR",
-                            "retained PCAP size metadata is invalid",
-                        ) from exc
-                    stored_digest = stored_metadata.get("sha256")
-                    if not _is_sha256_hex_digest(stored_digest):
-                        _close_capture_source_preserving_primary(
-                            source,
-                            "Capture source close failed after invalid retained digest metadata",
-                        )
-                        raise ApiError(
-                            409,
-                            "PCAP_SOURCE_INTEGRITY_ERROR",
-                            "retained PCAP digest metadata is invalid",
-                        )
-                    if (
-                        str(stored_metadata.get("id", "")) != str(descriptor.get("id", ""))
-                        or str(stored_metadata.get("sensor_id", ""))
-                        != str(descriptor.get("sensor_id", ""))
-                        or stored_metadata.get("analysis_job_id") != source_job_id
-                        or stored_size != declared_source_sizes[source_order]
-                        or stored_digest != descriptor.get("sha256")
-                    ):
-                        _close_capture_source_preserving_primary(
-                            source,
-                            "Capture source close failed after retained metadata mismatch",
-                        )
-                        raise ApiError(
-                            409,
-                            "PCAP_SOURCE_INTEGRITY_ERROR",
-                            "retained PCAP metadata mismatch",
-                        )
-                try:
-                    session = open_bounded_verified_capture(
-                        source,
-                        expected_size=declared_source_sizes[source_order],
-                        expected_sha256=str(expected_digest),
-                        max_admitted_bytes=remaining_source_bytes,
-                        max_admitted_packets=remaining_packets,
-                        stage_seconds=stage_seconds,
-                    )
-                except BaseException:
-                    # A successful factory call transfers ownership to the session.
-                    # On failure, this guard covers factories that did not take it.
-                    _close_capture_source_preserving_primary(
-                        source,
-                        "Capture source close failed after bounded capture factory failure",
-                    )
-                    raise
-                provisional: list[MatchedPacketRecord] = []
-                provisional_packets = 0
-                parse_error: PcapParseError | None = None
-                try:
-                    try:
-                        decoder = open_export_capture(
-                            session.reader,
-                            source_id=source.version_id,
-                            source_order=source_order,
-                            internal_networks=list(job["internal_networks"]),
-                        )
-                        packets = iter(decoder.iter_packets())
-                        while True:
-                            source_before = stage_seconds.get("source_read", 0.0)
-                            hash_before = stage_seconds.get("hash", 0.0)
-                            frame_before = stage_seconds.get("frame", 0.0)
-                            started_decode = perf_counter()
-                            try:
-                                packet = next(packets)
-                            except StopIteration:
-                                break
-                            finally:
-                                nested = (
-                                    stage_seconds.get("source_read", 0.0)
-                                    - source_before
-                                    + stage_seconds.get("hash", 0.0)
-                                    - hash_before
-                                    + stage_seconds.get("frame", 0.0)
-                                    - frame_before
-                                )
-                                stage_seconds["decode"] = stage_seconds.get("decode", 0.0) + max(
-                                    0.0, perf_counter() - started_decode - nested
-                                )
-                            provisional_packets += 1
-                            if not packet.supported:
-                                continue
-                            with _measure_pcap_export_stage(stage_seconds, "filter"):
-                                matched = predicate.matches(
-                                    packet, sensor_id=str(stored_metadata["sensor_id"])
-                                )
-                            if not matched:
-                                continue
-                            provisional.append(
-                                MatchedPacketRecord.from_export_packet(
-                                    packet, sensor_id=str(stored_metadata["sensor_id"])
-                                )
-                            )
-                    except PcapParseError as exc:
-                        parse_error = exc
-                    except CaptureIntegrityError:
-                        # The session remembers the primary read failure; finalization
-                        # closes the source and re-raises it with integrity precedence.
-                        pass
-                    try:
-                        scan = session.drain_and_verify()
-                    except CaptureIntegrityError as exc:
-                        raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", str(exc)) from exc
-                    if parse_error is not None and not (
-                        parse_error.code == "EMPTY_PCAP"
-                        and scan.admitted_packets == 0
-                        and (scan.byte_limited or scan.packet_limited)
-                    ):
-                        raise ApiError(422, parse_error.code, str(parse_error)) from parse_error
-                    source_manifest.append(
-                        {"id": str(stored_metadata["id"]), "sha256": scan.actual_sha256}
-                    )
-                    scanned_source_bytes += scan.admitted_bytes
-                    remaining_packets -= scan.admitted_packets
-                    if provisional_packets:
-                        scanned_source_capture_count += 1
-                    matched_records.extend(provisional)
-                    if scan.byte_limited:
-                        source_truncation_reasons.append("SOURCE_BYTE_LIMIT")
-                    if scan.packet_limited:
-                        source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
-                    if scan.byte_limited or scan.packet_limited:
-                        break
-                finally:
-                    try:
-                        session.close()
-                    except BaseException:
-                        logger.debug(
-                            "Capture session close failed after export processing; "
-                            "preserving primary failure",
-                            exc_info=True,
-                        )
-        for source_order, (descriptor, retained_content) in enumerate(
-            source_descriptors if not use_streaming_pipeline else []
+        if (
+            idempotency_header is not None
+            and payload.idempotency_key is not None
+            and idempotency_header != payload.idempotency_key
         ):
-            declared_size = declared_source_sizes[source_order]
-            if remaining_packets < 1:
-                source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
-                break
-            remaining_source_bytes = scan_max_bytes - scanned_source_bytes
-            if remaining_source_bytes < 1:
-                source_truncation_reasons.append("SOURCE_BYTE_LIMIT")
-                break
-            is_canonical = descriptor.get("_canonical") is True
-            if is_canonical:
-                with _measure_pcap_export_stage(stage_seconds, "source_read"):
-                    capture_content = repo.get_job_capture(source_job_id)
-                if capture_content is None:
-                    raise ApiError(
-                        409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained canonical PCAP missing"
-                    )
-                stored_metadata = descriptor
-            elif retained_content is None:
-                with _measure_pcap_export_stage(stage_seconds, "source_read"):
-                    stored_segment = repo.get_sensor_pcap(str(descriptor["id"]))
-                if stored_segment is None:
-                    raise ApiError(
-                        409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP segment missing"
-                    )
-                stored_metadata, capture_content = stored_segment
-            else:
-                stored_metadata, capture_content = descriptor, retained_content
-            stored_size_value = stored_metadata.get("size_bytes")
-            try:
-                if isinstance(stored_size_value, bool) or not isinstance(
-                    stored_size_value, int | str
-                ):
-                    raise ValueError
-                stored_size = int(stored_size_value)
-            except (TypeError, ValueError) as exc:
-                raise ApiError(
-                    409,
-                    "PCAP_SOURCE_INTEGRITY_ERROR",
-                    "retained PCAP size metadata is invalid",
-                ) from exc
-            if stored_size < 0 or stored_size != len(capture_content):
-                raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP size mismatch")
-            if (
-                retained_content is None
-                and not is_canonical
-                and (
-                    str(stored_metadata.get("id", "")) != str(descriptor.get("id", ""))
-                    or str(stored_metadata.get("sensor_id", ""))
-                    != str(descriptor.get("sensor_id", ""))
-                    or stored_metadata.get("analysis_job_id") != source_job_id
-                    or stored_size != declared_size
-                    or str(stored_metadata.get("sha256", "")) != str(descriptor.get("sha256", ""))
-                )
-            ):
-                raise ApiError(
-                    409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP metadata mismatch"
-                )
-            with _measure_pcap_export_stage(stage_seconds, "hash"):
-                digest = hashlib.sha256(capture_content).hexdigest()
-            expected_digest = stored_metadata.get("sha256")
-            if expected_digest and not hmac.compare_digest(str(expected_digest), digest):
-                raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP digest mismatch")
-            if not expected_digest:
-                raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", "retained PCAP digest missing")
-            source_manifest.append({"id": str(stored_metadata["id"]), "sha256": digest})
-            try:
-                with _measure_pcap_export_stage(stage_seconds, "frame"):
-                    bounded_prefix = bounded_pcap_prefix(
-                        capture_content,
-                        remaining_source_bytes,
-                        max_packets=remaining_packets,
-                    )
-                if bounded_prefix.packet_count == 0 and bounded_prefix.truncated:
-                    scanned_source_bytes += bounded_prefix.scanned_bytes
-                    if bounded_prefix.byte_limited:
-                        source_truncation_reasons.append("SOURCE_BYTE_LIMIT")
-                    if bounded_prefix.packet_limited:
-                        source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
-                    break
-                with _measure_pcap_export_stage(stage_seconds, "decode"):
-                    parsed = parse_pcap(
-                        bounded_prefix.content,
-                        sensor_id=str(stored_metadata["sensor_id"]),
-                        internal_networks=list(job["internal_networks"]),
-                        max_packets=remaining_packets,
-                        retain_packet_bytes=True,
-                        retain_packet_bytes_as_bytes=True,
-                        allow_no_supported_packets=True,
-                    )
-            except PcapParseError as exc:
-                raise ApiError(422, exc.code, str(exc)) from exc
-            scanned_source_bytes += bounded_prefix.scanned_bytes
-            scanned_source_capture_count += 1
-            remaining_packets -= parsed.captured_packet_count
-            source_records.extend(
-                {**record, "raw_packet_source_order": source_order} for record in parsed.records
-            )
-            if bounded_prefix.byte_limited:
-                source_truncation_reasons.append("SOURCE_BYTE_LIMIT")
-            if bounded_prefix.packet_limited:
-                source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
-            if bounded_prefix.truncated:
-                break
-
-        if not source_descriptors:
-            hydrated_source_job = repo.get_job(source_job_id)
-            fallback_records = [
-                dict(record)
-                for record in (hydrated_source_job or {}).get("flow_records", [])
-                if record.get("raw_packet_hex")
-            ]
-            try:
-                fallback_sizes = [
-                    _raw_packet_hex_size(record["raw_packet_hex"]) for record in fallback_records
-                ]
-            except ValueError as exc:
-                raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", str(exc)) from exc
-            source_total_bytes = sum(fallback_sizes)
-            source_records = []
-            predicate = compile_packet_predicate(
-                normalized, internal_networks=list(job["internal_networks"])
-            )
-            for fallback_packet_index, (record, packet_size) in enumerate(
-                zip(fallback_records, fallback_sizes, strict=True)
-            ):
-                if scanned_source_bytes + packet_size > scan_max_bytes:
-                    source_truncation_reasons.append("SOURCE_BYTE_LIMIT")
-                    break
-                if len(source_records) >= scan_max_packets:
-                    source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
-                    break
-                source_records.append(record)
-                scanned_source_bytes += packet_size
-                matched_record = MatchedPacketRecord.from_legacy_record(
-                    record,
-                    source_job_id=source_job_id,
-                    fallback_packet_index=fallback_packet_index,
-                    default_sensor_id=str(sensor_ids[0]),
-                )
-                with _measure_pcap_export_stage(stage_seconds, "filter"):
-                    matched = predicate.matches(matched_record, sensor_id=matched_record.sensor_id)
-                if matched:
-                    matched_records.append(matched_record)
-        scanned_packet_count = (
-            scan_max_packets - remaining_packets if source_descriptors else len(source_records)
-        )
-        artifact = None
-        capture_result: Any
-        try:
-            max_output_bytes = cast(int, config.pcap_export_max_bytes)
-            with _measure_pcap_export_stage(stage_seconds, "write"):
-                if use_streaming_pipeline and source_descriptors or not source_descriptors:
-                    verified_matches = VerifiedMatchedPackets(tuple(matched_records))
-                    export_records = (
-                        ExportPacketRecord(
-                            record.timestamp,
-                            record.source_id,
-                            record.source_order,
-                            record.packet_index,
-                            record.section_index,
-                            record.interface_id,
-                            record.interface_ordinal,
-                            record.link_type,
-                            record.raw_packet_bytes,
-                            record.captured_length,
-                            record.original_length,
-                        )
-                        for record in verified_matches
-                    )
-                    artifact = build_capture_to_sink(
-                        export_records,
-                        max_output_bytes=max_output_bytes,
-                        spool_max_memory_bytes=config.pcap_export_spool_max_memory_bytes,
-                        spool_directory=config.pcap_export_spool_directory,
-                    )
-                    capture_result = artifact
-                else:
-                    with _measure_pcap_export_stage(stage_seconds, "filter"):
-                        records = filter_records(
-                            source_records,
-                            normalized,
-                            internal_networks=list(job["internal_networks"]),
-                        )
-                    capture_result = build_capture_result(
-                        records, max_output_bytes=max_output_bytes
-                    )
-        except CaptureStorageError as exc:
             raise ApiError(
-                500,
-                "PCAP_EXPORT_STORAGE_ERROR",
-                "temporary PCAP export storage failed",
-            ) from exc
-        except CaptureRecordError as exc:
-            raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", str(exc)) from exc
-        except CaptureLimitTooSmall as exc:
-            raise ApiError(413, "PCAP_EXPORT_LIMIT_EXCEEDED", str(exc)) from exc
-        except ValueError as exc:
-            raise ApiError(413, "PCAP_EXPORT_LIMIT_EXCEEDED", str(exc)) from exc
-        content_size = artifact.size_bytes if artifact is not None else len(capture_result.content)
-        packet_count = capture_result.exported_packet_count
-        capture_format = capture_result.capture_format
-        truncation_reasons = list(
-            dict.fromkeys([*source_truncation_reasons, *capture_result.truncation_reasons])
+                422,
+                "PCAP_EXPORT_IDEMPOTENCY_KEY_CONFLICT",
+                "header and body idempotency keys conflict",
+            )
+        idempotency_key = idempotency_header or payload.idempotency_key
+        canonical_request = payload.model_dump(
+            mode="json", exclude_none=True, exclude={"idempotency_key"}
         )
-        export_id = str(uuid.uuid4())
-        status = "COMPLETED" if packet_count else "FAILED"
-        source_available = bool(source_descriptors or source_records)
-        if packet_count:
-            error_code = None
-            error_message = None
-        elif capture_result.matched_packet_count:
-            error_code = "PCAP_OUTPUT_LIMIT_TOO_SMALL"
-            error_message = "output byte limit cannot fit a complete matched packet"
-        elif source_truncation_reasons and not scanned_packet_count:
-            error_code = "PCAP_SOURCE_SCAN_LIMIT_TOO_SMALL"
-            error_message = "source scan byte limit cannot fit the first complete packet"
-        elif source_truncation_reasons:
-            error_code = "PCAP_SOURCE_SCAN_INCOMPLETE"
-            error_message = "no packets matched in the incomplete source prefix"
-        elif source_available:
-            error_code = "PCAP_NO_MATCH"
-            error_message = "no packets matched the applied filters"
-        else:
-            error_code = "PCAP_SOURCE_UNAVAILABLE"
-            error_message = "retained source packet bytes are unavailable"
-        safe_job_id = (
-            "".join(
-                character
-                for character in payload.job_id
-                if character.isalnum() or character in "-_"
-            )[:64]
-            or "analysis"
-        )
-        extension = "pcapng" if capture_format == "PCAPNG" else "pcap"
-        completeness = "-partial" if truncation_reasons else ""
-        metadata = {
-            "id": export_id,
-            "job_id": payload.job_id,
-            "source_job_id": str(source_job["id"]),
-            "candidate_id": payload.candidate_id,
-            "status": status,
-            "matched_packet_count": capture_result.matched_packet_count,
-            "exported_packet_count": packet_count,
-            "omitted_packet_count": capture_result.omitted_packet_count,
-            "truncated": bool(truncation_reasons),
-            "truncation_reasons": truncation_reasons,
-            "size_bytes": content_size,
-            "sha256": "",
-            "capture_format": capture_format,
-            "filename": (f"c2hunter-{safe_job_id}-filtered{completeness}-{export_id}.{extension}"),
-            "filter": normalized,
-            "source_capture_count": source_capture_count,
-            "scanned_source_capture_count": scanned_source_capture_count,
-            "omitted_source_capture_count": (source_capture_count - scanned_source_capture_count),
-            "source_total_bytes": source_total_bytes,
-            "scanned_source_bytes": scanned_source_bytes,
-            "scanned_packet_count": scanned_packet_count,
-            "output_byte_limit": max_output_bytes,
-            "source_scan_byte_limit": scan_max_bytes,
-            "source_scan_packet_limit": scan_max_packets,
-            "source_manifest": source_manifest,
-            "created_at": datetime.now(UTC).isoformat(),
-            "error_code": error_code,
-            "error": error_message,
+        limits = {
+            "source_scan_max_bytes": cast(int, config.pcap_export_scan_max_bytes),
+            "source_scan_max_packets": cast(int, config.pcap_export_scan_max_packets),
+            "output_max_bytes": cast(int, config.pcap_export_max_bytes),
         }
-        if artifact is not None:
+        principal_scope = _request_actor(request)
+        intent_fingerprint = request_fingerprint(
+            principal_scope=principal_scope,
+            requested_job_id=payload.job_id,
+            candidate_id=payload.candidate_id,
+            canonical_request=canonical_request,
+            effective_limits=limits,
+        )
+
+        def await_sync(existing: dict[str, Any]) -> dict[str, Any]:
+            current = existing
+            for _ in range(3000):
+                if current.get("status") not in {"QUEUED", "RUNNING"}:
+                    response.status_code = 201
+                    return public_job(current)
+                sleep(0.01)
+                refreshed = pcap_export_queue.get(str(current["id"]))
+                if refreshed is None:
+                    break
+                current = refreshed
+            raise ApiError(503, "PCAP_EXPORT_STORAGE_ERROR", "PCAP export replay unavailable")
+
+        if idempotency_key is not None:
             try:
-                with artifact:
-                    with _measure_pcap_export_stage(stage_seconds, "save"):
-                        if config.pcap_artifact_io == "streaming":
-                            stored_export = repo.save_export_stream(
-                                metadata,
-                                artifact.iter_chunks(),
-                                size_hint=artifact.size_bytes,
-                            )
-                        else:
-                            metadata["sha256"] = artifact.sha256
-                            stored_export = repo.save_export(metadata, artifact.read_bytes())
-            except CaptureStorageError as exc:
+                replay = pcap_export_queue.find_idempotent(
+                    principal_scope, idempotency_key, intent_fingerprint
+                )
+            except ValueError as exc:
                 raise ApiError(
-                    500,
-                    "PCAP_EXPORT_STORAGE_ERROR",
-                    "temporary PCAP export storage failed",
+                    422,
+                    "PCAP_EXPORT_IDEMPOTENCY_CONFLICT",
+                    "Idempotency-Key was already used for a different export request",
                 ) from exc
-            except ArtifactStorageError as exc:
+            except ExportQueueStorageError as exc:
                 raise ApiError(
                     503,
                     "PCAP_EXPORT_STORAGE_ERROR",
-                    "PCAP export persistence is temporarily unavailable",
+                    "PCAP export storage is temporarily unavailable",
                 ) from exc
-            except (ArtifactProducerError, ArtifactAlreadyExistsError) as exc:
-                raise ApiError(
-                    500,
-                    "PCAP_EXPORT_STORAGE_ERROR",
-                    "PCAP export artifact production failed",
-                ) from exc
-        else:
-            content = capture_result.content
-            if config.pcap_artifact_io == "streaming":
-                try:
-                    with _measure_pcap_export_stage(stage_seconds, "save"):
-                        stored_export = repo.save_export_stream(
-                            metadata, iter((content,)), size_hint=len(content)
-                        )
-                except ArtifactStorageError as exc:
-                    raise ApiError(
-                        503,
-                        "PCAP_EXPORT_STORAGE_ERROR",
-                        "PCAP export persistence is temporarily unavailable",
-                    ) from exc
-                except (ArtifactProducerError, ArtifactAlreadyExistsError) as exc:
-                    raise ApiError(
-                        500,
-                        "PCAP_EXPORT_STORAGE_ERROR",
-                        "PCAP export artifact production failed",
-                    ) from exc
-            else:
-                with _measure_pcap_export_stage(stage_seconds, "hash"):
-                    metadata["sha256"] = hashlib.sha256(content).hexdigest()
-                with _measure_pcap_export_stage(stage_seconds, "save"):
-                    stored_export = repo.save_export(metadata, content)
-        if stored_export is None:
+            if replay is not None:
+                if replay.get("execution_mode") == "SYNC":
+                    return await_sync(replay)
+                replay_status = 202 if replay["status"] in {"QUEUED", "RUNNING"} else 200
+                response.status_code = replay_status
+                response.headers["Location"] = str(replay["status_url"])
+                if replay_status == 202:
+                    response.headers["Retry-After"] = "1"
+                return public_job(replay)
+        try:
+            job = repo.get_job_summary(payload.job_id)
+        except (ArtifactStorageError, ExportQueueStorageError) as exc:
             raise ApiError(
-                409,
-                "PCAP_SOURCE_UNAVAILABLE",
-                "analysis job was deleted before the PCAP export could be saved",
+                503,
+                "PCAP_EXPORT_STORAGE_ERROR",
+                "PCAP export storage is temporarily unavailable",
+            ) from exc
+        if job is None:
+            observe_pcap_export_stage("total", perf_counter() - request_started)
+            raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
+        if job.get("mode") == "LIVE" and job.get("status") != JobState.COMPLETED:
+            raise ApiError(
+                409, "PCAP_SOURCE_NOT_FINAL", "LIVE analysis must be completed before PCAP export"
             )
-        return stored_export
+        if payload.candidate_id:
+            try:
+                candidate = repo.get_candidate(payload.candidate_id)
+            except (ArtifactStorageError, ExportQueueStorageError) as exc:
+                raise ApiError(
+                    503,
+                    "PCAP_EXPORT_STORAGE_ERROR",
+                    "PCAP export storage is temporarily unavailable",
+                ) from exc
+            if candidate is None or candidate[0] != payload.job_id:
+                raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
+        try:
+            snapshot = repo.snapshot_pcap_export_source(payload.job_id, canonical_request, limits)
+        except ValueError as exc:
+            message = (
+                "retained raw packet is not valid hexadecimal data"
+                if "non-hexadecimal number found" in str(exc)
+                else "retained PCAP metadata is invalid"
+            )
+            raise ApiError(409, "PCAP_SOURCE_INTEGRITY_ERROR", message) from exc
+        except (ArtifactStorageError, ExportQueueStorageError) as exc:
+            raise ApiError(
+                503,
+                "PCAP_EXPORT_STORAGE_ERROR",
+                "PCAP export storage is temporarily unavailable",
+            ) from exc
+        if snapshot is None:
+            raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
+        mode = choose_execution_mode(
+            config,
+            source_bytes=snapshot.get("source_total_bytes"),
+            packet_count=snapshot.get("source_packet_count"),
+        )
+        if mode == "ASYNC":
+            queued = build_async_job(
+                settings=config,
+                principal_scope=principal_scope,
+                requested_job_id=payload.job_id,
+                snapshot=snapshot,
+                candidate_id=payload.candidate_id,
+                idempotency_key=idempotency_key,
+            )
+            try:
+                stored, created = pcap_export_queue.enqueue(
+                    queued,
+                    capacity=config.pcap_export_queue_capacity,
+                    per_principal_limit=config.pcap_export_per_principal_active_limit,
+                )
+            except ValueError as exc:
+                raise ApiError(
+                    409,
+                    "PCAP_EXPORT_IDEMPOTENCY_CONFLICT",
+                    "Idempotency-Key was already used for a different export request",
+                ) from exc
+            except (ExportQueueFullError, ExportPrincipalLimitError) as exc:
+                raise ApiError(
+                    429,
+                    "PCAP_EXPORT_QUEUE_FULL",
+                    "PCAP export queue capacity is full",
+                    headers={"Retry-After": "1"},
+                ) from exc
+            except ExportSourceChangedError as exc:
+                raise ApiError(
+                    409,
+                    "PCAP_SOURCE_GENERATION_CHANGED",
+                    "PCAP export source changed before admission",
+                ) from exc
+            except ExportQueueStorageError as exc:
+                raise ApiError(
+                    503,
+                    "PCAP_EXPORT_STORAGE_ERROR",
+                    "PCAP export storage is temporarily unavailable",
+                ) from exc
+            status = 202 if stored["status"] in {"QUEUED", "RUNNING"} else 200
+            response.status_code = status
+            response.headers["Location"] = str(stored["status_url"])
+            if status == 202:
+                response.headers["Retry-After"] = "1"
+            return public_job(stored)
 
-    @app.post("/api/v1/pcap-exports", status_code=201, response_model=PcapExportResponse)
-    def create_pcap_export(payload: PcapExportCreate) -> dict[str, Any]:
-        if not pcap_export_slots.acquire(blocking=False):
+        # The unkeyed Stage 3-7 contract rejects without allocating an export ID,
+        # lifecycle row, artifact, or opening any source blob. Keyed requests may
+        # block because they have replay semantics.
+        if not pcap_export_slots.acquire(blocking=idempotency_key is not None):
             raise ApiError(
                 429,
                 "PCAP_EXPORT_BUSY",
                 "PCAP export capacity is busy; retry after an active export completes",
             )
-        stage_seconds: dict[str, float] = {}
-        started = perf_counter()
+        slot_owned = True
         try:
-            result = _create_pcap_export(payload, stage_seconds)
-            packet_counts = {
-                "scanned": int(result["scanned_packet_count"]),
-                "matched": int(result["matched_packet_count"]),
-                "exported": int(result["exported_packet_count"]),
-                "omitted": int(result["omitted_packet_count"]),
-            }
-            byte_counts = {
-                "source": int(result["scanned_source_bytes"]),
-                "output": int(result["size_bytes"]),
-            }
-            for kind, count in packet_counts.items():
-                increment_pcap_export_packets(kind, count)
-            for kind, count in byte_counts.items():
-                increment_pcap_export_bytes(kind, count)
-            return result
-        finally:
-            stage_seconds["total"] = perf_counter() - started
-            for stage in (*PCAP_EXPORT_STAGES, "total"):
-                if stage in stage_seconds:
-                    observe_pcap_export_stage(stage, stage_seconds[stage])
-            pcap_export_slots.release()
+            sync_job = build_async_job(
+                settings=config,
+                principal_scope=principal_scope,
+                requested_job_id=payload.job_id,
+                snapshot=snapshot,
+                candidate_id=payload.candidate_id,
+                idempotency_key=idempotency_key,
+            )
+            now = datetime.now(UTC)
+            sync_job.update(
+                status="RUNNING",
+                execution_mode="SYNC",
+                attempt=1,
+                max_attempts=1,
+                started_at=now.isoformat(),
+                updated_at=now.isoformat(),
+                lease_token=f"sync:{sync_job['id']}",
+                lease_expires_at=(
+                    now + timedelta(seconds=config.pcap_export_job_timeout_seconds)
+                ).isoformat(),
+            )
+            if idempotency_key is None:
+                sync_job["coalesce_fingerprint"] = f"unkeyed:{sync_job['id']}"
+            try:
+                stored, created = pcap_export_queue.enqueue(
+                    sync_job,
+                    capacity=config.pcap_export_queue_capacity + config.pcap_export_max_concurrent,
+                    per_principal_limit=(
+                        config.pcap_export_per_principal_active_limit
+                        + config.pcap_export_max_concurrent
+                    ),
+                )
+            except ValueError as exc:
+                raise ApiError(
+                    422,
+                    "PCAP_EXPORT_IDEMPOTENCY_CONFLICT",
+                    "Idempotency-Key was already used for a different export request",
+                ) from exc
+            except ExportSourceChangedError as exc:
+                raise ApiError(
+                    409,
+                    "PCAP_SOURCE_GENERATION_CHANGED",
+                    "PCAP export source changed before admission",
+                ) from exc
+            if not created:
+                pcap_export_slots.release()
+                slot_owned = False
+                return await_sync(stored)
 
-    @app.get("/api/v1/pcap-exports/{export_id}", response_model=PcapExportResponse)
-    def get_pcap_export(export_id: str) -> dict[str, Any]:
+            stage_seconds: dict[str, float] = {}
+            started = perf_counter()
+            result: dict[str, Any] | None = None
+            try:
+                snapshot.update(
+                    _principal_scope=principal_scope,
+                    attempt=1,
+                    lease_token=str(stored["lease_token"]),
+                )
+                result = pcap_export_executor.execute(
+                    payload,
+                    stage_seconds,
+                    export_id=str(stored["id"]),
+                    source_snapshot=snapshot,
+                )
+                try:
+                    completed = pcap_export_queue.complete(
+                        str(stored["id"]),
+                        attempt=1,
+                        lease_token=str(stored["lease_token"]),
+                        artifact=result,
+                    )
+                except ExportQueueStorageError as exc:
+                    raise ApiError(
+                        503,
+                        "PCAP_EXPORT_STORAGE_ERROR",
+                        "PCAP export completion is temporarily unavailable",
+                    ) from exc
+                if not completed:
+                    try:
+                        completion_winner = pcap_export_queue.get(str(stored["id"]))
+                    except ExportQueueStorageError as exc:
+                        raise ApiError(
+                            503,
+                            "PCAP_EXPORT_STORAGE_ERROR",
+                            "PCAP export completion is temporarily unavailable",
+                        ) from exc
+                    if (
+                        completion_winner is not None
+                        and completion_winner.get("status") == "CANCELLED"
+                    ):
+                        raise ApiError(409, "PCAP_EXPORT_CANCELLED", "PCAP export was cancelled")
+                    raise ApiError(
+                        503, "PCAP_EXPORT_STORAGE_ERROR", "PCAP export completion failed"
+                    )
+                packet_counts = {
+                    "scanned": int(result["scanned_packet_count"]),
+                    "matched": int(result["matched_packet_count"]),
+                    "exported": int(result["exported_packet_count"]),
+                    "omitted": int(result["omitted_packet_count"]),
+                }
+                byte_counts = {
+                    "source": int(result["scanned_source_bytes"]),
+                    "output": int(result["size_bytes"]),
+                }
+                for kind, count in packet_counts.items():
+                    increment_pcap_export_packets(kind, count)
+                for kind, count in byte_counts.items():
+                    increment_pcap_export_bytes(kind, count)
+                return result
+            except ApiError as primary:
+                try:
+                    pcap_export_queue.retry_or_fail(
+                        str(stored["id"]),
+                        attempt=1,
+                        lease_token=str(stored["lease_token"]),
+                        transient=False,
+                        error_code=primary.code,
+                        error=primary.message,
+                    )
+                except Exception:
+                    logger.error("Synchronous PCAP lifecycle terminalization failed", exc_info=True)
+                if result is not None:
+                    try:
+                        pcap_export_queue.compensate_artifact(
+                            str(stored["id"]),
+                            attempt=1,
+                            lease_token=str(stored["lease_token"]),
+                            artifact=result,
+                        )
+                    except Exception:
+                        logger.error("Synchronous PCAP artifact compensation failed", exc_info=True)
+                raise
+            except Exception:
+                try:
+                    pcap_export_queue.retry_or_fail(
+                        str(stored["id"]),
+                        attempt=1,
+                        lease_token=str(stored["lease_token"]),
+                        transient=False,
+                        error_code="PCAP_EXPORT_FAILED",
+                        error="PCAP export failed",
+                    )
+                except Exception:
+                    logger.error("Synchronous PCAP lifecycle terminalization failed", exc_info=True)
+                if result is not None:
+                    try:
+                        pcap_export_queue.compensate_artifact(
+                            str(stored["id"]),
+                            attempt=1,
+                            lease_token=str(stored["lease_token"]),
+                            artifact=result,
+                        )
+                    except Exception:
+                        logger.error("Synchronous PCAP artifact compensation failed", exc_info=True)
+                raise
+            finally:
+                stage_seconds["total"] = perf_counter() - started
+                for stage in (*PCAP_EXPORT_STAGES, "total"):
+                    if stage in stage_seconds:
+                        observe_pcap_export_stage(stage, stage_seconds[stage])
+        finally:
+            if slot_owned:
+                pcap_export_slots.release()
+
+    @app.get(
+        "/api/v1/pcap-exports/{export_id}",
+        response_model=PcapExportResponse | PcapExportJobResponse,
+    )
+    def get_pcap_export(export_id: str, request: Request) -> dict[str, Any]:
+        try:
+            lifecycle = pcap_export_queue.get(export_id)
+        except (ArtifactStorageError, ExportQueueStorageError) as exc:
+            raise ApiError(
+                503,
+                "PCAP_EXPORT_STORAGE_ERROR",
+                "PCAP export storage is temporarily unavailable",
+            ) from exc
+        if lifecycle is not None:
+            if lifecycle.get("principal_scope") != _request_actor(request):
+                raise ApiError(404, "PCAP_EXPORT_NOT_FOUND", "PCAP export를 찾을 수 없습니다")
+            return public_job(lifecycle)
         try:
             metadata = repo.get_export_metadata(export_id)
         except ArtifactStorageError as exc:
@@ -4715,10 +4446,113 @@ def create_app(
             ) from exc
         if metadata is None:
             raise ApiError(404, "PCAP_EXPORT_NOT_FOUND", "PCAP export를 찾을 수 없습니다")
-        return metadata
+        if metadata.get("principal_scope") not in {None, _request_actor(request)}:
+            raise ApiError(404, "PCAP_EXPORT_NOT_FOUND", "PCAP export를 찾을 수 없습니다")
+        return public_job(adapt_sync_export(metadata))
+
+    @app.post("/api/v1/pcap-exports/{export_id}/cancel")
+    def cancel_pcap_export(export_id: str, payload: PcapExportCancel, request: Request) -> Response:
+        try:
+            visible = pcap_export_queue.get(export_id)
+        except ExportQueueStorageError as exc:
+            raise ApiError(
+                503,
+                "PCAP_EXPORT_STORAGE_ERROR",
+                "PCAP export storage is temporarily unavailable",
+            ) from exc
+        if visible is None:
+            try:
+                legacy = repo.get_export_metadata(export_id)
+            except ArtifactStorageError as exc:
+                raise ApiError(
+                    503,
+                    "PCAP_EXPORT_STORAGE_ERROR",
+                    "PCAP export storage is temporarily unavailable",
+                ) from exc
+            if legacy is None or legacy.get("principal_scope") not in {
+                None,
+                _request_actor(request),
+            }:
+                raise ApiError(404, "PCAP_EXPORT_NOT_FOUND", "PCAP export를 찾을 수 없습니다")
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "cancelled": False,
+                    "reason": "already_finished",
+                    "status": legacy["status"],
+                },
+            )
+        if visible.get("principal_scope") != _request_actor(request):
+            raise ApiError(404, "PCAP_EXPORT_NOT_FOUND", "PCAP export를 찾을 수 없습니다")
+        try:
+            current = pcap_export_queue.cancel(export_id, reason=payload.reason)
+        except KeyError as exc:
+            raise ApiError(404, "PCAP_EXPORT_NOT_FOUND", "PCAP export를 찾을 수 없습니다") from exc
+        except ExportQueueStorageError as exc:
+            raise ApiError(
+                503,
+                "PCAP_EXPORT_STORAGE_ERROR",
+                "PCAP export storage is temporarily unavailable",
+            ) from exc
+        if current["status"] in {"COMPLETED", "FAILED"}:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "cancelled": False,
+                    "reason": "already_finished",
+                    "status": current["status"],
+                },
+            )
+        cancelled = current["status"] == "CANCELLED"
+        return JSONResponse(
+            status_code=200 if cancelled else 202,
+            content={
+                "cancelled": cancelled,
+                "cancellation_requested": True,
+                "status": current["status"],
+            },
+        )
 
     @app.get("/api/v1/pcap-exports/{export_id}/download")
-    def download_pcap_export(export_id: str) -> Response:
+    def download_pcap_export(export_id: str, request: Request) -> Response:
+        try:
+            lifecycle = pcap_export_queue.get(export_id)
+        except (ArtifactStorageError, ExportQueueStorageError) as exc:
+            raise ApiError(
+                503,
+                "PCAP_EXPORT_STORAGE_ERROR",
+                "PCAP export storage is temporarily unavailable",
+            ) from exc
+        if lifecycle is not None and lifecycle["status"] != "COMPLETED":
+            if lifecycle.get("principal_scope") != _request_actor(request):
+                raise ApiError(404, "PCAP_EXPORT_NOT_FOUND", "PCAP export를 찾을 수 없습니다")
+            status = str(lifecycle["status"])
+            if status in {"QUEUED", "RUNNING"}:
+                raise ApiError(
+                    409, "PCAP_EXPORT_NOT_READY", "PCAP export is not ready", {"status": status}
+                )
+            if status == "CANCELLED":
+                raise ApiError(409, "PCAP_EXPORT_CANCELLED", "PCAP export was cancelled")
+            raise ApiError(
+                409,
+                str(lifecycle.get("error_code") or "PCAP_EXPORT_FAILED"),
+                str(lifecycle.get("error") or "PCAP export failed"),
+            )
+        if lifecycle is not None and lifecycle.get("principal_scope") != _request_actor(request):
+            raise ApiError(404, "PCAP_EXPORT_NOT_FOUND", "PCAP export를 찾을 수 없습니다")
+        try:
+            authorized_metadata = repo.get_export_metadata(export_id)
+        except ArtifactStorageError as exc:
+            raise ApiError(
+                503,
+                "PCAP_EXPORT_STORAGE_ERROR",
+                "PCAP export storage is temporarily unavailable",
+            ) from exc
+        if authorized_metadata is None or authorized_metadata.get("principal_scope") not in {
+            None,
+            _request_actor(request),
+        }:
+            raise ApiError(404, "PCAP_EXPORT_NOT_FOUND", "PCAP export를 찾을 수 없습니다")
         if config.pcap_artifact_io == "legacy":
             stored = repo.get_export(export_id)
             if stored is None:
@@ -4748,17 +4582,7 @@ def create_app(
                 headers={"Content-Disposition": f'attachment; filename="{filename}"'},
             )
 
-        try:
-            streaming_metadata = repo.get_export_metadata(export_id)
-        except ArtifactStorageError as exc:
-            raise ApiError(
-                503,
-                "PCAP_EXPORT_STORAGE_ERROR",
-                "PCAP export storage is temporarily unavailable",
-            ) from exc
-        if streaming_metadata is None:
-            raise ApiError(404, "PCAP_EXPORT_NOT_FOUND", "PCAP export를 찾을 수 없습니다")
-        metadata = streaming_metadata
+        metadata = authorized_metadata
         if metadata["status"] != "COMPLETED":
             raise ApiError(409, "PCAP_NOT_AVAILABLE", "PCAP export가 사용 가능하지 않습니다")
 

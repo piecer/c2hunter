@@ -5,18 +5,169 @@ import io
 import json
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar, cast
+
+from .pcap_export_store import ExportQueueStorageError, RepositoryQueueStore
 
 _AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 _JOB_TERMINAL_STATUSES = {"COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELLED"}
 _DEFAULT_CAPTURE_CHUNK_SIZE = 64 * 1024
 _DEFAULT_ARTIFACT_CHUNK_SIZE = 1024 * 1024
+_PCAP_EXPORT_POLICY_VERSION = "pcap-export-v8"
+_T = TypeVar("_T")
+
+
+def _pcap_export_snapshot(
+    repository: Any,
+    job_id: str,
+    canonical_request: dict[str, Any],
+    effective_limits: dict[str, int],
+) -> dict[str, Any] | None:
+    """Build an immutable metadata-only source snapshot while the adapter lock is held."""
+    memory_jobs = getattr(repository, "jobs", None)
+
+    def job_summary(value: str) -> dict[str, Any] | None:
+        if memory_jobs is not None:
+            found = memory_jobs.get(value)
+            return deepcopy(found) if found is not None else None
+        return cast(dict[str, Any] | None, repository.get_job_summary(value))
+
+    def source_segments(value: str) -> list[dict[str, Any]]:
+        memory_segments = getattr(repository, "sensor_pcaps", None)
+        if memory_segments is not None:
+            return deepcopy(
+                sorted(
+                    (
+                        item
+                        for item in memory_segments.values()
+                        if item.get("analysis_job_id") == value
+                    ),
+                    key=lambda item: (str(item.get("uploaded_at", "")), str(item.get("id", ""))),
+                )
+            )
+        return cast(list[dict[str, Any]], repository.list_sensor_pcaps_for_job(value))
+
+    job = job_summary(job_id)
+    if job is None:
+        return None
+    source_job = job
+    visited: set[str] = set()
+    provenance_job_ids: list[str] = []
+    segments: list[dict[str, Any]] = []
+    canonical: dict[str, Any] | None = None
+    while True:
+        source_id = str(source_job["id"])
+        if source_id in visited:
+            raise ValueError("source_provenance_cycle")
+        visited.add(source_id)
+        provenance_job_ids.append(source_id)
+        source = source_job.get("source")
+        if isinstance(source, dict) and source.get("packet_bytes_retained"):
+            canonical = source
+            break
+        segments = source_segments(source_id)
+        if segments:
+            break
+        parent_id = source_job.get("parent_job_id")
+        if not parent_id:
+            break
+        parent = repository.get_job_summary(str(parent_id))
+        if parent is None:
+            raise ValueError("source_provenance_missing")
+        source_job = parent
+    source_id = str(source_job["id"])
+    sensor_ids = source_job.get("sensor_ids") or ["uploaded"]
+    descriptors = (
+        [{"id": source_id, "sensor_id": str(sensor_ids[0]), **canonical}]
+        if canonical is not None
+        else segments
+    )
+    manifest: list[dict[str, Any]] = []
+    for order, descriptor in enumerate(descriptors):
+        size = descriptor.get("size_bytes")
+        digest = descriptor.get("sha256")
+        if isinstance(size, bool) or not isinstance(size, int | str):
+            raise ValueError("source_size_invalid")
+        parsed_size = int(size)
+        if parsed_size < 0 or not isinstance(digest, str) or len(digest) != 64:
+            raise ValueError("source_integrity_invalid")
+        try:
+            int(digest, 16)
+        except ValueError as exc:
+            raise ValueError("source_integrity_invalid") from exc
+        manifest.append(
+            {
+                "order": order,
+                "id": str(descriptor["id"]),
+                "sensor_id": str(descriptor.get("sensor_id", sensor_ids[0])),
+                "version_id": str(
+                    descriptor.get("version_id")
+                    or descriptor.get("object_version_id")
+                    or f"sha256:{digest}"
+                ),
+                "size_bytes": parsed_size,
+                "sha256": digest,
+            }
+        )
+    packet_count: int | None = None
+    source_total: int | None = sum(item["size_bytes"] for item in manifest) if manifest else None
+    trusted_packets = (source_job.get("source") or {}).get("packet_count")
+    if (
+        isinstance(trusted_packets, int)
+        and not isinstance(trusted_packets, bool)
+        and trusted_packets >= 0
+    ):
+        packet_count = trusted_packets
+    if manifest and packet_count is None and source_total is not None:
+        # Conservative repository estimate: no physical packet can occupy fewer than one byte.
+        packet_count = source_total
+    generation_document = {
+        "source_job_id": source_id,
+        "provenance_job_ids": provenance_job_ids,
+        "source_manifest": manifest,
+        "source_total_bytes": source_total,
+        "source_packet_count": packet_count,
+    }
+    generation = hashlib.sha256(
+        json.dumps(generation_document, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    result = {
+        **generation_document,
+        "source_generation": generation,
+        "source_kind": (
+            "canonical_capture"
+            if canonical is not None
+            else "segment_manifest"
+            if manifest
+            else "legacy_inline"
+        ),
+        "canonical_request": deepcopy(canonical_request),
+        "effective_limits": deepcopy(effective_limits),
+        "policy_version": _PCAP_EXPORT_POLICY_VERSION,
+    }
+    return result
+
+
+def _pcap_export_admission_matches(repository: Any, job: dict[str, Any]) -> bool:
+    if "canonical_request" not in job:
+        return True
+    snapshot = _pcap_export_snapshot(
+        repository,
+        str(job["job_id"]),
+        dict(job.get("canonical_request", {})),
+        dict(job.get("effective_limits", {})),
+    )
+    return bool(
+        snapshot is not None
+        and snapshot["source_generation"] == job.get("source_generation")
+        and snapshot["source_manifest"] == job.get("source_manifest", [])
+    )
 
 
 class ArtifactError(Exception):
@@ -232,9 +383,85 @@ def _candidate_workflow_counts_from_records(
 
 
 class Repository(Protocol):
+    def for_background_worker(self) -> Repository: ...
+    def close(self) -> None: ...
+
     """PostgreSQL adapter가 구현해야 하는 제어 영역 경계."""
 
     def ready(self) -> bool: ...
+    def snapshot_pcap_export_source(
+        self,
+        job_id: str,
+        canonical_request: dict[str, Any],
+        effective_limits: dict[str, int],
+    ) -> dict[str, Any] | None: ...
+    def validate_pcap_export_admission(self, job: dict[str, Any]) -> bool: ...
+    def enqueue_pcap_export_job(
+        self, job: dict[str, Any], *, capacity: int, per_principal_limit: int
+    ) -> tuple[dict[str, Any], bool]: ...
+    def get_pcap_export_job(self, export_id: str) -> dict[str, Any] | None: ...
+    def find_pcap_export_job(
+        self, principal_scope: str, idempotency_key: str, request_fingerprint: str
+    ) -> dict[str, Any] | None: ...
+    def count_pcap_export_jobs_by_status(self) -> dict[str, int]: ...
+    def claim_pcap_export_job(
+        self, *, now: datetime | None = None, lease_seconds: int = 120
+    ) -> dict[str, Any] | None: ...
+    def heartbeat_pcap_export_job(
+        self, export_id: str, *, attempt: int, lease_token: str, lease_seconds: int
+    ) -> bool: ...
+    def progress_pcap_export_job(
+        self,
+        export_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        progress: dict[str, Any],
+    ) -> bool: ...
+    def complete_pcap_export_job(
+        self,
+        export_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        artifact: dict[str, Any],
+    ) -> bool: ...
+    def retry_pcap_export_job(
+        self,
+        export_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        transient: bool,
+        error_code: str,
+        error: str,
+        retry_base_seconds: int = 5,
+    ) -> bool: ...
+    def cancel_pcap_export_job(
+        self, export_id: str, *, reason: str | None = None
+    ) -> dict[str, Any]: ...
+    def recover_pcap_export_jobs(self, *, now: datetime | None = None) -> int: ...
+    def has_active_pcap_exports(self, job_id: str) -> bool: ...
+    def validate_pcap_export_source(self, job: dict[str, Any]) -> bool: ...
+    def compensate_pcap_export_artifact(
+        self,
+        export_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        artifact: dict[str, Any],
+    ) -> None: ...
+    def cleanup_pcap_export_orphans(
+        self, *, now: datetime, max_age_seconds: int, limit: int
+    ) -> list[str]: ...
+    def retain_pcap_export_jobs(
+        self,
+        *,
+        now: datetime,
+        max_age_seconds: int,
+        max_count: int,
+        max_artifact_bytes: int,
+    ) -> list[str]: ...
     def upsert_sensor(self, sensor: dict[str, Any]) -> dict[str, Any]: ...
     def update_sensor_heartbeat(
         self, sensor_id: str, fields: dict[str, Any]
@@ -405,6 +632,7 @@ class MemoryRepository:
         self.detector_weight_presets: dict[str, dict[str, Any]] = {}
         self.exports: dict[str, dict[str, Any]] = {}
         self.export_content: dict[str, bytes] = {}
+        self.pcap_export_jobs: dict[str, dict[str, Any]] = {}
         self.sensor_pcaps: dict[str, dict[str, Any]] = {}
         self.sensor_pcap_content: dict[str, bytes] = {}
         self.enrollments: dict[str, dict[str, Any]] = {}
@@ -413,6 +641,229 @@ class MemoryRepository:
 
     def ready(self) -> bool:
         return True
+
+    def for_background_worker(self) -> MemoryRepository:
+        return self
+
+    def close(self) -> None:
+        return None
+
+    def snapshot_pcap_export_source(
+        self,
+        job_id: str,
+        canonical_request: dict[str, Any],
+        effective_limits: dict[str, int],
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            return _pcap_export_snapshot(self, job_id, canonical_request, effective_limits)
+
+    def validate_pcap_export_admission(self, job: dict[str, Any]) -> bool:
+        with self._lock:
+            return _pcap_export_admission_matches(self, job)
+
+    def _pcap_store(self) -> RepositoryQueueStore:
+        return RepositoryQueueStore(self)
+
+    def enqueue_pcap_export_job(
+        self, job: dict[str, Any], *, capacity: int, per_principal_limit: int
+    ) -> tuple[dict[str, Any], bool]:
+        return self._pcap_store().enqueue(
+            job, capacity=capacity, per_principal_limit=per_principal_limit
+        )
+
+    def get_pcap_export_job(self, export_id: str) -> dict[str, Any] | None:
+        return self._pcap_store().get(export_id)
+
+    def find_pcap_export_job(
+        self, principal_scope: str, idempotency_key: str, request_fingerprint: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            found = next(
+                (
+                    deepcopy(job)
+                    for job in self.pcap_export_jobs.values()
+                    if job.get("principal_scope") == principal_scope
+                    and job.get("idempotency_key") == idempotency_key
+                ),
+                None,
+            )
+        if found is not None and found.get("request_fingerprint") != request_fingerprint:
+            raise ValueError("idempotency_conflict")
+        return found
+
+    def count_pcap_export_jobs_by_status(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                status: sum(job.get("status") == status for job in self.pcap_export_jobs.values())
+                for status in ("QUEUED", "RUNNING")
+            }
+
+    def claim_pcap_export_job(
+        self, *, now: datetime | None = None, lease_seconds: int = 120
+    ) -> dict[str, Any] | None:
+        return self._pcap_store().claim(now=now, lease_seconds=lease_seconds)
+
+    def heartbeat_pcap_export_job(
+        self, export_id: str, *, attempt: int, lease_token: str, lease_seconds: int
+    ) -> bool:
+        return self._pcap_store().heartbeat(
+            export_id, attempt=attempt, lease_token=lease_token, lease_seconds=lease_seconds
+        )
+
+    def progress_pcap_export_job(
+        self,
+        export_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        progress: dict[str, Any],
+    ) -> bool:
+        return self._pcap_store().progress(
+            export_id, attempt=attempt, lease_token=lease_token, progress=progress
+        )
+
+    def complete_pcap_export_job(
+        self,
+        export_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        artifact: dict[str, Any],
+    ) -> bool:
+        return self._pcap_store().complete(
+            export_id, attempt=attempt, lease_token=lease_token, artifact=artifact
+        )
+
+    def retry_pcap_export_job(
+        self,
+        export_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        transient: bool,
+        error_code: str,
+        error: str,
+        retry_base_seconds: int = 5,
+    ) -> bool:
+        return self._pcap_store().retry_or_fail(
+            export_id,
+            attempt=attempt,
+            lease_token=lease_token,
+            transient=transient,
+            error_code=error_code,
+            error=error,
+            retry_base_seconds=retry_base_seconds,
+        )
+
+    def cancel_pcap_export_job(
+        self, export_id: str, *, reason: str | None = None
+    ) -> dict[str, Any]:
+        return self._pcap_store().cancel(export_id, reason=reason)
+
+    def recover_pcap_export_jobs(self, *, now: datetime | None = None) -> int:
+        return self._pcap_store().recover_expired(now=now)
+
+    def has_active_pcap_exports(self, job_id: str) -> bool:
+        with self._lock:
+            return any(
+                job_id
+                in set(
+                    item.get("provenance_job_ids")
+                    or [item.get("job_id"), item.get("source_job_id")]
+                )
+                and item.get("status") in {"QUEUED", "RUNNING"}
+                for item in self.pcap_export_jobs.values()
+            )
+
+    def validate_pcap_export_source(self, job: dict[str, Any]) -> bool:
+        if "canonical_request" not in job:
+            return True
+        snapshot = self.snapshot_pcap_export_source(
+            str(job["job_id"]),
+            dict(job.get("canonical_request", {})),
+            dict(job.get("effective_limits", {})),
+        )
+        return bool(
+            snapshot is not None
+            and snapshot["source_generation"] == job.get("source_generation")
+            and snapshot["source_manifest"] == job.get("source_manifest", [])
+        )
+
+    def compensate_pcap_export_artifact(
+        self,
+        export_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        artifact: dict[str, Any],
+    ) -> None:
+        with self._lock:
+            object_key = artifact.get("object_key")
+            lifecycle = self.pcap_export_jobs.get(export_id)
+            published_winner = bool(
+                lifecycle is not None
+                and lifecycle.get("status") == "COMPLETED"
+                and int(lifecycle.get("attempt", 0)) == attempt
+                and isinstance(artifact.get("sha256"), str)
+                and isinstance(artifact.get("size_bytes"), int)
+                and lifecycle.get("sha256") == artifact.get("sha256")
+                and lifecycle.get("size_bytes") == artifact.get("size_bytes")
+            )
+            if published_winner or (
+                object_key and lifecycle is not None and lifecycle.get("object_key") == object_key
+            ):
+                return
+            metadata = self.exports.get(export_id)
+            if metadata is None:
+                return
+            if (
+                metadata.get("attempt") == attempt
+                and metadata.get("lease_token") == lease_token
+                and metadata.get("object_key") == artifact.get("object_key")
+            ):
+                self.exports.pop(export_id, None)
+                self.export_content.pop(export_id, None)
+
+    def cleanup_pcap_export_orphans(
+        self, *, now: datetime, max_age_seconds: int, limit: int
+    ) -> list[str]:
+        cutoff = now - timedelta(seconds=max_age_seconds)
+        with self._lock:
+            referenced = {
+                str(job.get("object_key"))
+                for job in self.pcap_export_jobs.values()
+                if job.get("object_key")
+            }
+            candidates = sorted(
+                (
+                    (str(metadata.get("created_at", "")), export_id, str(metadata["object_key"]))
+                    for export_id, metadata in self.exports.items()
+                    if metadata.get("published") is False
+                    and metadata.get("object_key")
+                    and str(metadata["object_key"]) not in referenced
+                    and metadata.get("created_at")
+                    and datetime.fromisoformat(str(metadata["created_at"])) <= cutoff
+                )
+            )[:limit]
+            for _created_at, export_id, _object_key in candidates:
+                self.exports.pop(export_id, None)
+                self.export_content.pop(export_id, None)
+            return [object_key for _created_at, _export_id, object_key in candidates]
+
+    def retain_pcap_export_jobs(
+        self,
+        *,
+        now: datetime,
+        max_age_seconds: int,
+        max_count: int,
+        max_artifact_bytes: int,
+    ) -> list[str]:
+        return self._pcap_store().retain_terminal(
+            now=now,
+            max_age_seconds=max_age_seconds,
+            max_count=max_count,
+            max_artifact_bytes=max_artifact_bytes,
+        )
 
     def upsert_sensor(self, sensor: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -513,6 +964,17 @@ class MemoryRepository:
 
     def delete_job(self, job_id: str) -> bool:
         with self._lock:
+            lifecycle_jobs = getattr(self, "pcap_export_jobs", {})
+            if any(
+                job_id
+                in set(
+                    export.get("provenance_job_ids")
+                    or [export.get("job_id"), export.get("source_job_id")]
+                )
+                and export.get("status") in {"QUEUED", "RUNNING"}
+                for export in lifecycle_jobs.values()
+            ):
+                return False
             if any(
                 run.get("analysis_job_id") == job_id
                 and run.get("status") not in _AI_TERMINAL_STATUSES
@@ -562,6 +1024,12 @@ class MemoryRepository:
             for export_id in export_ids:
                 self.exports.pop(export_id, None)
                 self.export_content.pop(export_id, None)
+            for export_id in [
+                export_id
+                for export_id, export in lifecycle_jobs.items()
+                if export.get("job_id") == job_id
+            ]:
+                lifecycle_jobs.pop(export_id, None)
             return True
 
     def save_job_capture(self, job_id: str, content: bytes) -> None:
@@ -995,6 +1463,8 @@ class MemoryRepository:
     def get_export_metadata(self, export_id: str) -> dict[str, Any] | None:
         with self._lock:
             metadata = self.exports.get(export_id)
+            if metadata is not None and metadata.get("published") is False:
+                return None
             return deepcopy(metadata) if metadata is not None else None
 
     def open_export_stream(
@@ -1003,6 +1473,8 @@ class MemoryRepository:
         with self._lock:
             metadata = self.exports.get(export_id)
             content = self.export_content.get(export_id)
+            if metadata is not None and metadata.get("published") is False:
+                return None
             if metadata is None:
                 return None
             if content is None:
@@ -1290,6 +1762,27 @@ class SQLiteRepository:
             CREATE TABLE IF NOT EXISTS export_blobs (
               export_id TEXT PRIMARY KEY, content BLOB NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS pcap_export_jobs (
+              export_id TEXT PRIMARY KEY,
+              principal_scope TEXT NOT NULL,
+              idempotency_key TEXT,
+              request_fingerprint TEXT NOT NULL,
+              coalesce_fingerprint TEXT NOT NULL,
+              status TEXT NOT NULL,
+              next_attempt_at TEXT,
+              queued_at TEXT NOT NULL,
+              lease_expires_at TEXT,
+              data TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS pcap_export_jobs_principal_idempotency
+              ON pcap_export_jobs(principal_scope,idempotency_key)
+              WHERE idempotency_key IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS pcap_export_jobs_claim
+              ON pcap_export_jobs(status,next_attempt_at,queued_at);
+            CREATE INDEX IF NOT EXISTS pcap_export_jobs_lease
+              ON pcap_export_jobs(status,lease_expires_at);
+            CREATE INDEX IF NOT EXISTS pcap_export_jobs_parent
+              ON pcap_export_jobs(json_extract(data,'$.job_id'),status);
             CREATE TABLE IF NOT EXISTS sensor_pcap_blobs (
               segment_id TEXT PRIMARY KEY, content BLOB NOT NULL
             );
@@ -1449,6 +1942,283 @@ class SQLiteRepository:
         with self._lock:
             self.connection.close()
 
+    def for_background_worker(self) -> SQLiteRepository:
+        return self
+
+    def snapshot_pcap_export_source(
+        self,
+        job_id: str,
+        canonical_request: dict[str, Any],
+        effective_limits: dict[str, int],
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                snapshot = _pcap_export_snapshot(self, job_id, canonical_request, effective_limits)
+                self.connection.commit()
+                return snapshot
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def validate_pcap_export_admission(self, job: dict[str, Any]) -> bool:
+        with self._lock:
+            return _pcap_export_admission_matches(self, job)
+
+    def _pcap_store(self) -> RepositoryQueueStore:
+        return RepositoryQueueStore(self)
+
+    def _pcap_storage_call(self, operation: Callable[[], _T]) -> _T:
+        try:
+            return operation()
+        except ExportQueueStorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise ExportQueueStorageError("PCAP export lifecycle storage unavailable") from exc
+
+    def enqueue_pcap_export_job(
+        self, job: dict[str, Any], *, capacity: int, per_principal_limit: int
+    ) -> tuple[dict[str, Any], bool]:
+        return self._pcap_storage_call(
+            lambda: self._pcap_store().enqueue(
+                job, capacity=capacity, per_principal_limit=per_principal_limit
+            )
+        )
+
+    def get_pcap_export_job(self, export_id: str) -> dict[str, Any] | None:
+        return self._pcap_storage_call(lambda: self._pcap_store().get(export_id))
+
+    def find_pcap_export_job(
+        self, principal_scope: str, idempotency_key: str, request_fingerprint: str
+    ) -> dict[str, Any] | None:
+        def find() -> dict[str, Any] | None:
+            with self._lock:
+                row = self.connection.execute(
+                    "SELECT data FROM pcap_export_jobs WHERE principal_scope=? "
+                    "AND idempotency_key=?",
+                    (principal_scope, idempotency_key),
+                ).fetchone()
+            found = json.loads(row[0]) if row is not None else None
+            if found is not None and found.get("request_fingerprint") != request_fingerprint:
+                raise ValueError("idempotency_conflict")
+            return found
+
+        return self._pcap_storage_call(find)
+
+    def count_pcap_export_jobs_by_status(self) -> dict[str, int]:
+        def count() -> dict[str, int]:
+            with self._lock:
+                rows = self.connection.execute(
+                    "SELECT status,COUNT(*) FROM pcap_export_jobs "
+                    "WHERE status IN ('QUEUED','RUNNING') GROUP BY status"
+                ).fetchall()
+            found = {str(status): int(value) for status, value in rows}
+            return {status: found.get(status, 0) for status in ("QUEUED", "RUNNING")}
+
+        return self._pcap_storage_call(count)
+
+    def claim_pcap_export_job(
+        self, *, now: datetime | None = None, lease_seconds: int = 120
+    ) -> dict[str, Any] | None:
+        return self._pcap_storage_call(
+            lambda: self._pcap_store().claim(now=now, lease_seconds=lease_seconds)
+        )
+
+    def heartbeat_pcap_export_job(
+        self, export_id: str, *, attempt: int, lease_token: str, lease_seconds: int
+    ) -> bool:
+        return self._pcap_storage_call(
+            lambda: self._pcap_store().heartbeat(
+                export_id, attempt=attempt, lease_token=lease_token, lease_seconds=lease_seconds
+            )
+        )
+
+    def progress_pcap_export_job(
+        self,
+        export_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        progress: dict[str, Any],
+    ) -> bool:
+        return self._pcap_storage_call(
+            lambda: self._pcap_store().progress(
+                export_id, attempt=attempt, lease_token=lease_token, progress=progress
+            )
+        )
+
+    def complete_pcap_export_job(
+        self,
+        export_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        artifact: dict[str, Any],
+    ) -> bool:
+        return self._pcap_storage_call(
+            lambda: self._pcap_store().complete(
+                export_id, attempt=attempt, lease_token=lease_token, artifact=artifact
+            )
+        )
+
+    def retry_pcap_export_job(
+        self,
+        export_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        transient: bool,
+        error_code: str,
+        error: str,
+        retry_base_seconds: int = 5,
+    ) -> bool:
+        return self._pcap_storage_call(
+            lambda: self._pcap_store().retry_or_fail(
+                export_id,
+                attempt=attempt,
+                lease_token=lease_token,
+                transient=transient,
+                error_code=error_code,
+                error=error,
+                retry_base_seconds=retry_base_seconds,
+            )
+        )
+
+    def cancel_pcap_export_job(
+        self, export_id: str, *, reason: str | None = None
+    ) -> dict[str, Any]:
+        return self._pcap_storage_call(lambda: self._pcap_store().cancel(export_id, reason=reason))
+
+    def recover_pcap_export_jobs(self, *, now: datetime | None = None) -> int:
+        return self._pcap_storage_call(lambda: self._pcap_store().recover_expired(now=now))
+
+    def has_active_pcap_exports(self, job_id: str) -> bool:
+        return bool(
+            self._pcap_storage_call(
+                lambda: self.connection.execute(
+                    "SELECT 1 FROM pcap_export_jobs WHERE (json_extract(data,'$.job_id')=? "
+                    "OR json_extract(data,'$.source_job_id')=? "
+                    "OR EXISTS (SELECT 1 FROM json_each(data,'$.provenance_job_ids') "
+                    "WHERE value=?)) "
+                    "AND status IN ('QUEUED','RUNNING') LIMIT 1",
+                    (job_id, job_id, job_id),
+                ).fetchone()
+            )
+        )
+
+    def validate_pcap_export_source(self, job: dict[str, Any]) -> bool:
+        if "canonical_request" not in job:
+            return True
+        snapshot = self.snapshot_pcap_export_source(
+            str(job["job_id"]),
+            dict(job.get("canonical_request", {})),
+            dict(job.get("effective_limits", {})),
+        )
+        return bool(
+            snapshot is not None
+            and snapshot["source_generation"] == job.get("source_generation")
+            and snapshot["source_manifest"] == job.get("source_manifest", [])
+        )
+
+    def compensate_pcap_export_artifact(
+        self,
+        export_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        artifact: dict[str, Any],
+    ) -> None:
+        def compensate() -> None:
+            with self._lock:
+                self.connection.execute("BEGIN IMMEDIATE")
+                object_key = artifact.get("object_key")
+                lifecycle = self.connection.execute(
+                    "SELECT data FROM pcap_export_jobs WHERE export_id=?",
+                    (export_id,),
+                ).fetchone()
+                lifecycle_job = json.loads(lifecycle[0]) if lifecycle is not None else None
+                published_winner = bool(
+                    lifecycle_job is not None
+                    and lifecycle_job.get("status") == "COMPLETED"
+                    and int(lifecycle_job.get("attempt", 0)) == attempt
+                    and isinstance(artifact.get("sha256"), str)
+                    and isinstance(artifact.get("size_bytes"), int)
+                    and lifecycle_job.get("sha256") == artifact.get("sha256")
+                    and lifecycle_job.get("size_bytes") == artifact.get("size_bytes")
+                )
+                if published_winner or (
+                    object_key
+                    and lifecycle_job is not None
+                    and lifecycle_job.get("object_key") == object_key
+                ):
+                    self.connection.commit()
+                    return
+                row = self.connection.execute(
+                    "SELECT data FROM objects WHERE kind='export' AND id=?", (export_id,)
+                ).fetchone()
+                metadata = json.loads(row[0]) if row else None
+                if (
+                    metadata is not None
+                    and metadata.get("attempt") == attempt
+                    and metadata.get("lease_token") == lease_token
+                    and metadata.get("object_key") == artifact.get("object_key")
+                ):
+                    self.connection.execute(
+                        "DELETE FROM export_blobs WHERE export_id=?", (export_id,)
+                    )
+                    self.connection.execute(
+                        "DELETE FROM objects WHERE kind='export' AND id=?", (export_id,)
+                    )
+                self.connection.commit()
+
+        self._pcap_storage_call(compensate)
+
+    def cleanup_pcap_export_orphans(
+        self, *, now: datetime, max_age_seconds: int, limit: int
+    ) -> list[str]:
+        def cleanup() -> list[str]:
+            cutoff = (now - timedelta(seconds=max_age_seconds)).isoformat()
+            with self._lock:
+                rows = self.connection.execute(
+                    "SELECT id,data FROM objects WHERE kind='export' "
+                    "AND json_extract(data,'$.published')=0 "
+                    "AND json_extract(data,'$.created_at')<=? "
+                    "AND NOT EXISTS (SELECT 1 FROM pcap_export_jobs "
+                    "WHERE json_extract(pcap_export_jobs.data,'$.object_key')="
+                    "json_extract(objects.data,'$.object_key')) "
+                    "ORDER BY json_extract(data,'$.created_at'),id LIMIT ?",
+                    (cutoff, limit),
+                ).fetchall()
+                selected = [(str(row[0]), json.loads(row[1])) for row in rows]
+                for export_id, _metadata in selected:
+                    self.connection.execute(
+                        "DELETE FROM export_blobs WHERE export_id=?", (export_id,)
+                    )
+                    self.connection.execute(
+                        "DELETE FROM objects WHERE kind='export' AND id=?", (export_id,)
+                    )
+                self.connection.commit()
+                return [str(metadata["object_key"]) for _export_id, metadata in selected]
+
+        return self._pcap_storage_call(cleanup)
+
+    def retain_pcap_export_jobs(
+        self,
+        *,
+        now: datetime,
+        max_age_seconds: int,
+        max_count: int,
+        max_artifact_bytes: int,
+    ) -> list[str]:
+        return self._pcap_storage_call(
+            lambda: self._pcap_store().retain_terminal(
+                now=now,
+                max_age_seconds=max_age_seconds,
+                max_count=max_count,
+                max_artifact_bytes=max_artifact_bytes,
+            )
+        )
+
     def upsert_sensor(self, sensor: dict[str, Any]) -> dict[str, Any]:
         return self._put("sensor", sensor["sensor_id"], sensor)
 
@@ -1541,6 +2311,17 @@ class SQLiteRepository:
             job = self.get_job(job_id)
             if job is None:
                 return False
+            active_export = self.connection.execute(
+                "SELECT 1 FROM pcap_export_jobs "
+                "WHERE (json_extract(data,'$.job_id')=? "
+                "OR json_extract(data,'$.source_job_id')=? "
+                "OR EXISTS (SELECT 1 FROM json_each(data,'$.provenance_job_ids') "
+                "WHERE value=?)) "
+                "AND status IN ('QUEUED','RUNNING') LIMIT 1",
+                (job_id, job_id, job_id),
+            ).fetchone()
+            if active_export is not None:
+                return False
             run_rows = self.connection.execute(
                 "SELECT run_id,data FROM ai_analysis_runs WHERE analysis_job_id=?", (job_id,)
             ).fetchall()
@@ -1599,6 +2380,9 @@ class SQLiteRepository:
             self.connection.execute("DELETE FROM job_payload_signatures WHERE job_id=?", (job_id,))
             self.connection.execute("DELETE FROM job_capture_blobs WHERE job_id=?", (job_id,))
             self.connection.execute("DELETE FROM idempotency WHERE job_id=?", (job_id,))
+            self.connection.execute(
+                "DELETE FROM pcap_export_jobs WHERE json_extract(data,'$.job_id')=?", (job_id,)
+            )
             cursor = self.connection.execute(
                 "DELETE FROM objects WHERE kind='job' AND id=?", (job_id,)
             )
@@ -1804,7 +2588,7 @@ class SQLiteRepository:
                 "SELECT data FROM ai_analysis_runs WHERE run_id=?", (run["id"],)
             ).fetchone()
             if row is not None:
-                existing = json.loads(row[0])
+                existing = cast(dict[str, Any], json.loads(row[0]))
                 if existing.get("status") in {"COMPLETED", "FAILED", "CANCELLED"}:
                     return existing
             self.connection.execute(
@@ -2061,7 +2845,7 @@ class SQLiteRepository:
                 ),
             )
             self.connection.commit()
-            return deepcopy(updated)
+            return cast(dict[str, Any], deepcopy(updated))
 
     def delete_candidate(self, candidate_id: str) -> bool:
         """Delete a candidate by ID across all jobs."""
@@ -2209,7 +2993,8 @@ class SQLiteRepository:
 
     def get_export_metadata(self, export_id: str) -> dict[str, Any] | None:
         try:
-            return self._get("export", export_id)
+            metadata = self._get("export", export_id)
+            return None if metadata is not None and metadata.get("published") is False else metadata
         except ArtifactStorageError:
             raise
         except Exception as exc:
@@ -2221,6 +3006,8 @@ class SQLiteRepository:
         try:
             with self._lock:
                 metadata = self._get("export", export_id)
+                if metadata is not None and metadata.get("published") is False:
+                    return None
                 if metadata is None:
                     return None
                 row = self.connection.execute(

@@ -2,11 +2,21 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
+from c2hunter_controller.pcap_export_queue import (
+    ExportPrincipalLimitError,
+    ExportQueueFullError,
+    ExportSourceChangedError,
+)
 from c2hunter_controller.production import MinioBlobStore, PostgresRepository
 from c2hunter_controller.queueing import RedisControllerQueue
 from c2hunter_controller.storage import ClickHouseFlowStore
@@ -18,6 +28,109 @@ pytestmark = pytest.mark.skipif(
 
 sys.path.insert(0, str(Path(__file__).parents[2] / "sensor" / "worker" / "src"))
 from c2hunter_worker.queue import RedisQueue  # noqa: E402
+
+_postgres_integration = pytest.mark.skipif(
+    os.getenv("C2HUNTER_RUN_STORAGE_INTEGRATION") != "1" or not os.getenv("C2HUNTER_DATABASE_URL"),
+    reason=(
+        "set C2HUNTER_RUN_STORAGE_INTEGRATION=1 and C2HUNTER_DATABASE_URL "
+        "for real PostgreSQL integration tests"
+    ),
+)
+
+
+def _pcap_export_job(
+    export_id: str,
+    *,
+    principal: str,
+    key: str,
+    fingerprint: str,
+) -> dict[str, Any]:
+    queued_at = datetime.now(UTC).isoformat()
+    return {
+        "id": export_id,
+        "principal_scope": principal,
+        "idempotency_key": key,
+        "request_fingerprint": fingerprint,
+        "coalesce_fingerprint": fingerprint,
+        "job_id": f"analysis-{export_id}",
+        "source_job_id": f"source-{export_id}",
+        "source_generation": "a" * 64,
+        "status": "QUEUED",
+        "attempt": 0,
+        "max_attempts": 3,
+        "queued_at": queued_at,
+        "next_attempt_at": queued_at,
+        "progress": {"phase": "QUEUED", "percent": 0},
+    }
+
+
+def _postgres_repositories(count: int) -> list[PostgresRepository]:
+    repositories: list[PostgresRepository] = []
+    try:
+        for _ in range(count):
+            repository = PostgresRepository(
+                os.environ["C2HUNTER_DATABASE_URL"],
+                cast(MinioBlobStore, SimpleNamespace(delete=lambda _key: None)),
+            )
+            repositories.append(repository)
+            assert repository.ready()
+            with repository.connection.cursor() as cursor:
+                cursor.execute("SELECT set_config('statement_timeout', %s, false)", ("15s",))
+                cursor.execute("SELECT set_config('lock_timeout', %s, false)", ("15s",))
+            repository.connection.commit()
+        return repositories
+    except Exception:
+        for repository in repositories:
+            repository.close()
+        raise
+
+
+def _race_enqueue(
+    repositories: list[PostgresRepository],
+    jobs: list[dict[str, Any]],
+    *,
+    capacity: int,
+    per_principal_limit: int,
+) -> list[tuple[dict[str, Any], bool] | Exception]:
+    barrier = threading.Barrier(len(jobs), timeout=10)
+
+    def enqueue(
+        repository: PostgresRepository, job: dict[str, Any]
+    ) -> tuple[dict[str, Any], bool] | Exception:
+        try:
+            barrier.wait()
+            return repository.enqueue_pcap_export_job(
+                job, capacity=capacity, per_principal_limit=per_principal_limit
+            )
+        except Exception as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
+        futures = [
+            executor.submit(enqueue, repository, job)
+            for repository, job in zip(repositories, jobs, strict=True)
+        ]
+        return [future.result(timeout=20) for future in futures]
+
+
+def _delete_pcap_export_jobs(repository: PostgresRepository, export_ids: list[str]) -> None:
+    try:
+        with repository.connection.cursor() as cursor:
+            cursor.execute("DELETE FROM pcap_export_jobs WHERE export_id=ANY(%s)", (export_ids,))
+        repository.connection.commit()
+    except Exception:
+        repository.connection.rollback()
+        raise
+
+
+def _cleanup_pcap_export_case(
+    repositories: list[PostgresRepository], export_ids: list[str]
+) -> None:
+    try:
+        _delete_pcap_export_jobs(repositories[0], export_ids)
+    finally:
+        for repository in repositories:
+            repository.close()
 
 
 def test_postgres_minio_clickhouse_and_redis_durable_vertical_path() -> None:
@@ -84,3 +197,185 @@ def test_postgres_minio_clickhouse_and_redis_durable_vertical_path() -> None:
     assert worker.client.llen(worker.processing_key) == 0
     worker.close()
     controller.client.close()
+
+
+@_postgres_integration
+@pytest.mark.parametrize(
+    ("limit_kind", "expected_error"),
+    [
+        ("global", ExportQueueFullError),
+        ("principal", ExportPrincipalLimitError),
+    ],
+)
+def test_real_postgres_simultaneous_first_inserts_never_exceed_capacity(
+    limit_kind: str, expected_error: type[Exception]
+) -> None:
+    admitted_limit = 3
+    worker_count = admitted_limit + 1
+    scope = f"stage8-capacity-{limit_kind}-{uuid.uuid4().hex}"
+    jobs = [
+        _pcap_export_job(
+            f"{scope}-export-{index}",
+            principal=scope if limit_kind == "principal" else f"{scope}-principal-{index}",
+            key=f"{scope}-key-{index}",
+            fingerprint=f"{scope}-fingerprint-{index}",
+        )
+        for index in range(worker_count)
+    ]
+    repositories = _postgres_repositories(worker_count)
+    try:
+        baseline = sum(repositories[0].count_pcap_export_jobs_by_status().values())
+        outcomes = _race_enqueue(
+            repositories,
+            jobs,
+            capacity=baseline + (admitted_limit if limit_kind == "global" else worker_count),
+            per_principal_limit=(worker_count if limit_kind == "global" else admitted_limit),
+        )
+
+        created = [outcome for outcome in outcomes if isinstance(outcome, tuple)]
+        rejected = [outcome for outcome in outcomes if isinstance(outcome, Exception)]
+        assert len(created) == admitted_limit
+        assert all(was_created for _stored, was_created in created)
+        assert len(rejected) == 1
+        assert isinstance(rejected[0], expected_error)
+    finally:
+        _cleanup_pcap_export_case(repositories, [job["id"] for job in jobs])
+
+
+@_postgres_integration
+def test_real_postgres_simultaneous_same_key_replays_one_created_winner() -> None:
+    worker_count = 6
+    scope = f"stage8-replay-{uuid.uuid4().hex}"
+    jobs = [
+        _pcap_export_job(
+            f"{scope}-export-{index}",
+            principal=scope,
+            key=f"{scope}-key",
+            fingerprint=f"{scope}-fingerprint",
+        )
+        for index in range(worker_count)
+    ]
+    repositories = _postgres_repositories(worker_count)
+    try:
+        baseline = sum(repositories[0].count_pcap_export_jobs_by_status().values())
+        outcomes = _race_enqueue(
+            repositories,
+            jobs,
+            capacity=baseline + 1,
+            per_principal_limit=1,
+        )
+
+        assert all(isinstance(outcome, tuple) for outcome in outcomes), outcomes
+        stored = [outcome for outcome in outcomes if isinstance(outcome, tuple)]
+        assert sum(created for _job, created in stored) == 1
+        assert len({job["id"] for job, _created in stored}) == 1
+    finally:
+        _cleanup_pcap_export_case(repositories, [job["id"] for job in jobs])
+
+
+@_postgres_integration
+def test_real_postgres_simultaneous_same_key_different_fingerprints_conflict() -> None:
+    worker_count = 6
+    scope = f"stage8-conflict-{uuid.uuid4().hex}"
+    jobs = [
+        _pcap_export_job(
+            f"{scope}-export-{index}",
+            principal=scope,
+            key=f"{scope}-key",
+            fingerprint=f"{scope}-fingerprint-{index}",
+        )
+        for index in range(worker_count)
+    ]
+    repositories = _postgres_repositories(worker_count)
+    try:
+        baseline = sum(repositories[0].count_pcap_export_jobs_by_status().values())
+        outcomes = _race_enqueue(
+            repositories,
+            jobs,
+            capacity=baseline + 1,
+            per_principal_limit=1,
+        )
+
+        winners = [outcome for outcome in outcomes if isinstance(outcome, tuple)]
+        conflicts = [outcome for outcome in outcomes if isinstance(outcome, ValueError)]
+        assert len(winners) == 1 and winners[0][1] is True
+        assert len(conflicts) == worker_count - 1
+        assert all(str(conflict) == "idempotency_conflict" for conflict in conflicts)
+        assert len(winners) + len(conflicts) == worker_count
+    finally:
+        _cleanup_pcap_export_case(repositories, [job["id"] for job in jobs])
+
+
+@_postgres_integration
+def test_real_postgres_source_delete_and_enqueue_are_atomic() -> None:
+    suffix = uuid.uuid4().hex
+    repositories = _postgres_repositories(2)
+    parent_id = f"stage8-admission-parent-{suffix}"
+    export_id = f"stage8-admission-export-{suffix}"
+    try:
+        repositories[0].create_job(
+            {
+                "id": parent_id,
+                "status": "COMPLETED",
+                "mode": "PCAP_UPLOAD",
+                "sensor_ids": ["uploaded"],
+                "source": {
+                    "packet_bytes_retained": True,
+                    "size_bytes": 0,
+                    "sha256": "0" * 64,
+                    "packet_count": 0,
+                },
+            }
+        )
+        canonical_request = {"job_id": parent_id}
+        limits: dict[str, int] = {}
+        snapshot = repositories[0].snapshot_pcap_export_source(parent_id, canonical_request, limits)
+        assert snapshot is not None
+        queued = _pcap_export_job(
+            export_id,
+            principal=f"stage8-admission-{suffix}",
+            key=f"stage8-admission-key-{suffix}",
+            fingerprint=f"stage8-admission-fingerprint-{suffix}",
+        )
+        queued.update(
+            job_id=parent_id,
+            source_job_id=snapshot["source_job_id"],
+            provenance_job_ids=snapshot["provenance_job_ids"],
+            source_generation=snapshot["source_generation"],
+            source_manifest=snapshot["source_manifest"],
+            canonical_request=canonical_request,
+            effective_limits=limits,
+        )
+        barrier = threading.Barrier(2, timeout=10)
+
+        def admit() -> tuple[dict[str, Any], bool] | Exception:
+            try:
+                baseline = sum(repositories[0].count_pcap_export_jobs_by_status().values())
+                barrier.wait()
+                return repositories[0].enqueue_pcap_export_job(
+                    queued, capacity=baseline + 1, per_principal_limit=1
+                )
+            except Exception as exc:
+                return exc
+
+        def delete() -> bool:
+            barrier.wait()
+            return repositories[1].delete_job(parent_id)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            admission_future = executor.submit(admit)
+            deletion_future = executor.submit(delete)
+            admitted = admission_future.result(timeout=20)
+            deleted = deletion_future.result(timeout=20)
+
+        if deleted:
+            assert isinstance(admitted, ExportSourceChangedError)
+        else:
+            assert isinstance(admitted, tuple) and admitted[1] is True
+    finally:
+        try:
+            _delete_pcap_export_jobs(repositories[0], [export_id])
+            repositories[0].delete_job(parent_id)
+        finally:
+            for repository in repositories:
+                repository.close()

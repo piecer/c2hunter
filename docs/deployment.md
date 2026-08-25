@@ -17,7 +17,7 @@ curl -fsS http://localhost:8000/api/v1/health
 curl -fsS http://localhost:8000/api/v1/ready
 ```
 
-Compose starts PostgreSQL, Redis, ClickHouse, MinIO, Controller, Worker, and Web. Sensors run on external Linux systems and connect outbound to the Controller. Service dependencies use health checks. `make down` preserves named volumes. To intentionally erase local data, first back it up, then run `docker compose --env-file .env down -v` manually.
+Compose starts PostgreSQL, Redis, ClickHouse, MinIO, Controller, Analysis Worker, dedicated PCAP Export Worker, and Web. The export worker shares the Controller's PostgreSQL URL, S3 endpoint/access/secret/bucket, and Stage 8 lifecycle limits. It has no Redis analysis-queue dependency and remains active even when `C2HUNTER_PCAP_EXPORT_EXECUTION_MODE=sync_only` so accepted async jobs can drain. Sensors run on external Linux systems and connect outbound to the Controller. Service dependencies use health checks. `make down` preserves named volumes. To intentionally erase local data, first back it up, then run `docker compose --env-file .env down -v` manually.
 
 ### Health check reference
 
@@ -29,6 +29,7 @@ Compose starts PostgreSQL, Redis, ClickHouse, MinIO, Controller, Worker, and Web
 | minio        | `curl -f http://127.0.0.1:9000/minio/health/live`          | 10 s     | 5 s     | 15      |
 | controller   | `python -m c2hunter_controller.healthcheck`                | 10 s     | 5 s     | 15      |
 | worker       | `python -m c2hunter_worker healthcheck --max-age 30`        | 15 s     | 5 s     | 5       |
+| pcap-export-worker | `python -m c2hunter_controller.pcap_export_worker healthcheck` | 15 s | 5 s | 5 |
 | web          | `wget -q -O- http://127.0.0.1:8080/healthz`                | 10 s     | 3 s     | 10      |
 
 ### Controller environment variables (security)
@@ -55,6 +56,20 @@ Values marked "SHA-256" must be 64-character lowercase hex digests — never pla
 | `C2HUNTER_PCAP_EXPORT_SCAN_MAX_BYTES` | upload byte limit   | Maximum retained source bytes scanned per export    |
 | `C2HUNTER_PCAP_EXPORT_SCAN_MAX_PACKETS` | upload packet limit | Maximum complete source packets scanned per export |
 | `C2HUNTER_PCAP_EXPORT_MAX_CONCURRENT` | `1`                 | Maximum synchronous exports executing concurrently  |
+| `C2HUNTER_PCAP_EXPORT_EXECUTION_MODE` | `hybrid` | `hybrid` admission or new-work-only `sync_only` rollback |
+| `C2HUNTER_PCAP_EXPORT_SYNC_MAX_SOURCE_BYTES` | `33554432` | Inclusive trusted sync threshold (32 MiB) |
+| `C2HUNTER_PCAP_EXPORT_SYNC_MAX_PACKETS` | `100000` | Inclusive trusted sync packet threshold |
+| `C2HUNTER_PCAP_EXPORT_ASYNC_WORKER_CONCURRENCY` | `2` | Dedicated worker concurrency; must not exceed queue capacity |
+| `C2HUNTER_PCAP_EXPORT_QUEUE_CAPACITY` | `100` | Active `QUEUED + RUNNING` capacity |
+| `C2HUNTER_PCAP_EXPORT_PER_PRINCIPAL_ACTIVE_LIMIT` | `10` | Active jobs per principal |
+| `C2HUNTER_PCAP_EXPORT_LEASE_SECONDS` / `...LEASE_RENEW_SECONDS` | `120` / `30` | Renewal must be at most half the lease |
+| `C2HUNTER_PCAP_EXPORT_MAX_ATTEMPTS` / `...RETRY_BASE_SECONDS` | `3` / `5` | Bounded transient retry policy |
+| `C2HUNTER_PCAP_EXPORT_JOB_TIMEOUT_SECONDS` | `1800` | Cooperative timeout; must exceed lease |
+| `C2HUNTER_PCAP_EXPORT_TERMINAL_RETENTION_SECONDS` | `604800` | Terminal age bound |
+| `C2HUNTER_PCAP_EXPORT_TERMINAL_MAX_COUNT` | `10000` | Terminal row-count bound |
+| `C2HUNTER_PCAP_EXPORT_TERMINAL_MAX_ARTIFACT_BYTES` | `107374182400` | Retained artifact-byte bound |
+| `C2HUNTER_PCAP_EXPORT_ORPHAN_MAX_AGE_SECONDS` | `3600` | Minimum age before unreferenced staging cleanup |
+| `C2HUNTER_PCAP_EXPORT_METRICS_PORT` | `9103` | Dedicated worker health/metrics port |
 
 ### Candidate 외부 검증 및 MISP 연동
 
@@ -127,6 +142,7 @@ Compose is a development/single-host artifact. Before production:
 5. Inject secrets from a secret manager, not `.env` or image layers.
 6. Set retention, disk alerts, NTP, monitoring, RBAC, and restore drills.
 7. Keep the human-readable image tag and immutable digest together in Compose, verify refreshed digests for every architecture in use, and scan them before promotion.
+8. Provision and verify an enabled S3/MinIO `AbortIncompleteMultipartUpload` lifecycle rule for the export prefix (`DaysAfterInitiation: 1`). Runtime object deletion cannot guarantee cleanup of abandoned multipart parts; deployment is not ready without this administrative prerequisite. See `operations.md` for exact put/get verification commands.
 
 ## 외부 Sensor 추가/제거
 
@@ -148,3 +164,5 @@ Agent는 enrollment 후 credential과 desired config version을 `/var/lib/c2hunt
 ## Upgrade and rollback
 
 Back up control metadata and object inventory, run tests and migrations in staging, pull/build pinned images, and roll Controller/Worker before sensors only when protocol compatibility allows. Keep the previous image digest and schema-compatible rollback procedure. Database migrations must be backed up and tested; never assume an application rollback reverses a migration.
+
+For a Stage 8 rollback, set `C2HUNTER_PCAP_EXPORT_EXECUTION_MODE=sync_only` on Controller and export worker. This routes only new creates through the bounded sync path. Keep the dedicated worker and status/cancel/download API online until no accepted rows remain `QUEUED` or `RUNNING`; only then may it be disabled. Do not remove lifecycle tables, rewrite artifacts, dual-write, or enable Stage 9 packet indexes as part of this rollback.

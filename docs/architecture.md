@@ -31,12 +31,12 @@ Controller API (FastAPI)
   ├── Redis: Celery broker/cache
   ├── ClickHouse: Flow/프로토콜 이벤트/관찰
   ├── MinIO: 회전 PCAP/후보 export/분석 산출물
-  └── Celery Worker
-       ├── ingestion pipeline
-       ├── detector pipeline
-       ├── score aggregation
-       ├── PCAP export
-       └── retention cleanup
+  ├── Celery Analysis Worker — ingestion/detector/scoring/analysis retention
+  └── Dedicated PCAP Export Worker
+       ├── PostgreSQL durable export queue + lease/retry/recovery
+       ├── snapshot-bound scan/filter/serialize
+       ├── metadata-last object publication
+       └── terminal retention + staging orphan cleanup
 
 Security middleware skips auth for healthchecks, metrics, dev-login, and sensor-specific endpoints.
 Human routes enforce minimum roles (VIEWER ≤ ANALYST ≤ ADMIN). Sensor endpoints authenticate via
@@ -172,12 +172,13 @@ Redis는 시스템 기록의 권위 저장소가 아니다. 작업 상태는 Pos
 
 ### 4.4 필터 기반 PCAP export
 
-1. Controller가 권한, rate limit, scalar/nested filter와 source/output byte·packet limit을 검증한다.
-2. Upload는 canonical job capture, 완료된 LIVE 분석은 `analysis_job_id`로 고정된 sensor-PCAP manifest, reanalysis는 parent provenance를 사용한다. Active LIVE source와 terminal job의 늦은 segment 저장은 거부한다.
-3. Source ID와 SHA-256 manifest를 고정하고 blob을 하나씩 크기·digest 검증 후 parse한다. Missing/corrupt object 또는 storage 장애에서 부분 결과를 만들거나 legacy source로 조용히 fallback하지 않는다.
-4. Controller가 retained packet을 source order로 동기식 필터링한다. Source scan ceiling에서는 다음 complete source/packet 전에 중단하고 partial metadata에 이유와 처리량을 기록한다. Scalar 조건은 AND, include/exclude group은 각 OR, group 내부는 AND이며 packet-level payload 의미를 사용한다.
-5. 단일 link type은 원 DLT와 captured/wire length를 보존한 PCAP, 여러 interface/link type 또는 classic timestamp 범위 밖 값은 PCAPNG으로 저장한다. Serialized output ceiling에서는 packet/IDB 경계 전에 중단하므로 결과는 설정 byte 이하의 독립 parsing 가능한 prefix다.
-6. 생성 응답은 full/partial `COMPLETED` 또는 호환 가능한 `FAILED` 결과를 반환한다. 완성 artifact는 repository가 size/SHA를 다시 계산하며 chunk-stream으로 불변 publication한다. Metadata GET은 blob을 열지 않는다. Download는 backend stream을 bounded local spool에 완전히 검증한 뒤에만 headers를 만들고, 응답 iterator가 완료·오류·취소 시 spool을 닫는다. 생성·실패·다운로드를 감사 기록한다.
+1. Controller가 auth/RBAC/rate limit, candidate ownership, normalized filter와 immutable recursive provenance snapshot을 검증한다. Snapshot은 source generation, ordered source manifest(size/SHA 포함), effective limits와 policy version을 고정한다.
+2. 기본 `hybrid` admission은 trusted planned source bytes ≤32 MiB **and** trusted packets ≤100,000일 때만 shared executor를 동기 실행한다. 초과 또는 unknown work는 PostgreSQL `pcap_export_jobs` durable queue로 간다. Principal-scoped idempotency/coalescing lookup 뒤에만 새 async capacity를 검사한다.
+3. Dedicated PCAP export worker는 분석/AI Redis queue와 분리되어 oldest-eligible row를 claim한다. PostgreSQL에서는 `FOR UPDATE SKIP LOCKED`, opaque lease token, heartbeat, attempt-bound compare-and-set을 사용한다. Lease expiry는 transient-only bounded retry로 복구하며 stale worker write/publication은 거부한다.
+4. Worker와 sync path는 같은 executor를 사용한다. 고정 snapshot의 source를 순서대로 size/SHA 검증하고 one-pass filter, boundary-aware PCAP/PCAPNG serialize, independent reparse를 수행한다. Progress/cancellation checkpoint는 cooperative이며 source/packet/block 경계를 보존한다.
+5. Async publication은 immutable attempt staging upload와 remote-size verification 후 lease/cancellation/parent/generation을 transaction에서 재검사하고 artifact metadata와 `COMPLETED`를 마지막에 기록한다. Losing attempt와 age-qualified unreferenced orphan만 정리하며 public metadata가 incomplete bytes를 가리키지 않는다.
+6. Lifecycle은 `QUEUED → RUNNING → COMPLETED|FAILED|CANCELLED`, transient `RUNNING → QUEUED`만 허용하고 terminal은 sticky다. `sync_only` rollback에서도 기존 async status/cancel/download와 worker는 drain 완료까지 유지한다. Analysis-job 삭제는 active export가 있으면 `409 JOB_HAS_ACTIVE_PCAP_EXPORT`다.
+7. Download는 completed artifact만 Stage 7의 full pre-header size/SHA validation과 bounded spool을 거쳐 제공한다. Active/cancelled/failed state는 각각 stable `409`를 반환한다. Retention은 terminal age, row count, retained artifact bytes의 세 독립 bound와 unreferenced staging orphan age를 적용한다.
 
 ## 5. 작업 상태 머신
 

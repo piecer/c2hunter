@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+from typing import Literal
 
+import pytest
 from fastapi.testclient import TestClient
 from test_analysis_job_api import api, payload, synthetic_flows
 
@@ -122,6 +124,54 @@ def test_static_tokens_enforce_viewer_and_analyst_roles() -> None:
     assert analyst.status_code == 422
 
 
+@pytest.mark.parametrize("artifact_io", ["legacy", "streaming"])
+def test_scoped_legacy_artifact_download_is_not_cross_principal(
+    artifact_io: Literal["legacy", "streaming"],
+) -> None:
+    viewer_token = "viewer-token-for-artifact-idor"
+    analyst_token = "analyst-token-for-artifact-idor"
+    repository = MemoryRepository()
+    content = b"private-pcap"
+    repository.exports["legacy-export"] = {
+        "id": "legacy-export",
+        "job_id": "analysis-1",
+        "source_job_id": "analysis-1",
+        "candidate_id": None,
+        "status": "COMPLETED",
+        "principal_scope": "static-viewer",
+        "size_bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "capture_format": "PCAP",
+        "filename": "private.pcap",
+        "created_at": "2026-01-01T00:00:00+00:00",
+    }
+    repository.export_content["legacy-export"] = content
+    client = TestClient(
+        create_app(
+            Settings(
+                environment="production",
+                api_auth_required=True,
+                viewer_token_sha256=token_hash(viewer_token),
+                analyst_token_sha256=token_hash(analyst_token),
+                pcap_artifact_io=artifact_io,
+            ),
+            repository,
+        )
+    )
+    analyst = {"Authorization": f"Bearer {analyst_token}"}
+    assert client.get("/api/v1/pcap-exports/legacy-export", headers=analyst).status_code == 404
+    assert (
+        client.post(
+            "/api/v1/pcap-exports/legacy-export/cancel", headers=analyst, json={}
+        ).status_code
+        == 404
+    )
+    assert (
+        client.get("/api/v1/pcap-exports/legacy-export/download", headers=analyst).status_code
+        == 404
+    )
+
+
 def test_development_login_is_rate_limited() -> None:
     client = TestClient(
         create_app(
@@ -212,9 +262,14 @@ def test_openapi_documents_pcap_export_metadata_responses() -> None:
 
     create_response = schema["paths"]["/api/v1/pcap-exports"]["post"]["responses"]["201"]
     get_response = schema["paths"]["/api/v1/pcap-exports/{export_id}"]["get"]["responses"]["200"]
-    expected_ref = "#/components/schemas/PcapExportResponse"
+    expected_refs = {
+        "#/components/schemas/PcapExportResponse",
+        "#/components/schemas/PcapExportJobResponse",
+    }
 
-    assert create_response["content"]["application/json"]["schema"]["$ref"] == expected_ref
-    assert get_response["content"]["application/json"]["schema"]["$ref"] == expected_ref
+    create_schema = create_response["content"]["application/json"]["schema"]
+    get_schema = get_response["content"]["application/json"]["schema"]
+    assert {item["$ref"] for item in create_schema["anyOf"]} == expected_refs
+    assert {item["$ref"] for item in get_schema["anyOf"]} == expected_refs
     properties = schema["components"]["schemas"]["PcapExportResponse"]["properties"]
     assert {"truncated", "truncation_reasons", "error_code", "source_manifest"} <= properties.keys()

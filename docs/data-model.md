@@ -89,8 +89,13 @@ Payload 원문과 미리보기는 라벨, signature, job snapshot, 감사 로그
 | `pcap_objects` | id, job/dataset/sensor FK, server-generated object key, start/end, size, SHA-256, packet count, rotation reason, state, retention/delete time |
 | uploaded source PCAP | `captures/{job_id}.pcap` server-generated key로 MinIO에 한 번 저장. normalized flow에는 기본적으로 raw packet hex를 중복 보관하지 않음 |
 | `flow_pcap_refs` | flow identity/range와 object FK, byte/time index 힌트 |
-| `pcap_exports` | id, requester, requested job/candidate, resolved `source_job_id`, normalized scalar/nested filter JSON, source count/manifest, status, matched packet count, capture format/filename, repository-computed immutable size/SHA-256, MinIO object key/blob, error code/message, created time. Metadata와 artifact는 stream 완성 후 함께 publication되며 metadata lookup은 blob을 읽지 않음 |
+| `pcap_exports` | 기존 sync/완료 artifact metadata: id, requester, requested job/candidate, resolved `source_job_id`, normalized filter, source manifest/count, terminal status, counters, format/filename, repository-computed immutable size/SHA-256, object key/blob, stable error, created time |
+| `pcap_export_jobs` | durable lifecycle row: export/principal identity, optional principal-scoped idempotency key, request/coalesce fingerprints, requested/resolved source IDs, immutable source generation + ordered manifest JSON, canonical request/effective limits/policy version, estimated work, `QUEUED/RUNNING/COMPLETED/FAILED/CANCELLED`, execution mode, progress phase/high-water counters/percent, cancellation request/reason, attempt/max attempts/next availability, opaque lease token/expiry, public error, artifact metadata, queued/started/updated/completed/expiry timestamps |
 | `download_audits` | export/object/user, request IP, time, result, bytes |
+
+`pcap_export_jobs`는 export ID PK, nullable key의 `(principal_scope,idempotency_key)` unique, reusable state의 principal/coalesce uniqueness, `(status,next_attempt_at,queued_at)` claim order, `(status,lease_expires_at)` recovery, parent/source-job deletion-guard index를 가진다. 이들은 durable queue correctness index이며 Stage 9 packet index가 아니다. 기존 Stage 3–7 rows/object는 backfill하지 않고 terminal `execution_mode=SYNC`로 adapt한다.
+
+Lifecycle row는 접수 즉시 보이지만 artifact metadata는 verified publication을 이긴 terminal compare-and-set에서만 연결한다. Active/cancelled row는 artifact field를 만들지 않는다. Terminal cleanup은 expiry age, retained terminal row count, retained artifact byte total을 각각 독립적으로 제한한다. Staging orphan cleanup은 충분히 오래되고 lifecycle row가 참조하지 않는 attempt object만 삭제한다.
 
 Export 필터는 candidate/internal host IP, time range, port, protocol, direction, sensor와 최대 20개의 include/exclude packet-filter group을 포함한다. Group 내부 조건은 AND, include/exclude group은 각각 OR이며 scalar 조건과 nested 결과는 AND로 결합한다. Source manifest는 provenance별 source ID와 SHA-256을 기록하고 결과 blob은 인증된 download endpoint를 통해 제공한다.
 
