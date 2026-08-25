@@ -7,12 +7,13 @@ import sys
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from minio.error import S3Error
 
 from c2hunter_controller.pcap_export_queue import (
     ExportPrincipalLimitError,
@@ -22,6 +23,7 @@ from c2hunter_controller.pcap_export_queue import (
 from c2hunter_controller.pcap_offset_index import (
     IndexAvailability,
     SourceIndexBinding,
+    build_live_segment_index,
     build_offline_upload_index,
 )
 from c2hunter_controller.production import MinioBlobStore, PostgresRepository
@@ -486,4 +488,142 @@ def test_real_postgres_minio_structural_index_publication_read_and_source_delete
     finally:
         if created:
             repository.delete_retained_source(job_id)
+        repository.close()
+
+
+@_postgres_minio_integration
+def test_real_postgres_minio_live_segment_index_lease_recovery_publication_and_job_delete() -> None:
+    suffix = uuid.uuid4().hex
+    sensor_id = f"stage10-live-sensor-{suffix}"
+    job_id = f"stage10-live-job-{suffix}"
+    segment_id = f"stage10-live-segment-{suffix}"
+    capture = _stage9_capture()
+    capture_sha256 = hashlib.sha256(capture).hexdigest()
+    object_key: str | None = None
+    blob = MinioBlobStore(
+        os.environ["C2HUNTER_S3_ENDPOINT"],
+        os.environ["C2HUNTER_S3_ACCESS_KEY"],
+        os.environ["C2HUNTER_S3_SECRET_KEY"],
+        os.getenv("C2HUNTER_S3_BUCKET", "c2hunter"),
+    )
+    assert blob.ready()
+    repository = PostgresRepository(os.environ["C2HUNTER_DATABASE_URL"], blob)
+    created = False
+    try:
+        repository.upsert_sensor({"sensor_id": sensor_id, "name": "stage10-live"})
+        stored_job, was_created = repository.create_job(
+            {
+                "id": job_id,
+                "idempotency_key": f"stage10-live-{suffix}",
+                "status": "CAPTURING",
+                "mode": "LIVE",
+                "sensor_ids": [sensor_id],
+                "capture": {"store_pcap": True},
+            }
+        )
+        assert was_created and stored_job["id"] == job_id
+        created = True
+        marker = datetime.now(UTC).isoformat()
+        stored, status = repository.save_sensor_pcap_limited(
+            {
+                "id": segment_id,
+                "sensor_id": sensor_id,
+                "analysis_job_id": job_id,
+                "filename": f"{segment_id}.pcap",
+                "size_bytes": len(capture),
+                "sha256": capture_sha256,
+                "uploaded_at": marker,
+                "index_requested_at": marker,
+            },
+            capture,
+            None,
+            require_open_job=True,
+        )
+        assert status == "OK" and stored is not None
+        object_key = str(stored["object_key"])
+        assert object_key.startswith(f"sensor-pcaps/{sensor_id}/{segment_id}/")
+        assert object_key.endswith(".pcap")
+        assert object_key != f"sensor-pcaps/{sensor_id}/{segment_id}.pcap"
+        assert stored["index_intent_state"] == "PENDING"
+        assert blob.get(object_key) == capture
+
+        admission = repository.admit_live_segment_index(segment_id, capacity=1, max_attempts=3)
+        assert admission.value == "QUEUED"
+        first_now = datetime.now(UTC) + timedelta(seconds=1)
+        abandoned = repository.claim_live_segment_index(now=first_now, lease_seconds=1)
+        assert abandoned is not None and abandoned.attempt == 1 and abandoned.lease_token
+        assert repository.recover_live_segment_indexes(now=first_now + timedelta(seconds=2)) == 1
+        claimed = repository.claim_live_segment_index(
+            now=first_now + timedelta(seconds=2), lease_seconds=120
+        )
+        assert claimed is not None and claimed.attempt == 2 and claimed.lease_token
+        assert claimed.lease_token != abandoned.lease_token
+
+        assert build_live_segment_index(
+            repository,
+            segment_id,
+            max_packets=10,
+            max_interfaces=4,
+            batch_size=2,
+            attempt=claimed.attempt,
+            lease_token=claimed.lease_token,
+        )
+        version = repository.get_live_capture_source_version(segment_id)
+        assert version is not None
+        assert version.object_key == object_key
+        assert version.source_size_bytes == len(capture)
+        assert version.source_sha256 == capture_sha256
+        binding = SourceIndexBinding(
+            "LIVE_SEGMENT",
+            segment_id,
+            version.source_version_id,
+            len(capture),
+            capture_sha256,
+            "PCAP",
+        )
+        lookup = repository.get_structural_index(binding)
+        assert lookup.availability is IndexAvailability.READY
+        assert lookup.snapshot is not None and lookup.snapshot.binding == binding
+        assert len(lookup.snapshot.interfaces) == 1
+        assert len(lookup.snapshot.packets) == 1
+        task = repository.get_live_segment_index_task(segment_id)
+        assert task is not None and task.status == "COMPLETED" and task.attempt == 2
+        with repository.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT o.build_id,g.state,g.source_kind,g.source_id "
+                "FROM pcap_offset_index_owners o JOIN pcap_offset_index_generations g "
+                "ON g.build_id=o.build_id WHERE o.source_kind='LIVE_SEGMENT' AND o.source_id=%s",
+                (segment_id,),
+            )
+            owner = cursor.fetchone()
+        repository.connection.commit()
+        assert owner is not None and owner[1:] == ("READY", "LIVE_SEGMENT", segment_id)
+
+        assert repository.delete_job(job_id)
+        created = False
+        assert repository.get_job_summary(job_id) is None
+        assert repository.get_sensor_pcap(segment_id) is None
+        assert repository.get_live_segment_index_task(segment_id) is None
+        assert repository.get_live_capture_source_version(segment_id) is None
+        assert repository.get_structural_index(binding).availability is IndexAvailability.MISSING
+        with repository.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM pcap_offset_index_jobs "
+                "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s),"
+                "(SELECT COUNT(*) FROM pcap_capture_source_versions "
+                "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s),"
+                "(SELECT COUNT(*) FROM pcap_offset_index_owners "
+                "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s),"
+                "(SELECT COUNT(*) FROM pcap_offset_index_generations "
+                "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s)",
+                (segment_id, segment_id, segment_id, segment_id),
+            )
+            assert cursor.fetchone() == (0, 0, 0, 0)
+        repository.connection.commit()
+        with pytest.raises(S3Error):
+            blob.get(object_key)
+    finally:
+        if created:
+            repository.delete_job(job_id)
         repository.close()

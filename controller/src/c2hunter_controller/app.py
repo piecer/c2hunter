@@ -107,6 +107,7 @@ from .pcap_export_service import (
     request_fingerprint,
 )
 from .pcap_offset_index import build_offline_upload_index
+from .pcap_offset_index_metrics import PcapOffsetIndexMetrics
 from .pcap_stream import (
     open_bounded_verified_capture,
 )
@@ -150,6 +151,8 @@ from .schemas import (
     ReanalysisRequest,
     SensorConfigurationResponse,
     SensorConfigurationUpdate,
+    SensorPcapListResponse,
+    SensorPcapUploadResponse,
     SensorRegistration,
 )
 from .security import (
@@ -164,6 +167,7 @@ from .security import (
     trusted_client_ip,
 )
 from .sensor_groups_api import sensor_group_router
+from .sensor_pcap_api import public_sensor_pcap_metadata
 from .storage import ClickHouseFlowStore, FlowStore, MemoryFlowStore
 
 logger = logging.getLogger(__name__)
@@ -1132,6 +1136,7 @@ def create_app(
     rate_limiter = FixedWindowRateLimiter(config.rate_limit_window_seconds)
     registry = CollectorRegistry()
     pcap_export_queue.metrics = PcapExportMetrics(registry)
+    pcap_offset_index_metrics = PcapOffsetIndexMetrics(registry)
     requests = Counter(
         "c2hunter_api_requests_total",
         "API requests",
@@ -1736,7 +1741,11 @@ def create_app(
             "record_count": count,
         }
 
-    @app.put("/api/v1/sensors/{sensor_id}/pcap-segments/{segment_id}", status_code=201)
+    @app.put(
+        "/api/v1/sensors/{sensor_id}/pcap-segments/{segment_id}",
+        status_code=201,
+        response_model=SensorPcapUploadResponse,
+    )
     async def upload_sensor_pcap(
         sensor_id: str,
         segment_id: str,
@@ -1833,6 +1842,35 @@ def create_app(
         }:
             raise ApiError(422, "INVALID_PCAP", "유효한 classic PCAP header가 필요합니다")
         digest = hashlib.sha256(content).hexdigest()
+
+        def admit_index_best_effort() -> None:
+            if not config.pcap_offset_index_live_enabled or analysis_job is None:
+                return
+            try:
+                decision = repo.admit_live_segment_index(
+                    segment_id,
+                    capacity=config.pcap_offset_index_queue_capacity,
+                    max_attempts=config.pcap_offset_index_max_attempts,
+                )
+                try:
+                    pcap_offset_index_metrics.admission("LIVE_SEGMENT", str(decision.value).lower())
+                except Exception:
+                    logger.debug(
+                        "LIVE PCAP offset index admission metric unavailable", exc_info=True
+                    )
+            except Exception:
+                try:
+                    pcap_offset_index_metrics.admission("LIVE_SEGMENT", "error")
+                except Exception:
+                    logger.debug(
+                        "LIVE PCAP offset index admission metric unavailable", exc_info=True
+                    )
+                logger.warning(
+                    "LIVE PCAP offset index admission unavailable segment_id=%s",
+                    segment_id,
+                    exc_info=True,
+                )
+
         existing = repo.get_sensor_pcap(segment_id)
         if existing is not None:
             metadata, _ = existing
@@ -1846,8 +1884,8 @@ def create_app(
                     "PCAP_SEGMENT_CONFLICT",
                     "동일 segment ID에 다른 PCAP이 저장되어 있습니다",
                 )
-            public = {key: value for key, value in metadata.items() if key != "object_key"}
-            return {**public, "segment_id": segment_id}
+            admit_index_best_effort()
+            return public_sensor_pcap_metadata(metadata, segment_id=segment_id)
         if (
             analysis_pcap_limit is not None
             and stored_analysis_bytes + len(content) > analysis_pcap_limit
@@ -1895,10 +1933,11 @@ def create_app(
             )
         if stored is None:
             raise RuntimeError(f"unexpected sensor PCAP save status: {save_status}")
-        public = {key: value for key, value in stored.items() if key != "object_key"}
-        return {**public, "segment_id": segment_id}
+        if save_status in {"OK", "EXISTS"}:
+            admit_index_best_effort()
+        return public_sensor_pcap_metadata(stored, segment_id=segment_id)
 
-    @app.get("/api/v1/sensor-pcaps")
+    @app.get("/api/v1/sensor-pcaps", response_model=SensorPcapListResponse)
     def list_sensor_pcaps(
         sensor_id: str | None = None,
         analysis_job_id: str | None = None,
@@ -1913,10 +1952,7 @@ def create_app(
                 segment for segment in segments if segment.get("analysis_job_id") == analysis_job_id
             ]
         segments.sort(key=lambda segment: str(segment["uploaded_at"]), reverse=True)
-        public = [
-            {key: value for key, value in segment.items() if key != "object_key"}
-            for segment in segments
-        ]
+        public = [public_sensor_pcap_metadata(segment) for segment in segments]
         return _page(public, page, page_size)
 
     @app.get("/api/v1/sensor-pcaps/{segment_id}/download")
@@ -1925,11 +1961,12 @@ def create_app(
         if stored is None:
             raise ApiError(404, "SENSOR_PCAP_NOT_FOUND", "sensor PCAP을 찾을 수 없습니다")
         metadata, content = stored
+        public = public_sensor_pcap_metadata(metadata)
         return Response(
             content,
             media_type="application/vnd.tcpdump.pcap",
             headers={
-                "Content-Disposition": f'attachment; filename="{metadata["filename"]}"',
+                "Content-Disposition": f'attachment; filename="{public["filename"]}"',
                 "X-Content-Type-Options": "nosniff",
             },
         )

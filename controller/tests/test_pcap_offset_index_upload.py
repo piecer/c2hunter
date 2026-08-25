@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import ipaddress
 import struct
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -10,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from c2hunter_controller.app import create_app
 from c2hunter_controller.config import Settings
+from c2hunter_controller.pcap_export_worker import create_pcap_export_worker
 from c2hunter_controller.pcap_offset_index import (
     CaptureSourceVersion,
     IndexAvailability,
@@ -207,14 +210,64 @@ def test_sync_and_async_export_never_query_stage9_index(
     uploaded = _upload(client)
     assert uploaded.status_code == 201
 
-    monkeypatch.setattr(
-        repository,
-        "get_structural_index",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("index lookup")),
-    )
+    lookup_calls = 0
+
+    def reject_lookup(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal lookup_calls
+        lookup_calls += 1
+        raise AssertionError("index lookup")
+
+    monkeypatch.setattr(repository, "get_structural_index", reject_lookup)
     exported = client.post("/api/v1/pcap-exports", json={"job_id": uploaded.json()["id"]})
     assert exported.status_code == expected_status
     if expected_status == 201:
         assert exported.json()["exported_packet_count"] == 1
+        download = client.get(f"/api/v1/pcap-exports/{exported.json()['id']}/download")
+        assert download.status_code == 200 and download.content.startswith(b"\xd4\xc3\xb2\xa1")
     else:
         assert exported.json()["execution_mode"] == "ASYNC"
+        assert create_pcap_export_worker(repository, settings).run_once()
+        completed = client.get(f"/api/v1/pcap-exports/{exported.json()['id']}")
+        assert completed.status_code == 200 and completed.json()["status"] == "COMPLETED"
+        download = client.get(f"/api/v1/pcap-exports/{exported.json()['id']}/download")
+        assert download.status_code == 200 and download.content.startswith(b"\xd4\xc3\xb2\xa1")
+    assert lookup_calls == 0
+
+
+def test_export_modules_have_no_qualified_structural_lookup_range_or_postings_dependency() -> None:
+    source_root = Path(__file__).parents[1] / "src" / "c2hunter_controller"
+    export_modules = sorted(source_root.glob("pcap_export*.py"))
+    assert export_modules
+    forbidden_attributes = {
+        "get_structural_index",
+        "lookup_structural_index",
+        "structural_packet_range",
+        "structural_postings",
+        "packet_range",
+        "postings",
+    }
+    violations: list[str] = []
+    for path in export_modules:
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in forbidden_attributes:
+                violations.append(f"{path.name}:{node.lineno}:attribute:{node.attr}")
+            elif (
+                isinstance(node, ast.ImportFrom)
+                and node.module
+                and "pcap_offset_index" in node.module
+            ):
+                imported = {alias.name for alias in node.names}
+                if imported & forbidden_attributes or any(
+                    token in name.lower()
+                    for name in imported
+                    for token in ("structural", "postings")
+                ):
+                    violations.append(f"{path.name}:{node.lineno}:import:{sorted(imported)}")
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if "pcap_offset_index" in alias.name:
+                        violations.append(
+                            f"{path.name}:{node.lineno}:qualified-import:{alias.name}"
+                        )
+    assert violations == []

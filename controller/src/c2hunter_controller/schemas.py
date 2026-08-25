@@ -151,6 +151,58 @@ class SensorConfigurationResponse(BaseModel):
     internal_networks: list[str]
 
 
+_SENSOR_PCAP_METADATA_EXAMPLE: dict[str, Any] = {
+    "id": "8f9756c2c95f35b536155ba0acdd926d3bdca13a2bd433f6b9f0d18f120366f3",
+    "sensor_id": "sensor-1",
+    "sensor_name": "edge sensor",
+    "analysis_job_id": "live-analysis-1",
+    "filename": "eth0-000001.pcap",
+    "size_bytes": 24,
+    "sha256": "d92c6a81b2ff9e7893465d5e141eb80a0f37e74f33446f727ec14919dd1d1d88",
+    "uploaded_at": "2026-08-25T00:00:00Z",
+}
+
+
+class SensorPcapMetadata(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid", json_schema_extra={"examples": [_SENSOR_PCAP_METADATA_EXAMPLE]}
+    )
+
+    id: str
+    sensor_id: str
+    sensor_name: str
+    analysis_job_id: str | None = None
+    filename: str
+    size_bytes: int
+    sha256: str
+    uploaded_at: datetime
+
+
+class SensorPcapUploadResponse(SensorPcapMetadata):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    **_SENSOR_PCAP_METADATA_EXAMPLE,
+                    "segment_id": _SENSOR_PCAP_METADATA_EXAMPLE["id"],
+                }
+            ]
+        },
+    )
+
+    segment_id: str
+
+
+class SensorPcapListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[SensorPcapMetadata]
+    total: int
+    page: int
+    page_size: int
+
+
 class SensorInterface(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     mac_address: str | None = Field(default=None, min_length=11, max_length=32)

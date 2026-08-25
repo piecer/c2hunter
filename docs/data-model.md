@@ -51,6 +51,8 @@ Job 상태 enum은 `CREATED, WAITING_FOR_SENSOR, CAPTURING, UPLOADING, INGESTING
 
 이력 화면에서 수정 가능한 값은 `name`과 analyst note뿐이다. source/dataset, capture·analysis snapshot, 시간 범위, 후보와 evidence는 불변이며 탐지 조건 변경은 새 `analysis_runs`를 만드는 reanalysis로 처리한다. 사용자가 terminal job을 명시적으로 삭제하면 해당 job의 후보와 생성 export를 함께 삭제하지만 append-only 삭제 감사 이벤트는 유지한다. 보관 정책에 의한 PCAP 만료는 이 명시적 job 삭제와 달리 후보를 삭제하지 않는다.
 
+Stage 10의 `pcap_offset_index_jobs`는 공개 job 모델이 아닌 내부 LIVE-segment 작업 ledger다. finalized/retained LIVE segment marker, canonical sensor/job/object binding, queue status, attempt, retry time, lease token/expiry, stable terminal code만 저장한다. segment JSON의 내부 `index_intent_state`는 `PENDING/DEFERRED/COMPLETED/FAILED`이고 schema/parser contract version과 함께 task 전이 transaction에서 갱신된다. `COMPLETED/FAILED`는 terminal이라 reconciliation이 다시 admit하지 않고, `PENDING/DEFERRED`만 유실된 task 복구 대상이다. READY owner와 staging generation은 canonical LIVE source 삭제/보관 시 cascade되고, 연결되지 않은 archive source는 보존된다. 이 per-segment metadata는 optional이며 export가 Stage 12 전에는 조회하지 않는다. Stage 11 posting과 Stage 12 range/read 모델은 아직 존재하지 않는다.
+
 캡처 파라미터 snapshot은 시작/종료/기간/packet·byte limit, directions, BPF, src/dst CIDR와 port, protocols, IP version, payload/PCAP flags, timeout을 포함한다. 여러 종료 조건 중 먼저 충족된 이유를 `analysis_job_sensors.stop_reason`에 기록한다.
 
 ### 2.4 후보·증거
@@ -86,7 +88,7 @@ Payload 원문과 미리보기는 라벨, signature, job snapshot, 감사 로그
 
 | 엔터티 | 핵심 필드/제약 |
 |---|---|
-| `pcap_objects` | id, job/dataset/sensor FK, server-generated object key, start/end, size, SHA-256, packet count, rotation reason, state, retention/delete time |
+| `pcap_objects` | id, job/dataset/sensor FK, server-generated object key, start/end, size, SHA-256, packet count, rotation reason, state, retention/delete time. LIVE upload key는 `sensor-pcaps/{sensor_id}/{segment_id}/{generation}.pcap` 형태의 attempt 고유 immutable key이며 공개 filename/segment response는 그대로 유지 |
 | uploaded source PCAP | `captures/{job_id}.pcap` server-generated key로 MinIO에 한 번 저장. normalized flow에는 기본적으로 raw packet hex를 중복 보관하지 않음 |
 | `pcap_capture_source_versions` | canonical uploaded source별 authoritative durable identity: source/job ID, exact object key, immutable backend version ID, verified byte size/SHA-256, update time. capture upload 검증 후 PostgreSQL transaction에서 기록하며 publication/lookup은 이 row를 재검증 |
 | `flow_pcap_refs` | flow identity/range와 object FK, byte/time index 힌트 |

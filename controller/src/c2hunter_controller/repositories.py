@@ -5,15 +5,21 @@ import io
 import json
 import sqlite3
 import threading
+from _thread import RLock
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
-from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from dataclasses import asdict, dataclass, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol, TypeVar, cast
+from typing import Any, Protocol, Self, TypeGuard, TypeVar, cast
 
-from c2hunter_analysis.pcap_index import StructuralInterfaceEntry, StructuralPacketEntry
+from c2hunter_analysis.pcap_index import (
+    PCAP_OFFSET_INDEX_PARSER_CONTRACT_VERSION,
+    PCAP_OFFSET_INDEX_SCHEMA_VERSION,
+    StructuralInterfaceEntry,
+    StructuralPacketEntry,
+)
 
 from .pcap_export_store import ExportQueueStorageError, RepositoryQueueStore
 from .pcap_offset_index import (
@@ -24,6 +30,43 @@ from .pcap_offset_index import (
     StructuralIndexSnapshot,
     structural_index_digest,
     validate_structural_index,
+)
+from .pcap_offset_index_queue import (
+    IndexAdmission,
+    LiveIndexTask,
+    _mark_intent,
+    eligible_live_segment,
+    encode_task,
+)
+from .pcap_offset_index_queue import (
+    admit as admit_live_index,
+)
+from .pcap_offset_index_queue import (
+    claim as claim_live_index,
+)
+from .pcap_offset_index_queue import (
+    cleanup_terminal as cleanup_terminal_live_indexes,
+)
+from .pcap_offset_index_queue import (
+    complete as complete_live_index,
+)
+from .pcap_offset_index_queue import (
+    fail as fail_live_index,
+)
+from .pcap_offset_index_queue import (
+    get_task as get_live_index_task,
+)
+from .pcap_offset_index_queue import (
+    heartbeat as heartbeat_live_index,
+)
+from .pcap_offset_index_queue import (
+    queue_depth as live_index_queue_depth,
+)
+from .pcap_offset_index_queue import (
+    reconcile as reconcile_live_indexes,
+)
+from .pcap_offset_index_queue import (
+    recover as recover_live_indexes,
 )
 
 _AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
@@ -331,6 +374,19 @@ def _job_matches_structural_binding(
     )
 
 
+def _live_segment_matches_structural_binding(repository: Any, binding: SourceIndexBinding) -> bool:
+    segment = repository.sensor_pcaps.get(binding.source_id)
+    if segment is None:
+        return False
+    job = repository.jobs.get(str(segment.get("analysis_job_id")))
+    return bool(
+        eligible_live_segment(job, segment)
+        and segment.get("index_requested_at")
+        and segment.get("size_bytes") == binding.source_size_bytes
+        and segment.get("sha256") == binding.source_sha256
+    )
+
+
 def _valid_candidate_decision_record(decision: dict[str, Any]) -> bool:
     if not all(
         isinstance(decision.get(field), str) and bool(decision.get(field))
@@ -409,7 +465,7 @@ def _candidate_workflow_counts_from_records(
 
 
 class Repository(Protocol):
-    def for_background_worker(self) -> Repository: ...
+    def for_background_worker(self) -> Self: ...
     def close(self) -> None: ...
 
     """PostgreSQL adapter가 구현해야 하는 제어 영역 경계."""
@@ -525,7 +581,9 @@ class Repository(Protocol):
     ) -> bool: ...
     def abort_structural_index(self, build_id: str) -> None: ...
     def get_structural_index(self, binding: SourceIndexBinding) -> StructuralIndexLookup: ...
-    def delete_structural_indexes_for_source(self, source_id: str) -> None: ...
+    def delete_structural_indexes_for_source(
+        self, source_id: str, *, source_kind: str = "PCAP_UPLOAD"
+    ) -> None: ...
     def cleanup_stale_structural_indexes(self, *, before: datetime, limit: int) -> int: ...
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None: ...
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]: ...
@@ -626,6 +684,9 @@ class Repository(Protocol):
         self, export_id: str
     ) -> tuple[dict[str, Any], AbstractContextManager[Iterator[bytes]]] | None: ...
     def save_sensor_pcap(self, segment: dict[str, Any], content: bytes) -> dict[str, Any]: ...
+    def admit_live_segment_index(
+        self, source_id: str, *, capacity: int, max_attempts: int
+    ) -> IndexAdmission: ...
     def save_sensor_pcap_limited(
         self,
         segment: dict[str, Any],
@@ -652,7 +713,390 @@ class Repository(Protocol):
     ) -> tuple[dict[str, Any] | None, str]: ...
 
 
-class MemoryRepository:
+class _LiveIndexRepositoryBackend(Protocol):
+    _lock: RLock
+
+    def get_job_summary(self, job_id: str) -> dict[str, Any] | None: ...
+
+
+class _SQLiteLiveIndexRepositoryBackend(_LiveIndexRepositoryBackend, Protocol):
+    connection: sqlite3.Connection
+
+    def _get(self, kind: str, object_id: str) -> dict[str, Any] | None: ...
+
+    @staticmethod
+    def _serialize(value: Any) -> str: ...
+
+
+class _MemoryLiveIndexRepositoryBackend(_LiveIndexRepositoryBackend, Protocol):
+    jobs: dict[str, dict[str, Any]]
+    sensor_pcaps: dict[str, dict[str, Any]]
+    capture_source_versions: dict[str, CaptureSourceVersion]
+    structural_index_staging: dict[
+        str, tuple[SourceIndexBinding, datetime, list[StructuralPacketEntry]]
+    ]
+    structural_index_generations: dict[str, StructuralIndexSnapshot]
+    structural_index_owners: dict[tuple[str, str], str]
+    live_segment_index_tasks: dict[str, LiveIndexTask]
+
+
+def _is_sqlite_live_index_backend(
+    repository: _LiveIndexRepositoryBackend,
+) -> TypeGuard[_SQLiteLiveIndexRepositoryBackend]:
+    return isinstance(getattr(repository, "connection", None), sqlite3.Connection)
+
+
+def _is_memory_live_index_backend(
+    repository: _LiveIndexRepositoryBackend,
+) -> TypeGuard[_MemoryLiveIndexRepositoryBackend]:
+    return not hasattr(repository, "connection")
+
+
+class LiveIndexQueueRepositoryMixin:
+    def get_live_segment_index_metadata(
+        self: _LiveIndexRepositoryBackend, source_id: str
+    ) -> dict[str, Any] | None:
+        """Return marked canonical metadata without retaining a repository lock."""
+        with self._lock:
+            if _is_sqlite_live_index_backend(self):
+                segment = self._get("sensor_pcap", source_id)
+                job = (
+                    self._get("job", str(segment.get("analysis_job_id")))
+                    if segment is not None
+                    else None
+                )
+            else:
+                if not _is_memory_live_index_backend(self):
+                    raise TypeError("unsupported LIVE index repository backend")
+                segment = deepcopy(self.sensor_pcaps.get(source_id))
+                job = (
+                    self.jobs.get(str(segment.get("analysis_job_id")))
+                    if segment is not None
+                    else None
+                )
+            if (
+                segment is None
+                or not segment.get("index_requested_at")
+                or not eligible_live_segment(job, segment)
+            ):
+                return None
+            return deepcopy(segment)
+
+    def admit_live_segment_index(
+        self, source_id: str, *, capacity: int, max_attempts: int
+    ) -> IndexAdmission:
+        return admit_live_index(self, source_id, capacity=capacity, max_attempts=max_attempts)
+
+    def get_live_segment_index_task(self, source_id: str) -> LiveIndexTask | None:
+        return get_live_index_task(self, source_id)
+
+    def claim_live_segment_index(
+        self, *, now: datetime, lease_seconds: int
+    ) -> LiveIndexTask | None:
+        return claim_live_index(self, now=now, lease_seconds=lease_seconds)
+
+    def heartbeat_live_segment_index(
+        self,
+        source_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> bool:
+        return heartbeat_live_index(
+            self,
+            source_id,
+            attempt=attempt,
+            lease_token=lease_token,
+            now=now,
+            lease_seconds=lease_seconds,
+        )
+
+    def complete_live_segment_index(
+        self,
+        source_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        now: datetime | None = None,
+    ) -> bool:
+        return complete_live_index(
+            self, source_id, attempt=attempt, lease_token=lease_token, now=now
+        )
+
+    def fail_live_segment_index(
+        self,
+        source_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        transient: bool,
+        error_code: str,
+        now: datetime,
+        retry_base_seconds: int,
+    ) -> bool:
+        return fail_live_index(
+            self,
+            source_id,
+            attempt=attempt,
+            lease_token=lease_token,
+            transient=transient,
+            error_code=error_code,
+            now=now,
+            retry_base_seconds=retry_base_seconds,
+        )
+
+    def recover_live_segment_indexes(self, *, now: datetime) -> int:
+        return recover_live_indexes(self, now=now)
+
+    def get_live_segment_index_queue_depth(self) -> dict[str, int]:
+        return live_index_queue_depth(self)
+
+    def cleanup_terminal_live_segment_indexes(self, *, before: datetime, limit: int) -> int:
+        return cleanup_terminal_live_indexes(self, before=before, limit=limit)
+
+    def reconcile_live_segment_indexes(
+        self, *, capacity: int, max_attempts: int, limit: int
+    ) -> int:
+        return reconcile_live_indexes(
+            self, capacity=capacity, max_attempts=max_attempts, limit=limit
+        )
+
+    def get_live_capture_source_version(
+        self: _LiveIndexRepositoryBackend, source_id: str
+    ) -> CaptureSourceVersion | None:
+        if _is_sqlite_live_index_backend(self):
+            row = self.connection.execute(
+                "SELECT source_kind,source_id,object_key,source_version_id,source_size_bytes,"
+                "source_sha256 FROM pcap_capture_source_versions "
+                "WHERE source_kind='LIVE_SEGMENT' AND source_id=?",
+                (source_id,),
+            ).fetchone()
+            return CaptureSourceVersion(*row) if row is not None else None
+        if not _is_memory_live_index_backend(self):
+            raise TypeError("unsupported LIVE index repository backend")
+        return self.capture_source_versions.get(f"LIVE_SEGMENT:{source_id}")
+
+    def publish_live_structural_index(
+        self: _LiveIndexRepositoryBackend,
+        build_id: str,
+        binding: SourceIndexBinding,
+        interfaces: tuple[StructuralInterfaceEntry, ...],
+        packet_count: int,
+        source_version: CaptureSourceVersion,
+        *,
+        attempt: int,
+        lease_token: str,
+    ) -> bool:
+        if binding.source_kind != "LIVE_SEGMENT" or packet_count < 1:
+            return False
+        with self._lock:
+            if _is_sqlite_live_index_backend(self):
+                # A per-instance lock cannot exclude another SQLite connection.
+                # Serialize all canonical, staging, owner, and task checks with publication.
+                self.connection.execute("BEGIN IMMEDIATE")
+                segment = self._get("sensor_pcap", binding.source_id)
+            else:
+                if not _is_memory_live_index_backend(self):
+                    raise TypeError("unsupported LIVE index repository backend")
+                segment = self.sensor_pcaps.get(binding.source_id)
+            job = self.get_job_summary(str(segment.get("analysis_job_id"))) if segment else None
+            expected_key = (
+                str(segment.get("object_key"))
+                if segment and segment.get("object_key")
+                else f"sensor-pcaps/{segment.get('sensor_id')}/{binding.source_id}.pcap"
+                if segment
+                else ""
+            )
+            task = get_live_index_task(self, binding.source_id)
+            now = datetime.now(UTC)
+            if (
+                segment is None
+                or not eligible_live_segment(job, segment)
+                or not segment.get("index_requested_at")
+                or source_version
+                != CaptureSourceVersion(
+                    "LIVE_SEGMENT",
+                    binding.source_id,
+                    expected_key,
+                    binding.source_version_id,
+                    binding.source_size_bytes,
+                    binding.source_sha256,
+                )
+                or int(segment.get("size_bytes", -1)) != binding.source_size_bytes
+                or segment.get("sha256") != binding.source_sha256
+                or task is None
+                or task.spec.source_kind != binding.source_kind
+                or task.spec.source_id != binding.source_id
+                or task.spec.sensor_id != segment.get("sensor_id")
+                or task.spec.analysis_job_id != segment.get("analysis_job_id")
+                or task.spec.object_key != expected_key
+                or task.spec.source_size_bytes != binding.source_size_bytes
+                or task.spec.source_sha256 != binding.source_sha256
+                or task.status != "RUNNING"
+                or task.attempt != attempt
+                or task.lease_token != lease_token
+                or task.lease_expires_at is None
+                or task.lease_expires_at <= now
+            ):
+                if _is_sqlite_live_index_backend(self):
+                    self.connection.rollback()
+                return False
+            if _is_sqlite_live_index_backend(self):
+                generation = self.connection.execute(
+                    "SELECT binding,created_at FROM pcap_offset_index_generations "
+                    "WHERE build_id=? AND state='STAGING'",
+                    (build_id,),
+                ).fetchone()
+                packets = tuple(
+                    StructuralPacketEntry(**json.loads(row[0]))
+                    for row in self.connection.execute(
+                        "SELECT data FROM pcap_offset_index_packets "
+                        "WHERE build_id=? ORDER BY packet_index",
+                        (build_id,),
+                    ).fetchall()
+                )
+                created_at = (
+                    datetime.fromisoformat(generation[1])
+                    if generation
+                    else datetime.now().astimezone()
+                )
+                stored_binding = (
+                    SourceIndexBinding(**json.loads(generation[0])) if generation else None
+                )
+            else:
+                if not _is_memory_live_index_backend(self):
+                    raise TypeError("unsupported LIVE index repository backend")
+                staged = self.structural_index_staging.get(build_id)
+                stored_binding = staged[0] if staged else None
+                created_at = staged[1] if staged else datetime.now().astimezone()
+                packets = tuple(staged[2]) if staged else ()
+            snapshot = StructuralIndexSnapshot(
+                build_id,
+                binding,
+                created_at,
+                structural_index_digest(binding, interfaces, packets),
+                interfaces,
+                packets,
+            )
+            if (
+                stored_binding != binding
+                or len(packets) != packet_count
+                or not validate_structural_index(snapshot)
+            ):
+                if _is_sqlite_live_index_backend(self):
+                    self.connection.rollback()
+                return False
+            if _is_sqlite_live_index_backend(self):
+                try:
+                    self.connection.execute(
+                        "INSERT INTO pcap_capture_source_versions("
+                        "source_kind,source_id,object_key,source_version_id,source_size_bytes,source_sha256"
+                        ") VALUES(?,?,?,?,?,?) ON CONFLICT(source_kind,source_id) DO NOTHING",
+                        (
+                            source_version.source_kind,
+                            source_version.source_id,
+                            source_version.object_key,
+                            source_version.source_version_id,
+                            source_version.source_size_bytes,
+                            source_version.source_sha256,
+                        ),
+                    )
+                    persisted_version = self.connection.execute(
+                        "SELECT source_kind,source_id,object_key,source_version_id,"
+                        "source_size_bytes,source_sha256 FROM pcap_capture_source_versions "
+                        "WHERE source_kind='LIVE_SEGMENT' AND source_id=?",
+                        (binding.source_id,),
+                    ).fetchone()
+                    if (
+                        persisted_version is None
+                        or CaptureSourceVersion(*persisted_version) != source_version
+                    ):
+                        self.connection.rollback()
+                        return False
+                    self.connection.executemany(
+                        "INSERT INTO pcap_offset_index_interfaces("
+                        "build_id,interface_ordinal,data) VALUES(?,?,?)",
+                        [
+                            (build_id, item.interface_ordinal, self._serialize(asdict(item)))
+                            for item in interfaces
+                        ],
+                    )
+                    self.connection.execute(
+                        "UPDATE pcap_offset_index_generations SET state='READY',packet_count=?,"
+                        "interface_count=?,index_sha256=? WHERE build_id=? AND state='STAGING'",
+                        (packet_count, len(interfaces), snapshot.index_sha256, build_id),
+                    )
+                    previous = self.connection.execute(
+                        "SELECT build_id FROM pcap_offset_index_owners "
+                        "WHERE source_kind=? AND source_id=?",
+                        (binding.source_kind, binding.source_id),
+                    ).fetchone()
+                    self.connection.execute(
+                        "INSERT INTO pcap_offset_index_owners("
+                        "source_kind,source_id,build_id) VALUES(?,?,?) "
+                        "ON CONFLICT(source_kind,source_id) "
+                        "DO UPDATE SET build_id=excluded.build_id",
+                        (binding.source_kind, binding.source_id, build_id),
+                    )
+                    if previous and previous[0] != build_id:
+                        self.connection.execute(
+                            "DELETE FROM pcap_offset_index_generations WHERE build_id=?", previous
+                        )
+                    completed = replace(
+                        task,
+                        status="COMPLETED",
+                        lease_token=None,
+                        lease_expires_at=None,
+                        updated_at=now,
+                    )
+                    cursor = self.connection.execute(
+                        "UPDATE pcap_offset_index_jobs SET status='COMPLETED',data=? "
+                        "WHERE source_kind='LIVE_SEGMENT' AND source_id=? AND status='RUNNING' "
+                        "AND json_extract(data,'$.attempt')=? "
+                        "AND json_extract(data,'$.lease_token')=? "
+                        "AND json_extract(data,'$.lease_expires_at')>?",
+                        (
+                            encode_task(completed),
+                            binding.source_id,
+                            attempt,
+                            lease_token,
+                            now.isoformat(),
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        self.connection.rollback()
+                        return False
+                    _mark_intent(self, binding.source_id, "COMPLETED")
+                    self.connection.commit()
+                except Exception:
+                    self.connection.rollback()
+                    raise
+            else:
+                if not _is_memory_live_index_backend(self):
+                    raise TypeError("unsupported LIVE index repository backend")
+                self.capture_source_versions[f"LIVE_SEGMENT:{binding.source_id}"] = source_version
+                previous = self.structural_index_owners.get(
+                    (binding.source_kind, binding.source_id)
+                )
+                self.structural_index_generations[build_id] = snapshot
+                self.structural_index_owners[(binding.source_kind, binding.source_id)] = build_id
+                self.structural_index_staging.pop(build_id, None)
+                self.live_segment_index_tasks[binding.source_id] = replace(
+                    task,
+                    status="COMPLETED",
+                    lease_token=None,
+                    lease_expires_at=None,
+                    updated_at=now,
+                )
+                _mark_intent(self, binding.source_id, "COMPLETED")
+                if previous and previous != build_id:
+                    self.structural_index_generations.pop(previous, None)
+            return True
+
+
+class MemoryRepository(LiveIndexQueueRepositoryMixin):
     def __init__(self) -> None:
         self.sensors: dict[str, dict[str, Any]] = {}
         self.groups: dict[str, dict[str, Any]] = {}
@@ -679,6 +1123,7 @@ class MemoryRepository:
         self.exports: dict[str, dict[str, Any]] = {}
         self.export_content: dict[str, bytes] = {}
         self.pcap_export_jobs: dict[str, dict[str, Any]] = {}
+        self.live_segment_index_tasks: dict[str, LiveIndexTask] = {}
         self.sensor_pcaps: dict[str, dict[str, Any]] = {}
         self.sensor_pcap_content: dict[str, bytes] = {}
         self.enrollments: dict[str, dict[str, Any]] = {}
@@ -687,7 +1132,7 @@ class MemoryRepository:
             str, tuple[SourceIndexBinding, datetime, list[StructuralPacketEntry]]
         ] = {}
         self.structural_index_generations: dict[str, StructuralIndexSnapshot] = {}
-        self.structural_index_owners: dict[str, str] = {}
+        self.structural_index_owners: dict[object, str] = {}
         self._lock = threading.RLock()
 
     def ready(self) -> bool:
@@ -1064,7 +1509,8 @@ class MemoryRepository:
             for key, run_id in list(self.ai_run_idempotency_keys.items()):
                 if run_id in run_ids:
                     self.ai_run_idempotency_keys.pop(key, None)
-            self.idempotency_keys.pop(str(job["idempotency_key"]), None)
+            if job.get("idempotency_key") is not None:
+                self.idempotency_keys.pop(str(job["idempotency_key"]), None)
             self.candidates.pop(job_id, None)
             self.job_captures.pop(job_id, None)
             self.capture_source_versions.pop(job_id, None)
@@ -1083,6 +1529,17 @@ class MemoryRepository:
                 if export.get("job_id") == job_id
             ]:
                 lifecycle_jobs.pop(export_id, None)
+            live_segment_ids = [
+                segment_id
+                for segment_id, segment in self.sensor_pcaps.items()
+                if segment.get("analysis_job_id") == job_id
+            ]
+            for segment_id in live_segment_ids:
+                self.sensor_pcaps.pop(segment_id, None)
+                self.sensor_pcap_content.pop(segment_id, None)
+                self.live_segment_index_tasks.pop(segment_id, None)
+                self.capture_source_versions.pop(f"LIVE_SEGMENT:{segment_id}", None)
+                self.delete_structural_indexes_for_source(segment_id, source_kind="LIVE_SEGMENT")
             return True
 
     def delete_retained_source(self, job_id: str) -> bool:
@@ -1173,9 +1630,10 @@ class MemoryRepository:
             )
             if not validate_structural_index(snapshot):
                 return False
-            previous = self.structural_index_owners.get(binding.source_id)
+            owner_key = (binding.source_kind, binding.source_id)
+            previous = self.structural_index_owners.get(owner_key)
             self.structural_index_generations[build_id] = snapshot
-            self.structural_index_owners[binding.source_id] = build_id
+            self.structural_index_owners[owner_key] = build_id
             self.structural_index_staging.pop(build_id, None)
             if previous is not None and previous != build_id:
                 self.structural_index_generations.pop(previous, None)
@@ -1187,7 +1645,8 @@ class MemoryRepository:
 
     def get_structural_index(self, binding: SourceIndexBinding) -> StructuralIndexLookup:
         with self._lock:
-            build_id = self.structural_index_owners.get(binding.source_id)
+            owner_key: object = (binding.source_kind, binding.source_id)
+            build_id = self.structural_index_owners.get(owner_key)
             if build_id is None:
                 return StructuralIndexLookup(IndexAvailability.MISSING)
             snapshot = self.structural_index_generations.get(build_id)
@@ -1200,33 +1659,55 @@ class MemoryRepository:
                 return StructuralIndexLookup(IndexAvailability.UNSUPPORTED_SCHEMA)
             if snapshot.binding != binding:
                 return StructuralIndexLookup(IndexAvailability.STALE)
+            if binding.source_kind == "LIVE_SEGMENT":
+                segment = self.sensor_pcaps.get(binding.source_id)
+                object_key = (
+                    str(segment.get("object_key"))
+                    if segment and segment.get("object_key")
+                    else f"sensor-pcaps/{segment.get('sensor_id')}/{binding.source_id}.pcap"
+                    if segment
+                    else ""
+                )
+                source_key = f"LIVE_SEGMENT:{binding.source_id}"
+                canonical_matches = _live_segment_matches_structural_binding(self, binding)
+            else:
+                object_key = f"captures/{binding.source_id}.pcap"
+                source_key = binding.source_id
+                canonical_matches = _job_matches_structural_binding(
+                    self.jobs.get(binding.source_id), binding
+                )
             expected_version = CaptureSourceVersion(
                 binding.source_kind,
                 binding.source_id,
-                f"captures/{binding.source_id}.pcap",
+                object_key,
                 binding.source_version_id,
                 binding.source_size_bytes,
                 binding.source_sha256,
             )
             if (
-                not _job_matches_structural_binding(self.jobs.get(binding.source_id), binding)
-                or self.capture_source_versions.get(binding.source_id) != expected_version
+                not canonical_matches
+                or self.capture_source_versions.get(source_key) != expected_version
             ):
                 return StructuralIndexLookup(IndexAvailability.STALE)
             if not validate_structural_index(snapshot):
                 return StructuralIndexLookup(IndexAvailability.CORRUPT)
             return StructuralIndexLookup(IndexAvailability.READY, deepcopy(snapshot))
 
-    def delete_structural_indexes_for_source(self, source_id: str) -> None:
+    def delete_structural_indexes_for_source(
+        self, source_id: str, *, source_kind: str = "PCAP_UPLOAD"
+    ) -> None:
         with self._lock:
-            self.structural_index_owners.pop(source_id, None)
+            self.structural_index_owners.pop((source_kind, source_id), None)
             for build_id, snapshot in list(self.structural_index_generations.items()):
-                if snapshot.binding.source_id == source_id:
+                if (
+                    snapshot.binding.source_kind == source_kind
+                    and snapshot.binding.source_id == source_id
+                ):
                     self.structural_index_generations.pop(build_id, None)
             for build_id, (binding, _created_at, _packets) in list(
                 self.structural_index_staging.items()
             ):
-                if binding.source_id == source_id:
+                if binding.source_kind == source_kind and binding.source_id == source_id:
                     self.structural_index_staging.pop(build_id, None)
 
     def cleanup_stale_structural_indexes(self, *, before: datetime, limit: int) -> int:
@@ -1713,8 +2194,8 @@ class MemoryRepository:
     ) -> tuple[dict[str, Any] | None, str]:
         with self._lock:
             analysis_job_id = segment.get("analysis_job_id")
+            job = self.jobs.get(str(analysis_job_id)) if analysis_job_id is not None else None
             if require_open_job and analysis_job_id is not None:
-                job = self.jobs.get(str(analysis_job_id))
                 if job is None or job.get("status") in _JOB_TERMINAL_STATUSES:
                     return None, "JOB_CLOSED"
             existing = self.sensor_pcaps.get(segment["id"])
@@ -1732,9 +2213,17 @@ class MemoryRepository:
                 )
                 if used + len(content) > max_total_bytes:
                     return None, "LIMIT"
-            self.sensor_pcaps[segment["id"]] = deepcopy(segment)
+            stored = deepcopy(segment)
+            if eligible_live_segment(job, stored):
+                stored["index_requested_at"] = datetime.now().astimezone().isoformat()
+                stored["index_intent_state"] = "PENDING"
+                stored["index_intent_schema_version"] = PCAP_OFFSET_INDEX_SCHEMA_VERSION
+                stored["index_intent_parser_contract_version"] = (
+                    PCAP_OFFSET_INDEX_PARSER_CONTRACT_VERSION
+                )
+            self.sensor_pcaps[segment["id"]] = stored
             self.sensor_pcap_content[segment["id"]] = bytes(content)
-            return deepcopy(segment), "OK"
+            return deepcopy(stored), "OK"
 
     def get_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], bytes] | None:
         opened = self.open_sensor_pcap(segment_id)
@@ -1878,7 +2367,7 @@ class MemoryRepository:
             return deepcopy(selected)
 
 
-class SQLiteRepository:
+class SQLiteRepository(LiveIndexQueueRepositoryMixin):
     """외부 서비스 없이 계약 테스트 가능한 SQLite adapter. 같은 경계로 PostgreSQL 교체 가능."""
 
     def __init__(self, path: str | Path) -> None:
@@ -1959,7 +2448,7 @@ class SQLiteRepository:
               job_id TEXT PRIMARY KEY, content BLOB NOT NULL
             );
             CREATE TABLE IF NOT EXISTS pcap_capture_source_versions (
-              source_kind TEXT NOT NULL CHECK(source_kind='PCAP_UPLOAD'),
+              source_kind TEXT NOT NULL CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
               source_id TEXT NOT NULL,
               object_key TEXT NOT NULL,
               source_version_id TEXT NOT NULL,
@@ -1994,8 +2483,21 @@ class SQLiteRepository:
             CREATE TABLE IF NOT EXISTS sensor_pcap_blobs (
               segment_id TEXT PRIMARY KEY, content BLOB NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS pcap_offset_index_jobs (
+              source_kind TEXT NOT NULL CHECK(source_kind='LIVE_SEGMENT'),
+              source_id TEXT NOT NULL,
+              status TEXT NOT NULL CHECK(status IN ('QUEUED','RUNNING','COMPLETED','FAILED')),
+              next_attempt_at TEXT NOT NULL,
+              queued_at TEXT NOT NULL,
+              data TEXT NOT NULL,
+              PRIMARY KEY(source_kind,source_id)
+            );
+            CREATE INDEX IF NOT EXISTS pcap_offset_index_jobs_claim
+              ON pcap_offset_index_jobs(status,next_attempt_at,queued_at,source_id);
             CREATE TABLE IF NOT EXISTS pcap_offset_index_generations (
               build_id TEXT PRIMARY KEY,
+              source_kind TEXT NOT NULL DEFAULT 'PCAP_UPLOAD'
+                CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
               source_id TEXT NOT NULL,
               state TEXT NOT NULL CHECK(state IN ('STAGING','READY')),
               binding TEXT NOT NULL,
@@ -2019,9 +2521,11 @@ class SQLiteRepository:
               PRIMARY KEY(build_id,packet_index)
             );
             CREATE TABLE IF NOT EXISTS pcap_offset_index_owners (
-              source_id TEXT PRIMARY KEY,
+              source_kind TEXT NOT NULL CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+              source_id TEXT NOT NULL,
               build_id TEXT NOT NULL UNIQUE REFERENCES pcap_offset_index_generations(build_id)
-                ON DELETE CASCADE
+                ON DELETE CASCADE,
+              PRIMARY KEY(source_kind,source_id)
             );
             CREATE INDEX IF NOT EXISTS pcap_offset_index_packets_lookup
               ON pcap_offset_index_packets(build_id,packet_index);
@@ -2034,6 +2538,7 @@ class SQLiteRepository:
                 id
               ) WHERE kind='sensor_pcap';
         """)
+        self._migrate_stage10_offset_index_schema()
         candidate_columns = {
             str(row[1]) for row in self.connection.execute("PRAGMA table_info(candidate_records)")
         }
@@ -2057,6 +2562,93 @@ class SQLiteRepository:
         self._migrate_embedded_job_signatures()
         self._migrate_legacy_candidates()
         self.connection.commit()
+
+    def _migrate_stage10_offset_index_schema(self) -> None:
+        """Transactionally rebuild deployed Stage9 index tables exactly once."""
+        columns = lambda table: {  # noqa: E731 - local schema probe
+            str(row[1]) for row in self.connection.execute(f"PRAGMA table_info({table})")
+        }
+        source_row = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='pcap_capture_source_versions'"
+        ).fetchone()
+        if (
+            "source_kind" in columns("pcap_offset_index_owners")
+            and "source_kind" in columns("pcap_offset_index_generations")
+            and source_row is not None
+            and "LIVE_SEGMENT" in str(source_row[0])
+        ):
+            return
+        self.connection.commit()
+        self.connection.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self.connection.executescript("""
+                BEGIN IMMEDIATE;
+                CREATE TABLE pcap_capture_source_versions_stage10 (
+                  source_kind TEXT NOT NULL CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+                  source_id TEXT NOT NULL, object_key TEXT NOT NULL,
+                  source_version_id TEXT NOT NULL, source_size_bytes INTEGER NOT NULL
+                    CHECK(source_size_bytes>=0), source_sha256 TEXT NOT NULL,
+                  PRIMARY KEY(source_kind,source_id));
+                INSERT INTO pcap_capture_source_versions_stage10
+                  SELECT * FROM pcap_capture_source_versions;
+                CREATE TABLE pcap_offset_index_generations_stage10 (
+                  build_id TEXT PRIMARY KEY, source_kind TEXT NOT NULL DEFAULT 'PCAP_UPLOAD'
+                    CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+                  source_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('STAGING','READY')),
+                  binding TEXT NOT NULL, created_at TEXT NOT NULL, packet_count INTEGER,
+                  interface_count INTEGER, index_sha256 TEXT);
+                INSERT INTO pcap_offset_index_generations_stage10
+                  SELECT build_id,COALESCE(json_extract(binding,'$.source_kind'),'PCAP_UPLOAD'),
+                         source_id,state,binding,created_at,packet_count,interface_count,index_sha256
+                  FROM pcap_offset_index_generations;
+                CREATE TABLE pcap_offset_index_interfaces_stage10 (
+                  build_id TEXT NOT NULL REFERENCES pcap_offset_index_generations_stage10(build_id)
+                    ON DELETE CASCADE, interface_ordinal INTEGER NOT NULL, data TEXT NOT NULL,
+                  PRIMARY KEY(build_id,interface_ordinal));
+                INSERT INTO pcap_offset_index_interfaces_stage10
+                  SELECT * FROM pcap_offset_index_interfaces;
+                CREATE TABLE pcap_offset_index_packets_stage10 (
+                  build_id TEXT NOT NULL REFERENCES pcap_offset_index_generations_stage10(build_id)
+                    ON DELETE CASCADE, packet_index INTEGER NOT NULL, data TEXT NOT NULL,
+                  PRIMARY KEY(build_id,packet_index));
+                INSERT INTO pcap_offset_index_packets_stage10
+                  SELECT * FROM pcap_offset_index_packets;
+                CREATE TABLE pcap_offset_index_owners_stage10 (
+                  source_kind TEXT NOT NULL CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+                  source_id TEXT NOT NULL, build_id TEXT NOT NULL UNIQUE
+                    REFERENCES pcap_offset_index_generations_stage10(build_id) ON DELETE CASCADE,
+                  PRIMARY KEY(source_kind,source_id));
+                INSERT INTO pcap_offset_index_owners_stage10
+                  SELECT COALESCE(json_extract(g.binding,'$.source_kind'),'PCAP_UPLOAD'),
+                         o.source_id,o.build_id
+                  FROM pcap_offset_index_owners o
+                  JOIN pcap_offset_index_generations g ON g.build_id=o.build_id;
+                DROP TABLE pcap_offset_index_owners;
+                DROP TABLE pcap_offset_index_interfaces;
+                DROP TABLE pcap_offset_index_packets;
+                DROP TABLE pcap_offset_index_generations;
+                DROP TABLE pcap_capture_source_versions;
+                ALTER TABLE pcap_offset_index_generations_stage10
+                  RENAME TO pcap_offset_index_generations;
+                ALTER TABLE pcap_offset_index_interfaces_stage10
+                  RENAME TO pcap_offset_index_interfaces;
+                ALTER TABLE pcap_offset_index_packets_stage10
+                  RENAME TO pcap_offset_index_packets;
+                ALTER TABLE pcap_offset_index_owners_stage10 RENAME TO pcap_offset_index_owners;
+                ALTER TABLE pcap_capture_source_versions_stage10
+                  RENAME TO pcap_capture_source_versions;
+                CREATE INDEX pcap_offset_index_packets_lookup
+                  ON pcap_offset_index_packets(build_id,packet_index);
+                CREATE INDEX pcap_offset_index_generations_staging
+                  ON pcap_offset_index_generations(state,created_at,build_id);
+                COMMIT;
+            """)
+        except Exception:
+            self.connection.rollback()
+            raise
+        finally:
+            self.connection.execute("PRAGMA foreign_keys=ON")
 
     @staticmethod
     def _serialize(value: Any) -> str:
@@ -2619,8 +3211,38 @@ class SQLiteRepository:
             self.connection.execute("DELETE FROM candidate_records WHERE job_id=?", (job_id,))
             self.connection.execute("DELETE FROM job_flow_records WHERE job_id=?", (job_id,))
             self.connection.execute("DELETE FROM job_payload_signatures WHERE job_id=?", (job_id,))
+            live_segment_rows = self.connection.execute(
+                "SELECT id FROM objects WHERE kind='sensor_pcap' "
+                "AND json_extract(data,'$.analysis_job_id')=? ORDER BY id",
+                (job_id,),
+            ).fetchall()
+            live_segment_ids = [str(row[0]) for row in live_segment_rows]
+            for segment_id in live_segment_ids:
+                self.connection.execute(
+                    "DELETE FROM pcap_offset_index_jobs "
+                    "WHERE source_kind='LIVE_SEGMENT' AND source_id=?",
+                    (segment_id,),
+                )
+                self.connection.execute(
+                    "DELETE FROM pcap_capture_source_versions "
+                    "WHERE source_kind='LIVE_SEGMENT' AND source_id=?",
+                    (segment_id,),
+                )
+                self.connection.execute(
+                    "DELETE FROM pcap_offset_index_generations "
+                    "WHERE source_kind='LIVE_SEGMENT' AND source_id=?",
+                    (segment_id,),
+                )
+                self.connection.execute(
+                    "DELETE FROM sensor_pcap_blobs WHERE segment_id=?", (segment_id,)
+                )
+                self.connection.execute(
+                    "DELETE FROM objects WHERE kind='sensor_pcap' AND id=?", (segment_id,)
+                )
             self.connection.execute(
-                "DELETE FROM pcap_offset_index_generations WHERE source_id=?", (job_id,)
+                "DELETE FROM pcap_offset_index_generations WHERE source_kind='PCAP_UPLOAD' "
+                "AND source_id=?",
+                (job_id,),
             )
             self.connection.execute("DELETE FROM job_capture_blobs WHERE job_id=?", (job_id,))
             self.connection.execute(
@@ -2691,9 +3313,11 @@ class SQLiteRepository:
         with self._lock, self.connection:
             self.connection.execute(
                 "INSERT INTO pcap_offset_index_generations("
-                "build_id,source_id,state,binding,created_at) VALUES(?,?,'STAGING',?,?)",
+                "build_id,source_kind,source_id,state,binding,created_at) "
+                "VALUES(?,?,?,'STAGING',?,?)",
                 (
                     build_id,
+                    binding.source_kind,
                     binding.source_id,
                     self._serialize(asdict(binding)),
                     created_at.isoformat(),
@@ -2833,8 +3457,9 @@ class SQLiteRepository:
                     ],
                 )
                 previous = self.connection.execute(
-                    "SELECT build_id FROM pcap_offset_index_owners WHERE source_id=?",
-                    (binding.source_id,),
+                    "SELECT build_id FROM pcap_offset_index_owners "
+                    "WHERE source_kind=? AND source_id=?",
+                    (binding.source_kind, binding.source_id),
                 ).fetchone()
                 self.connection.execute(
                     "UPDATE pcap_offset_index_generations SET state='READY',packet_count=?,"
@@ -2842,9 +3467,10 @@ class SQLiteRepository:
                     (packet_count, len(interfaces), snapshot.index_sha256, build_id),
                 )
                 self.connection.execute(
-                    "INSERT INTO pcap_offset_index_owners(source_id,build_id) VALUES(?,?) "
-                    "ON CONFLICT(source_id) DO UPDATE SET build_id=excluded.build_id",
-                    (binding.source_id, build_id),
+                    "INSERT INTO pcap_offset_index_owners(source_kind,source_id,build_id) "
+                    "VALUES(?,?,?) ON CONFLICT(source_kind,source_id) "
+                    "DO UPDATE SET build_id=excluded.build_id",
+                    (binding.source_kind, binding.source_id, build_id),
                 )
                 if previous is not None and str(previous[0]) != build_id:
                     self.connection.execute(
@@ -2867,8 +3493,8 @@ class SQLiteRepository:
     def get_structural_index(self, binding: SourceIndexBinding) -> StructuralIndexLookup:
         with self._lock:
             row = self.connection.execute(
-                "SELECT build_id FROM pcap_offset_index_owners WHERE source_id=?",
-                (binding.source_id,),
+                "SELECT build_id FROM pcap_offset_index_owners WHERE source_kind=? AND source_id=?",
+                (binding.source_kind, binding.source_id),
             ).fetchone()
             if row is None:
                 return StructuralIndexLookup(IndexAvailability.MISSING)
@@ -2885,21 +3511,45 @@ class SQLiteRepository:
                 return StructuralIndexLookup(IndexAvailability.UNSUPPORTED_SCHEMA)
             if snapshot.binding != binding:
                 return StructuralIndexLookup(IndexAvailability.STALE)
-            job = self.get_job_summary(binding.source_id)
+            if binding.source_kind == "LIVE_SEGMENT":
+                segment = self._get("sensor_pcap", binding.source_id)
+                job = (
+                    self.get_job_summary(str(segment.get("analysis_job_id")))
+                    if segment is not None
+                    else None
+                )
+                object_key = (
+                    str(segment.get("object_key"))
+                    if segment and segment.get("object_key")
+                    else f"sensor-pcaps/{segment.get('sensor_id')}/{binding.source_id}.pcap"
+                    if segment
+                    else ""
+                )
+                canonical_matches = bool(
+                    segment
+                    and eligible_live_segment(job, segment)
+                    and segment.get("index_requested_at")
+                    and int(segment.get("size_bytes", -1)) == binding.source_size_bytes
+                    and segment.get("sha256") == binding.source_sha256
+                )
+            else:
+                job = self.get_job_summary(binding.source_id)
+                object_key = f"captures/{binding.source_id}.pcap"
+                canonical_matches = _job_matches_structural_binding(job, binding)
             source_version = self.connection.execute(
                 "SELECT source_kind,source_id,object_key,source_version_id,source_size_bytes,"
                 "source_sha256 FROM pcap_capture_source_versions "
-                "WHERE source_kind='PCAP_UPLOAD' AND source_id=?",
-                (binding.source_id,),
+                "WHERE source_kind=? AND source_id=?",
+                (binding.source_kind, binding.source_id),
             ).fetchone()
             if (
-                not _job_matches_structural_binding(job, binding)
+                not canonical_matches
                 or source_version is None
                 or tuple(source_version)
                 != (
                     binding.source_kind,
                     binding.source_id,
-                    f"captures/{binding.source_id}.pcap",
+                    object_key,
                     binding.source_version_id,
                     binding.source_size_bytes,
                     binding.source_sha256,
@@ -2910,10 +3560,13 @@ class SQLiteRepository:
                 return StructuralIndexLookup(IndexAvailability.CORRUPT)
             return StructuralIndexLookup(IndexAvailability.READY, snapshot)
 
-    def delete_structural_indexes_for_source(self, source_id: str) -> None:
+    def delete_structural_indexes_for_source(
+        self, source_id: str, *, source_kind: str = "PCAP_UPLOAD"
+    ) -> None:
         with self._lock, self.connection:
             self.connection.execute(
-                "DELETE FROM pcap_offset_index_generations WHERE source_id=?", (source_id,)
+                "DELETE FROM pcap_offset_index_generations WHERE source_kind=? AND source_id=?",
+                (source_kind, source_id),
             )
 
     def cleanup_stale_structural_indexes(self, *, before: datetime, limit: int) -> int:
@@ -3650,12 +4303,16 @@ class SQLiteRepository:
             try:
                 self.connection.execute("BEGIN IMMEDIATE")
                 analysis_job_id = segment.get("analysis_job_id")
-                if require_open_job and analysis_job_id is not None:
-                    job_row = self.connection.execute(
+                job_row = (
+                    self.connection.execute(
                         "SELECT data FROM objects WHERE kind='job' AND id=?",
                         (analysis_job_id,),
                     ).fetchone()
-                    job = json.loads(job_row[0]) if job_row is not None else None
+                    if analysis_job_id is not None
+                    else None
+                )
+                job = json.loads(job_row[0]) if job_row is not None else None
+                if require_open_job and analysis_job_id is not None:
                     if job is None or job.get("status") in _JOB_TERMINAL_STATUSES:
                         self.connection.commit()
                         return None, "JOB_CLOSED"
@@ -3683,16 +4340,24 @@ class SQLiteRepository:
                     if used + len(content) > max_total_bytes:
                         self.connection.commit()
                         return None, "LIMIT"
+                stored = deepcopy(segment)
+                if eligible_live_segment(job, stored):
+                    stored["index_requested_at"] = datetime.now().astimezone().isoformat()
+                    stored["index_intent_state"] = "PENDING"
+                    stored["index_intent_schema_version"] = PCAP_OFFSET_INDEX_SCHEMA_VERSION
+                    stored["index_intent_parser_contract_version"] = (
+                        PCAP_OFFSET_INDEX_PARSER_CONTRACT_VERSION
+                    )
                 self.connection.execute(
                     "INSERT INTO objects(kind,id,data) VALUES('sensor_pcap',?,?)",
-                    (segment["id"], self._serialize(segment)),
+                    (segment["id"], self._serialize(stored)),
                 )
                 self.connection.execute(
                     "INSERT INTO sensor_pcap_blobs(segment_id,content) VALUES(?,?)",
                     (segment["id"], content),
                 )
                 self.connection.commit()
-                return deepcopy(segment), "OK"
+                return deepcopy(stored), "OK"
             except Exception:
                 self.connection.rollback()
                 raise

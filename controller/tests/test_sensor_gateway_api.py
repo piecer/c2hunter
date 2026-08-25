@@ -11,6 +11,70 @@ from fastapi.testclient import TestClient
 from c2hunter_controller.app import create_app
 from c2hunter_controller.config import Settings
 from c2hunter_controller.repositories import MemoryRepository, SQLiteRepository
+from c2hunter_controller.sensor_pcap_api import (
+    PUBLIC_SENSOR_PCAP_METADATA_FIELDS,
+    public_sensor_pcap_metadata,
+)
+
+SENSOR_PCAP_PUBLIC_METADATA_FIELDS = {
+    "id",
+    "sensor_id",
+    "sensor_name",
+    "analysis_job_id",
+    "filename",
+    "size_bytes",
+    "sha256",
+    "uploaded_at",
+}
+SENSOR_PCAP_INTERNAL_METADATA = {
+    "index": {"implementation": "private"},
+    "index_requested_at": "2026-08-25T00:00:01+00:00",
+    "index_intent_state": "PENDING",
+    "index_intent_schema_version": 1,
+    "index_intent_parser_contract_version": 1,
+    "index_future_private_state": "future-private",
+    "object_key": "sensor-pcaps/private/live-segment.pcap",
+    "task_id": "private-task",
+    "task_status": "QUEUED",
+    "lease_token": "private-lease",
+    "lease_owner": "private-worker",
+    "source_version_id": "private-version",
+    "source_size_bytes": 24,
+    "source_sha256": "private-source-sha",
+    "owner": "private-owner",
+    "generation": 7,
+    "cleanup_state": "PENDING",
+    "cleanup_after": "2026-08-26T00:00:00+00:00",
+    "internal_cleanup_metadata": {"private": True},
+    "future_internal_field": "must-not-pass-through",
+}
+
+
+def assert_public_sensor_pcap_metadata(value: dict[str, Any], *, upload: bool = False) -> None:
+    expected = SENSOR_PCAP_PUBLIC_METADATA_FIELDS | ({"segment_id"} if upload else set())
+    assert set(value) == expected
+    assert value["id"]
+    if upload:
+        assert value["segment_id"] == value["id"]
+    for key in value:
+        assert key != "index"
+        assert not key.startswith("index_")
+        assert key != "object_key"
+        assert not key.startswith(("task_", "lease_", "source_version", "internal_"))
+        assert key not in {"owner", "generation"}
+        assert not key.startswith("cleanup_")
+
+
+def test_sensor_pcap_public_projection_is_closed_to_unknown_metadata() -> None:
+    metadata = {
+        **{key: f"public-{key}" for key in SENSOR_PCAP_PUBLIC_METADATA_FIELDS},
+        **SENSOR_PCAP_INTERNAL_METADATA,
+    }
+
+    assert set(PUBLIC_SENSOR_PCAP_METADATA_FIELDS) == SENSOR_PCAP_PUBLIC_METADATA_FIELDS
+    assert public_sensor_pcap_metadata(metadata) == {
+        key: metadata[key] for key in SENSOR_PCAP_PUBLIC_METADATA_FIELDS
+    }
 
 
 def api_and_repo() -> tuple[TestClient, MemoryRepository]:
@@ -584,3 +648,247 @@ def test_sensor_pcap_upload_is_linked_to_assigned_analysis_job() -> None:
     assert filtered.status_code == 200
     assert filtered.json()["total"] == 1
     assert filtered.json()["items"][0]["analysis_job_id"] == "job-a"
+
+
+def test_live_segment_upload_best_effort_admits_and_duplicate_renudges() -> None:
+    api, repo = api_and_repo()
+    sensor_id, token = enroll_and_claim(api)
+    repo.save_job(
+        {
+            "id": "live-index-job",
+            "mode": "LIVE",
+            "status": "CAPTURING",
+            "sensor_ids": [sensor_id],
+            "capture": {"store_pcap": True},
+        }
+    )
+    filename = "eth0-indexed.pcap"
+    segment_id = hashlib.sha256(f"{sensor_id}\0{filename}".encode()).hexdigest()
+    capture = bytes.fromhex("d4c3b2a1020004000000000000000000ffff000001000000")
+    path = f"/api/v1/sensors/{sensor_id}/pcap-segments/{segment_id}"
+    params = {"filename": filename, "analysis_job_id": "live-index-job"}
+    headers = {"X-Sensor-Token": token, "content-type": "application/vnd.tcpdump.pcap"}
+    first = api.put(path, params=params, content=capture, headers=headers)
+    duplicate = api.put(path, params=params, content=capture, headers=headers)
+    assert first.status_code == duplicate.status_code == 201
+    assert first.json() == duplicate.json()
+    assert_public_sensor_pcap_metadata(first.json(), upload=True)
+    queued = repo.get_live_segment_index_task(segment_id)
+    assert queued is not None and queued.status == "QUEUED"
+    admission_lines = [
+        line
+        for line in api.get("/api/v1/metrics").text.splitlines()
+        if line.startswith("c2hunter_pcap_offset_index_admissions_total{")
+    ]
+    assert admission_lines == [
+        "c2hunter_pcap_offset_index_admissions_total{"
+        'outcome="queued",source_kind="LIVE_SEGMENT"} 1.0',
+        "c2hunter_pcap_offset_index_admissions_total{"
+        'outcome="coalesced",source_kind="LIVE_SEGMENT"} 1.0',
+    ]
+    samples = "\n".join(admission_lines)
+    assert segment_id not in samples
+    assert sensor_id not in samples
+    assert "error_id" not in samples
+
+
+def test_live_segment_admission_exception_does_not_change_upload_response() -> None:
+    api, repo = api_and_repo()
+    sensor_id, token = enroll_and_claim(api)
+    repo.save_job(
+        {
+            "id": "live-index-error",
+            "mode": "LIVE",
+            "status": "CAPTURING",
+            "sensor_ids": [sensor_id],
+            "capture": {"store_pcap": True},
+        }
+    )
+    filename = "eth0-error.pcap"
+    segment_id = hashlib.sha256(f"{sensor_id}\0{filename}".encode()).hexdigest()
+    capture = bytes.fromhex("d4c3b2a1020004000000000000000000ffff000001000000")
+
+    def broken(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("queue unavailable")
+
+    repo.admit_live_segment_index = broken  # type: ignore[method-assign]
+    response = api.put(
+        f"/api/v1/sensors/{sensor_id}/pcap-segments/{segment_id}",
+        params={"filename": filename, "analysis_job_id": "live-index-error"},
+        content=capture,
+        headers={"X-Sensor-Token": token, "content-type": "application/vnd.tcpdump.pcap"},
+    )
+    assert response.status_code == 201
+    assert repo.get_sensor_pcap(segment_id) is not None
+    admission_lines = [
+        line
+        for line in api.get("/api/v1/metrics").text.splitlines()
+        if line.startswith("c2hunter_pcap_offset_index_admissions_total{")
+    ]
+    assert admission_lines == [
+        "c2hunter_pcap_offset_index_admissions_total{"
+        'outcome="error",source_kind="LIVE_SEGMENT"} 1.0'
+    ]
+    samples = "\n".join(admission_lines)
+    assert segment_id not in samples
+    assert sensor_id not in samples
+    assert "error_id" not in samples
+
+
+def test_live_sensor_pcap_public_paths_project_persisted_internal_metadata(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    api, repo = api_and_repo()
+    sensor_id, token = enroll_and_claim(api)
+    repo.save_job(
+        {
+            "id": "live-public-contract",
+            "mode": "LIVE",
+            "status": "CAPTURING",
+            "sensor_ids": [sensor_id],
+            "capture": {"store_pcap": True},
+        }
+    )
+    filename = "eth0-public-contract.pcap"
+    segment_id = hashlib.sha256(f"{sensor_id}\0{filename}".encode()).hexdigest()
+    capture = bytes.fromhex("d4c3b2a1020004000000000000000000ffff000001000000")
+    path = f"/api/v1/sensors/{sensor_id}/pcap-segments/{segment_id}"
+    params = {"filename": filename, "analysis_job_id": "live-public-contract"}
+    headers = {"X-Sensor-Token": token, "content-type": "application/vnd.tcpdump.pcap"}
+
+    uploaded = api.put(path, params=params, content=capture, headers=headers)
+
+    assert uploaded.status_code == 201
+    assert_public_sensor_pcap_metadata(uploaded.json(), upload=True)
+    persisted = repo.sensor_pcaps[segment_id]
+    assert {
+        "index_requested_at",
+        "index_intent_state",
+        "index_intent_schema_version",
+        "index_intent_parser_contract_version",
+    } <= persisted.keys()
+    persisted.update(SENSOR_PCAP_INTERNAL_METADATA)
+    for key, value in SENSOR_PCAP_INTERNAL_METADATA.items():
+        assert persisted[key] == value
+
+    duplicate = api.put(path, params=params, content=capture, headers=headers)
+    assert duplicate.status_code == 201
+    assert duplicate.json() == uploaded.json()
+    assert_public_sensor_pcap_metadata(duplicate.json(), upload=True)
+
+    listed = api.get("/api/v1/sensor-pcaps", params={"analysis_job_id": "live-public-contract"})
+    assert listed.status_code == 200
+    assert listed.json()["total"] == 1
+    assert listed.json()["page"] == 1
+    assert listed.json()["page_size"] == 50
+    assert_public_sensor_pcap_metadata(listed.json()["items"][0])
+
+    downloaded = api.get(f"/api/v1/sensor-pcaps/{segment_id}/download")
+    assert downloaded.status_code == 200
+    assert downloaded.content == capture
+    assert downloaded.headers["content-disposition"] == f'attachment; filename="{filename}"'
+    exposed_download_metadata = "\n".join(
+        f"{key}: {value}" for key, value in downloaded.headers.items()
+    )
+    for key in SENSOR_PCAP_INTERNAL_METADATA:
+        assert key not in exposed_download_metadata
+
+    metrics = api.get("/api/v1/metrics")
+    assert metrics.status_code == 200
+    for key in SENSOR_PCAP_INTERNAL_METADATA.keys() - {"index"}:
+        assert key not in metrics.text
+        assert key not in caplog.text
+    persisted_after_responses = repo.sensor_pcaps[segment_id]
+    for key, value in SENSOR_PCAP_INTERNAL_METADATA.items():
+        assert persisted_after_responses[key] == value
+
+
+def test_live_sensor_pcap_exists_save_projects_internal_metadata(monkeypatch: Any) -> None:
+    api, repo = api_and_repo()
+    sensor_id, token = enroll_and_claim(api)
+    repo.save_job(
+        {
+            "id": "live-exists-contract",
+            "mode": "LIVE",
+            "status": "CAPTURING",
+            "sensor_ids": [sensor_id],
+            "capture": {"store_pcap": True},
+        }
+    )
+    filename = "eth0-exists-contract.pcap"
+    segment_id = hashlib.sha256(f"{sensor_id}\0{filename}".encode()).hexdigest()
+    capture = bytes.fromhex("d4c3b2a1020004000000000000000000ffff000001000000")
+    repo.sensor_pcaps[segment_id] = {
+        "id": segment_id,
+        "sensor_id": sensor_id,
+        "sensor_name": "edge sensor",
+        "analysis_job_id": "live-exists-contract",
+        "filename": filename,
+        "size_bytes": len(capture),
+        "sha256": hashlib.sha256(capture).hexdigest(),
+        "uploaded_at": "2026-08-25T00:00:00+00:00",
+        **SENSOR_PCAP_INTERNAL_METADATA,
+    }
+    repo.sensor_pcap_content[segment_id] = capture
+    monkeypatch.setattr(repo, "get_sensor_pcap", lambda _segment_id: None)
+
+    response = api.put(
+        f"/api/v1/sensors/{sensor_id}/pcap-segments/{segment_id}",
+        params={"filename": filename, "analysis_job_id": "live-exists-contract"},
+        content=capture,
+        headers={"X-Sensor-Token": token, "content-type": "application/vnd.tcpdump.pcap"},
+    )
+
+    assert response.status_code == 201
+    assert_public_sensor_pcap_metadata(response.json(), upload=True)
+
+
+def test_openapi_sensor_pcap_contract_contains_only_pre_stage10_public_fields() -> None:
+    schema = create_app(Settings(environment="test"), MemoryRepository()).openapi()
+    paths = schema["paths"]
+    sensor_pcap_paths = {
+        path: value
+        for path, value in paths.items()
+        if "sensor-pcaps" in path or "pcap-segments" in path
+    }
+
+    assert set(sensor_pcap_paths) == {
+        "/api/v1/sensors/{sensor_id}/pcap-segments/{segment_id}",
+        "/api/v1/sensor-pcaps",
+        "/api/v1/sensor-pcaps/{segment_id}/download",
+    }
+    upload_schema = sensor_pcap_paths["/api/v1/sensors/{sensor_id}/pcap-segments/{segment_id}"][
+        "put"
+    ]["responses"]["201"]["content"]["application/json"]["schema"]
+    list_schema = sensor_pcap_paths["/api/v1/sensor-pcaps"]["get"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]
+    assert upload_schema == {"$ref": "#/components/schemas/SensorPcapUploadResponse"}
+    assert list_schema == {"$ref": "#/components/schemas/SensorPcapListResponse"}
+
+    components = schema["components"]["schemas"]
+    metadata = components["SensorPcapMetadata"]
+    upload = components["SensorPcapUploadResponse"]
+    listing = components["SensorPcapListResponse"]
+    assert set(metadata["properties"]) == SENSOR_PCAP_PUBLIC_METADATA_FIELDS
+    assert metadata["additionalProperties"] is False
+    assert set(upload["properties"]) == SENSOR_PCAP_PUBLIC_METADATA_FIELDS | {"segment_id"}
+    assert upload["additionalProperties"] is False
+    assert set(listing["properties"]) == {"items", "total", "page", "page_size"}
+    assert listing["additionalProperties"] is False
+    examples = metadata["examples"] + upload["examples"]
+    assert examples
+    for example in examples:
+        assert set(example) <= SENSOR_PCAP_PUBLIC_METADATA_FIELDS | {"segment_id"}
+
+    selected_components = {
+        key: components[key]
+        for key in (
+            "SensorPcapMetadata",
+            "SensorPcapUploadResponse",
+            "SensorPcapListResponse",
+        )
+    }
+    serialized_contract = str({**sensor_pcap_paths, **selected_components})
+    for internal_key in SENSOR_PCAP_INTERNAL_METADATA:
+        assert internal_key not in serialized_contract

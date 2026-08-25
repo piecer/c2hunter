@@ -5,7 +5,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -14,6 +14,7 @@ from typing import Any, Literal, Protocol
 from c2hunter_analysis.pcap_index import (
     PCAP_OFFSET_INDEX_PARSER_CONTRACT_VERSION,
     PCAP_OFFSET_INDEX_SCHEMA_VERSION,
+    StructuralIndexLimitError,
     StructuralInterfaceEntry,
     StructuralPacketEntry,
     scan_structural_packet_index,
@@ -25,9 +26,25 @@ _MAX_I64 = (1 << 63) - 1
 _MAX_U64 = (1 << 64) - 1
 
 
+class LiveIndexBuildError(RuntimeError):
+    """Stable-code failure raised by the durable LIVE builder."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class LiveIndexTransientError(LiveIndexBuildError):
+    """Object-store, database, or deadline availability failure."""
+
+
+class LiveIndexPermanentError(LiveIndexBuildError):
+    """Malformed source, resource bound, ownership, or digest failure."""
+
+
 @dataclass(frozen=True)
 class CaptureSourceVersion:
-    source_kind: Literal["PCAP_UPLOAD"]
+    source_kind: Literal["PCAP_UPLOAD", "LIVE_SEGMENT"]
     source_id: str
     object_key: str
     source_version_id: str
@@ -36,7 +53,7 @@ class CaptureSourceVersion:
 
     def __post_init__(self) -> None:
         if (
-            self.source_kind != "PCAP_UPLOAD"
+            self.source_kind not in {"PCAP_UPLOAD", "LIVE_SEGMENT"}
             or not self.source_id
             or not self.object_key
             or not self.source_version_id
@@ -50,7 +67,7 @@ class CaptureSourceVersion:
 
 @dataclass(frozen=True)
 class SourceIndexBinding:
-    source_kind: Literal["PCAP_UPLOAD"]
+    source_kind: Literal["PCAP_UPLOAD", "LIVE_SEGMENT"]
     source_id: str
     source_version_id: str
     source_size_bytes: int
@@ -60,7 +77,11 @@ class SourceIndexBinding:
     parser_contract_version: int = PCAP_OFFSET_INDEX_PARSER_CONTRACT_VERSION
 
     def __post_init__(self) -> None:
-        if self.source_kind != "PCAP_UPLOAD" or not self.source_id or not self.source_version_id:
+        if (
+            self.source_kind not in {"PCAP_UPLOAD", "LIVE_SEGMENT"}
+            or not self.source_id
+            or not self.source_version_id
+        ):
             raise ValueError("invalid structural index source identity")
         if self.source_size_bytes < 0 or self.source_size_bytes > _MAX_I64:
             raise ValueError("invalid structural index source size")
@@ -279,6 +300,140 @@ def build_offline_upload_index(
                 )
         if source is not None and not source.closed:
             source.close()
+
+
+def build_live_segment_index(
+    repository: Any,
+    segment_id: str,
+    *,
+    max_packets: int,
+    max_interfaces: int,
+    batch_size: int,
+    attempt: int | None = None,
+    lease_token: str | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> bool:
+    """Build and atomically publish one immutable marked LIVE segment."""
+    source = None
+    build_id = uuid.uuid4().hex
+    begun = False
+
+    def check_cancelled() -> None:
+        if should_cancel is not None and should_cancel():
+            raise LiveIndexTransientError("INDEX_BUILD_TIMEOUT")
+
+    check_cancelled()
+    if attempt is None or attempt < 1 or not lease_token:
+        raise LiveIndexPermanentError("INDEX_LEASE_INVALID")
+    try:
+        segment = repository.get_live_segment_index_metadata(segment_id)
+    except Exception as exc:
+        raise LiveIndexTransientError("INDEX_METADATA_UNAVAILABLE") from exc
+    if segment is None:
+        raise LiveIndexPermanentError("INDEX_SOURCE_NOT_ELIGIBLE")
+    try:
+        opened = repository.open_sensor_pcap(segment_id)
+    except Exception as exc:
+        raise LiveIndexTransientError("INDEX_SOURCE_OPEN_UNAVAILABLE") from exc
+    if opened is None:
+        raise LiveIndexPermanentError("INDEX_SOURCE_MISSING")
+    opened_metadata, source = opened
+    try:
+        expected_key = str(
+            segment.get("object_key")
+            or f"sensor-pcaps/{segment.get('sensor_id')}/{segment_id}.pcap"
+        )
+        if (
+            opened_metadata != segment
+            or not source.version_id
+            or segment.get("id") != segment_id
+            or not segment.get("index_requested_at")
+            or str(segment.get("filename", "")).endswith(".pcap") is False
+            or int(segment.get("size_bytes", -1)) < 0
+            or not _SHA256.fullmatch(str(segment.get("sha256", "")))
+        ):
+            raise LiveIndexPermanentError("INDEX_SOURCE_OWNERSHIP_MISMATCH")
+        try:
+            source_version = CaptureSourceVersion(
+                "LIVE_SEGMENT",
+                segment_id,
+                expected_key,
+                source.version_id,
+                int(segment["size_bytes"]),
+                str(segment["sha256"]),
+            )
+            binding = SourceIndexBinding(
+                "LIVE_SEGMENT",
+                segment_id,
+                source.version_id,
+                source_version.source_size_bytes,
+                source_version.source_sha256,
+                "PCAP",
+            )
+        except (TypeError, ValueError) as exc:
+            raise LiveIndexPermanentError("INDEX_SOURCE_FRAMING_INVALID") from exc
+        check_cancelled()
+        try:
+            repository.begin_structural_index(build_id, binding, datetime.now(UTC))
+            begun = True
+        except Exception as exc:
+            raise LiveIndexTransientError("INDEX_STAGING_UNAVAILABLE") from exc
+        try:
+            result = scan_structural_packet_index(
+                source,
+                max_packets=max_packets,
+                max_interfaces=max_interfaces,
+                batch_size=batch_size,
+                consume_packet_batch=lambda batch: repository.stage_structural_index_packets(
+                    build_id, batch
+                ),
+            )
+        except LiveIndexBuildError:
+            raise
+        except StructuralIndexLimitError as exc:
+            raise LiveIndexPermanentError("INDEX_RESOURCE_LIMIT") from exc
+        except (OSError, ConnectionError, TimeoutError) as exc:
+            raise LiveIndexTransientError("INDEX_SOURCE_READ_UNAVAILABLE") from exc
+        except (ValueError, TypeError) as exc:
+            raise LiveIndexPermanentError("INDEX_SOURCE_FRAMING_INVALID") from exc
+        except Exception as exc:
+            raise LiveIndexTransientError("INDEX_STAGING_UNAVAILABLE") from exc
+        if (
+            result.packet_count < 1
+            or result.size_bytes != binding.source_size_bytes
+            or result.sha256 != binding.source_sha256
+            or result.capture_format != "PCAP"
+            or source.version_id != binding.source_version_id
+        ):
+            raise LiveIndexPermanentError("INDEX_SOURCE_DIGEST_MISMATCH")
+        # This check is deliberately adjacent to the atomic publication call.
+        check_cancelled()
+        try:
+            published = repository.publish_live_structural_index(
+                build_id,
+                binding,
+                result.interfaces,
+                result.packet_count,
+                source_version,
+                attempt=attempt,
+                lease_token=lease_token,
+            )
+        except Exception as exc:
+            raise LiveIndexTransientError("INDEX_PUBLICATION_UNAVAILABLE") from exc
+        if not published:
+            raise LiveIndexPermanentError("INDEX_PUBLICATION_REJECTED")
+        return True
+    finally:
+        if begun:
+            try:
+                repository.abort_structural_index(build_id)
+            except Exception:
+                logger.warning("LIVE structural index staging cleanup unavailable", exc_info=True)
+        if source is not None:
+            try:
+                source.close()
+            except Exception:
+                logger.warning("LIVE capture source close unavailable", exc_info=True)
 
 
 def rebuild_offline_upload_index(

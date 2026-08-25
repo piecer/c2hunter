@@ -14,7 +14,12 @@ from functools import wraps
 from typing import Any, BinaryIO, cast
 from uuid import uuid4
 
-from c2hunter_analysis.pcap_index import StructuralInterfaceEntry, StructuralPacketEntry
+from c2hunter_analysis.pcap_index import (
+    PCAP_OFFSET_INDEX_PARSER_CONTRACT_VERSION,
+    PCAP_OFFSET_INDEX_SCHEMA_VERSION,
+    StructuralInterfaceEntry,
+    StructuralPacketEntry,
+)
 
 from c2hunter_controller.pcap_export_store import (
     TERMINAL_EXPORT_STATES,
@@ -31,6 +36,13 @@ from c2hunter_controller.pcap_offset_index import (
     StructuralIndexSnapshot,
     structural_index_digest,
     validate_structural_index,
+)
+from c2hunter_controller.pcap_offset_index_queue import (
+    IndexAdmission,
+    LiveIndexTask,
+    LiveIndexTaskSpec,
+    eligible_live_segment,
+    live_index_task_status,
 )
 from c2hunter_controller.repositories import (
     ArtifactAlreadyExistsError,
@@ -336,6 +348,11 @@ class PostgresRepository:
 
     _DETECTOR_PRESET_ADVISORY_LOCK = 112737
     _FLOW_RECORD_CHUNK_TARGET_BYTES = 8 * 1024 * 1024
+    _LIVE_TASK_COLUMNS = (
+        "source_kind,source_id,sensor_id,analysis_job_id,object_key,source_size_bytes,"
+        "source_sha256,capture_format,schema_version,parser_contract_version,status,attempt,"
+        "max_attempts,lease_token,lease_expires_at,next_attempt_at,queued_at,updated_at,error_code"
+    )
 
     def __init__(self, database_url: str, blob_store: MinioBlobStore) -> None:
         self.database_url = database_url
@@ -1512,7 +1529,8 @@ class PostgresRepository:
                           data jsonb NOT NULL
                         );
                         CREATE TABLE IF NOT EXISTS pcap_capture_source_versions (
-                          source_kind text NOT NULL CHECK(source_kind='PCAP_UPLOAD'),
+                          source_kind text NOT NULL
+                            CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
                           source_id text NOT NULL,
                           object_key text NOT NULL,
                           source_version_id text NOT NULL,
@@ -1523,7 +1541,8 @@ class PostgresRepository:
                         );
                         CREATE TABLE IF NOT EXISTS pcap_offset_index_generations (
                           build_id text PRIMARY KEY,
-                          source_kind text NOT NULL CHECK(source_kind='PCAP_UPLOAD'),
+                          source_kind text NOT NULL
+                            CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
                           source_id text NOT NULL,
                           source_version_id text NOT NULL,
                           source_size_bytes bigint NOT NULL CHECK(source_size_bytes>=0),
@@ -1572,10 +1591,81 @@ class PostgresRepository:
                             REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
                           PRIMARY KEY(source_kind,source_id)
                         );
+                        CREATE TABLE IF NOT EXISTS pcap_offset_index_jobs (
+                          source_kind text NOT NULL CHECK(source_kind='LIVE_SEGMENT'),
+                          source_id text NOT NULL, sensor_id text NOT NULL,
+                          analysis_job_id text NOT NULL, object_key text NOT NULL,
+                          source_size_bytes bigint NOT NULL CHECK(source_size_bytes>=0),
+                          source_sha256 text NOT NULL,
+                          capture_format text NOT NULL CHECK(capture_format='PCAP'),
+                          schema_version integer NOT NULL, parser_contract_version integer NOT NULL,
+                          status text NOT NULL
+                            CHECK(status IN ('QUEUED','RUNNING','COMPLETED','FAILED')),
+                          attempt integer NOT NULL DEFAULT 0,
+                          max_attempts integer NOT NULL CHECK(max_attempts>0),
+                          lease_token text, lease_expires_at timestamptz,
+                          next_attempt_at timestamptz NOT NULL, queued_at timestamptz NOT NULL,
+                          updated_at timestamptz NOT NULL, completed_at timestamptz,
+                          error_code text, published_build_id text,
+                          published_source_version_id text,
+                          PRIMARY KEY(source_kind,source_id)
+                        );
+                        DO $stage10$
+                        DECLARE
+                          target_table text;
+                          constraint_row record;
+                        BEGIN
+                          FOREACH target_table IN ARRAY ARRAY[
+                            'pcap_capture_source_versions',
+                            'pcap_offset_index_generations'
+                          ] LOOP
+                            FOR constraint_row IN
+                              SELECT con.conname
+                              FROM pg_constraint AS con
+                              JOIN pg_class AS rel ON rel.oid=con.conrelid
+                              JOIN pg_namespace AS nsp ON nsp.oid=rel.relnamespace
+                              WHERE nsp.nspname=current_schema()
+                                AND rel.relname=target_table
+                                AND con.contype='c'
+                                AND pg_get_constraintdef(con.oid) LIKE '%source_kind%'
+                                AND pg_get_constraintdef(con.oid) LIKE '%PCAP_UPLOAD%'
+                                AND pg_get_constraintdef(con.oid) NOT LIKE '%LIVE_SEGMENT%'
+                            LOOP
+                              EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I',
+                                             target_table,constraint_row.conname);
+                            END LOOP;
+                          END LOOP;
+                          IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint con
+                            JOIN pg_class rel ON rel.oid=con.conrelid
+                            WHERE rel.relname='pcap_capture_source_versions'
+                              AND con.contype='c'
+                              AND pg_get_constraintdef(con.oid) LIKE '%LIVE_SEGMENT%'
+                          ) THEN
+                            ALTER TABLE pcap_capture_source_versions ADD CONSTRAINT
+                              pcap_capture_source_versions_source_kind_check
+                              CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT'));
+                          END IF;
+                          IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint con
+                            JOIN pg_class rel ON rel.oid=con.conrelid
+                            WHERE rel.relname='pcap_offset_index_generations'
+                              AND con.contype='c'
+                              AND pg_get_constraintdef(con.oid) LIKE '%LIVE_SEGMENT%'
+                          ) THEN
+                            ALTER TABLE pcap_offset_index_generations ADD CONSTRAINT
+                              pcap_offset_index_generations_source_kind_check
+                              CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT'));
+                          END IF;
+                        END $stage10$;
                         CREATE INDEX IF NOT EXISTS pcap_offset_index_generations_staging
                           ON pcap_offset_index_generations(state,created_at,build_id);
                         CREATE INDEX IF NOT EXISTS pcap_offset_index_packets_lookup
                           ON pcap_offset_index_packets(build_id,packet_index);
+                        CREATE INDEX IF NOT EXISTS pcap_offset_index_jobs_claim
+                          ON pcap_offset_index_jobs(status,next_attempt_at,queued_at,source_id);
+                        CREATE INDEX IF NOT EXISTS pcap_offset_index_jobs_lease
+                          ON pcap_offset_index_jobs(status,lease_expires_at);
                         CREATE UNIQUE INDEX IF NOT EXISTS pcap_export_jobs_principal_idempotency
                           ON pcap_export_jobs(principal_scope,idempotency_key)
                           WHERE idempotency_key IS NOT NULL;
@@ -2206,9 +2296,41 @@ class PostgresRepository:
                 (job_id,),
             )
             export_objects = [(str(item[0]), str(item[1])) for item in cursor.fetchall() if item[1]]
+            job_data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+            live_segment_rows: list[tuple[str, str | None]] = []
+            if job_data.get("mode") == "LIVE":
+                cursor.execute(
+                    "SELECT id,data->>'object_key' FROM controller_objects "
+                    "WHERE kind='sensor_pcap' AND data->>'analysis_job_id'=%s "
+                    "ORDER BY data->>'uploaded_at',id FOR UPDATE",
+                    (job_id,),
+                )
+                live_segment_rows = [
+                    (str(item[0]), str(item[1]) if item[1] else None) for item in cursor.fetchall()
+                ]
+            if job_data.get("mode") == "LIVE":
+                cleanup_objects = [
+                    (f"job-delete:{job_id}:sensor-pcap:{segment_id}", object_key)
+                    for segment_id, object_key in live_segment_rows
+                    if object_key is not None
+                ]
+            else:
+                cleanup_objects = [
+                    (f"job-delete:{job_id}:{export_id}", object_key)
+                    for export_id, object_key in export_objects
+                ]
+                capture_key = self._capture_key(job_id)
+                cleanup_objects.append((f"job-delete:{job_id}:capture", capture_key))
+            unique_cleanup_objects: dict[str, str] = {}
+            for cleanup_source, object_key in cleanup_objects:
+                unique_cleanup_objects.setdefault(object_key, cleanup_source)
+            cleanup_objects = [
+                (cleanup_source, object_key)
+                for object_key, cleanup_source in unique_cleanup_objects.items()
+            ]
             cleanup: list[tuple[str, str]] = []
-            for export_id, object_key in export_objects:
-                cleanup_id = self._pcap_cleanup_id(f"job-delete:{job_id}:{export_id}", object_key)
+            for cleanup_source, object_key in cleanup_objects:
+                cleanup_id = self._pcap_cleanup_id(cleanup_source, object_key)
                 cleanup.append((cleanup_id, object_key))
                 cursor.execute(
                     "INSERT INTO controller_objects(kind,id,data) "
@@ -2224,23 +2346,6 @@ class PostgresRepository:
                         ),
                     ),
                 )
-            capture_key = self._capture_key(job_id)
-            capture_cleanup_id = self._pcap_cleanup_id(f"job-delete:{job_id}:capture", capture_key)
-            cleanup.append((capture_cleanup_id, capture_key))
-            cursor.execute(
-                "INSERT INTO controller_objects(kind,id,data) "
-                "VALUES('pcap_export_cleanup',%s,%s::jsonb) "
-                "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
-                (
-                    capture_cleanup_id,
-                    self._json(
-                        {
-                            "object_key": capture_key,
-                            "created_at": datetime.now(UTC).isoformat(),
-                        }
-                    ),
-                ),
-            )
             cursor.execute(
                 "DELETE FROM ai_feedback WHERE assessment_id IN "
                 "(SELECT assessment_id FROM ai_candidate_assessments "
@@ -2282,6 +2387,32 @@ class PostgresRepository:
                 "AND source_id=%s",
                 (job_id,),
             )
+            if live_segment_rows:
+                segment_ids = [segment_id for segment_id, _object_key in live_segment_rows]
+                cursor.execute(
+                    "DELETE FROM pcap_offset_index_jobs WHERE source_kind='LIVE_SEGMENT' "
+                    "AND source_id=ANY(%s)",
+                    (segment_ids,),
+                )
+                cursor.execute(
+                    "DELETE FROM pcap_offset_index_owners WHERE source_kind='LIVE_SEGMENT' "
+                    "AND source_id=ANY(%s)",
+                    (segment_ids,),
+                )
+                cursor.execute(
+                    "DELETE FROM pcap_offset_index_generations WHERE source_kind='LIVE_SEGMENT' "
+                    "AND source_id=ANY(%s)",
+                    (segment_ids,),
+                )
+                cursor.execute(
+                    "DELETE FROM pcap_capture_source_versions WHERE source_kind='LIVE_SEGMENT' "
+                    "AND source_id=ANY(%s)",
+                    (segment_ids,),
+                )
+                cursor.execute(
+                    "DELETE FROM controller_objects WHERE kind='sensor_pcap' AND id=ANY(%s)",
+                    (segment_ids,),
+                )
             cursor.execute("DELETE FROM job_idempotency WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM controller_objects WHERE kind='job' AND id=%s", (job_id,))
             self._audit("job-delete", job_id, {"id": job_id})
@@ -2472,6 +2603,381 @@ class PostgresRepository:
             source_sha256=str(row[5]),
         )
 
+    @classmethod
+    def _live_task_from_row(cls, row: tuple[Any, ...] | None) -> LiveIndexTask | None:
+        if row is None:
+            return None
+        spec = LiveIndexTaskSpec(
+            source_kind="LIVE_SEGMENT",
+            source_id=str(row[1]),
+            sensor_id=str(row[2]),
+            analysis_job_id=str(row[3]),
+            object_key=str(row[4]),
+            source_size_bytes=int(row[5]),
+            source_sha256=str(row[6]),
+            capture_format="PCAP",
+            schema_version=int(row[8]),
+            parser_contract_version=int(row[9]),
+        )
+        return LiveIndexTask(
+            spec=spec,
+            status=live_index_task_status(row[10]),
+            attempt=int(row[11]),
+            max_attempts=int(row[12]),
+            lease_token=str(row[13]) if row[13] is not None else None,
+            lease_expires_at=row[14],
+            next_attempt_at=row[15],
+            queued_at=row[16],
+            updated_at=row[17],
+            error_code=str(row[18]) if row[18] is not None else None,
+        )
+
+    def _mark_live_index_intent(self, cursor: Any, source_id: str, state: str) -> None:
+        cursor.execute(
+            "UPDATE controller_objects SET data=data || %s::jsonb "
+            "WHERE kind='sensor_pcap' AND id=%s",
+            (
+                self._json(
+                    {
+                        "index_intent_state": state,
+                        "index_intent_schema_version": PCAP_OFFSET_INDEX_SCHEMA_VERSION,
+                        "index_intent_parser_contract_version": (
+                            PCAP_OFFSET_INDEX_PARSER_CONTRACT_VERSION
+                        ),
+                    }
+                ),
+                source_id,
+            ),
+        )
+
+    def get_live_segment_index_metadata(self, source_id: str) -> dict[str, Any] | None:
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='sensor_pcap' AND id=%s",
+                (source_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                self.connection.commit()
+                return None
+            segment = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='job' AND id=%s",
+                (str(segment.get("analysis_job_id", "")),),
+            )
+            job_row = cursor.fetchone()
+            job = (
+                job_row[0]
+                if job_row is not None and isinstance(job_row[0], dict)
+                else json.loads(job_row[0])
+                if job_row is not None
+                else None
+            )
+            self.connection.commit()
+        return (
+            deepcopy(segment)
+            if segment.get("index_requested_at") and eligible_live_segment(job, segment)
+            else None
+        )
+
+    def admit_live_segment_index(
+        self, source_id: str, *, capacity: int, max_attempts: int
+    ) -> IndexAdmission:
+        now = datetime.now(UTC)
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("live-offset-index-admission",),
+            )
+            cursor.execute(
+                f"SELECT {self._LIVE_TASK_COLUMNS} FROM pcap_offset_index_jobs "  # noqa: S608 -- fixed internal column list
+                "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s FOR UPDATE",
+                (source_id,),
+            )
+            if cursor.fetchone() is not None:
+                self.connection.commit()
+                return IndexAdmission.COALESCED
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='sensor_pcap' AND id=%s FOR UPDATE",
+                (source_id,),
+            )
+            segment_row = cursor.fetchone()
+            if segment_row is None:
+                self.connection.commit()
+                return IndexAdmission.DEFERRED
+            segment = (
+                segment_row[0] if isinstance(segment_row[0], dict) else json.loads(segment_row[0])
+            )
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
+                (str(segment.get("analysis_job_id", "")),),
+            )
+            job_row = cursor.fetchone()
+            job = (
+                job_row[0]
+                if job_row is not None and isinstance(job_row[0], dict)
+                else json.loads(job_row[0])
+                if job_row is not None
+                else None
+            )
+            if not segment.get("index_requested_at") or not eligible_live_segment(job, segment):
+                self.connection.commit()
+                return IndexAdmission.DEFERRED
+            if segment.get("index_intent_state") in {"COMPLETED", "FAILED"}:
+                self.connection.commit()
+                return IndexAdmission.COALESCED
+            cursor.execute(
+                "SELECT COUNT(*) FROM pcap_offset_index_jobs WHERE status IN ('QUEUED','RUNNING')"
+            )
+            count_row = cursor.fetchone()
+            if int(count_row[0] if count_row else 0) >= capacity:
+                self._mark_live_index_intent(cursor, source_id, "DEFERRED")
+                self.connection.commit()
+                return IndexAdmission.DEFERRED
+            spec = LiveIndexTaskSpec.from_segment(segment)
+            cursor.execute(
+                "INSERT INTO pcap_offset_index_jobs("
+                "source_kind,source_id,sensor_id,analysis_job_id,object_key,source_size_bytes,"
+                "source_sha256,capture_format,schema_version,parser_contract_version,status,attempt,"
+                "max_attempts,next_attempt_at,queued_at,updated_at) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'QUEUED',0,%s,%s,%s,%s) "
+                "ON CONFLICT(source_kind,source_id) DO NOTHING",
+                (
+                    spec.source_kind,
+                    spec.source_id,
+                    spec.sensor_id,
+                    spec.analysis_job_id,
+                    spec.object_key,
+                    spec.source_size_bytes,
+                    spec.source_sha256,
+                    spec.capture_format,
+                    spec.schema_version,
+                    spec.parser_contract_version,
+                    max_attempts,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            queued = cursor.rowcount == 1
+            if queued:
+                self._mark_live_index_intent(cursor, source_id, "PENDING")
+            self.connection.commit()
+            return IndexAdmission.QUEUED if queued else IndexAdmission.COALESCED
+
+    def get_live_segment_index_task(self, source_id: str) -> LiveIndexTask | None:
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                f"SELECT {self._LIVE_TASK_COLUMNS} FROM pcap_offset_index_jobs "  # noqa: S608 -- fixed internal column list
+                "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s",
+                (source_id,),
+            )
+            task = self._live_task_from_row(cursor.fetchone())
+            self.connection.commit()
+            return task
+
+    def claim_live_segment_index(
+        self, *, now: datetime, lease_seconds: int
+    ) -> LiveIndexTask | None:
+        token = secrets.token_hex(16)
+        expires = now + timedelta(seconds=lease_seconds)
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "WITH selected AS (SELECT source_kind,source_id FROM pcap_offset_index_jobs "  # noqa: S608 -- fixed internal RETURNING columns
+                "WHERE status='QUEUED' AND next_attempt_at<=%s "
+                "ORDER BY next_attempt_at,queued_at,source_id FOR UPDATE SKIP LOCKED LIMIT 1) "
+                "UPDATE pcap_offset_index_jobs AS task SET status='RUNNING',attempt=task.attempt+1,"
+                "lease_expires_at=%s,lease_token=%s,updated_at=%s FROM selected "
+                "WHERE task.source_kind=selected.source_kind AND task.source_id=selected.source_id "
+                f"RETURNING {self._LIVE_TASK_COLUMNS}",
+                (now, expires, token, now),
+            )
+            task = self._live_task_from_row(cursor.fetchone())
+            self.connection.commit()
+            return task
+
+    def heartbeat_live_segment_index(
+        self,
+        source_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> bool:
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE pcap_offset_index_jobs SET lease_expires_at=%s,updated_at=%s "
+                "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s AND status='RUNNING' "
+                "AND attempt=%s AND lease_token=%s AND lease_expires_at>%s",
+                (now + timedelta(seconds=lease_seconds), now, source_id, attempt, lease_token, now),
+            )
+            updated = cursor.rowcount == 1
+            self.connection.commit()
+            return updated
+
+    def complete_live_segment_index(
+        self, source_id: str, *, attempt: int, lease_token: str
+    ) -> bool:
+        now = datetime.now(UTC)
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE pcap_offset_index_jobs SET status='COMPLETED',lease_token=NULL,"
+                "lease_expires_at=NULL,completed_at=%s,updated_at=%s "
+                "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s AND status='RUNNING' "
+                "AND attempt=%s AND lease_token=%s AND lease_expires_at>%s",
+                (now, now, source_id, attempt, lease_token, now),
+            )
+            updated = cursor.rowcount == 1
+            if updated:
+                self._mark_live_index_intent(cursor, source_id, "COMPLETED")
+            self.connection.commit()
+            return updated
+
+    def fail_live_segment_index(
+        self,
+        source_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        transient: bool,
+        error_code: str,
+        now: datetime,
+        retry_base_seconds: int,
+    ) -> bool:
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                f"SELECT {self._LIVE_TASK_COLUMNS} FROM pcap_offset_index_jobs "  # noqa: S608 -- fixed internal column list
+                "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s AND status='RUNNING' "
+                "AND attempt=%s AND lease_token=%s AND lease_expires_at>%s FOR UPDATE",
+                (source_id, attempt, lease_token, now),
+            )
+            task = self._live_task_from_row(cursor.fetchone())
+            if task is None:
+                self.connection.commit()
+                return False
+            retry = transient and task.attempt < task.max_attempts
+            next_attempt = (
+                now + timedelta(seconds=retry_base_seconds * 2 ** max(task.attempt - 1, 0))
+                if retry
+                else task.next_attempt_at
+            )
+            cursor.execute(
+                "UPDATE pcap_offset_index_jobs SET "
+                "status=%s,lease_token=NULL,lease_expires_at=NULL,"
+                "next_attempt_at=%s,updated_at=%s,error_code=%s WHERE source_kind='LIVE_SEGMENT' "
+                "AND source_id=%s AND status='RUNNING' AND attempt=%s AND lease_token=%s",
+                (
+                    "QUEUED" if retry else "FAILED",
+                    next_attempt,
+                    now,
+                    error_code[:64],
+                    source_id,
+                    attempt,
+                    lease_token,
+                ),
+            )
+            updated = cursor.rowcount == 1
+            if updated:
+                self._mark_live_index_intent(cursor, source_id, "PENDING" if retry else "FAILED")
+            self.connection.commit()
+            return updated
+
+    def recover_live_segment_indexes(self, *, now: datetime) -> int:
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "WITH selected AS (SELECT source_kind,source_id FROM pcap_offset_index_jobs "
+                "WHERE status='RUNNING' AND lease_expires_at<=%s "
+                "ORDER BY lease_expires_at,source_id "
+                "FOR UPDATE SKIP LOCKED) UPDATE pcap_offset_index_jobs AS task SET "
+                "status=CASE WHEN task.attempt<task.max_attempts THEN 'QUEUED' ELSE 'FAILED' END,"
+                "lease_token=NULL,lease_expires_at=NULL,next_attempt_at=%s,updated_at=%s,"
+                "error_code=CASE WHEN task.attempt<task.max_attempts "
+                "THEN NULL ELSE 'LEASE_EXPIRED' END "
+                "FROM selected WHERE task.source_kind=selected.source_kind "
+                "AND task.source_id=selected.source_id RETURNING source_id,status",
+                (now, now, now),
+            )
+            recovered_rows = cursor.fetchall()
+            for source_id, status in recovered_rows:
+                self._mark_live_index_intent(
+                    cursor, str(source_id), "PENDING" if status == "QUEUED" else "FAILED"
+                )
+            recovered = len(recovered_rows)
+            self.connection.commit()
+            return recovered
+
+    def get_live_segment_index_queue_depth(self) -> dict[str, int]:
+        depths = {status: 0 for status in ("QUEUED", "RUNNING", "COMPLETED", "FAILED")}
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT status,COUNT(*) FROM pcap_offset_index_jobs "
+                "WHERE source_kind='LIVE_SEGMENT' GROUP BY status"
+            )
+            for status, count in cursor.fetchall():
+                depths[str(status)] = int(count)
+            self.connection.commit()
+        return depths
+
+    def cleanup_terminal_live_segment_indexes(self, *, before: datetime, limit: int) -> int:
+        if limit <= 0:
+            raise ValueError("terminal cleanup limit must be positive")
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "WITH selected AS (SELECT source_kind,source_id FROM pcap_offset_index_jobs "
+                "WHERE source_kind='LIVE_SEGMENT' AND status IN ('COMPLETED','FAILED') "
+                "AND updated_at<=%s ORDER BY updated_at,source_id "
+                "FOR UPDATE SKIP LOCKED LIMIT %s) "
+                "DELETE FROM pcap_offset_index_jobs AS task USING selected "
+                "WHERE task.source_kind=selected.source_kind "
+                "AND task.source_id=selected.source_id RETURNING task.source_id",
+                (before, limit),
+            )
+            deleted = len(cursor.fetchall())
+            self.connection.commit()
+            return deleted
+
+    def reconcile_live_segment_indexes(
+        self, *, capacity: int, max_attempts: int, limit: int
+    ) -> int:
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT source.id FROM controller_objects AS source "
+                "WHERE source.kind='sensor_pcap' "
+                "AND source.data ? 'index_requested_at' "
+                "AND source.data->>'index_requested_at'<>'' "
+                "AND COALESCE(source.data->>'index_intent_state','PENDING') "
+                "IN ('PENDING','DEFERRED') "
+                "AND NOT EXISTS (SELECT 1 FROM pcap_offset_index_jobs AS task "
+                "WHERE task.source_kind='LIVE_SEGMENT' AND task.source_id=source.id) "
+                "ORDER BY source.data->>'index_requested_at',source.id LIMIT %s",
+                (limit,),
+            )
+            source_ids = [str(row[0]) for row in cursor.fetchall()]
+            self.connection.commit()
+        admitted = 0
+        for source_id in source_ids:
+            if (
+                self.admit_live_segment_index(
+                    source_id, capacity=capacity, max_attempts=max_attempts
+                )
+                is IndexAdmission.QUEUED
+            ):
+                admitted += 1
+        return admitted
+
+    def get_live_capture_source_version(self, source_id: str) -> CaptureSourceVersion | None:
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT source_kind,source_id,object_key,source_version_id,source_size_bytes,"
+                "source_sha256 FROM pcap_capture_source_versions "
+                "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s",
+                (source_id,),
+            )
+            row = cursor.fetchone()
+            self.connection.commit()
+        return CaptureSourceVersion(*row) if row is not None else None
+
     def begin_structural_index(
         self, build_id: str, binding: SourceIndexBinding, created_at: datetime
     ) -> None:
@@ -2614,7 +3120,11 @@ class PostgresRepository:
 
     @classmethod
     def _capture_source_row_matches(
-        cls, row: tuple[Any, ...] | None, binding: SourceIndexBinding
+        cls,
+        row: tuple[Any, ...] | None,
+        binding: SourceIndexBinding,
+        *,
+        object_key: str | None = None,
     ) -> bool:
         return row is not None and (
             str(row[0]),
@@ -2626,7 +3136,7 @@ class PostgresRepository:
         ) == (
             binding.source_kind,
             binding.source_id,
-            cls._capture_key(binding.source_id),
+            object_key or cls._capture_key(binding.source_id),
             binding.source_version_id,
             binding.source_size_bytes,
             binding.source_sha256,
@@ -2743,6 +3253,217 @@ class PostgresRepository:
             self.connection.commit()
             return True
 
+    def publish_live_structural_index(
+        self,
+        build_id: str,
+        binding: SourceIndexBinding,
+        interfaces: tuple[StructuralInterfaceEntry, ...],
+        packet_count: int,
+        source_version: CaptureSourceVersion,
+        *,
+        attempt: int,
+        lease_token: str,
+    ) -> bool:
+        if binding.source_kind != "LIVE_SEGMENT" or packet_count < 1:
+            return False
+        now = datetime.now(UTC)
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            # Lock the canonical ownership chain before any derived row can become visible.
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='sensor' AND id=("
+                "SELECT data->>'sensor_id' FROM controller_objects "
+                "WHERE kind='sensor_pcap' AND id=%s) FOR UPDATE",
+                (binding.source_id,),
+            )
+            sensor_row = cursor.fetchone()
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='job' AND id=("
+                "SELECT data->>'analysis_job_id' FROM controller_objects "
+                "WHERE kind='sensor_pcap' AND id=%s) FOR UPDATE",
+                (binding.source_id,),
+            )
+            job_row = cursor.fetchone()
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='sensor_pcap' AND id=%s FOR UPDATE",
+                (binding.source_id,),
+            )
+            segment_row = cursor.fetchone()
+            if sensor_row is None or job_row is None or segment_row is None:
+                self.connection.rollback()
+                return False
+            sensor = sensor_row[0] if isinstance(sensor_row[0], dict) else json.loads(sensor_row[0])
+            job = job_row[0] if isinstance(job_row[0], dict) else json.loads(job_row[0])
+            segment = (
+                segment_row[0] if isinstance(segment_row[0], dict) else json.loads(segment_row[0])
+            )
+            expected_key = str(
+                segment.get("object_key")
+                or f"sensor-pcaps/{segment.get('sensor_id')}/{binding.source_id}.pcap"
+            )
+            cursor.execute(
+                f"SELECT {self._LIVE_TASK_COLUMNS} FROM pcap_offset_index_jobs "  # noqa: S608 -- fixed internal column list
+                "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s FOR UPDATE",
+                (binding.source_id,),
+            )
+            task = self._live_task_from_row(cursor.fetchone())
+            expected_version = CaptureSourceVersion(
+                "LIVE_SEGMENT",
+                binding.source_id,
+                expected_key,
+                binding.source_version_id,
+                binding.source_size_bytes,
+                binding.source_sha256,
+            )
+            if (
+                str(sensor.get("sensor_id", "")) != str(segment.get("sensor_id", ""))
+                or not segment.get("index_requested_at")
+                or not eligible_live_segment(job, segment)
+                or int(segment.get("size_bytes", -1)) != binding.source_size_bytes
+                or str(segment.get("sha256", "")) != binding.source_sha256
+                or source_version != expected_version
+                or task is None
+                or task.spec != LiveIndexTaskSpec.from_segment(segment)
+                or task.status != "RUNNING"
+                or task.attempt != attempt
+                or task.lease_token != lease_token
+                or task.lease_expires_at is None
+                or task.lease_expires_at <= now
+            ):
+                self.connection.rollback()
+                return False
+            cursor.execute(
+                "SELECT source_kind,source_id,source_version_id,source_size_bytes,source_sha256,"
+                "capture_format,schema_version,parser_contract_version,created_at "
+                "FROM pcap_offset_index_generations "
+                "WHERE build_id=%s AND state='STAGING' FOR UPDATE",
+                (build_id,),
+            )
+            generation = cursor.fetchone()
+            if generation is None or self._structural_binding_from_row(generation[:8]) != binding:
+                self.connection.rollback()
+                return False
+            cursor.execute(
+                "SELECT COUNT(*) FROM pcap_offset_index_packets WHERE build_id=%s",
+                (build_id,),
+            )
+            count_row = cursor.fetchone()
+            cursor.execute(
+                "SELECT packet_index,record_offset,data_offset,captured_length,original_length,"
+                "framed_length,section_index,interface_id,interface_ordinal,raw_timestamp_ticks "
+                "FROM pcap_offset_index_packets WHERE build_id=%s ORDER BY packet_index",
+                (build_id,),
+            )
+            packets = tuple(
+                StructuralPacketEntry(*(int(value) for value in row)) for row in cursor.fetchall()
+            )
+            snapshot = StructuralIndexSnapshot(
+                build_id,
+                binding,
+                generation[8],
+                structural_index_digest(binding, interfaces, packets),
+                interfaces,
+                packets,
+            )
+            if (
+                count_row is None
+                or int(count_row[0]) != packet_count
+                or len(packets) != packet_count
+                or not validate_structural_index(snapshot)
+            ):
+                self.connection.rollback()
+                return False
+            cursor.execute(
+                "SELECT build_id FROM pcap_offset_index_owners "
+                "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s FOR UPDATE",
+                (binding.source_id,),
+            )
+            previous = cursor.fetchone()
+            cursor.execute(
+                "INSERT INTO pcap_capture_source_versions("
+                "source_kind,source_id,object_key,source_version_id,"
+                "source_size_bytes,source_sha256,updated_at) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(source_kind,source_id) DO NOTHING",
+                (
+                    source_version.source_kind,
+                    source_version.source_id,
+                    source_version.object_key,
+                    source_version.source_version_id,
+                    source_version.source_size_bytes,
+                    source_version.source_sha256,
+                    now,
+                ),
+            )
+            cursor.execute(
+                "SELECT source_kind,source_id,object_key,source_version_id,source_size_bytes,"
+                "source_sha256 FROM pcap_capture_source_versions "
+                "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s FOR UPDATE",
+                (binding.source_id,),
+            )
+            persisted = cursor.fetchone()
+            if persisted is None or CaptureSourceVersion(*persisted) != source_version:
+                self.connection.rollback()
+                return False
+            cursor.executemany(
+                "INSERT INTO pcap_offset_index_interfaces("
+                "build_id,interface_ordinal,section_index,interface_id,link_type,snaplen,"
+                "timestamp_resolution_numerator,timestamp_resolution_denominator,"
+                "timestamp_offset_seconds) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                [
+                    (
+                        build_id,
+                        item.interface_ordinal,
+                        item.section_index,
+                        item.interface_id,
+                        item.link_type,
+                        item.snaplen,
+                        item.timestamp_resolution_numerator,
+                        item.timestamp_resolution_denominator,
+                        item.timestamp_offset_seconds,
+                    )
+                    for item in interfaces
+                ],
+            )
+            cursor.execute(
+                "UPDATE pcap_offset_index_generations SET state='READY',packet_count=%s,"
+                "interface_count=%s,index_sha256=%s WHERE build_id=%s AND state='STAGING'",
+                (packet_count, len(interfaces), snapshot.index_sha256, build_id),
+            )
+            if cursor.rowcount != 1:
+                self.connection.rollback()
+                return False
+            cursor.execute(
+                "INSERT INTO pcap_offset_index_owners(source_kind,source_id,build_id) "
+                "VALUES('LIVE_SEGMENT',%s,%s) ON CONFLICT(source_kind,source_id) "
+                "DO UPDATE SET build_id=excluded.build_id",
+                (binding.source_id, build_id),
+            )
+            if previous is not None and str(previous[0]) != build_id:
+                cursor.execute(
+                    "DELETE FROM pcap_offset_index_generations WHERE build_id=%s", (previous[0],)
+                )
+            cursor.execute(
+                "UPDATE pcap_offset_index_jobs SET status='COMPLETED',lease_token=NULL,"
+                "lease_expires_at=NULL,completed_at=%s,updated_at=%s,published_build_id=%s,"
+                "published_source_version_id=%s WHERE source_kind='LIVE_SEGMENT' AND source_id=%s "
+                "AND status='RUNNING' AND attempt=%s AND lease_token=%s AND lease_expires_at>%s",
+                (
+                    now,
+                    now,
+                    build_id,
+                    binding.source_version_id,
+                    binding.source_id,
+                    attempt,
+                    lease_token,
+                    now,
+                ),
+            )
+            if cursor.rowcount != 1:
+                self.connection.rollback()
+                return False
+            self._mark_live_index_intent(cursor, binding.source_id, "COMPLETED")
+            self.connection.commit()
+            return True
+
     def abort_structural_index(self, build_id: str) -> None:
         with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
             cursor.execute(
@@ -2767,11 +3488,57 @@ class PostgresRepository:
             except (TypeError, ValueError, KeyError):
                 self.connection.rollback()
                 return StructuralIndexLookup(IndexAvailability.CORRUPT)
-            cursor.execute(
-                "SELECT data FROM controller_objects WHERE kind='job' AND id=%s",
-                (binding.source_id,),
-            )
-            job_row = cursor.fetchone()
+            canonical_matches = False
+            canonical_object_key: str | None = None
+            if binding.source_kind == "LIVE_SEGMENT":
+                cursor.execute(
+                    "SELECT data FROM controller_objects WHERE kind='sensor_pcap' AND id=%s",
+                    (binding.source_id,),
+                )
+                segment_row = cursor.fetchone()
+                segment = None
+                if segment_row is not None:
+                    segment = (
+                        segment_row[0]
+                        if isinstance(segment_row[0], dict)
+                        else json.loads(segment_row[0])
+                    )
+                job = None
+                if segment is not None and segment.get("analysis_job_id"):
+                    cursor.execute(
+                        "SELECT data FROM controller_objects WHERE kind='job' AND id=%s",
+                        (str(segment["analysis_job_id"]),),
+                    )
+                    parent_row = cursor.fetchone()
+                    if parent_row is not None:
+                        job = (
+                            parent_row[0]
+                            if isinstance(parent_row[0], dict)
+                            else json.loads(parent_row[0])
+                        )
+                canonical_matches = bool(
+                    segment is not None
+                    and segment.get("id") == binding.source_id
+                    and segment.get("index_requested_at")
+                    and segment.get("size_bytes") == binding.source_size_bytes
+                    and segment.get("sha256") == binding.source_sha256
+                    and eligible_live_segment(job, segment)
+                )
+                if segment is not None:
+                    canonical_object_key = str(
+                        segment.get("object_key")
+                        or f"sensor-pcaps/{segment.get('sensor_id')}/{binding.source_id}.pcap"
+                    )
+            else:
+                cursor.execute(
+                    "SELECT data FROM controller_objects WHERE kind='job' AND id=%s",
+                    (binding.source_id,),
+                )
+                job_row = cursor.fetchone()
+                job = None
+                if job_row is not None:
+                    job = job_row[0] if isinstance(job_row[0], dict) else json.loads(job_row[0])
+                canonical_matches = _job_matches_structural_binding(job, binding)
             cursor.execute(
                 "SELECT source_kind,source_id,object_key,source_version_id,"
                 "source_size_bytes,source_sha256 FROM pcap_capture_source_versions "
@@ -2789,21 +3556,21 @@ class PostgresRepository:
             return StructuralIndexLookup(IndexAvailability.UNSUPPORTED_SCHEMA)
         if snapshot.binding != binding:
             return StructuralIndexLookup(IndexAvailability.STALE)
-        job = None
-        if job_row is not None:
-            job = job_row[0] if isinstance(job_row[0], dict) else json.loads(job_row[0])
-        if not _job_matches_structural_binding(
-            job, binding
-        ) or not self._capture_source_row_matches(source_version_row, binding):
+        if not canonical_matches or not self._capture_source_row_matches(
+            source_version_row, binding, object_key=canonical_object_key
+        ):
             return StructuralIndexLookup(IndexAvailability.STALE)
         if not validate_structural_index(snapshot):
             return StructuralIndexLookup(IndexAvailability.CORRUPT)
         return StructuralIndexLookup(IndexAvailability.READY, snapshot)
 
-    def delete_structural_indexes_for_source(self, source_id: str) -> None:
+    def delete_structural_indexes_for_source(
+        self, source_id: str, *, source_kind: str = "PCAP_UPLOAD"
+    ) -> None:
         with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
             cursor.execute(
-                "DELETE FROM pcap_offset_index_generations WHERE source_id=%s", (source_id,)
+                "DELETE FROM pcap_offset_index_generations WHERE source_kind=%s AND source_id=%s",
+                (source_kind, source_id),
             )
             self.connection.commit()
 
@@ -3780,38 +4547,66 @@ class PostgresRepository:
         *,
         require_open_job: bool = False,
     ) -> tuple[dict[str, Any] | None, str]:
+        """Publish a sensor capture without retaining DB locks across object I/O."""
         connection = self.connection
         analysis_job_id = segment.get("analysis_job_id")
-        lock_key = f"sensor-pcap:{analysis_job_id or segment['id']}"
-        object_key = f"sensor-pcaps/{segment['sensor_id']}/{segment['id']}.pcap"
-        uploaded = False
-        with self._lock:
-            try:
-                with connection.cursor() as cursor:
+        source_id = str(segment["id"])
+        lock_key = f"sensor-pcap:{analysis_job_id or source_id}"
+
+        # Cheap duplicate/conflict check avoids an unnecessary upload in the common replay case.
+        with self._lock, self._rollback_on_error(), connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='sensor_pcap' AND id=%s",
+                (source_id,),
+            )
+            row = cursor.fetchone()
+            if row is not None:
+                value = row[0]
+                existing = value if isinstance(value, dict) else json.loads(value)
+                matches = all(
+                    existing.get(field) == segment.get(field)
+                    for field in ("sensor_id", "analysis_job_id", "sha256")
+                )
+                connection.commit()
+                return (deepcopy(existing), "EXISTS") if matches else (None, "CONFLICT")
+            connection.commit()
+
+        # Every accepted attempt owns a non-reused key, so compensation can never delete a winner.
+        object_key = f"sensor-pcaps/{segment['sensor_id']}/{source_id}/{uuid4().hex}.pcap"
+        self.blob_store.put(object_key, content)
+        stored: dict[str, Any] | None = None
+        status = "ERROR"
+        try:
+            with self._lock, self._rollback_on_error(), connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                    (lock_key,),
+                )
+                locked_job: dict[str, Any] | None = None
+                if analysis_job_id is not None:
                     cursor.execute(
-                        "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-                        (lock_key,),
+                        "SELECT data FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
+                        (analysis_job_id,),
                     )
-                    if require_open_job and analysis_job_id is not None:
-                        cursor.execute(
-                            "SELECT data FROM controller_objects "
-                            "WHERE kind='job' AND id=%s FOR UPDATE",
-                            (analysis_job_id,),
-                        )
-                        job_row = cursor.fetchone()
-                        value = job_row[0] if job_row is not None else None
-                        locked_job: dict[str, Any] | None
-                        if isinstance(value, dict):
-                            locked_job = value
-                        else:
-                            locked_job = json.loads(value) if value else None
-                        if locked_job is None or locked_job.get("status") in _JOB_TERMINAL_STATUSES:
-                            connection.commit()
-                            return None, "JOB_CLOSED"
+                    job_row = cursor.fetchone()
+                    value = job_row[0] if job_row is not None else None
+                    locked_job = (
+                        value if isinstance(value, dict) else json.loads(value) if value else None
+                    )
+                    if require_open_job and (
+                        locked_job is None or locked_job.get("status") in _JOB_TERMINAL_STATUSES
+                    ):
+                        connection.commit()
+                        status = "JOB_CLOSED"
+                    else:
+                        status = "CONTINUE"
+                else:
+                    status = "CONTINUE"
+                if status == "CONTINUE":
                     cursor.execute(
                         "SELECT data FROM controller_objects "
                         "WHERE kind='sensor_pcap' AND id=%s FOR UPDATE",
-                        (segment["id"],),
+                        (source_id,),
                     )
                     row = cursor.fetchone()
                     if row is not None:
@@ -3822,41 +4617,66 @@ class PostgresRepository:
                             for field in ("sensor_id", "analysis_job_id", "sha256")
                         )
                         connection.commit()
-                        return (deepcopy(existing), "EXISTS") if matches else (None, "CONFLICT")
-                    if max_total_bytes is not None and analysis_job_id is not None:
-                        cursor.execute(
-                            "SELECT COALESCE(SUM((data->>'size_bytes')::bigint),0) "
-                            "FROM controller_objects WHERE kind='sensor_pcap' "
-                            "AND data->>'analysis_job_id'=%s",
-                            (analysis_job_id,),
-                        )
-                        used = int(cursor.fetchone()[0])
-                        if used + len(content) > max_total_bytes:
+                        stored = deepcopy(existing) if matches else None
+                        status = "EXISTS" if matches else "CONFLICT"
+                    else:
+                        if max_total_bytes is not None and analysis_job_id is not None:
+                            cursor.execute(
+                                "SELECT COALESCE(SUM((data->>'size_bytes')::bigint),0) "
+                                "FROM controller_objects WHERE kind='sensor_pcap' "
+                                "AND data->>'analysis_job_id'=%s",
+                                (analysis_job_id,),
+                            )
+                            used_row = cursor.fetchone()
+                            used = int(used_row[0] if used_row else 0)
+                            if used + len(content) > max_total_bytes:
+                                connection.commit()
+                                status = "LIMIT"
+                        if status == "CONTINUE":
+                            stored = {**segment, "object_key": object_key}
+                            if eligible_live_segment(locked_job, stored):
+                                stored.update(
+                                    index_requested_at=datetime.now(UTC).isoformat(),
+                                    index_intent_state="PENDING",
+                                    index_intent_schema_version=PCAP_OFFSET_INDEX_SCHEMA_VERSION,
+                                    index_intent_parser_contract_version=(
+                                        PCAP_OFFSET_INDEX_PARSER_CONTRACT_VERSION
+                                    ),
+                                )
+                            cursor.execute(
+                                "INSERT INTO controller_objects(kind,id,data) "
+                                "VALUES('sensor_pcap',%s,%s::jsonb)",
+                                (source_id, self._json(stored)),
+                            )
+                            cursor.execute(
+                                "INSERT INTO audit_events(kind,object_id,occurred_at,data) "
+                                "VALUES('sensor_pcap',%s,%s,%s::jsonb)",
+                                (source_id, datetime.now(UTC), self._json(stored)),
+                            )
                             connection.commit()
-                            return None, "LIMIT"
-                    self.blob_store.put(object_key, content)
-                    uploaded = True
-                    stored = {**segment, "object_key": object_key}
-                    cursor.execute(
-                        "INSERT INTO controller_objects(kind,id,data) "
-                        "VALUES('sensor_pcap',%s,%s::jsonb)",
-                        (segment["id"], self._json(stored)),
-                    )
-                    cursor.execute(
-                        "INSERT INTO audit_events(kind,object_id,occurred_at,data) "
-                        "VALUES('sensor_pcap',%s,%s,%s::jsonb)",
-                        (segment["id"], datetime.now(UTC), self._json(stored)),
-                    )
-                connection.commit()
-                return deepcopy(stored), "OK"
+                            status = "OK"
+        except Exception:
+            connection.rollback()
+            # A commit can fail ambiguously. Retain the candidate if metadata names it;
+            # otherwise it is provably unowned and safe to compensate by exact key.
+            authoritative: dict[str, Any] | None = None
+            try:
+                authoritative = self._get("sensor_pcap", source_id)
             except Exception:
-                connection.rollback()
-                if uploaded:
-                    try:
-                        self.blob_store.delete(object_key)
-                    except Exception:
-                        logger.warning("Failed to roll back uploaded sensor PCAP %s", object_key)
-                raise
+                logger.warning("Could not resolve ambiguous sensor PCAP commit", exc_info=True)
+            if authoritative is None or authoritative.get("object_key") != object_key:
+                try:
+                    self.blob_store.delete(object_key)
+                except Exception:
+                    logger.warning("Failed to delete unowned sensor PCAP %s", object_key)
+            raise
+
+        if status != "OK":
+            try:
+                self.blob_store.delete(object_key)
+            except Exception:
+                logger.warning("Failed to delete race-losing sensor PCAP %s", object_key)
+        return deepcopy(stored) if stored is not None else None, status
 
     def get_sensor_pcap(self, segment_id: str) -> tuple[dict[str, Any], bytes] | None:
         opened = self.open_sensor_pcap(segment_id)
