@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, NamedTuple, Protocol, cast
 
 from c2hunter_analysis.pcap_postings import PostingQueryLimits, select_posting_candidates
 
@@ -14,8 +14,12 @@ from .pcap_offset_index import (
     CaptureSourceVersion,
     IndexAvailability,
     SourceIndexBinding,
+    StructuralIndexIdentity,
+    StructuralIndexIdentityLookup,
     StructuralIndexLookup,
+    StructuralIndexParentIdentity,
     StructuralIndexSnapshot,
+    structural_index_identity,
 )
 from .pcap_posting_index import (
     PostingIndexAvailability,
@@ -47,6 +51,18 @@ class AnalysisPostingCandidateSet:
     candidates: tuple[PostingPacketCandidate, ...]
 
 
+class _PostingSelectionSourceProof(NamedTuple):
+    source: CaptureSourceVersion
+    parent: StructuralIndexSnapshot
+    parent_identity: StructuralIndexIdentity
+    posting_identity: PostingIndexIdentity
+
+
+class _PostingSelectionPlan(NamedTuple):
+    candidates: AnalysisPostingCandidateSet
+    source_proofs: tuple[_PostingSelectionSourceProof, ...]
+
+
 class PostingSelectionRepository(Protocol):
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None: ...
 
@@ -59,11 +75,15 @@ class PostingSelectionRepository(Protocol):
         effective_limits: dict[str, int],
     ) -> dict[str, Any] | None: ...
 
-    def get_capture_source_version(self, source_id: str) -> CaptureSourceVersion | None: ...
+    def get_capture_source_version(self, source_id: str, /) -> CaptureSourceVersion | None: ...
 
-    def get_live_capture_source_version(self, source_id: str) -> CaptureSourceVersion | None: ...
+    def get_live_capture_source_version(self, source_id: str, /) -> CaptureSourceVersion | None: ...
 
     def get_structural_index(self, binding: SourceIndexBinding) -> StructuralIndexLookup: ...
+
+    def get_structural_index_identity(
+        self, source_version: CaptureSourceVersion
+    ) -> StructuralIndexIdentityLookup: ...
 
     def get_posting_index(
         self,
@@ -75,7 +95,7 @@ class PostingSelectionRepository(Protocol):
     def get_posting_index_identity(
         self,
         source_version: CaptureSourceVersion,
-        parent: StructuralIndexSnapshot,
+        parent: StructuralIndexParentIdentity,
     ) -> PostingIndexIdentityLookup: ...
 
 
@@ -96,19 +116,17 @@ def _source_matches_manifest(
 def _ready_parent(
     repository: PostingSelectionRepository, source: CaptureSourceVersion
 ) -> StructuralIndexSnapshot | None:
-    for capture_format in ("PCAP", "PCAPNG"):
-        binding = SourceIndexBinding(
-            source.source_kind,
-            source.source_id,
-            source.source_version_id,
-            source.source_size_bytes,
-            source.source_sha256,
-            capture_format,
-        )
-        lookup = repository.get_structural_index(binding)
-        if lookup.availability is IndexAvailability.READY and lookup.snapshot is not None:
-            return lookup.snapshot
-    return None
+    compact = repository.get_structural_index_identity(source)
+    if compact.availability is not IndexAvailability.READY or compact.identity is None:
+        return None
+    lookup = repository.get_structural_index(compact.identity.binding)
+    if (
+        lookup.availability is not IndexAvailability.READY
+        or lookup.snapshot is None
+        or structural_index_identity(lookup.snapshot) != compact.identity
+    ):
+        return None
+    return lookup.snapshot
 
 
 def _query_limits(settings: Settings) -> PostingQueryLimits:
@@ -157,52 +175,21 @@ def _source_identity(source: CaptureSourceVersion) -> tuple[object, ...]:
     )
 
 
-def _parent_identity(parent: StructuralIndexSnapshot) -> tuple[object, ...]:
-    return (parent.build_id, parent.binding, parent.created_at, parent.index_sha256)
-
-
-def select_analysis_posting_candidates(
+def _select_analysis_posting_plan_from_snapshot(
     repository: PostingSelectionRepository,
     settings: Settings,
     *,
-    job_id: str,
+    requested_job: Mapping[str, Any],
+    source_snapshot: Mapping[str, Any],
     canonical_request: Mapping[str, Any],
-    candidate_id: str | None = None,
+    candidate_id: str | None,
     max_sources: int = _HARD_MAX_MANIFEST_SOURCES,
-) -> AnalysisPostingCandidateSet | None:
-    """Select immutable packet references, or require whole-view sequential fallback."""
-    job = repository.get_job_summary(job_id)
-    if job is None:
-        raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
-    if job.get("mode") == "LIVE" and job.get("status") != JobState.COMPLETED:
-        raise ApiError(
-            409,
-            "PCAP_SOURCE_NOT_FINAL",
-            "LIVE analysis must be completed before PCAP export",
-        )
-
+) -> _PostingSelectionPlan | None:
+    """Select an internal proof-bound plan from one authorized immutable snapshot."""
+    del candidate_id  # Ownership and normalization belong to the compatibility facade/executor.
+    job = requested_job
     normalized = dict(canonical_request)
-    if candidate_id is not None:
-        found_candidate = repository.get_candidate(candidate_id)
-        if found_candidate is None or found_candidate[0] != job_id:
-            raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
-        normalized["candidate_ip"] = found_candidate[1]["candidate_ip"]
-    effective_limits = {
-        "scan_max_bytes": cast(int, settings.pcap_export_scan_max_bytes),
-        "scan_max_packets": cast(int, settings.pcap_export_scan_max_packets),
-    }
-    try:
-        snapshot = repository.snapshot_pcap_export_source(job_id, normalized, effective_limits)
-    except ValueError as exc:
-        if str(exc) in {"source_provenance_cycle", "source_provenance_missing"}:
-            raise ApiError(
-                409,
-                "PCAP_SOURCE_PROVENANCE_INVALID",
-                "PCAP source provenance is invalid",
-            ) from exc
-        return None
-    if snapshot is None:
-        raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
+    snapshot = source_snapshot
     manifest = snapshot.get("source_manifest")
     snapshot_kind = snapshot.get("source_kind")
     if (
@@ -234,7 +221,14 @@ def select_analysis_posting_candidates(
         return None
     global_result_limit = settings.pcap_posting_index_query_max_result_ordinals
     selected: list[PostingPacketCandidate] = []
-    observed: list[tuple[tuple[object, ...], tuple[object, ...], PostingIndexIdentity]] = []
+    observed: list[
+        tuple[
+            tuple[object, ...],
+            StructuralIndexSnapshot,
+            StructuralIndexIdentity,
+            PostingIndexIdentity,
+        ]
+    ] = []
     for source_order, descriptor_value in enumerate(manifest):
         limits = allocated_limits[source_order]
         if not isinstance(descriptor_value, Mapping):
@@ -286,16 +280,18 @@ def select_analysis_posting_candidates(
         observed.append(
             (
                 _source_identity(source),
-                _parent_identity(parent),
+                parent,
+                structural_index_identity(parent),
                 posting_index_identity(posting),
             )
         )
 
+    final_sources: list[CaptureSourceVersion] = []
     # Re-read canonical ownership after all bounded queries so replacements or
     # deletion observed during selection invalidate the whole candidate view.
     for source_order, identities in enumerate(observed):
         descriptor = cast(Mapping[str, Any], manifest[source_order])
-        source_identity, parent_identity, posting_identity = identities
+        source_identity, _parent, parent_identity, posting_identity = identities
         source_id = cast(str, source_identity[1])
         current_source = (
             repository.get_capture_source_version(source_id)
@@ -308,15 +304,101 @@ def select_analysis_posting_candidates(
             or not _source_matches_manifest(current_source, descriptor, source_kind)
         ):
             return None
-        current_parent = _ready_parent(repository, current_source)
-        if current_parent is None or _parent_identity(current_parent) != parent_identity:
+        current_parent = repository.get_structural_index_identity(current_source)
+        if (
+            current_parent.availability is not IndexAvailability.READY
+            or current_parent.identity != parent_identity
+        ):
             return None
-        current_posting = repository.get_posting_index_identity(current_source, current_parent)
+        current_posting = repository.get_posting_index_identity(current_source, parent_identity)
         if (
             current_posting.availability is not PostingIndexAvailability.READY
             or current_posting.identity != posting_identity
         ):
             return None
+        final_sources.append(current_source)
 
     unique = tuple(sorted(set(selected), key=lambda item: (item.source_order, item.packet_index)))
-    return AnalysisPostingCandidateSet(str(snapshot.get("source_generation", "")), unique)
+    proofs = tuple(
+        _PostingSelectionSourceProof(source, identities[1], identities[2], identities[3])
+        for source, identities in zip(final_sources, observed, strict=True)
+    )
+    return _PostingSelectionPlan(
+        AnalysisPostingCandidateSet(str(snapshot.get("source_generation", "")), unique),
+        proofs,
+    )
+
+
+def select_analysis_posting_candidates_from_snapshot(
+    repository: PostingSelectionRepository,
+    settings: Settings,
+    *,
+    requested_job: Mapping[str, Any],
+    source_snapshot: Mapping[str, Any],
+    canonical_request: Mapping[str, Any],
+    candidate_id: str | None,
+    max_sources: int = _HARD_MAX_MANIFEST_SOURCES,
+) -> AnalysisPostingCandidateSet | None:
+    """Return the unchanged Stage 11 facade from one admitted source snapshot."""
+    plan = _select_analysis_posting_plan_from_snapshot(
+        repository,
+        settings,
+        requested_job=requested_job,
+        source_snapshot=source_snapshot,
+        canonical_request=canonical_request,
+        candidate_id=candidate_id,
+        max_sources=max_sources,
+    )
+    return None if plan is None else plan.candidates
+
+
+def select_analysis_posting_candidates(
+    repository: PostingSelectionRepository,
+    settings: Settings,
+    *,
+    job_id: str,
+    canonical_request: Mapping[str, Any],
+    candidate_id: str | None = None,
+    max_sources: int = _HARD_MAX_MANIFEST_SOURCES,
+) -> AnalysisPostingCandidateSet | None:
+    """Compatibility facade preserving authorization, ownership, and snapshot provenance."""
+    job = repository.get_job_summary(job_id)
+    if job is None:
+        raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
+    if job.get("mode") == "LIVE" and job.get("status") != JobState.COMPLETED:
+        raise ApiError(
+            409,
+            "PCAP_SOURCE_NOT_FINAL",
+            "LIVE analysis must be completed before PCAP export",
+        )
+    normalized = dict(canonical_request)
+    if candidate_id is not None:
+        found_candidate = repository.get_candidate(candidate_id)
+        if found_candidate is None or found_candidate[0] != job_id:
+            raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
+        normalized["candidate_ip"] = found_candidate[1]["candidate_ip"]
+    effective_limits = {
+        "scan_max_bytes": cast(int, settings.pcap_export_scan_max_bytes),
+        "scan_max_packets": cast(int, settings.pcap_export_scan_max_packets),
+    }
+    try:
+        snapshot = repository.snapshot_pcap_export_source(job_id, normalized, effective_limits)
+    except ValueError as exc:
+        if str(exc) in {"source_provenance_cycle", "source_provenance_missing"}:
+            raise ApiError(
+                409,
+                "PCAP_SOURCE_PROVENANCE_INVALID",
+                "PCAP source provenance is invalid",
+            ) from exc
+        return None
+    if snapshot is None:
+        raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
+    return select_analysis_posting_candidates_from_snapshot(
+        repository,
+        settings,
+        requested_job=job,
+        source_snapshot=snapshot,
+        canonical_request=normalized,
+        candidate_id=candidate_id,
+        max_sources=max_sources,
+    )

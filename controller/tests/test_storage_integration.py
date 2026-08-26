@@ -19,10 +19,23 @@ import pytest
 from minio.error import S3Error
 from psycopg.errors import ForeignKeyViolation
 
+from c2hunter_controller.config import Settings
 from c2hunter_controller.pcap_export_queue import (
     ExportPrincipalLimitError,
     ExportQueueFullError,
     ExportSourceChangedError,
+)
+from c2hunter_controller.pcap_export_service import (
+    PcapExportDependencies,
+    PcapExportExecutor,
+)
+from c2hunter_controller.pcap_indexed_export import (
+    CaptureByteRange,
+    CaptureRangeMissing,
+    CaptureRangeShortRead,
+    CaptureRangeUnavailable,
+    CaptureRangeVersionDrift,
+    create_indexed_match_factory_from_settings,
 )
 from c2hunter_controller.pcap_offset_index import (
     IndexAvailability,
@@ -36,6 +49,7 @@ from c2hunter_controller.pcap_posting_index import (
 )
 from c2hunter_controller.production import MinioBlobStore, PostgresRepository
 from c2hunter_controller.queueing import RedisControllerQueue
+from c2hunter_controller.schemas import PcapExportCreate
 from c2hunter_controller.storage import ClickHouseFlowStore
 
 pytestmark = pytest.mark.skipif(
@@ -137,6 +151,23 @@ def _stage9_capture() -> bytes:
         + struct.pack("<IIII", 1_700_000_000, 123, len(payload), len(payload))
         + payload
     )
+
+
+def _stage12_capture(*, port_base: int = 40_000, packet_count: int = 6) -> bytes:
+    """Build parseable deterministic Ethernet/IPv4/UDP packets for sparse reads."""
+    capture = bytearray(struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65_535, 1))
+    for index in range(packet_count):
+        payload = bytes([index + 1]) * (24 + index)
+        udp = struct.pack("!HHHH", port_base + index, 443, 8 + len(payload), 0) + payload
+        source = bytes((10, 0, 0, index + 1))
+        destination = bytes((203, 0, 113, 77))
+        ip = struct.pack(
+            "!BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), index, 0, 64, 17, 0, source, destination
+        )
+        packet = bytes.fromhex("0200000000020200000000010800") + ip + udp
+        capture.extend(struct.pack("<IIII", 1_700_000_000 + index, index, len(packet), len(packet)))
+        capture.extend(packet)
+    return bytes(capture)
 
 
 def _pcap_export_job(
@@ -1096,3 +1127,505 @@ def test_real_stage11_postgres_minio_posting_lifecycle_is_fenced_and_cascading()
             first.delete_job(live_job_id)
         second.close()
         first.close()
+
+
+@_postgres_minio_integration
+def test_real_stage12_postgres_minio_immutable_upload_and_live_exact_ranges() -> None:
+    """Opt-in only: exact immutable range identity and typed failure distinctions."""
+    suffix = uuid.uuid4().hex
+    upload_id = f"stage12-range-upload-{suffix}"
+    sensor_id = f"stage12-range-sensor-{suffix}"
+    live_job_id = f"stage12-range-live-job-{suffix}"
+    segment_id = f"stage12-range-segment-{suffix}"
+    capture = _stage9_capture()
+    digest = hashlib.sha256(capture).hexdigest()
+    blob = MinioBlobStore(
+        os.environ["C2HUNTER_S3_ENDPOINT"],
+        os.environ["C2HUNTER_S3_ACCESS_KEY"],
+        os.environ["C2HUNTER_S3_SECRET_KEY"],
+        os.getenv("C2HUNTER_S3_BUCKET", "c2hunter"),
+    )
+    assert blob.ready()
+    repository = PostgresRepository(os.environ["C2HUNTER_DATABASE_URL"], blob)
+    upload_created = False
+    live_created = False
+    try:
+        _stored, upload_created = repository.create_job(
+            {
+                "id": upload_id,
+                "idempotency_key": upload_id,
+                "status": "COMPLETED",
+                "mode": "PCAP_UPLOAD",
+                "sensor_ids": ["uploaded"],
+                "source": {
+                    "packet_bytes_retained": True,
+                    "size_bytes": len(capture),
+                    "sha256": digest,
+                    "packet_count": 1,
+                    "capture_format": "PCAP",
+                },
+            }
+        )
+        assert upload_created
+        repository.save_job_capture(upload_id, capture)
+        upload = repository.get_capture_source_version(upload_id)
+        assert upload is not None
+        assert upload.object_key.startswith(f"captures/{upload_id}/")
+        assert upload.object_key.endswith(".pcap")
+        assert upload.object_key != f"captures/{upload_id}.pcap"
+
+        repository.upsert_sensor({"sensor_id": sensor_id, "name": "stage12-range"})
+        _stored, live_created = repository.create_job(
+            {
+                "id": live_job_id,
+                "idempotency_key": live_job_id,
+                "status": "CAPTURING",
+                "mode": "LIVE",
+                "sensor_ids": [sensor_id],
+                "capture": {"store_pcap": True},
+            }
+        )
+        assert live_created
+        segment, status = repository.save_sensor_pcap_limited(
+            {
+                "id": segment_id,
+                "sensor_id": sensor_id,
+                "analysis_job_id": live_job_id,
+                "filename": f"{segment_id}.pcap",
+                "size_bytes": len(capture),
+                "sha256": digest,
+                "uploaded_at": datetime.now(UTC).isoformat(),
+            },
+            capture,
+            None,
+            require_open_job=True,
+        )
+        assert status == "OK" and segment is not None
+        live = repository.get_live_capture_source_version(segment_id)
+        assert live is not None
+        assert live.object_key.startswith(f"sensor-pcaps/{sensor_id}/{segment_id}/")
+        assert live.object_key.endswith(".pcap")
+        assert live.object_key != f"sensor-pcaps/{sensor_id}/{segment_id}.pcap"
+
+        for source in (upload, live):
+            assert repository.read_capture_range(source, CaptureByteRange(0, 2)) == capture[:2]
+            middle = len(capture) // 2
+            assert (
+                repository.read_capture_range(source, CaptureByteRange(middle, 3))
+                == capture[middle : middle + 3]
+            )
+            assert (
+                repository.read_capture_range(source, CaptureByteRange(len(capture) - 1, 1))
+                == capture[-1:]
+            )
+
+        # Same immutable bytes still publish under a fresh generation key/version.
+        repository.save_job_capture(upload_id, capture)
+        replacement = repository.get_capture_source_version(upload_id)
+        assert replacement is not None
+        assert replacement.object_key != upload.object_key
+        with pytest.raises(CaptureRangeVersionDrift):
+            repository.read_capture_range(upload, CaptureByteRange(0, 1))
+
+        real_blob = repository.blob_store
+        repository.blob_store = cast(
+            MinioBlobStore,
+            SimpleNamespace(read_range=lambda *_args, **_kwargs: b""),
+        )
+        with pytest.raises(CaptureRangeShortRead):
+            repository.read_capture_range(replacement, CaptureByteRange(0, 1))
+
+        def unavailable(*_args: Any, **_kwargs: Any) -> bytes:
+            raise CaptureRangeUnavailable("injected provider outage")
+
+        repository.blob_store = cast(MinioBlobStore, SimpleNamespace(read_range=unavailable))
+        with pytest.raises(CaptureRangeUnavailable, match="injected provider outage"):
+            repository.read_capture_range(replacement, CaptureByteRange(0, 1))
+        repository.blob_store = real_blob
+
+        blob.delete(live.object_key)
+        with pytest.raises(CaptureRangeMissing):
+            repository.read_capture_range(live, CaptureByteRange(0, 1))
+        assert repository.delete_job(live_job_id)
+        live_created = False
+        with pytest.raises(CaptureRangeMissing):
+            repository.read_capture_range(live, CaptureByteRange(0, 1))
+    finally:
+        repository.blob_store = blob
+        if upload_created:
+            repository.delete_retained_source(upload_id)
+        if live_created:
+            repository.delete_job(live_job_id)
+        repository.close()
+
+
+@_postgres_minio_integration
+def test_real_stage12_postgres_minio_active_factory_executor_parity_and_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opt-in only: production active sparse path and bounded all-source fallbacks."""
+    suffix = uuid.uuid4().hex
+    upload_id = f"stage12-active-upload-{suffix}"
+    live_job_id = f"stage12-active-live-{suffix}"
+    sensors = (f"stage12-sensor-a-{suffix}", f"stage12-sensor-b-{suffix}")
+    segments = (f"stage12-segment-a-{suffix}", f"stage12-segment-b-{suffix}")
+    upload_capture = _stage12_capture(port_base=41_000)
+    captures = (_stage12_capture(), _stage12_capture())
+    blob = MinioBlobStore(
+        os.environ["C2HUNTER_S3_ENDPOINT"],
+        os.environ["C2HUNTER_S3_ACCESS_KEY"],
+        os.environ["C2HUNTER_S3_SECRET_KEY"],
+        os.getenv("C2HUNTER_S3_BUCKET", "c2hunter"),
+    )
+    assert blob.ready()
+    repository = PostgresRepository(os.environ["C2HUNTER_DATABASE_URL"], blob)
+    upload_created = live_created = False
+    source_keys: set[str] = set()
+    export_ids: list[str] = []
+
+    def publish_next() -> None:
+        claim = repository.claim_posting_index(lease_seconds=120)
+        assert claim is not None and claim.lease_token
+        source = (
+            repository.get_capture_source_version(claim.source_id)
+            if claim.source_kind == "PCAP_UPLOAD"
+            else repository.get_live_capture_source_version(claim.source_id)
+        )
+        assert source is not None
+        binding = SourceIndexBinding(
+            source.source_kind,
+            source.source_id,
+            source.source_version_id,
+            source.source_size_bytes,
+            source.source_sha256,
+            "PCAP",
+        )
+        lookup = repository.get_structural_index(binding)
+        assert lookup.availability is IndexAvailability.READY and lookup.snapshot is not None
+        opened = (
+            repository.open_job_capture(source.source_id)
+            if source.source_kind == "PCAP_UPLOAD"
+            else repository.open_sensor_pcap(source.source_id)
+        )
+        assert opened is not None
+        stream = opened if source.source_kind == "PCAP_UPLOAD" else opened[1]
+        with stream:
+            posting = build_source_posting_index(
+                stream,
+                source_version=source,
+                parent=lookup.snapshot,
+                internal_networks=["10.0.0.0/8"],
+                build_id=f"stage12-posting-{source.source_id}-{suffix}",
+            )
+        repository.begin_posting_index(
+            posting, attempt=claim.attempt, lease_token=claim.lease_token
+        )
+        repository.stage_posting_index_chunks(
+            posting.build_id,
+            posting.generation.chunks,
+            source_kind=source.source_kind,
+            source_id=source.source_id,
+            attempt=claim.attempt,
+            lease_token=claim.lease_token,
+        )
+        assert repository.publish_posting_index(
+            posting.build_id,
+            source_version=source,
+            parent=lookup.snapshot,
+            attempt=claim.attempt,
+            lease_token=claim.lease_token,
+        )
+        assert (
+            repository.get_posting_index(source, lookup.snapshot).availability
+            is PostingIndexAvailability.READY
+        )
+
+    base_settings = Settings(
+        environment="test",
+        pcap_export_pipeline="streaming",
+        pcap_export_max_bytes=1 << 20,
+        pcap_export_scan_max_bytes=1 << 20,
+        pcap_export_scan_max_packets=1_000,
+    )
+
+    def active_settings(max_gap: int = 1) -> Settings:
+        return Settings(
+            **{
+                **base_settings.model_dump(),
+                "pcap_posting_index_enabled": True,
+                "pcap_indexed_export_mode": "active",
+                "pcap_indexed_export_max_gap_bytes": max_gap,
+                "pcap_indexed_export_max_source_fraction_numerator": 9,
+                "pcap_indexed_export_max_source_fraction_denominator": 10,
+            }
+        )
+
+    def execute(
+        payload: PcapExportCreate,
+        snapshot: dict[str, Any],
+        export_id: str,
+        *,
+        active: bool,
+        gap: int = 1,
+    ) -> tuple[dict[str, Any], bytes]:
+        settings = active_settings(gap) if active else base_settings
+        dependencies = PcapExportDependencies(
+            indexed_match_factory=create_indexed_match_factory_from_settings(repository, settings)
+            if active
+            else None
+        )
+        export_ids.append(export_id)
+        result = PcapExportExecutor(repository, settings, dependencies).execute(
+            payload, {}, export_id=export_id, source_snapshot=snapshot
+        )
+        stored = repository.get_export(export_id)
+        assert stored is not None
+        metadata, content = stored
+        assert metadata["sha256"] == hashlib.sha256(content).hexdigest()
+        assert metadata["size_bytes"] == len(content)
+        assert result["sha256"] == metadata["sha256"]
+        return result, content
+
+    try:
+        _stored, upload_created = repository.create_job(
+            {
+                "id": upload_id,
+                "idempotency_key": upload_id,
+                "status": "COMPLETED",
+                "mode": "PCAP_UPLOAD",
+                "sensor_ids": ["uploaded"],
+                "internal_networks": ["10.0.0.0/8"],
+                "source": {
+                    "packet_bytes_retained": True,
+                    "size_bytes": len(upload_capture),
+                    "sha256": hashlib.sha256(upload_capture).hexdigest(),
+                    "packet_count": 6,
+                    "capture_format": "PCAP",
+                },
+            }
+        )
+        assert upload_created
+        repository.save_job_capture(upload_id, upload_capture)
+        upload_source = repository.get_capture_source_version(upload_id)
+        assert upload_source is not None
+        source_keys.add(upload_source.object_key)
+        assert build_offline_upload_index(
+            repository,
+            upload_id,
+            max_packets=100,
+            max_interfaces=4,
+            batch_size=8,
+            request_postings=True,
+            posting_queue_capacity=8,
+            posting_max_attempts=3,
+        )
+
+        for sensor in sensors:
+            repository.upsert_sensor({"sensor_id": sensor, "name": sensor})
+        live_job, live_created = repository.create_job(
+            {
+                "id": live_job_id,
+                "idempotency_key": live_job_id,
+                "status": "CAPTURING",
+                "mode": "LIVE",
+                "sensor_ids": list(sensors),
+                "internal_networks": ["10.0.0.0/8"],
+                "capture": {"store_pcap": True},
+            }
+        )
+        assert live_created
+        for order, (segment_id, sensor, capture) in enumerate(
+            zip(segments, sensors, captures, strict=True)
+        ):
+            marker = (datetime.now(UTC) + timedelta(microseconds=order)).isoformat()
+            stored, status = repository.save_sensor_pcap_limited(
+                {
+                    "id": segment_id,
+                    "sensor_id": sensor,
+                    "analysis_job_id": live_job_id,
+                    "filename": f"{segment_id}.pcap",
+                    "size_bytes": len(capture),
+                    "sha256": hashlib.sha256(capture).hexdigest(),
+                    "uploaded_at": marker,
+                    "index_requested_at": marker,
+                },
+                capture,
+                None,
+                require_open_job=True,
+            )
+            assert status == "OK" and stored is not None
+            source_keys.add(str(stored["object_key"]))
+            assert (
+                repository.admit_live_segment_index(segment_id, capacity=8, max_attempts=3).value
+                == "QUEUED"
+            )
+            claim = repository.claim_live_segment_index(now=datetime.now(UTC), lease_seconds=120)
+            assert claim is not None and claim.lease_token
+            assert build_live_segment_index(
+                repository,
+                segment_id,
+                max_packets=100,
+                max_interfaces=4,
+                batch_size=8,
+                attempt=claim.attempt,
+                lease_token=claim.lease_token,
+                request_postings=True,
+                posting_queue_capacity=8,
+                posting_max_attempts=3,
+            )
+        repository.save_job_metadata({**live_job, "status": "COMPLETED"})
+        for _ in range(3):
+            publish_next()
+
+        for name, filters, gap in (
+            ("sparse", [{"source_port": 40_000}, {"source_port": 40_005}], 1),
+            ("coalesced", [{"source_port": 40_000}, {"source_port": 40_001}], 1 << 16),
+        ):
+            payload = PcapExportCreate(job_id=live_job_id, include_filters=filters)
+            snapshot = repository.snapshot_pcap_export_source(
+                live_job_id, payload.model_dump(mode="json", exclude_none=True), {}
+            )
+            assert snapshot is not None and len(snapshot["source_manifest"]) == 2
+            sequential, sequential_bytes = execute(
+                payload, snapshot, f"stage12-{name}-sequential-{suffix}", active=False
+            )
+            forbidden = (
+                "open_job_capture",
+                "open_sensor_pcap",
+                "get_job_capture",
+                "get_sensor_pcap",
+            )
+            originals = {item: getattr(repository, item) for item in forbidden}
+            original_get, original_open = blob.get, blob.open
+            original_range = repository.read_capture_range
+            ranges: list[tuple[str, int, int]] = []
+
+            def reject_full(*_args: Any, **_kwargs: Any) -> Any:
+                raise AssertionError("successful indexed path performed a full source read")
+
+            def bounded(
+                source: Any,
+                byte_range: CaptureByteRange,
+                _ranges: list[tuple[str, int, int]] = ranges,
+                _read: Callable[[Any, CaptureByteRange], bytes] = original_range,
+            ) -> bytes:
+                assert byte_range.offset >= 0 and 0 < byte_range.length < source.source_size_bytes
+                _ranges.append((source.source_id, byte_range.offset, byte_range.length))
+                return _read(source, byte_range)
+
+            for item in forbidden:
+                monkeypatch.setattr(repository, item, reject_full)
+            monkeypatch.setattr(blob, "get", reject_full)
+            monkeypatch.setattr(blob, "open", reject_full)
+            monkeypatch.setattr(repository, "read_capture_range", bounded)
+            settings = active_settings(gap)
+            indexed_export_id = f"stage12-{name}-indexed-{suffix}"
+            export_ids.append(indexed_export_id)
+            indexed = PcapExportExecutor(
+                repository,
+                settings,
+                PcapExportDependencies(
+                    indexed_match_factory=create_indexed_match_factory_from_settings(
+                        repository, settings
+                    )
+                ),
+            ).execute(payload, {}, export_id=indexed_export_id, source_snapshot=snapshot)
+            for item, original in originals.items():
+                monkeypatch.setattr(repository, item, original)
+            monkeypatch.setattr(blob, "get", original_get)
+            monkeypatch.setattr(blob, "open", original_open)
+            monkeypatch.setattr(repository, "read_capture_range", original_range)
+            stored_indexed = repository.get_export(indexed_export_id)
+            assert stored_indexed is not None
+            metadata, indexed_bytes = stored_indexed
+            assert ranges and {item[0] for item in ranges} == set(segments)
+            assert indexed_bytes == sequential_bytes
+            assert metadata["sha256"] == hashlib.sha256(sequential_bytes).hexdigest()
+            for field in (
+                "matched_packet_count",
+                "exported_packet_count",
+                "source_manifest",
+                "source_capture_count",
+            ):
+                assert indexed[field] == sequential[field]
+
+        payload = PcapExportCreate(job_id=live_job_id, include_filters=[{"source_port": 40_000}])
+        snapshot = repository.snapshot_pcap_export_source(
+            live_job_id, payload.model_dump(mode="json", exclude_none=True), {}
+        )
+        assert snapshot is not None
+        baseline, baseline_bytes = execute(
+            payload, snapshot, f"stage12-fallback-base-{suffix}", active=False
+        )
+        original_range = repository.read_capture_range
+        for reason in ("short", "version", "outage"):
+            attempts: list[CaptureByteRange] = []
+
+            def fault(
+                source: Any,
+                byte_range: CaptureByteRange,
+                *,
+                _reason: str = reason,
+                _attempts: list[CaptureByteRange] = attempts,
+                _read: Callable[[Any, CaptureByteRange], bytes] = original_range,
+            ) -> bytes:
+                assert 0 < byte_range.length < source.source_size_bytes
+                _attempts.append(byte_range)
+                if _reason == "short":
+                    return _read(source, byte_range)[:-1]
+                if _reason == "version":
+                    raise CaptureRangeVersionDrift("injected")
+                raise CaptureRangeUnavailable("injected")
+
+            monkeypatch.setattr(repository, "read_capture_range", fault)
+            result, content = execute(
+                payload, snapshot, f"stage12-fallback-{reason}-{suffix}", active=True
+            )
+            assert attempts and content == baseline_bytes
+            assert result["source_manifest"] == baseline["source_manifest"]
+        monkeypatch.setattr(repository, "read_capture_range", original_range)
+
+        upload_payload = PcapExportCreate(
+            job_id=upload_id, include_filters=[{"source_port": 41_000}]
+        )
+        stale = repository.snapshot_pcap_export_source(
+            upload_id, upload_payload.model_dump(mode="json", exclude_none=True), {}
+        )
+        assert stale is not None
+        repository.save_job_capture(upload_id, upload_capture)
+        replacement = repository.get_capture_source_version(upload_id)
+        assert replacement is not None and replacement.object_key not in source_keys
+        source_keys.add(replacement.object_key)
+        replaced, replaced_bytes = execute(
+            upload_payload, stale, f"stage12-replaced-{suffix}", active=True
+        )
+        fresh = repository.snapshot_pcap_export_source(
+            upload_id, upload_payload.model_dump(mode="json", exclude_none=True), {}
+        )
+        assert fresh is not None
+        sequential, sequential_bytes = execute(
+            upload_payload, fresh, f"stage12-replaced-sequential-{suffix}", active=False
+        )
+        assert replaced_bytes == sequential_bytes
+        assert replaced["source_manifest"] == sequential["source_manifest"]
+
+        assert repository.delete_job(live_job_id)
+        live_created = False
+        for key in source_keys:
+            if key.startswith("sensor-pcaps/"):
+                _assert_minio_object_missing(blob, key)
+    finally:
+        repository.blob_store = blob
+        try:
+            _delete_pcap_export_jobs(repository, export_ids)
+        finally:
+            if upload_created:
+                repository.delete_retained_source(upload_id)
+            if live_created:
+                repository.delete_job(live_job_id)
+            repository.cleanup_pcap_export_orphans(
+                now=datetime.now(UTC),
+                max_age_seconds=0,
+                limit=max(100, len(export_ids) * 2),
+            )
+            repository.close()

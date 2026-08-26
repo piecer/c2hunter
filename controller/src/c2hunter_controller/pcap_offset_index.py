@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_I64 = (1 << 63) - 1
 _MAX_U64 = (1 << 64) - 1
+_MIN_I64 = -(1 << 63)
+_MAX_CAPTURED_PACKET_BYTES = 16 * 1024 * 1024
 
 
 class LiveIndexBuildError(RuntimeError):
@@ -120,6 +122,76 @@ class StructuralIndexLookup:
     snapshot: StructuralIndexSnapshot | None = None
 
 
+@dataclass(frozen=True)
+class StructuralIndexIdentity:
+    """Exact READY generation identity, excluding interfaces and packet rows."""
+
+    build_id: str
+    binding: SourceIndexBinding
+    created_at: datetime
+    index_sha256: str
+
+
+@dataclass(frozen=True)
+class StructuralIndexIdentityLookup:
+    availability: IndexAvailability
+    identity: StructuralIndexIdentity | None = None
+
+
+class StructuralIndexParentIdentity(Protocol):
+    """Narrow structural-parent contract used by posting identity operations."""
+
+    @property
+    def build_id(self) -> str: ...
+
+    @property
+    def binding(self) -> SourceIndexBinding: ...
+
+    @property
+    def created_at(self) -> datetime: ...
+
+    @property
+    def index_sha256(self) -> str: ...
+
+
+def structural_index_identity(
+    snapshot: StructuralIndexParentIdentity,
+) -> StructuralIndexIdentity:
+    return StructuralIndexIdentity(
+        snapshot.build_id,
+        snapshot.binding,
+        snapshot.created_at,
+        snapshot.index_sha256,
+    )
+
+
+def structural_index_identity_availability(
+    identity: StructuralIndexIdentity, source: CaptureSourceVersion
+) -> IndexAvailability:
+    binding = identity.binding
+    if (
+        binding.schema_version != PCAP_OFFSET_INDEX_SCHEMA_VERSION
+        or binding.parser_contract_version != PCAP_OFFSET_INDEX_PARSER_CONTRACT_VERSION
+    ):
+        return IndexAvailability.UNSUPPORTED_SCHEMA
+    if (
+        binding.source_kind != source.source_kind
+        or binding.source_id != source.source_id
+        or binding.source_version_id != source.source_version_id
+        or binding.source_size_bytes != source.source_size_bytes
+        or binding.source_sha256 != source.source_sha256
+    ):
+        return IndexAvailability.STALE
+    if (
+        not identity.build_id
+        or identity.created_at.tzinfo is None
+        or identity.created_at.utcoffset() is None
+        or not _SHA256.fullmatch(identity.index_sha256)
+    ):
+        return IndexAvailability.CORRUPT
+    return IndexAvailability.READY
+
+
 class StructuralIndexRepository(Protocol):
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None: ...
     def open_job_capture(self, job_id: str) -> Any: ...
@@ -143,6 +215,9 @@ class StructuralIndexRepository(Protocol):
         filter_contract_version: int = PCAP_FILTER_CONTRACT_VERSION,
     ) -> bool: ...
     def abort_structural_index(self, build_id: str) -> None: ...
+    def get_structural_index_identity(
+        self, source: CaptureSourceVersion
+    ) -> StructuralIndexIdentityLookup: ...
 
 
 def binding_document(binding: SourceIndexBinding) -> bytes:
@@ -181,6 +256,30 @@ def validate_structural_index(snapshot: StructuralIndexSnapshot) -> bool:
         range(len(interfaces))
     ):
         return False
+    for interface_entry in interfaces:
+        integer_values = (
+            interface_entry.section_index,
+            interface_entry.interface_id,
+            interface_entry.interface_ordinal,
+            interface_entry.link_type,
+            interface_entry.snaplen,
+            interface_entry.timestamp_resolution_numerator,
+            interface_entry.timestamp_resolution_denominator,
+            interface_entry.timestamp_offset_seconds,
+        )
+        if any(type(value) is not int for value in integer_values):
+            return False
+        if (
+            not 0 <= interface_entry.section_index <= _MAX_I64
+            or not 0 <= interface_entry.interface_id <= _MAX_I64
+            or not 0 <= interface_entry.interface_ordinal <= _MAX_I64
+            or not 0 <= interface_entry.link_type <= 0xFFFF
+            or not 1 <= interface_entry.snaplen <= _MAX_CAPTURED_PACKET_BYTES
+            or not 1 <= interface_entry.timestamp_resolution_numerator <= _MAX_I64
+            or not 1 <= interface_entry.timestamp_resolution_denominator <= _MAX_I64
+            or not _MIN_I64 <= interface_entry.timestamp_offset_seconds <= _MAX_I64
+        ):
+            return False
     interface_map = {
         (item.section_index, item.interface_id, item.interface_ordinal): item for item in interfaces
     }
@@ -188,6 +287,20 @@ def validate_structural_index(snapshot: StructuralIndexSnapshot) -> bool:
         return False
     previous_end = 0
     for expected_index, packet in enumerate(packets):
+        packet_integer_values = (
+            packet.packet_index,
+            packet.record_offset,
+            packet.data_offset,
+            packet.captured_length,
+            packet.original_length,
+            packet.framed_length,
+            packet.section_index,
+            packet.interface_id,
+            packet.interface_ordinal,
+            packet.raw_timestamp_ticks,
+        )
+        if any(type(value) is not int for value in packet_integer_values):
+            return False
         interface = interface_map.get(
             (packet.section_index, packet.interface_id, packet.interface_ordinal)
         )
@@ -202,6 +315,9 @@ def validate_structural_index(snapshot: StructuralIndexSnapshot) -> bool:
         )
         if (
             any(value < 0 or value > _MAX_I64 for value in values)
+            or not 0 <= packet.section_index <= _MAX_I64
+            or not 0 <= packet.interface_id <= _MAX_I64
+            or not 0 <= packet.interface_ordinal <= _MAX_I64
             or packet.raw_timestamp_ticks < 0
             or packet.raw_timestamp_ticks > _MAX_U64
         ):

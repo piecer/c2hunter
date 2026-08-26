@@ -486,7 +486,7 @@ def test_openapi_and_public_sensor_export_responses_hide_posting_internals() -> 
         assert internal_fields.isdisjoint(_walk_mapping_keys(public_document))
 
 
-def test_all_tracked_export_modules_have_no_posting_or_stage12_dependency() -> None:
+def test_all_tracked_production_export_modules_have_no_direct_posting_storage_dependency() -> None:
     repository_root = Path(__file__).parents[2]
     tracked = (
         subprocess.run(
@@ -501,7 +501,10 @@ def test_all_tracked_export_modules_have_no_posting_or_stage12_dependency() -> N
     export_modules = [
         repository_root / name
         for name in tracked
-        if name and Path(name).name.startswith("pcap_export") and name.endswith(".py")
+        if name
+        and name.startswith(("controller/src/", "analysis/src/"))
+        and Path(name).name.startswith("pcap_export")
+        and name.endswith(".py")
     ]
     assert export_modules
 

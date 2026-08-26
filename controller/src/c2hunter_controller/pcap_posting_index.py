@@ -27,6 +27,7 @@ from c2hunter_analysis.pcap_postings import (
 
 from .pcap_offset_index import (
     CaptureSourceVersion,
+    StructuralIndexParentIdentity,
     StructuralIndexSnapshot,
     validate_structural_index,
 )
@@ -158,7 +159,7 @@ def posting_index_identity_availability(
     identity: PostingIndexIdentity,
     *,
     source_version: CaptureSourceVersion,
-    parent: StructuralIndexSnapshot,
+    parent: StructuralIndexParentIdentity,
 ) -> PostingIndexAvailability:
     try:
         expected = _binding(source_version, parent)
@@ -234,7 +235,9 @@ class _DigestingReader:
         return value
 
 
-def _binding(source: CaptureSourceVersion, parent: StructuralIndexSnapshot) -> PostingIndexBinding:
+def _binding(
+    source: CaptureSourceVersion, parent: StructuralIndexParentIdentity
+) -> PostingIndexBinding:
     structural = parent.binding
     return PostingIndexBinding(
         source.source_kind,

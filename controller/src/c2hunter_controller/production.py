@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import logging
+import re
 import secrets
 import threading
 from collections.abc import Callable, Iterable, Iterator
@@ -38,13 +39,25 @@ from c2hunter_controller.pcap_export_store import (
     ExportQueueStorageError,
     ExportSourceChangedError,
 )
+from c2hunter_controller.pcap_indexed_export import (
+    CaptureByteRange,
+    CaptureRangeError,
+    CaptureRangeMissing,
+    CaptureRangeShortRead,
+    CaptureRangeUnavailable,
+    CaptureRangeVersionDrift,
+)
 from c2hunter_controller.pcap_offset_index import (
     CaptureSourceVersion,
     IndexAvailability,
     SourceIndexBinding,
+    StructuralIndexIdentity,
+    StructuralIndexIdentityLookup,
     StructuralIndexLookup,
+    StructuralIndexParentIdentity,
     StructuralIndexSnapshot,
     structural_index_digest,
+    structural_index_identity_availability,
     validate_structural_index,
 )
 from c2hunter_controller.pcap_offset_index_queue import (
@@ -144,6 +157,103 @@ class MinioBlobStore:
             len(content),
             content_type="application/vnd.tcpdump.pcap",
         )
+
+    def read_range(
+        self,
+        key: str,
+        *,
+        expected_version_id: str,
+        expected_size: int,
+        offset: int,
+        length: int,
+    ) -> bytes:
+        """Read one exact immutable object range with only bounded reads."""
+        byte_range = CaptureByteRange(offset, length)
+        if type(expected_size) is not int or not 0 <= expected_size <= (1 << 63) - 1:
+            raise ValueError("expected capture size must be a non-negative signed 64-bit integer")
+        if byte_range.offset + byte_range.length > expected_size:
+            raise ValueError("capture range exceeds expected object size")
+        kwargs: dict[str, Any] = {"offset": offset, "length": length}
+        expected_kind, separator, expected_value = expected_version_id.partition(":")
+        if not separator or not expected_value or expected_kind not in {"s3-version", "etag"}:
+            raise CaptureRangeVersionDrift("unsupported immutable object version identity")
+        if expected_kind == "s3-version":
+            kwargs["version_id"] = expected_value
+        else:
+            kwargs["request_headers"] = {"If-Match": f'"{expected_value}"'}
+        response: Any = None
+        try:
+            try:
+                response = self.client.get_object(self.bucket, key, **kwargs)
+            except Exception as exc:
+                code = str(getattr(exc, "code", ""))
+                if _is_missing_object_error(exc):
+                    raise CaptureRangeMissing("capture object version is missing") from exc
+                if code in {"PreconditionFailed", "InvalidRequest"}:
+                    raise CaptureRangeVersionDrift("capture object version changed") from exc
+                raise CaptureRangeUnavailable("MinIO capture range open failed") from exc
+            status = getattr(response, "status", None)
+            if status in {404, 410}:
+                raise CaptureRangeMissing("capture object version is missing")
+            if status in {409, 412}:
+                raise CaptureRangeVersionDrift("capture object version changed")
+            if isinstance(status, int) and status >= 500:
+                raise CaptureRangeUnavailable("MinIO capture range backend unavailable")
+            if status != 206:
+                raise CaptureRangeShortRead("MinIO backend ignored exact range request")
+            raw_headers = getattr(response, "headers", {}) or {}
+            headers = {str(name).lower(): str(value).strip() for name, value in raw_headers.items()}
+            content_length = headers.get("content-length")
+            if content_length is None:
+                raise CaptureRangeShortRead("MinIO range content length is missing")
+            try:
+                if int(content_length) != length:
+                    raise CaptureRangeShortRead("MinIO range content length mismatch")
+            except ValueError as exc:
+                raise CaptureRangeShortRead("MinIO range content length is invalid") from exc
+            content_range = headers.get("content-range")
+            match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", content_range or "", re.IGNORECASE)
+            if (
+                match is None
+                or int(match.group(1)) != offset
+                or int(match.group(2)) != offset + length - 1
+                or int(match.group(3)) != expected_size
+            ):
+                raise CaptureRangeShortRead("MinIO content range mismatch")
+            if expected_kind == "etag":
+                if headers.get("etag", "").strip('"') != expected_value:
+                    raise CaptureRangeVersionDrift("MinIO response ETag changed")
+            else:
+                response_version = headers.get("x-amz-version-id")
+                if response_version != expected_value:
+                    raise CaptureRangeVersionDrift("MinIO response version changed")
+            result = bytearray()
+            while len(result) < byte_range.length:
+                remaining = byte_range.length - len(result)
+                try:
+                    chunk = response.read(remaining)
+                except Exception as exc:
+                    raise CaptureRangeUnavailable("MinIO capture range read failed") from exc
+                if type(chunk) is not bytes:
+                    raise CaptureRangeUnavailable("MinIO range response returned non-bytes data")
+                if not chunk:
+                    raise CaptureRangeShortRead("MinIO range response ended early")
+                if len(chunk) > remaining:
+                    raise CaptureRangeShortRead("MinIO range response exceeded requested length")
+                result.extend(chunk)
+            return bytes(result)
+        except CaptureRangeError:
+            raise
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    logger.debug("MinIO range response close failed", exc_info=True)
+                try:
+                    response.release_conn()
+                except Exception:
+                    logger.debug("MinIO range response release failed", exc_info=True)
 
     def put_stream(
         self,
@@ -3374,7 +3484,7 @@ ORDER BY source_kind,source_id
     def get_posting_index_identity(
         self,
         source_version: CaptureSourceVersion,
-        parent: StructuralIndexSnapshot,
+        parent: StructuralIndexParentIdentity,
     ) -> PostingIndexIdentityLookup:
         key = (source_version.source_kind, source_version.source_id, parent.build_id)
         connection = self.connection
@@ -4406,6 +4516,48 @@ ORDER BY source_kind,source_id
             source_size_bytes=int(row[4]),
             source_sha256=str(row[5]),
         )
+
+    def read_capture_range(
+        self, source: CaptureSourceVersion, byte_range: CaptureByteRange
+    ) -> bytes:
+        byte_range.validate_for_source(source)
+
+        def authoritative() -> CaptureSourceVersion | None:
+            try:
+                with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT source_kind,source_id,object_key,source_version_id,"
+                        "source_size_bytes,source_sha256 FROM pcap_capture_source_versions "
+                        "WHERE source_kind=%s AND source_id=%s",
+                        (source.source_kind, source.source_id),
+                    )
+                    row = cursor.fetchone()
+                    self.connection.commit()
+            except Exception as exc:
+                raise CaptureRangeUnavailable("PostgreSQL capture source lookup failed") from exc
+            return CaptureSourceVersion(*row) if row is not None else None
+
+        current = authoritative()
+        if current is None:
+            raise CaptureRangeMissing("capture source row is missing")
+        if current != source:
+            raise CaptureRangeVersionDrift("capture source version changed")
+        # The metadata transaction is committed and its cursor/lock released before network I/O.
+        result = self.blob_store.read_range(
+            current.object_key,
+            expected_version_id=current.source_version_id,
+            expected_size=current.source_size_bytes,
+            offset=byte_range.offset,
+            length=byte_range.length,
+        )
+        after = authoritative()
+        if after is None:
+            raise CaptureRangeMissing("capture source disappeared during range read")
+        if after != source:
+            raise CaptureRangeVersionDrift("capture source changed during range read")
+        if type(result) is not bytes or len(result) != byte_range.length:
+            raise CaptureRangeShortRead("capture range returned fewer bytes than requested")
+        return result
 
     @classmethod
     def _live_task_from_row(cls, row: tuple[Any, ...] | None) -> LiveIndexTask | None:
@@ -5504,6 +5656,115 @@ ORDER BY source_kind,source_id
         if not validate_structural_index(snapshot):
             return StructuralIndexLookup(IndexAvailability.CORRUPT)
         return StructuralIndexLookup(IndexAvailability.READY, snapshot)
+
+    def get_structural_index_identity(
+        self, source: CaptureSourceVersion
+    ) -> StructuralIndexIdentityLookup:
+        """Read exact READY ownership metadata without loading structural child rows."""
+
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "/* compact_structural_identity */ SELECT owner.build_id,"
+                "generation.source_kind,generation.source_id,generation.source_version_id,"
+                "generation.source_size_bytes,generation.source_sha256,"
+                "generation.capture_format,generation.schema_version,"
+                "generation.parser_contract_version,generation.created_at,"
+                "generation.index_sha256,generation.state,generation.packet_count,"
+                "generation.interface_count,source.source_kind,source.source_id,"
+                "source.object_key,source.source_version_id,source.source_size_bytes,"
+                "source.source_sha256,canonical.data,parent_job.data,task.status,"
+                "task.published_build_id,task.published_source_version_id FROM "
+                "pcap_offset_index_owners AS owner LEFT JOIN "
+                "pcap_offset_index_generations AS generation ON "
+                "generation.build_id=owner.build_id LEFT JOIN "
+                "pcap_capture_source_versions AS source ON "
+                "source.source_kind=owner.source_kind AND source.source_id=owner.source_id "
+                "LEFT JOIN controller_objects AS canonical ON canonical.kind=CASE WHEN "
+                "owner.source_kind='LIVE_SEGMENT' THEN 'sensor_pcap' ELSE 'job' END AND "
+                "canonical.id=owner.source_id LEFT JOIN controller_objects AS parent_job ON "
+                "owner.source_kind='LIVE_SEGMENT' AND parent_job.kind='job' AND "
+                "parent_job.id=canonical.data->>'analysis_job_id' LEFT JOIN "
+                "pcap_offset_index_jobs AS task ON task.source_kind=owner.source_kind AND "
+                "task.source_id=owner.source_id WHERE owner.source_kind=%s AND "
+                "owner.source_id=%s LIMIT 1",
+                (source.source_kind, source.source_id),
+            )
+            row = cursor.fetchone()
+            self.connection.commit()
+        if row is None:
+            return StructuralIndexIdentityLookup(IndexAvailability.MISSING)
+        if (
+            row[1] is None
+            or row[11] != "READY"
+            or any(type(row[index]) is not int for index in (4, 7, 8, 12, 13))
+            or row[12] < 0
+            or row[13] < 0
+            or not isinstance(row[9], datetime)
+        ):
+            return StructuralIndexIdentityLookup(IndexAvailability.CORRUPT)
+        if all(row[index] is None for index in range(14, 20)):
+            return StructuralIndexIdentityLookup(IndexAvailability.STALE)
+        try:
+            identity = StructuralIndexIdentity(
+                str(row[0]),
+                SourceIndexBinding(
+                    cast(Any, row[1]),
+                    str(row[2]),
+                    str(row[3]),
+                    row[4],
+                    str(row[5]),
+                    cast(Any, row[6]),
+                    row[7],
+                    row[8],
+                ),
+                row[9],
+                str(row[10]),
+            )
+            source_row = CaptureSourceVersion(
+                cast(Any, row[14]),
+                str(row[15]),
+                str(row[16]),
+                str(row[17]),
+                row[18],
+                str(row[19]),
+            )
+            canonical = row[20] if isinstance(row[20], dict) else json.loads(row[20])
+            parent_job = (
+                row[21] if isinstance(row[21], dict) or row[21] is None else json.loads(row[21])
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return StructuralIndexIdentityLookup(IndexAvailability.CORRUPT)
+        availability = structural_index_identity_availability(identity, source)
+        if availability is IndexAvailability.READY:
+            binding = identity.binding
+            canonical_matches = source_row == source
+            if binding.source_kind == "LIVE_SEGMENT":
+                expected_key = str(
+                    canonical.get("object_key")
+                    or f"sensor-pcaps/{canonical.get('sensor_id')}/{binding.source_id}.pcap"
+                )
+                canonical_matches = bool(
+                    canonical_matches
+                    and canonical.get("id") == binding.source_id
+                    and canonical.get("index_requested_at")
+                    and canonical.get("size_bytes") == binding.source_size_bytes
+                    and canonical.get("sha256") == binding.source_sha256
+                    and source.object_key == expected_key
+                    and eligible_live_segment(parent_job, canonical)
+                    and row[22] == "COMPLETED"
+                    and row[23] == identity.build_id
+                    and row[24] == source.source_version_id
+                )
+            else:
+                canonical_matches = canonical_matches and _job_matches_structural_binding(
+                    canonical, binding
+                )
+            if not canonical_matches:
+                availability = IndexAvailability.STALE
+        return StructuralIndexIdentityLookup(
+            availability,
+            identity if availability is IndexAvailability.READY else None,
+        )
 
     def delete_structural_indexes_for_source(
         self, source_id: str, *, source_kind: str = "PCAP_UPLOAD"

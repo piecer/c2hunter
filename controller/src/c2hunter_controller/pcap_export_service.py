@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 
 from c2hunter_analysis.pcap import PcapParseError, bounded_pcap_prefix, parse_pcap
 from c2hunter_analysis.pcap_export import open_export_capture
@@ -26,6 +26,7 @@ from .pcap import (
     compile_packet_predicate,
     filter_records,
 )
+from .pcap_indexed_export import IndexedFallback, IndexedMatchBatch, IndexedMatchFactory
 from .pcap_stream import (
     CaptureIntegrityError,
     MatchedPacketRecord,
@@ -42,6 +43,49 @@ from .repositories import (
 from .schemas import PcapExportCreate
 
 logger = logging.getLogger(__name__)
+
+RolloutPath = Literal["sequential", "shadow", "indexed", "fallback"]
+RolloutFallbackReason = Literal[
+    "none",
+    "unsupported_source",
+    "unsupported_scan_semantics",
+    "index_unavailable",
+    "index_corrupt",
+    "resource_limit",
+    "range_missing",
+    "range_short",
+    "range_unavailable",
+    "version_drift",
+    "ownership_changed",
+]
+ShadowParity = Literal["not_applicable", "not_sampled", "match", "mismatch", "error"]
+
+
+class PcapExportRolloutObserver(Protocol):
+    def __call__(
+        self,
+        *,
+        path: RolloutPath,
+        fallback_reason: RolloutFallbackReason,
+        shadow_parity: ShadowParity,
+        requested_range_count: int,
+        coalesced_range_count: int,
+        selected_payload_bytes: int,
+        fetched_bytes: int,
+        source_total_bytes: int,
+    ) -> None: ...
+
+
+def deterministic_shadow_sample(
+    request_identity: str, source_generation: str, basis_points: int
+) -> bool:
+    """Stable, non-secret Stage 12 sampling with an exact basis-point threshold."""
+    if not 0 <= basis_points <= 10_000:
+        raise ValueError("basis_points must be between 0 and 10000")
+    if basis_points == 0:
+        return False
+    digest = hashlib.sha256(f"{request_identity}\0{source_generation}".encode()).digest()
+    return int.from_bytes(digest[:8], "big") % 10_000 < basis_points
 
 
 def _utcnow() -> datetime:
@@ -60,6 +104,8 @@ class PcapExportDependencies:
     legacy_parser: Callable[..., Any] = parse_pcap
     legacy_filter: Callable[..., Any] = filter_records
     legacy_capture_builder: Callable[..., Any] = build_capture_result
+    indexed_match_factory: IndexedMatchFactory | None = None
+    rollout_observer: PcapExportRolloutObserver | None = None
     clock: Callable[[], datetime] = _utcnow
 
 
@@ -110,6 +156,43 @@ class PcapExportExecutor:
         self.repository = repository
         self.settings = settings
         self.dependencies = dependencies or PcapExportDependencies()
+        self.indexed_mode = settings.pcap_indexed_export_mode
+        if (
+            self.indexed_mode == "off"
+            and dependencies is not None
+            and dependencies.indexed_match_factory is not None
+        ):
+            # Explicit test seams retain the pre-rollout active behavior. Production
+            # wiring never injects the indexed dependency while mode is off.
+            self.indexed_mode = "active"
+
+    def _observe_rollout(
+        self,
+        *,
+        path: RolloutPath,
+        fallback_reason: RolloutFallbackReason,
+        shadow_parity: ShadowParity,
+        batch: IndexedMatchBatch | None,
+        source_total_bytes: int,
+    ) -> None:
+        observer = self.dependencies.rollout_observer
+        if observer is None:
+            return
+        try:
+            observer(
+                path=path,
+                fallback_reason=fallback_reason,
+                shadow_parity=shadow_parity,
+                requested_range_count=batch.requested_range_count if batch is not None else 0,
+                coalesced_range_count=batch.range_count if batch is not None else 0,
+                selected_payload_bytes=batch.selected_payload_bytes if batch is not None else 0,
+                fetched_bytes=batch.fetched_bytes if batch is not None else 0,
+                source_total_bytes=max(0, source_total_bytes),
+            )
+        except BaseException:
+            # Rollout telemetry is metrics-only. Even a badly behaved callback must
+            # not alter artifact publication, cancellation, or deadline semantics.
+            logger.debug("PCAP indexed rollout observation failed", exc_info=True)
 
     def execute(
         self,
@@ -119,6 +202,8 @@ class PcapExportExecutor:
         export_id: str | None = None,
         source_snapshot: dict[str, Any] | None = None,
         checkpoint: Callable[..., None] | None = None,
+        check_cancelled: Callable[[], None] | None = None,
+        check_deadline: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         checkpoint = checkpoint or (lambda **_progress: None)
         checkpoint(phase="SNAPSHOT_VALIDATION", percent=1)
@@ -280,10 +365,104 @@ class PcapExportExecutor:
         remaining_packets = scan_max_packets
         source_truncation_reasons: list[str] = []
         checkpoint(phase="SOURCE_SCAN", percent=10)
+        indexed_batch: IndexedMatchBatch | None = None
+        shadow_batch: IndexedMatchBatch | None = None
+        shadow_parity: ShadowParity = "not_applicable"
+        fallback_reason: RolloutFallbackReason = "none"
+        rollout_path: RolloutPath = "sequential"
+        predicate = None
         if use_streaming_pipeline and source_descriptors:
             predicate = self.dependencies.predicate_compiler(
                 normalized, internal_networks=list(job["internal_networks"])
             )
+            indexed_factory = self.dependencies.indexed_match_factory
+            shadow_sampled = False
+            if self.indexed_mode == "shadow" and source_snapshot is not None:
+                request_identity = str(
+                    source_snapshot.get("request_fingerprint")
+                    or source_snapshot.get("coalesce_fingerprint")
+                    or hashlib.sha256(
+                        canonical_json(
+                            {
+                                "job_id": payload.job_id,
+                                "candidate_id": payload.candidate_id,
+                                "request": normalized,
+                            }
+                        ).encode()
+                    ).hexdigest()
+                )
+                shadow_sampled = deterministic_shadow_sample(
+                    request_identity,
+                    str(source_snapshot.get("source_generation", "")),
+                    self.settings.pcap_indexed_export_canary_basis_points,
+                )
+                if not shadow_sampled:
+                    shadow_parity = "not_sampled"
+            should_try_indexed = self.indexed_mode == "active" or shadow_sampled
+            if indexed_factory is not None and source_snapshot is not None and should_try_indexed:
+                try:
+                    provisional_batch = indexed_factory(
+                        repository=self.repository,
+                        settings=self.settings,
+                        requested_job=job,
+                        source_snapshot=source_snapshot,
+                        canonical_request=normalized,
+                        candidate_id=payload.candidate_id,
+                        predicate=predicate,
+                        internal_networks=list(job["internal_networks"]),
+                        scan_max_bytes=scan_max_bytes,
+                        scan_max_packets=scan_max_packets,
+                        checkpoint=checkpoint,
+                        check_cancelled=check_cancelled,
+                        check_deadline=check_deadline,
+                    )
+                    if self.indexed_mode == "active":
+                        indexed_batch = provisional_batch
+                        rollout_path = "indexed"
+                    else:
+                        shadow_batch = provisional_batch
+                        rollout_path = "shadow"
+                except IndexedFallback as exc:
+                    if self.indexed_mode == "active":
+                        fallback_reason = exc.reason.value
+                        rollout_path = "fallback"
+                    else:
+                        shadow_parity = "error"
+                        rollout_path = "shadow"
+                except Exception:
+                    if self.indexed_mode != "shadow":
+                        raise
+                    # Re-run cooperative guards so cancellation/deadline/lease loss
+                    # escapes rather than being mistaken for a shadow-only error.
+                    if check_cancelled is not None:
+                        check_cancelled()
+                    if check_deadline is not None and check_deadline is not check_cancelled:
+                        check_deadline()
+                    shadow_parity = "error"
+                    rollout_path = "shadow"
+            elif self.indexed_mode == "active":
+                fallback_reason = (
+                    "unsupported_source" if indexed_factory is not None else "index_unavailable"
+                )
+                rollout_path = "fallback"
+        if self.indexed_mode == "active" and rollout_path == "sequential":
+            fallback_reason = "unsupported_source"
+            rollout_path = "fallback"
+        elif self.indexed_mode == "shadow" and shadow_parity == "not_applicable":
+            shadow_parity = "not_sampled"
+        if indexed_batch is not None:
+            matched_records.extend(indexed_batch.records)
+            source_manifest.extend(
+                {"id": source_id, "sha256": digest}
+                for source_id, digest in indexed_batch.source_manifest
+            )
+            scanned_source_bytes = indexed_batch.scanned_source_bytes
+            scanned_source_capture_count = indexed_batch.scanned_source_capture_count
+            remaining_packets = scan_max_packets - indexed_batch.scanned_packet_count
+            source_truncation_reasons.extend(indexed_batch.truncation_reasons)
+        elif use_streaming_pipeline and source_descriptors:
+            if predicate is None:
+                raise RuntimeError("streaming PCAP predicate was not initialized")
             for source_order, (descriptor, _retained_content) in enumerate(source_descriptors):
                 if remaining_packets < 1:
                     source_truncation_reasons.append("SOURCE_PACKET_LIMIT")
@@ -388,7 +567,7 @@ class PcapExportExecutor:
                     try:
                         decoder = self.dependencies.decoder_factory(
                             session.reader,
-                            source_id=source.version_id,
+                            source_id=str(stored_metadata["id"]),
                             source_order=source_order,
                             internal_networks=list(job["internal_networks"]),
                         )
@@ -687,6 +866,64 @@ class PcapExportExecutor:
             raise ApiError(413, "PCAP_EXPORT_LIMIT_EXCEEDED", str(exc)) from exc
         except ValueError as exc:
             raise ApiError(413, "PCAP_EXPORT_LIMIT_EXCEEDED", str(exc)) from exc
+        observation_batch = indexed_batch
+        if shadow_batch is not None:
+            try:
+                authoritative_transcript = tuple(
+                    ExportPacketRecord(
+                        record.timestamp,
+                        record.source_id,
+                        record.source_order,
+                        record.packet_index,
+                        record.section_index,
+                        record.interface_id,
+                        record.interface_ordinal,
+                        record.link_type,
+                        record.raw_packet_bytes,
+                        record.captured_length,
+                        record.original_length,
+                    )
+                    for record in matched_records
+                )
+                shadow_transcript = tuple(
+                    ExportPacketRecord(
+                        record.timestamp,
+                        record.source_id,
+                        record.source_order,
+                        record.packet_index,
+                        record.section_index,
+                        record.interface_id,
+                        record.interface_ordinal,
+                        record.link_type,
+                        record.raw_packet_bytes,
+                        record.captured_length,
+                        record.original_length,
+                    )
+                    for record in shadow_batch.records
+                )
+                shadow_artifact = self.dependencies.capture_writer(
+                    iter(shadow_transcript),
+                    max_output_bytes=max_output_bytes,
+                    spool_max_memory_bytes=self.settings.pcap_export_spool_max_memory_bytes,
+                    spool_directory=self.settings.pcap_export_spool_directory,
+                )
+                with shadow_artifact:
+                    shadow_parity = (
+                        "match"
+                        if shadow_transcript == authoritative_transcript
+                        and artifact is not None
+                        and shadow_artifact.sha256 == artifact.sha256
+                        and shadow_artifact.size_bytes == artifact.size_bytes
+                        and shadow_artifact.capture_format == artifact.capture_format
+                        and shadow_artifact.matched_packet_count == artifact.matched_packet_count
+                        and shadow_artifact.exported_packet_count == artifact.exported_packet_count
+                        else "mismatch"
+                    )
+                observation_batch = shadow_batch
+            except Exception:
+                shadow_parity = "error"
+                observation_batch = None
+                logger.debug("PCAP indexed shadow comparison failed", exc_info=True)
         content_size = artifact.size_bytes if artifact is not None else len(capture_result.content)
         packet_count = capture_result.exported_packet_count
         capture_format = capture_result.capture_format
@@ -828,6 +1065,13 @@ class PcapExportExecutor:
                 "PCAP_SOURCE_UNAVAILABLE",
                 "analysis job was deleted before the PCAP export could be saved",
             )
+        self._observe_rollout(
+            path=rollout_path,
+            fallback_reason=fallback_reason,
+            shadow_parity=shadow_parity,
+            batch=observation_batch,
+            source_total_bytes=source_total_bytes,
+        )
         return stored_export
 
 

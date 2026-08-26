@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from threading import Event
 from typing import Any, Protocol
@@ -17,7 +18,14 @@ from .api_errors import ApiError
 from .config import Settings
 from .pcap_export_metrics import PcapExportMetrics
 from .pcap_export_queue import ExportQueueStorageError, PcapExportQueue
-from .pcap_export_service import PcapExportExecutor
+from .pcap_export_service import (
+    PcapExportDependencies,
+    PcapExportExecutor,
+    RolloutFallbackReason,
+    RolloutPath,
+    ShadowParity,
+)
+from .pcap_indexed_export import create_indexed_match_factory_from_settings
 from .production import MinioBlobStore, PostgresRepository
 from .repositories import ArtifactStorageError, Repository
 from .schemas import PcapExportCreate
@@ -29,6 +37,19 @@ class PcapExportWorkerMetrics(Protocol):
     def checkpoint(self, **progress: Any) -> None: ...
 
     def completed(self, artifact: dict[str, Any]) -> None: ...
+
+    def rollout_observer(
+        self,
+        *,
+        path: RolloutPath,
+        fallback_reason: RolloutFallbackReason,
+        shadow_parity: ShadowParity,
+        requested_range_count: int,
+        coalesced_range_count: int,
+        selected_payload_bytes: int,
+        fetched_bytes: int,
+        source_total_bytes: int,
+    ) -> None: ...
 
 
 class TransientExportError(RuntimeError):
@@ -300,9 +321,23 @@ def create_pcap_export_worker(
     settings: Settings,
     *,
     metrics: PcapExportWorkerMetrics | None = None,
+    dependencies: PcapExportDependencies | None = None,
 ) -> PcapExportWorker:
     """Build the production worker without capturing HTTP application state."""
-    shared = PcapExportExecutor(repository, settings)
+    effective_dependencies = dependencies
+    rollout_observer = metrics.rollout_observer if metrics is not None else None
+    if effective_dependencies is None:
+        effective_dependencies = PcapExportDependencies(
+            indexed_match_factory=(
+                create_indexed_match_factory_from_settings(repository, settings)
+                if settings.pcap_indexed_export_mode != "off"
+                else None
+            ),
+            rollout_observer=rollout_observer,
+        )
+    elif effective_dependencies.rollout_observer is None and rollout_observer is not None:
+        effective_dependencies = replace(effective_dependencies, rollout_observer=rollout_observer)
+    shared = PcapExportExecutor(repository, settings, effective_dependencies)
 
     def heartbeat_queue_factory() -> tuple[PcapExportQueue, Callable[[], None]]:
         background_factory = getattr(repository, "for_background_worker", None)
@@ -322,6 +357,11 @@ def create_pcap_export_worker(
                 except Exception:
                     logger.debug("PCAP export worker metric checkpoint failed", exc_info=True)
 
+        # The worker checkpoint is also the authoritative cooperative guard: an
+        # empty progress update validates deadline, cancellation, and exact lease
+        # ownership without changing any user-visible progress fields.
+        durable_guard = checkpoint
+
         try:
             payload = PcapExportCreate.model_validate(job["canonical_request"])
             artifact = shared.execute(
@@ -330,6 +370,8 @@ def create_pcap_export_worker(
                 export_id=str(job["id"]),
                 source_snapshot=job,
                 checkpoint=observed_checkpoint,
+                check_cancelled=durable_guard,
+                check_deadline=durable_guard,
             )
             if metrics is not None:
                 try:

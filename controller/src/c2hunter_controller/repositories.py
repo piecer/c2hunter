@@ -31,13 +31,24 @@ from c2hunter_analysis.pcap_postings import (
 )
 
 from .pcap_export_store import ExportQueueStorageError, RepositoryQueueStore
+from .pcap_indexed_export import (
+    CaptureByteRange,
+    CaptureRangeMissing,
+    CaptureRangeShortRead,
+    CaptureRangeUnavailable,
+    CaptureRangeVersionDrift,
+)
 from .pcap_offset_index import (
     CaptureSourceVersion,
     IndexAvailability,
     SourceIndexBinding,
+    StructuralIndexIdentityLookup,
     StructuralIndexLookup,
+    StructuralIndexParentIdentity,
     StructuralIndexSnapshot,
     structural_index_digest,
+    structural_index_identity,
+    structural_index_identity_availability,
     validate_structural_index,
 )
 from .pcap_offset_index_queue import (
@@ -629,7 +640,11 @@ class Repository(Protocol):
     def delete_retained_source(self, job_id: str) -> bool: ...
     def save_job_capture(self, job_id: str, content: bytes) -> None: ...
     def open_job_capture(self, job_id: str) -> CaptureSource | None: ...
-    def get_capture_source_version(self, job_id: str) -> CaptureSourceVersion | None: ...
+    def get_capture_source_version(self, source_id: str, /) -> CaptureSourceVersion | None: ...
+    def get_live_capture_source_version(self, source_id: str, /) -> CaptureSourceVersion | None: ...
+    def read_capture_range(
+        self, source: CaptureSourceVersion, byte_range: CaptureByteRange
+    ) -> bytes: ...
     def get_job_capture(self, job_id: str) -> bytes | None: ...
     def begin_structural_index(
         self, build_id: str, binding: SourceIndexBinding, created_at: datetime
@@ -651,6 +666,9 @@ class Repository(Protocol):
     ) -> bool: ...
     def abort_structural_index(self, build_id: str) -> None: ...
     def get_structural_index(self, binding: SourceIndexBinding) -> StructuralIndexLookup: ...
+    def get_structural_index_identity(
+        self, source: CaptureSourceVersion
+    ) -> StructuralIndexIdentityLookup: ...
     def delete_structural_indexes_for_source(
         self, source_id: str, *, source_kind: str = "PCAP_UPLOAD"
     ) -> None: ...
@@ -753,7 +771,7 @@ class Repository(Protocol):
     def get_posting_index_identity(
         self,
         source_version: CaptureSourceVersion,
-        parent: StructuralIndexSnapshot,
+        parent: StructuralIndexParentIdentity,
     ) -> PostingIndexIdentityLookup:
         raise NotImplementedError("posting indexes are unavailable")
 
@@ -2107,7 +2125,7 @@ class PostingIndexRepositoryMixin:
     def get_posting_index_identity(
         self: _PostingIndexRepositoryBackend,
         source_version: CaptureSourceVersion,
-        parent: StructuralIndexSnapshot,
+        parent: StructuralIndexParentIdentity,
     ) -> PostingIndexIdentityLookup:
         key = (source_version.source_kind, source_version.source_id, parent.build_id)
         with self._lock:
@@ -2829,6 +2847,40 @@ class MemoryRepository(
         with self._lock:
             return self.capture_source_versions.get(job_id)
 
+    def read_capture_range(
+        self, source: CaptureSourceVersion, byte_range: CaptureByteRange
+    ) -> bytes:
+        byte_range.validate_for_source(source)
+        key = (
+            source.source_id
+            if source.source_kind == "PCAP_UPLOAD"
+            else f"LIVE_SEGMENT:{source.source_id}"
+        )
+        with self._lock:
+            current = self.capture_source_versions.get(key)
+            if current is None:
+                raise CaptureRangeMissing("capture source row is missing")
+            if current != source:
+                raise CaptureRangeVersionDrift("capture source version changed")
+            content = (
+                self.job_captures.get(source.source_id)
+                if source.source_kind == "PCAP_UPLOAD"
+                else self.sensor_pcap_content.get(source.source_id)
+            )
+            if content is None:
+                raise CaptureRangeMissing("capture object is missing")
+            start = byte_range.offset
+            result = bytes(content[start : start + byte_range.length])
+        with self._lock:
+            current = self.capture_source_versions.get(key)
+            if current is None:
+                raise CaptureRangeMissing("capture source disappeared during range read")
+            if current != source:
+                raise CaptureRangeVersionDrift("capture source changed during range read")
+        if len(result) != byte_range.length:
+            raise CaptureRangeShortRead("capture range returned fewer bytes than requested")
+        return result
+
     def open_job_capture(self, job_id: str) -> CaptureSource | None:
         with self._lock:
             content = self.job_captures.get(job_id)
@@ -3066,6 +3118,56 @@ class MemoryRepository(
             if not validate_structural_index(snapshot):
                 return StructuralIndexLookup(IndexAvailability.CORRUPT)
             return StructuralIndexLookup(IndexAvailability.READY, deepcopy(snapshot))
+
+    def get_structural_index_identity(
+        self, source: CaptureSourceVersion
+    ) -> StructuralIndexIdentityLookup:
+        with self._lock:
+            build_id = self.structural_index_owners.get((source.source_kind, source.source_id))
+            if build_id is None:
+                return StructuralIndexIdentityLookup(IndexAvailability.MISSING)
+            snapshot = self.structural_index_generations.get(build_id)
+            if snapshot is None or snapshot.build_id != build_id:
+                return StructuralIndexIdentityLookup(IndexAvailability.CORRUPT)
+            identity = structural_index_identity(snapshot)
+            availability = structural_index_identity_availability(identity, source)
+            if availability is IndexAvailability.READY:
+                binding = identity.binding
+                if binding.source_kind == "LIVE_SEGMENT":
+                    segment = self.sensor_pcaps.get(binding.source_id)
+                    object_key = (
+                        str(segment.get("object_key"))
+                        if segment and segment.get("object_key")
+                        else f"sensor-pcaps/{segment.get('sensor_id')}/{binding.source_id}.pcap"
+                        if segment
+                        else ""
+                    )
+                    source_key = f"LIVE_SEGMENT:{binding.source_id}"
+                    canonical_matches = _live_segment_matches_structural_binding(self, binding)
+                else:
+                    source_key = binding.source_id
+                    stored_source = self.capture_source_versions.get(source_key)
+                    object_key = stored_source.object_key if stored_source is not None else ""
+                    canonical_matches = _job_matches_structural_binding(
+                        self.jobs.get(binding.source_id), binding
+                    )
+                expected_version = CaptureSourceVersion(
+                    binding.source_kind,
+                    binding.source_id,
+                    object_key,
+                    binding.source_version_id,
+                    binding.source_size_bytes,
+                    binding.source_sha256,
+                )
+                if (
+                    not canonical_matches
+                    or self.capture_source_versions.get(source_key) != expected_version
+                ):
+                    availability = IndexAvailability.STALE
+            return StructuralIndexIdentityLookup(
+                availability,
+                identity if availability is IndexAvailability.READY else None,
+            )
 
     def delete_structural_indexes_for_source(
         self, source_id: str, *, source_kind: str = "PCAP_UPLOAD"
@@ -4823,6 +4925,58 @@ class SQLiteRepository(
             ).fetchone()
         return CaptureSourceVersion(*row) if row is not None else None
 
+    def read_capture_range(
+        self, source: CaptureSourceVersion, byte_range: CaptureByteRange
+    ) -> bytes:
+        byte_range.validate_for_source(source)
+        blob_table, blob_id = (
+            ("job_capture_blobs", "job_id")
+            if source.source_kind == "PCAP_UPLOAD"
+            else ("sensor_pcap_blobs", "segment_id")
+        )
+        try:
+            with self._lock:
+                self.connection.execute("BEGIN")
+                row = self.connection.execute(
+                    "SELECT source_kind,source_id,object_key,source_version_id,"
+                    "source_size_bytes,source_sha256 FROM pcap_capture_source_versions "
+                    "WHERE source_kind=? AND source_id=?",
+                    (source.source_kind, source.source_id),
+                ).fetchone()
+                if row is None:
+                    self.connection.rollback()
+                    raise CaptureRangeMissing("capture source row is missing")
+                if CaptureSourceVersion(*row) != source:
+                    self.connection.rollback()
+                    raise CaptureRangeVersionDrift("capture source version changed")
+                content_row = self.connection.execute(
+                    f"SELECT substr(content, ?, ?) FROM {blob_table} WHERE {blob_id}=?",  # noqa: S608 -- table and identifier are selected from fixed internal constants
+                    (byte_range.offset + 1, byte_range.length, source.source_id),
+                ).fetchone()
+                if content_row is None:
+                    self.connection.rollback()
+                    raise CaptureRangeMissing("capture object is missing")
+                result = bytes(content_row[0])
+                post = self.connection.execute(
+                    "SELECT source_kind,source_id,object_key,source_version_id,"
+                    "source_size_bytes,source_sha256 FROM pcap_capture_source_versions "
+                    "WHERE source_kind=? AND source_id=?",
+                    (source.source_kind, source.source_id),
+                ).fetchone()
+                self.connection.commit()
+        except (CaptureRangeMissing, CaptureRangeVersionDrift):
+            raise
+        except sqlite3.Error as exc:
+            self.connection.rollback()
+            raise CaptureRangeUnavailable("SQLite capture range read failed") from exc
+        if post is None:
+            raise CaptureRangeMissing("capture source disappeared during range read")
+        if CaptureSourceVersion(*post) != source:
+            raise CaptureRangeVersionDrift("capture source changed during range read")
+        if len(result) != byte_range.length:
+            raise CaptureRangeShortRead("capture range returned fewer bytes than requested")
+        return result
+
     def get_job_capture(self, job_id: str) -> bytes | None:
         source = self.open_job_capture(job_id)
         if source is None:
@@ -5132,6 +5286,98 @@ class SQLiteRepository(
             if not validate_structural_index(snapshot):
                 return StructuralIndexLookup(IndexAvailability.CORRUPT)
             return StructuralIndexLookup(IndexAvailability.READY, snapshot)
+
+    def get_structural_index_identity(
+        self, source: CaptureSourceVersion
+    ) -> StructuralIndexIdentityLookup:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT owner.build_id,generation.binding,generation.created_at,"
+                "generation.index_sha256,generation.state,generation.packet_count,"
+                "generation.interface_count FROM pcap_offset_index_owners AS owner "
+                "LEFT JOIN pcap_offset_index_generations AS generation "
+                "ON generation.build_id=owner.build_id WHERE owner.source_kind=? "
+                "AND owner.source_id=? LIMIT 1",
+                (source.source_kind, source.source_id),
+            ).fetchone()
+            if row is None:
+                return StructuralIndexIdentityLookup(IndexAvailability.MISSING)
+            if (
+                row[1] is None
+                or row[4] != "READY"
+                or type(row[5]) is not int
+                or type(row[6]) is not int
+                or row[5] < 0
+                or row[6] < 0
+            ):
+                return StructuralIndexIdentityLookup(IndexAvailability.CORRUPT)
+            try:
+                snapshot_binding = SourceIndexBinding(**json.loads(row[1]))
+                identity = structural_index_identity(
+                    StructuralIndexSnapshot(
+                        str(row[0]),
+                        snapshot_binding,
+                        datetime.fromisoformat(str(row[2])),
+                        str(row[3]),
+                        (),
+                        (),
+                    )
+                )
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+                return StructuralIndexIdentityLookup(IndexAvailability.CORRUPT)
+            availability = structural_index_identity_availability(identity, source)
+            if availability is IndexAvailability.READY:
+                binding = identity.binding
+                if binding.source_kind == "LIVE_SEGMENT":
+                    segment = self._get("sensor_pcap", binding.source_id)
+                    job = (
+                        self.get_job_summary(str(segment.get("analysis_job_id")))
+                        if segment is not None
+                        else None
+                    )
+                    object_key = (
+                        str(segment.get("object_key"))
+                        if segment and segment.get("object_key")
+                        else f"sensor-pcaps/{segment.get('sensor_id')}/{binding.source_id}.pcap"
+                        if segment
+                        else ""
+                    )
+                    canonical_matches = bool(
+                        segment
+                        and eligible_live_segment(job, segment)
+                        and segment.get("index_requested_at")
+                        and int(segment.get("size_bytes", -1)) == binding.source_size_bytes
+                        and segment.get("sha256") == binding.source_sha256
+                    )
+                else:
+                    object_key = f"captures/{binding.source_id}.pcap"
+                    canonical_matches = _job_matches_structural_binding(
+                        self.get_job_summary(binding.source_id), binding
+                    )
+                source_version = self.connection.execute(
+                    "SELECT source_kind,source_id,object_key,source_version_id,"
+                    "source_size_bytes,source_sha256 FROM pcap_capture_source_versions "
+                    "WHERE source_kind=? AND source_id=?",
+                    (binding.source_kind, binding.source_id),
+                ).fetchone()
+                if (
+                    not canonical_matches
+                    or source_version is None
+                    or tuple(source_version)
+                    != (
+                        binding.source_kind,
+                        binding.source_id,
+                        object_key,
+                        binding.source_version_id,
+                        binding.source_size_bytes,
+                        binding.source_sha256,
+                    )
+                ):
+                    availability = IndexAvailability.STALE
+            return StructuralIndexIdentityLookup(
+                availability,
+                identity if availability is IndexAvailability.READY else None,
+            )
 
     def delete_structural_indexes_for_source(
         self, source_id: str, *, source_kind: str = "PCAP_UPLOAD"

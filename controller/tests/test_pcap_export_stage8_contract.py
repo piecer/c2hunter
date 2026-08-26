@@ -8,7 +8,11 @@ from pydantic import ValidationError
 
 from c2hunter_controller.app import create_app
 from c2hunter_controller.config import Settings
-from c2hunter_controller.pcap_export_service import PcapExportExecutor, choose_execution_mode
+from c2hunter_controller.pcap_export_service import (
+    PcapExportDependencies,
+    PcapExportExecutor,
+    choose_execution_mode,
+)
 from c2hunter_controller.schemas import PcapExportCreate, PcapExportJobResponse
 
 
@@ -19,6 +23,18 @@ def test_shared_executor_owns_processing_body_outside_request_composition() -> N
     assert "def _create_pcap_export" not in app_source
     assert "dependencies.capture_writer" in executor_source
     assert "save_export_stream" in executor_source
+
+
+def test_indexed_match_factory_is_an_optional_shared_executor_dependency() -> None:
+    def sentinel(**_kwargs):
+        return None
+
+    dependencies = PcapExportDependencies(indexed_match_factory=sentinel)
+
+    assert dependencies.indexed_match_factory is sentinel
+    assert PcapExportDependencies().indexed_match_factory is None
+    executor_source = inspect.getsource(PcapExportExecutor.execute)
+    assert "indexed_match_factory" in executor_source
 
 
 def test_hybrid_admission_uses_exact_boundaries_and_unknown_is_async() -> None:

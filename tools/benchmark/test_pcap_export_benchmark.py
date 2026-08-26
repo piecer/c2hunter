@@ -117,6 +117,175 @@ class PcapExportBenchmarkTest(unittest.TestCase):
                 saved["workload"]["output_sha256"], report["workload"]["output_sha256"]
             )
 
+    def test_stage12_report_uses_production_factory_and_has_exact_schema(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = benchmark.run_stage12(
+                output_dir=Path(directory), packet_count=24, seed=31
+            )
+
+        self.assertEqual(report["schema_version"], 3)
+        self.assertEqual(
+            report["implementation"], "stage12-production-indexed-factory-v1"
+        )
+        descriptions = report["schema_descriptions"]
+        self.assertIn(
+            "final execution bytes avoided versus sequential",
+            descriptions["source_bytes_saved"],
+        )
+        self.assertIn("null", descriptions["indexed"])
+        self.assertIn("null", descriptions["parity"])
+        self.assertIn(
+            "candidate packet payload requests", descriptions["original_request_count"]
+        )
+        self.assertIn(
+            "complete admitted range plan", descriptions["coalesced_range_count"]
+        )
+        self.assertIn(
+            "range calls actually issued", descriptions["attempted_range_count"]
+        )
+        self.assertIn("bytes actually returned", descriptions["received_range_bytes"])
+        self.assertIn("authoritative final output", descriptions["final_artifact"])
+        self.assertEqual(
+            [item["workload"] for item in report["workloads"]],
+            [
+                "sparse",
+                "clustered",
+                "dense_fallback",
+                "multi_source_live",
+                "pcapng_multi_interface",
+                "range_limit_plus_one",
+                "short_read",
+                "version_drift",
+            ],
+        )
+        exact = {
+            "workload",
+            "path",
+            "fallback_reason",
+            "indexed_support_reason",
+            "plan_available",
+            "selected_packet_count",
+            "original_request_count",
+            "coalesced_range_count",
+            "selected_bytes",
+            "planned_range_bytes",
+            "attempted_range_count",
+            "attempted_range_bytes",
+            "received_range_bytes",
+            "fetched_bytes",
+            "source_bytes",
+            "source_bytes_saved",
+            "amplification",
+            "source_fraction",
+            "source_count",
+            "source_ids",
+            "range_source_ids",
+            "interface_count",
+            "sequential",
+            "indexed",
+            "final_artifact",
+            "parity",
+            "peak_rss_bytes",
+            "stages",
+        }
+        indexed_names = {
+            "sparse",
+            "clustered",
+            "multi_source_live",
+            "pcapng_multi_interface",
+        }
+        for item in report["workloads"]:
+            self.assertEqual(set(item), exact)
+            self.assertGreater(item["original_request_count"], 0)
+            self.assertGreater(item["selected_bytes"], 0)
+            self.assertEqual(
+                item["source_bytes_saved"],
+                0
+                if item["path"] == "fallback"
+                else max(0, item["source_bytes"] - item["fetched_bytes"]),
+            )
+            self.assertEqual(
+                item["source_fraction"],
+                item["fetched_bytes"] / max(1, item["source_bytes"]),
+            )
+            self.assertEqual(
+                set(item["sequential"]),
+                {"artifact_sha256", "artifact_size_bytes", "packet_count"},
+            )
+            self.assertEqual(
+                set(item["final_artifact"]),
+                {"artifact_sha256", "artifact_size_bytes", "packet_count"},
+            )
+            self.assertGreater(item["peak_rss_bytes"], 0)
+            if item["plan_available"]:
+                self.assertEqual(item["indexed_support_reason"], "supported")
+                self.assertIsInstance(item["coalesced_range_count"], int)
+                self.assertIsInstance(item["planned_range_bytes"], int)
+                self.assertEqual(
+                    item["amplification"],
+                    {
+                        "numerator": item["planned_range_bytes"],
+                        "denominator": max(1, item["selected_bytes"]),
+                        "value": item["planned_range_bytes"]
+                        / max(1, item["selected_bytes"]),
+                    },
+                )
+            else:
+                self.assertEqual(
+                    item["indexed_support_reason"], item["fallback_reason"]
+                )
+                self.assertIsNone(item["coalesced_range_count"])
+                self.assertIsNone(item["planned_range_bytes"])
+                self.assertIsNone(item["amplification"])
+            if item["workload"] in indexed_names:
+                self.assertEqual(item["path"], "indexed")
+                self.assertIsNotNone(item["indexed"])
+                self.assertEqual(item["final_artifact"], item["indexed"])
+                self.assertTrue(all(item["parity"].values()))
+                self.assertEqual(item["fetched_bytes"], item["received_range_bytes"])
+            else:
+                self.assertEqual(item["path"], "fallback")
+                self.assertIsNone(item["indexed"])
+                self.assertIsNone(item["parity"])
+                self.assertEqual(item["final_artifact"], item["sequential"])
+                self.assertEqual(item["source_bytes_saved"], 0)
+                self.assertGreaterEqual(item["fetched_bytes"], item["source_bytes"])
+        sparse, clustered = report["workloads"][:2]
+        self.assertTrue(sparse["plan_available"])
+        self.assertTrue(clustered["plan_available"])
+        self.assertLess(
+            clustered["coalesced_range_count"], clustered["original_request_count"]
+        )
+        multi_source = report["workloads"][3]
+        self.assertEqual(multi_source["source_count"], 2)
+        self.assertEqual(len(set(multi_source["source_ids"])), 2)
+        self.assertEqual(
+            set(multi_source["range_source_ids"]), set(multi_source["source_ids"])
+        )
+        self.assertGreaterEqual(multi_source["coalesced_range_count"], 2)
+        pcapng = report["workloads"][4]
+        self.assertEqual(pcapng["interface_count"], 2)
+        self.assertEqual(pcapng["indexed_support_reason"], "supported")
+        resource_cases = (report["workloads"][2], report["workloads"][5])
+        for item in resource_cases:
+            self.assertEqual(item["fallback_reason"], "resource_limit")
+            self.assertFalse(item["plan_available"])
+            self.assertEqual(item["attempted_range_count"], 0)
+            self.assertEqual(item["attempted_range_bytes"], 0)
+            self.assertEqual(item["received_range_bytes"], 0)
+        short_read, version_drift = report["workloads"][6:]
+        self.assertEqual(short_read["fallback_reason"], "range_short")
+        self.assertEqual(version_drift["fallback_reason"], "version_drift")
+        for item in (short_read, version_drift):
+            self.assertTrue(item["plan_available"])
+            self.assertGreater(item["attempted_range_count"], 0)
+            self.assertGreater(item["attempted_range_bytes"], 0)
+        self.assertGreater(short_read["received_range_bytes"], 0)
+        self.assertLess(
+            short_read["received_range_bytes"], short_read["attempted_range_bytes"]
+        )
+        self.assertEqual(version_drift["received_range_bytes"], 0)
+
     def test_seeded_workload_is_comparable_and_comparison_reports_ratios(self):
         with (
             tempfile.TemporaryDirectory() as first,

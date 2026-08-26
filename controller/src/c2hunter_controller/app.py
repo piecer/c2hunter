@@ -11,6 +11,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from time import perf_counter, sleep
 from typing import Annotated, Any, Literal, cast
@@ -111,6 +112,7 @@ from .pcap_export_service import (
     public_job,
     request_fingerprint,
 )
+from .pcap_indexed_export import create_indexed_match_factory_from_settings
 from .pcap_offset_index import build_offline_upload_index
 from .pcap_offset_index_metrics import PcapOffsetIndexMetrics
 from .pcap_stream import (
@@ -876,6 +878,7 @@ def create_app(
     misp_client: MispPublisher | None = None,
     ai_gateway: ModelGateway | None = None,
     ai_task_queue: AIAnalysisTaskQueue | None = None,
+    pcap_export_dependencies: PcapExportDependencies | None = None,
 ) -> FastAPI:
     config = settings or Settings()
     pcap_export_slots = threading.BoundedSemaphore(config.pcap_export_max_concurrent)
@@ -903,23 +906,40 @@ def create_app(
         )
     else:
         raise RuntimeError(f"unsupported database URL: {config.database_url.split(':', 1)[0]}")
-    pcap_export_queue = PcapExportQueue(repo)
+    registry = CollectorRegistry()
+    pcap_export_metrics = PcapExportMetrics(registry)
+    pcap_export_queue = PcapExportQueue(repo, metrics=pcap_export_metrics)
+    default_pcap_export_dependencies = PcapExportDependencies(
+        bounded_source_factory=lambda *args, **kwargs: open_bounded_verified_capture(
+            *args, **kwargs
+        ),
+        decoder_factory=lambda *args, **kwargs: open_export_capture(*args, **kwargs),
+        predicate_compiler=lambda *args, **kwargs: compile_packet_predicate(*args, **kwargs),
+        capture_writer=lambda *args, **kwargs: build_capture_to_sink(*args, **kwargs),
+        legacy_prefix_builder=lambda *args, **kwargs: bounded_pcap_prefix(*args, **kwargs),
+        legacy_parser=lambda *args, **kwargs: parse_pcap(*args, **kwargs),
+        legacy_filter=lambda *args, **kwargs: filter_records(*args, **kwargs),
+        legacy_capture_builder=lambda *args, **kwargs: build_capture_result(*args, **kwargs),
+        indexed_match_factory=(
+            create_indexed_match_factory_from_settings(repo, config)
+            if config.pcap_indexed_export_mode != "off"
+            else None
+        ),
+        rollout_observer=pcap_export_metrics.rollout_observer,
+        clock=lambda: datetime.now(UTC),
+    )
+    effective_pcap_export_dependencies = (
+        pcap_export_dependencies or default_pcap_export_dependencies
+    )
+    if effective_pcap_export_dependencies.rollout_observer is None:
+        effective_pcap_export_dependencies = replace(
+            effective_pcap_export_dependencies,
+            rollout_observer=pcap_export_metrics.rollout_observer,
+        )
     pcap_export_executor = PcapExportExecutor(
         repo,
         config,
-        PcapExportDependencies(
-            bounded_source_factory=lambda *args, **kwargs: open_bounded_verified_capture(
-                *args, **kwargs
-            ),
-            decoder_factory=lambda *args, **kwargs: open_export_capture(*args, **kwargs),
-            predicate_compiler=lambda *args, **kwargs: compile_packet_predicate(*args, **kwargs),
-            capture_writer=lambda *args, **kwargs: build_capture_to_sink(*args, **kwargs),
-            legacy_prefix_builder=lambda *args, **kwargs: bounded_pcap_prefix(*args, **kwargs),
-            legacy_parser=lambda *args, **kwargs: parse_pcap(*args, **kwargs),
-            legacy_filter=lambda *args, **kwargs: filter_records(*args, **kwargs),
-            legacy_capture_builder=lambda *args, **kwargs: build_capture_result(*args, **kwargs),
-            clock=lambda: datetime.now(UTC),
-        ),
+        effective_pcap_export_dependencies,
     )
     if flow_store is not None:
         flows = flow_store
@@ -1139,8 +1159,6 @@ def create_app(
         admin_token_sha256=config.admin_token_sha256,
     )
     rate_limiter = FixedWindowRateLimiter(config.rate_limit_window_seconds)
-    registry = CollectorRegistry()
-    pcap_export_queue.metrics = PcapExportMetrics(registry)
     pcap_offset_index_metrics = PcapOffsetIndexMetrics(registry)
     requests = Counter(
         "c2hunter_api_requests_total",
@@ -1224,6 +1242,9 @@ def create_app(
         "enqueue_failures": ai_enqueue_failures,
         "feedback": ai_feedback,
     }
+    app.state.pcap_export_metrics = pcap_export_metrics
+    app.state.pcap_export_executor = pcap_export_executor
+    app.state.metrics_registry = registry
     app.include_router(operations_router(repo, flows, work_queue, registry))
 
     @app.middleware("http")

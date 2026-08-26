@@ -22,9 +22,12 @@ from c2hunter_controller.pcap_offset_index import (
     CaptureSourceVersion,
     IndexAvailability,
     SourceIndexBinding,
+    StructuralIndexIdentityLookup,
     StructuralIndexLookup,
+    StructuralIndexParentIdentity,
     StructuralIndexSnapshot,
     structural_index_digest,
+    structural_index_identity,
 )
 from c2hunter_controller.pcap_posting_index import (
     PostingIndexAvailability,
@@ -38,6 +41,7 @@ from c2hunter_controller.pcap_posting_selection import (
     AnalysisPostingCandidateSet,
     PostingPacketCandidate,
     select_analysis_posting_candidates,
+    select_analysis_posting_candidates_from_snapshot,
 )
 
 
@@ -99,13 +103,14 @@ def _indexed_source(source_kind: str, source_id: str, capture: bytes) -> _Indexe
         digest,
     )
     scan = scan_structural_packet_index(io.BytesIO(capture), max_packets=100, max_interfaces=4)
+    capture_format = "PCAPNG" if capture[:4] == bytes.fromhex("0a0d0d0a") else "PCAP"
     binding = SourceIndexBinding(
         source_kind,
         source_id,
         version.source_version_id,
         len(capture),
         digest,
-        "PCAP",
+        capture_format,
     )
     parent = StructuralIndexSnapshot(
         f"structural:{source_id}",
@@ -133,9 +138,11 @@ class _FacadeRepository:
         self.candidates: dict[str, tuple[str, dict[str, Any]]] = {}
         self.snapshot_calls: list[tuple[str, dict[str, Any], dict[str, int]]] = []
         self.source_lookup_calls = 0
+        self.structural_lookup_calls: list[SourceIndexBinding] = []
+        self.structural_identity_lookup_calls: list[CaptureSourceVersion] = []
         self.posting_lookup_limits: list[PostingQueryLimits | None] = []
         self.posting_identity_lookup_calls: list[
-            tuple[CaptureSourceVersion, StructuralIndexSnapshot]
+            tuple[CaptureSourceVersion, StructuralIndexParentIdentity]
         ] = []
         manifest = [
             {
@@ -182,12 +189,26 @@ class _FacadeRepository:
         return self.get_capture_source_version(source_id)
 
     def get_structural_index(self, binding: SourceIndexBinding) -> StructuralIndexLookup:
+        self.structural_lookup_calls.append(binding)
         source = self.sources.get(binding.source_id)
         if source is None:
             return StructuralIndexLookup(IndexAvailability.MISSING)
         if binding != source.parent.binding:
             return StructuralIndexLookup(IndexAvailability.MISSING)
         return StructuralIndexLookup(IndexAvailability.READY, source.parent)
+
+    def get_structural_index_identity(
+        self, source_version: CaptureSourceVersion
+    ) -> StructuralIndexIdentityLookup:
+        self.structural_identity_lookup_calls.append(source_version)
+        source = self.sources.get(source_version.source_id)
+        if source is None:
+            return StructuralIndexIdentityLookup(IndexAvailability.MISSING)
+        if source_version != source.version:
+            return StructuralIndexIdentityLookup(IndexAvailability.STALE)
+        return StructuralIndexIdentityLookup(
+            IndexAvailability.READY, structural_index_identity(source.parent)
+        )
 
     def get_posting_index(
         self,
@@ -206,13 +227,15 @@ class _FacadeRepository:
     def get_posting_index_identity(
         self,
         source_version: CaptureSourceVersion,
-        parent: StructuralIndexSnapshot,
+        parent: StructuralIndexParentIdentity,
     ) -> PostingIndexIdentityLookup:
         self.posting_identity_lookup_calls.append((source_version, parent))
         source = self.sources.get(source_version.source_id)
         if source is None:
             return PostingIndexIdentityLookup(PostingIndexAvailability.MISSING)
-        if source_version != source.version or parent != source.parent:
+        if source_version != source.version or structural_index_identity(
+            parent
+        ) != structural_index_identity(source.parent):
             return PostingIndexIdentityLookup(PostingIndexAvailability.STALE)
         return PostingIndexIdentityLookup(
             PostingIndexAvailability.READY,
@@ -329,6 +352,39 @@ def test_upload_returns_typed_offset_free_candidates_and_exact_settings_limits()
             },
         )
     ]
+
+
+def test_snapshot_primitive_consumes_exact_supplied_manifest_without_resnapshot() -> None:
+    first = _indexed_source(
+        "LIVE_SEGMENT",
+        "first",
+        _capture(_udp_packet("10.0.0.1", "203.0.113.8", 50_000, 443)),
+    )
+    second = _indexed_source(
+        "LIVE_SEGMENT",
+        "second",
+        _capture(_udp_packet("10.0.0.2", "203.0.113.9", 50_001, 53)),
+    )
+    requested_job = {**_job("live"), "mode": "LIVE"}
+    repository = _FacadeRepository(requested_job, [(first, "a"), (second, "b")])
+    admitted = dict(repository.snapshot)
+    repository.snapshot = {**repository.snapshot, "source_generation": "0" * 64}
+
+    selected = select_analysis_posting_candidates_from_snapshot(
+        repository,
+        Settings(environment="test"),
+        requested_job=requested_job,
+        source_snapshot=admitted,
+        canonical_request={"port": 53},
+        candidate_id=None,
+    )
+
+    assert selected is not None
+    assert selected.source_generation == "f" * 64
+    assert [
+        (item.source_order, item.source_id, item.packet_index) for item in selected.candidates
+    ] == [(1, "second", 0)]
+    assert repository.snapshot_calls == []
 
 
 def test_missing_job_and_incomplete_live_raise_export_stable_errors() -> None:
@@ -972,16 +1028,18 @@ def test_source_parent_and_posting_replacement_during_selection_invalidate_froze
 
     repository = _FacadeRepository(_job(), [(source, "uploaded")])
     parent_reads = 0
-    original_parent = repository.get_structural_index
+    original_parent = repository.get_structural_index_identity
 
-    def replaced_parent(binding: SourceIndexBinding) -> StructuralIndexLookup:
+    def replaced_parent(
+        source_version: CaptureSourceVersion,
+    ) -> StructuralIndexIdentityLookup:
         nonlocal parent_reads
         parent_reads += 1
         if parent_reads == 1:
-            return original_parent(binding)
-        return StructuralIndexLookup(IndexAvailability.MISSING)
+            return original_parent(source_version)
+        return StructuralIndexIdentityLookup(IndexAvailability.MISSING)
 
-    monkeypatch.setattr(repository, "get_structural_index", replaced_parent)
+    monkeypatch.setattr(repository, "get_structural_index_identity", replaced_parent)
     assert (
         select_analysis_posting_candidates(
             repository,
@@ -997,7 +1055,7 @@ def test_source_parent_and_posting_replacement_during_selection_invalidate_froze
 
     def replaced_posting_identity(
         _source_version: CaptureSourceVersion,
-        _parent: StructuralIndexSnapshot,
+        _parent: StructuralIndexParentIdentity,
     ) -> PostingIndexIdentityLookup:
         return PostingIndexIdentityLookup(
             PostingIndexAvailability.READY,

@@ -16,6 +16,7 @@ from c2hunter_controller.pcap_offset_index import (
     CaptureSourceVersion,
     IndexAvailability,
     SourceIndexBinding,
+    StructuralIndexIdentity,
     structural_index_digest,
 )
 from c2hunter_controller.pcap_offset_index_queue import LiveIndexTask
@@ -55,6 +56,8 @@ class RecordingCursor:
     def fetchone(self) -> tuple[Any, ...] | None:
         if self.connection.calls:
             query = self.connection.calls[-1][0]
+            if "compact_structural_identity" in query:
+                return self.connection.structural_identity_row
             if "FROM controller_objects" in query and "kind='job'" in query:
                 return (self.connection.job_data,) if self.connection.job_data is not None else None
             if "FROM controller_objects" in query and "kind='sensor_pcap'" in query:
@@ -113,6 +116,7 @@ class RecordingConnection:
         self.source_version_row: tuple[Any, ...] | None = None
         self.owner_build_id: str | None = None
         self.ready_generation_row: tuple[Any, ...] | None = None
+        self.structural_identity_row: tuple[Any, ...] | None = None
         self.interfaces: list[tuple[Any, ...]] = []
         self.packets: list[tuple[Any, ...]] = []
         self.sensor_pcaps: list[tuple[Any, ...]] = []
@@ -211,6 +215,99 @@ def _source_version_row(
         binding.source_size_bytes,
         binding.source_sha256,
     )
+
+
+def _compact_identity_row(binding: SourceIndexBinding, *, state: str = "READY") -> tuple[Any, ...]:
+    return (
+        "build-1",
+        binding.source_kind,
+        binding.source_id,
+        binding.source_version_id,
+        binding.source_size_bytes,
+        binding.source_sha256,
+        binding.capture_format,
+        binding.schema_version,
+        binding.parser_contract_version,
+        datetime.now(UTC),
+        "b" * 64,
+        state,
+        100_000_000,
+        1_000_000,
+        *_source_version_row(binding),
+        _job(binding),
+        None,
+        None,
+        None,
+        None,
+    )
+
+
+def test_postgres_structural_identity_is_one_metadata_query_without_children_or_blob_io() -> None:
+    binding = _binding()
+    connection = RecordingConnection()
+    connection.structural_identity_row = _compact_identity_row(binding)
+    repository = _repository(connection)
+    repository.blob_store = cast(
+        MinioBlobStore,
+        SimpleNamespace(open=lambda *_args: pytest.fail("compact lookup performed object I/O")),
+    )
+    source = CaptureSourceVersion(*_source_version_row(binding))
+
+    lookup = repository.get_structural_index_identity(source)
+
+    row = cast(tuple[Any, ...], connection.structural_identity_row)
+    assert lookup.availability is IndexAvailability.READY
+    assert lookup.identity == StructuralIndexIdentity("build-1", binding, row[9], "b" * 64)
+    assert len(connection.calls) == 1
+    query, params = connection.calls[0]
+    assert params == (binding.source_kind, binding.source_id)
+    assert "pcap_offset_index_interfaces" not in query
+    assert "pcap_offset_index_packets" not in query
+    assert connection.commits == 1
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        (None, IndexAvailability.MISSING),
+        (_compact_identity_row(_binding(), state="STAGING"), IndexAvailability.CORRUPT),
+        (
+            (
+                *_compact_identity_row(_binding())[:17],
+                "other-version",
+                *_compact_identity_row(_binding())[18:],
+            ),
+            IndexAvailability.STALE,
+        ),
+        (
+            (
+                *_compact_identity_row(_binding())[:14],
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                *_compact_identity_row(_binding())[20:],
+            ),
+            IndexAvailability.STALE,
+        ),
+    ],
+)
+def test_postgres_structural_identity_preserves_missing_corrupt_and_stale_semantics(
+    row: tuple[Any, ...] | None, expected: IndexAvailability
+) -> None:
+    binding = _binding()
+    connection = RecordingConnection()
+    connection.structural_identity_row = row
+    repository = _repository(connection)
+
+    lookup = repository.get_structural_index_identity(
+        CaptureSourceVersion(*_source_version_row(binding))
+    )
+
+    assert lookup.availability is expected
+    assert lookup.identity is None
 
 
 def test_postgres_migration_uses_normalized_generation_interface_packet_owner_tables(

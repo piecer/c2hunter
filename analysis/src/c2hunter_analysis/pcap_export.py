@@ -168,8 +168,17 @@ class ExportCaptureDecoder:
                 raise PcapParseError(
                     "classic PCAP packet length exceeds original length or snap length"
                 )
-            timestamp = _timestamp(seconds + fraction / resolution)
-            projection = _project(raw, interface.link_type, self._networks)
+            timestamp = export_timestamp_from_ticks(
+                seconds * resolution + fraction,
+                numerator=1,
+                denominator=resolution,
+                offset_seconds=0,
+                classic_seconds=seconds,
+                classic_fraction=fraction,
+            )
+            projection = project_export_packet(
+                raw, link_type=interface.link_type, internal_networks=self._networks
+            )
             locator = PacketLocator(
                 self._source_id,
                 self._source_order,
@@ -345,16 +354,15 @@ class ExportCaptureDecoder:
                         or padded_length > body_length - 20
                     ):
                         raise PcapParseError("PCAPNG packet data is truncated or oversized")
-                    interface, timestamp_resolution = interfaces[interface_id]
+                    interface, _timestamp_resolution = interfaces[interface_id]
                     if captured_length > original_length or captured_length > interface.snaplen:
                         raise PcapParseError(
                             "PCAPNG packet length exceeds original length or interface snap length"
                         )
                     raw_timestamp = (high << 32) | low
-                    seconds = (
-                        raw_timestamp * timestamp_resolution + interface.timestamp_offset_seconds
+                    projection = project_export_packet(
+                        raw, link_type=interface.link_type, internal_networks=self._networks
                     )
-                    projection = _project(raw, interface.link_type, self._networks)
                     locator = PacketLocator(
                         self._source_id,
                         self._source_order,
@@ -366,7 +374,12 @@ class ExportCaptureDecoder:
                     )
                     count += 1
                     yield ExportPacket(
-                        _timestamp(seconds),
+                        export_timestamp_from_ticks(
+                            raw_timestamp,
+                            numerator=interface.timestamp_resolution_numerator,
+                            denominator=interface.timestamp_resolution_denominator,
+                            offset_seconds=interface.timestamp_offset_seconds,
+                        ),
                         *projection,
                         raw,
                         locator,
@@ -489,6 +502,105 @@ def _timestamp(seconds: float) -> datetime:
         return datetime.fromtimestamp(seconds, UTC)
     except (OverflowError, OSError, ValueError) as exc:
         raise PcapParseError("capture contains an invalid packet timestamp") from exc
+
+
+PacketProjection = tuple[
+    str | None,
+    str | None,
+    int | None,
+    int | None,
+    str | None,
+    Direction | None,
+    bool | None,
+    bool,
+]
+
+
+def export_timestamp_from_ticks(
+    raw_ticks: int,
+    *,
+    numerator: int,
+    denominator: int,
+    offset_seconds: int,
+    classic_seconds: int | None = None,
+    classic_fraction: int | None = None,
+) -> datetime:
+    """Convert structural timestamp metadata with sequential float semantics."""
+    if (
+        raw_ticks < 0
+        or numerator <= 0
+        or denominator <= 0
+        or (classic_seconds is None) != (classic_fraction is None)
+        or (classic_seconds is not None and classic_seconds < 0)
+        or (classic_fraction is not None and classic_fraction < 0)
+    ):
+        raise PcapParseError("capture contains invalid structural timestamp metadata")
+    if classic_seconds is not None and classic_fraction is not None:
+        if numerator != 1:
+            raise PcapParseError("capture contains invalid structural timestamp metadata")
+        return _timestamp(classic_seconds + classic_fraction / denominator + offset_seconds)
+    return _timestamp(raw_ticks * (numerator / denominator) + offset_seconds)
+
+
+def project_export_packet(
+    raw_packet_bytes: bytes,
+    *,
+    link_type: int,
+    internal_networks: Sequence[str] | tuple[Network, ...],
+) -> PacketProjection:
+    """Project one packet through the same decoder used by sequential export."""
+    networks = (
+        internal_networks
+        if all(isinstance(item, IPv4Network | IPv6Network) for item in internal_networks)
+        else _networks(internal_networks)  # type: ignore[arg-type]
+    )
+    return _project(raw_packet_bytes, link_type, networks)  # type: ignore[arg-type]
+
+
+def export_packet_from_structural_locator(
+    raw_packet_bytes: bytes,
+    *,
+    locator: PacketLocator,
+    interface: CaptureInterface,
+    original_length: int,
+    raw_timestamp_ticks: int,
+    internal_networks: Sequence[str] | tuple[Network, ...],
+) -> ExportPacket:
+    """Reconstruct the existing export packet shape from trusted structural metadata."""
+    if type(raw_packet_bytes) is not bytes or len(raw_packet_bytes) != locator.captured_length:
+        raise PcapParseError("selected packet bytes do not match structural captured length")
+    if (
+        locator.captured_length < 0
+        or original_length < locator.captured_length
+        or locator.captured_length > interface.snaplen
+    ):
+        raise PcapParseError("selected packet structural lengths are invalid")
+    projection = project_export_packet(
+        raw_packet_bytes,
+        link_type=interface.link_type,
+        internal_networks=internal_networks,
+    )
+    timestamp_kwargs: dict[str, int] = {}
+    if (
+        locator.data_offset == locator.record_offset + 16
+        and locator.framed_length == 16 + locator.captured_length
+    ):
+        seconds, fraction = divmod(raw_timestamp_ticks, interface.timestamp_resolution_denominator)
+        timestamp_kwargs = {"classic_seconds": seconds, "classic_fraction": fraction}
+    return ExportPacket(
+        export_timestamp_from_ticks(
+            raw_timestamp_ticks,
+            numerator=interface.timestamp_resolution_numerator,
+            denominator=interface.timestamp_resolution_denominator,
+            offset_seconds=interface.timestamp_offset_seconds,
+            **timestamp_kwargs,
+        ),
+        *projection,
+        raw_packet_bytes,
+        locator,
+        interface,
+        original_length,
+    )
 
 
 def _project(

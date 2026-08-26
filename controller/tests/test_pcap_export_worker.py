@@ -296,6 +296,8 @@ def test_worker_factory_executes_stored_canonical_request_with_shared_executor(m
     assert seen["payload"] == PcapExportCreate(job_id="analysis-1", port=443)
     assert seen["kwargs"]["export_id"] == "e1"
     assert seen["kwargs"]["source_snapshot"]["lease_token"]
+    assert callable(seen["kwargs"]["check_cancelled"])
+    assert seen["kwargs"]["check_deadline"] is seen["kwargs"]["check_cancelled"]
 
 
 def test_attempt_artifact_is_hidden_until_cas_and_removed_after_cas_loss(monkeypatch) -> None:

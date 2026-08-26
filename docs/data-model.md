@@ -114,7 +114,7 @@ Stage 11 posting generation은 canonical `PCAP_UPLOAD`와 eligible finalized ret
 
 Authoritative source-version row와 exact retained object key/backend version/size/SHA는 불변 build identity다. 특히 LIVE upload는 attempt별 immutable generation key를 사용하므로 duplicate-race loser나 과거 cleanup이 이후 같은 이름의 canonical source를 삭제할 수 없다. Canonical source/job 삭제는 posting intent/task/owner/generation/chunk를 source-bound cascade로 제거한다. Structural owner를 교체할 때는 old parent의 posting lifecycle과 child generations를 먼저 structural cascade로 제거해 서로 다른 parent의 metadata가 섞이지 않게 한다. Memory, SQLite, PostgreSQL adapter는 같은 intent/task, staging/publication, lookup/fallback, recovery, cleanup, source deletion 및 structural-replacement 계약을 구현한다.
 
-이 다섯 posting table과 Analysis/Candidate ordinal facade는 모두 internal-only다. Public REST/OpenAPI schema, response marker, offset/range read API를 추가하지 않으며 sync/async export는 Stage 12 전까지 posting lookup을 하지 않는다.
+이 다섯 posting table과 Analysis/Candidate ordinal facade는 모두 internal-only다. Stage 12는 이 ordinal을 기존 structural packet locator와 ephemeral bounded/coalesced range plan으로 변환하지만 locator/range plan을 저장하지 않는다. Public REST/OpenAPI/UI schema, response marker, offset/range read API 또는 새 persistence table/column을 추가하지 않는다. Active sparse path는 full source를 읽지 않고 immutable-version range만 읽으며 dense/unsafe plan은 sequential fallback한다.
 
 Lifecycle row는 접수 즉시 보이지만 artifact metadata는 verified publication을 이긴 terminal compare-and-set에서만 연결한다. Active/cancelled row는 artifact field를 만들지 않는다. Terminal cleanup은 expiry age, retained terminal row count, retained artifact byte total을 각각 독립적으로 제한한다. Staging orphan cleanup은 충분히 오래되고 lifecycle row가 참조하지 않는 attempt object만 삭제한다.
 

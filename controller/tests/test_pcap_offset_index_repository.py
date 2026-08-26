@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import struct
+from dataclasses import replace
 from datetime import UTC, datetime
+from typing import Any, cast
 
 import pytest
 from c2hunter_analysis.pcap_index import StructuralInterfaceEntry, StructuralPacketEntry
@@ -13,6 +15,7 @@ from c2hunter_controller.pcap_offset_index import (
     SourceIndexBinding,
     StructuralIndexSnapshot,
     structural_index_digest,
+    structural_index_identity,
     validate_structural_index,
 )
 from c2hunter_controller.repositories import MemoryRepository, SQLiteRepository
@@ -73,6 +76,63 @@ def test_validator_accepts_full_uint64_pcapng_raw_timestamp_ticks(raw_ticks: int
     assert validate_structural_index(snapshot)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("section_index", -1),
+        ("section_index", True),
+        ("interface_id", -1),
+        ("interface_id", True),
+        ("interface_ordinal", True),
+        ("link_type", -1),
+        ("link_type", 1 << 16),
+        ("link_type", True),
+        ("snaplen", 0),
+        ("snaplen", 16 * 1024 * 1024 + 1),
+        ("snaplen", True),
+        ("timestamp_resolution_numerator", 0),
+        ("timestamp_resolution_numerator", True),
+        ("timestamp_resolution_denominator", 0),
+        ("timestamp_resolution_denominator", True),
+        ("timestamp_offset_seconds", True),
+        ("timestamp_offset_seconds", -(1 << 63) - 1),
+        ("timestamp_offset_seconds", 1 << 63),
+    ],
+)
+def test_validator_rejects_digest_consistent_malformed_interface_metadata(
+    field: str, value: int
+) -> None:
+    binding = _binding()
+    interface, packet = _rows()
+    malformed = replace(interface, **{field: value})
+    snapshot = StructuralIndexSnapshot(
+        "malformed",
+        binding,
+        datetime.now(UTC),
+        structural_index_digest(binding, (malformed,), (packet,)),
+        (malformed,),
+        (packet,),
+    )
+
+    assert not validate_structural_index(snapshot)
+
+
+def test_validator_rejects_digest_consistent_packet_with_unavailable_interface() -> None:
+    binding = _binding()
+    interface, packet = _rows()
+    unavailable = replace(packet, interface_id=1)
+    snapshot = StructuralIndexSnapshot(
+        "unavailable",
+        binding,
+        datetime.now(UTC),
+        structural_index_digest(binding, (interface,), (unavailable,)),
+        (interface,),
+        (unavailable,),
+    )
+
+    assert not validate_structural_index(snapshot)
+
+
 @pytest.mark.parametrize("repository_kind", ["memory", "sqlite"])
 @pytest.mark.parametrize("raw_ticks", [(1 << 63) - 1, 1 << 63, (1 << 64) - 1])
 def test_full_uint64_pcapng_ticks_round_trip_exactly(
@@ -126,6 +186,125 @@ def test_memory_staging_is_invisible_then_publication_is_atomic() -> None:
     assert lookup.availability is IndexAvailability.READY
     assert lookup.snapshot is not None
     assert lookup.snapshot.packets == (packet,)
+
+
+@pytest.mark.parametrize("repository_kind", ["memory", "sqlite"])
+def test_structural_identity_lookup_is_compact_exact_and_never_reads_children(
+    tmp_path, repository_kind: str
+) -> None:
+    repository = (
+        MemoryRepository()
+        if repository_kind == "memory"
+        else SQLiteRepository(tmp_path / "structural-identity.sqlite")
+    )
+    binding = _binding()
+    repository.create_job(_job(binding))
+    repository.save_job_capture(binding.source_id, _CAPTURE)
+    interface, packet = _rows()
+    repository.begin_structural_index("ready", binding, datetime.now(UTC))
+    repository.stage_structural_index_packets("ready", (packet,))
+    assert repository.publish_structural_index("ready", binding, (interface,), 1)
+    full = repository.get_structural_index(binding)
+    assert full.snapshot is not None
+    sql: list[str] = []
+    if repository_kind == "sqlite":
+        repository.connection.set_trace_callback(sql.append)
+    else:
+        repository.get_structural_index = lambda _binding: pytest.fail(  # type: ignore[method-assign]
+            "compact identity lookup rematerialized the full structural snapshot"
+        )
+
+    source = repository.get_capture_source_version(binding.source_id)
+    assert source is not None
+    compact = repository.get_structural_index_identity(source)
+
+    assert compact.availability is IndexAvailability.READY
+    assert compact.identity == structural_index_identity(full.snapshot)
+    if repository_kind == "sqlite":
+        assert not any("pcap_offset_index_packets" in query for query in sql)
+        assert not any("pcap_offset_index_interfaces" in query for query in sql)
+        assert len(sql) <= 4
+        repository.connection.set_trace_callback(None)
+    repository.close()
+
+
+@pytest.mark.parametrize("repository_kind", ["memory", "sqlite"])
+def test_structural_identity_lookup_preserves_missing_stale_and_corrupt_semantics(
+    tmp_path, repository_kind: str
+) -> None:
+    repository = (
+        MemoryRepository()
+        if repository_kind == "memory"
+        else SQLiteRepository(tmp_path / "structural-identity-semantics.sqlite")
+    )
+    binding = _binding()
+    repository.create_job(_job(binding))
+    repository.save_job_capture(binding.source_id, _CAPTURE)
+    source = repository.get_capture_source_version(binding.source_id)
+    assert source is not None
+    assert (
+        repository.get_structural_index_identity(source).availability is IndexAvailability.MISSING
+    )
+    interface, packet = _rows()
+    repository.begin_structural_index("ready", binding, datetime.now(UTC))
+    repository.stage_structural_index_packets("ready", (packet,))
+    assert repository.publish_structural_index("ready", binding, (interface,), 1)
+
+    stale_source = replace(source, source_version_id="s3-version:replacement")
+    assert (
+        repository.get_structural_index_identity(stale_source).availability
+        is IndexAvailability.STALE
+    )
+
+    if isinstance(repository, MemoryRepository):
+        snapshot = repository.structural_index_generations["ready"]
+        repository.structural_index_generations["ready"] = replace(
+            snapshot, index_sha256="not-a-digest"
+        )
+    else:
+        repository.connection.execute(
+            "UPDATE pcap_offset_index_generations SET index_sha256=? WHERE build_id=?",
+            ("not-a-digest", "ready"),
+        )
+        repository.connection.commit()
+    assert (
+        repository.get_structural_index_identity(source).availability is IndexAvailability.CORRUPT
+    )
+    repository.close()
+
+
+def test_memory_structural_identity_fence_never_touches_huge_child_collections() -> None:
+    class ExplodingChildren:
+        def __iter__(self) -> Any:
+            pytest.fail("compact identity fence iterated structural children")
+
+        def __len__(self) -> int:
+            pytest.fail("compact identity fence counted structural children")
+
+        def __deepcopy__(self, _memo: object) -> Any:
+            pytest.fail("compact identity fence copied structural children")
+
+    repository = MemoryRepository()
+    binding = _binding()
+    repository.create_job(_job(binding))
+    repository.save_job_capture(binding.source_id, _CAPTURE)
+    interface, packet = _rows()
+    repository.begin_structural_index("ready", binding, datetime.now(UTC))
+    repository.stage_structural_index_packets("ready", (packet,))
+    assert repository.publish_structural_index("ready", binding, (interface,), 1)
+    snapshot = repository.structural_index_generations["ready"]
+    repository.structural_index_generations["ready"] = replace(
+        snapshot,
+        interfaces=cast(Any, ExplodingChildren()),
+        packets=cast(Any, ExplodingChildren()),
+    )
+    source = repository.get_capture_source_version(binding.source_id)
+    assert source is not None
+
+    lookup = repository.get_structural_index_identity(source)
+
+    assert lookup.availability is IndexAvailability.READY
+    assert lookup.identity == structural_index_identity(snapshot)
 
 
 @pytest.mark.parametrize("repository_kind", ["memory", "sqlite"])

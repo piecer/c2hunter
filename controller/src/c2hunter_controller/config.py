@@ -79,6 +79,28 @@ class Settings(BaseSettings):
     pcap_posting_index_metrics_enabled: bool = True
     pcap_posting_index_backfill_enabled: bool = False
     pcap_posting_index_backfill_batch_size: int = Field(default=100, gt=0, le=10_000)
+    # Stage 12 shadow is sampled; active applies to every eligible export.
+    pcap_indexed_export_mode: Literal["off", "shadow", "active"] = "off"
+    pcap_indexed_export_canary_basis_points: int = Field(default=0, ge=0, le=10_000)
+    pcap_indexed_export_max_sources: int = Field(default=128, gt=0, le=1_024)
+    pcap_indexed_export_max_gap_bytes: int = Field(default=65_536, gt=0, le=(1 << 63) - 1)
+    pcap_indexed_export_max_range_bytes: int = Field(
+        default=8 * 1024 * 1024, gt=0, le=(1 << 63) - 1
+    )
+    pcap_indexed_export_max_ranges: int = Field(default=4_096, gt=0, le=(1 << 63) - 1)
+    pcap_indexed_export_max_total_fetched_bytes: int = Field(
+        default=256 * 1024 * 1024, gt=0, le=(1 << 63) - 1
+    )
+    pcap_indexed_export_max_amplification_numerator: int = Field(default=4, gt=0, le=(1 << 63) - 1)
+    pcap_indexed_export_max_amplification_denominator: int = Field(
+        default=1, gt=0, le=(1 << 63) - 1
+    )
+    pcap_indexed_export_max_source_fraction_numerator: int = Field(
+        default=1, gt=0, le=(1 << 63) - 1
+    )
+    pcap_indexed_export_max_source_fraction_denominator: int = Field(
+        default=2, gt=0, le=(1 << 63) - 1
+    )
     pcap_export_max_bytes: int | None = Field(default=None, ge=24)
     pcap_export_scan_max_bytes: int | None = Field(default=None, gt=0)
     pcap_export_scan_max_packets: int | None = Field(default=None, gt=0)
@@ -209,6 +231,28 @@ class Settings(BaseSettings):
             raise ValueError("PCAP posting index timeout must exceed the heartbeat interval")
         if self.pcap_posting_index_worker_concurrency > self.pcap_posting_index_queue_capacity:
             raise ValueError("PCAP posting index worker concurrency must not exceed queue capacity")
+        if self.pcap_indexed_export_mode != "off" and not self.pcap_posting_index_enabled:
+            raise ValueError("indexed PCAP export requires the posting index")
+        if self.pcap_indexed_export_mode == "shadow":
+            if self.pcap_indexed_export_canary_basis_points == 0:
+                raise ValueError("indexed PCAP export shadow mode requires a non-zero canary")
+        elif self.pcap_indexed_export_canary_basis_points != 0:
+            raise ValueError("indexed PCAP export canary is only valid in shadow mode")
+        if (
+            self.pcap_indexed_export_max_range_bytes
+            > self.pcap_indexed_export_max_total_fetched_bytes
+        ):
+            raise ValueError("indexed PCAP export range limit must not exceed the total limit")
+        if (
+            self.pcap_indexed_export_max_amplification_numerator
+            < self.pcap_indexed_export_max_amplification_denominator
+        ):
+            raise ValueError("indexed PCAP export amplification must be at least one")
+        if (
+            self.pcap_indexed_export_max_source_fraction_numerator
+            > self.pcap_indexed_export_max_source_fraction_denominator
+        ):
+            raise ValueError("indexed PCAP export source fraction must not exceed one")
         if self.pcap_export_lease_renew_seconds * 2 > self.pcap_export_lease_seconds:
             raise ValueError("pcap export lease renewal must be at most half the lease duration")
         if self.pcap_export_job_timeout_seconds <= self.pcap_export_lease_seconds:

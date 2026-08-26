@@ -35,6 +35,9 @@ Controller API (FastAPI)
   └── Dedicated PCAP Export Worker
        ├── PostgreSQL durable export queue + lease/retry/recovery
        ├── snapshot-bound scan/filter/serialize
+       ├── optional Stage 12 posting→structural locator→bounded range plan
+       ├── active sparse exact-range read / dense-or-failure sequential fallback
+       ├── shadow sequential-authoritative parity comparison
        ├── metadata-last object publication
        └── terminal retention + staging orphan cleanup
 
