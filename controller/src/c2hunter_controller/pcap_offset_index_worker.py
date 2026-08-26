@@ -20,9 +20,28 @@ from .pcap_offset_index import (
     build_live_segment_index,
 )
 from .pcap_offset_index_metrics import PcapOffsetIndexMetrics
+from .pcap_posting_index_metrics import PcapPostingIndexMetrics
+from .pcap_posting_index_worker import (
+    PcapPostingIndexWorker,
+    PostingIndexWorkerConfig,
+    PostingWorkerControl,
+    create_posting_operation_builder,
+)
 from .production import MinioBlobStore, PostgresRepository
 
 logger = logging.getLogger(__name__)
+
+
+class _SharedFatalEvent(Event):
+    """A fatal transition synchronously closes the process claim gate."""
+
+    def __init__(self, stopped: Event) -> None:
+        super().__init__()
+        self._stopped = stopped
+
+    def set(self) -> None:
+        self._stopped.set()
+        super().set()
 
 
 class PcapOffsetIndexWorker:
@@ -71,6 +90,7 @@ class PcapOffsetIndexWorker:
         self.heartbeat_repository_factory = heartbeat_repository_factory
         self.fatal_stop = False
         self.fatal_event = fatal_event
+        self._orphan: threading.Thread | None = None
 
     def _metric(self, method: str, *args: Any) -> None:
         if self.metrics is None:
@@ -246,6 +266,7 @@ class PcapOffsetIndexWorker:
             if not completed_in_time or self.monotonic() - started >= self.job_timeout_seconds:
                 cancelled.set()
                 self.fatal_stop = operation.is_alive()
+                self._orphan = operation if operation.is_alive() else None
                 if self.fatal_stop and self.fatal_event is not None:
                     self.fatal_event.set()
                 transient, code, reason = True, "INDEX_BUILD_TIMEOUT", "timeout"
@@ -326,6 +347,9 @@ def create_pcap_offset_index_worker(
             max_packets=max_packets,
             max_interfaces=settings.pcap_offset_index_max_interfaces,
             batch_size=settings.pcap_offset_index_batch_size,
+            request_postings=settings.pcap_posting_index_enabled,
+            posting_queue_capacity=settings.pcap_posting_index_queue_capacity,
+            posting_max_attempts=settings.pcap_posting_index_max_attempts,
             **lease,
         )
 
@@ -391,48 +415,133 @@ def main(argv: list[str] | None = None) -> int:
     if command in {"readiness", "healthcheck"}:
         repository.close()
         return 0
-    registry = CollectorRegistry()
-    metrics = PcapOffsetIndexMetrics(registry)
-    start_http_server(settings.pcap_offset_index_metrics_port, registry=registry)
     stopped = Event()
-    fatal = Event()
-    signal.signal(signal.SIGTERM, lambda *_args: stopped.set())
-    signal.signal(signal.SIGINT, lambda *_args: stopped.set())
-    repositories = [repository]
-    repositories.extend(
-        repository.for_background_worker()
-        for _ in range(settings.pcap_offset_index_worker_concurrency - 1)
-    )
-    workers = [
-        create_pcap_offset_index_worker(item, settings, metrics, fatal) for item in repositories
-    ]
-    threads = [
-        threading.Thread(
-            target=worker.run,
-            args=(stopped,),
-            name=f"pcap-offset-index-worker-{index + 1}",
-            daemon=True,
-        )
-        for index, worker in enumerate(workers)
-    ]
+    fatal = _SharedFatalEvent(stopped)
+    control = PostingWorkerControl(stopped, fatal)
+    repositories: list[Any] = [repository]
+    workers: list[Any] = []
+    threads: list[threading.Thread] = []
+    started_threads: list[threading.Thread] = []
+    startup_complete = False
     try:
+        registry = CollectorRegistry()
+        offset_metrics = PcapOffsetIndexMetrics(registry)
+        posting_metrics = (
+            PcapPostingIndexMetrics(registry)
+            if getattr(settings, "pcap_posting_index_metrics_enabled", False)
+            else None
+        )
+        start_http_server(settings.pcap_offset_index_metrics_port, registry=registry)
+        signal.signal(signal.SIGTERM, lambda *_args: stopped.set())
+        signal.signal(signal.SIGINT, lambda *_args: stopped.set())
+
+        offset_concurrency = (
+            settings.pcap_offset_index_worker_concurrency
+            if getattr(settings, "pcap_offset_index_live_enabled", True)
+            else 0
+        )
+        posting_concurrency = (
+            settings.pcap_posting_index_worker_concurrency
+            if getattr(settings, "pcap_posting_index_enabled", False)
+            else 0
+        )
+        repository_count = offset_concurrency + posting_concurrency
+        repositories.extend(
+            repository.for_background_worker() for _ in range(max(0, repository_count - 1))
+        )
+        offset_repositories = repositories[:offset_concurrency]
+        posting_repositories = repositories[offset_concurrency:repository_count]
+
+        offset_workers = [
+            create_pcap_offset_index_worker(item, settings, offset_metrics, fatal)
+            for item in offset_repositories
+        ]
+        posting_workers: list[Any] = []
+        if posting_repositories:
+            operation_builder = create_posting_operation_builder(settings)
+            posting_config = PostingIndexWorkerConfig(
+                lease_seconds=settings.pcap_posting_index_lease_seconds,
+                renew_seconds=settings.pcap_posting_index_heartbeat_interval_seconds,
+                retry_base_seconds=settings.pcap_posting_index_retry_base_seconds,
+                job_timeout_seconds=settings.pcap_posting_index_operation_timeout_seconds,
+                queue_capacity=settings.pcap_posting_index_queue_capacity,
+                max_attempts=settings.pcap_posting_index_max_attempts,
+                reconcile_batch_size=settings.pcap_posting_index_reconcile_batch_size,
+                backfill_enabled=settings.pcap_posting_index_backfill_enabled,
+                backfill_batch_size=settings.pcap_posting_index_backfill_batch_size,
+                staging_max_age_seconds=settings.pcap_posting_index_staging_max_age_seconds,
+                staging_cleanup_batch_size=settings.pcap_posting_index_staging_cleanup_batch_size,
+                terminal_retention_seconds=settings.pcap_posting_index_terminal_retention_seconds,
+                terminal_cleanup_batch_size=settings.pcap_posting_index_terminal_cleanup_batch_size,
+                reconcile_interval_seconds=settings.pcap_posting_index_reconcile_interval_seconds,
+            )
+            posting_workers = [
+                PcapPostingIndexWorker(
+                    item,
+                    operation_builder,
+                    config=posting_config,
+                    metrics=posting_metrics,
+                    control=control,
+                )
+                for item in posting_repositories
+            ]
+        workers = [*offset_workers, *posting_workers]
+        threads = [
+            threading.Thread(
+                target=worker.run,
+                args=(stopped,),
+                kwargs=(
+                    {"idle_seconds": settings.pcap_posting_index_poll_interval_seconds}
+                    if index >= len(offset_workers)
+                    else {}
+                ),
+                name=(
+                    f"pcap-offset-index-worker-{index + 1}"
+                    if index < len(offset_workers)
+                    else f"pcap-posting-index-worker-{index - len(offset_workers) + 1}"
+                ),
+                daemon=True,
+            )
+            for index, worker in enumerate(workers)
+        ]
         for thread in threads:
             thread.start()
-        while any(thread.is_alive() for thread in threads) and not stopped.is_set():
-            if fatal.wait(0.05):
-                stopped.set()
+            started_threads.append(thread)
+        startup_complete = True
+        while any(thread.is_alive() for thread in threads):
+            if fatal.is_set() or any(
+                bool(getattr(worker, "fatal_stop", False)) for worker in workers
+            ):
+                fatal.set()
                 break
+            if stopped.wait(0.05):
+                break
+            if any(not thread.is_alive() for thread in threads):
+                logger.error("PCAP index worker exited before process shutdown")
+                fatal.set()
+                break
+    except Exception:
+        logger.exception("PCAP index worker process startup failed")
+        fatal.set()
     finally:
         stopped.set()
         deadline = time.monotonic() + settings.pcap_offset_index_shutdown_grace_seconds
-        for thread in threads:
+        for thread in started_threads:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
-        for thread, item in zip(threads, repositories, strict=True):
-            if thread.is_alive():
-                logger.error("PCAP offset index worker exceeded shutdown grace; lease will recover")
-            elif not fatal.is_set():
+        alive = {thread for thread in started_threads if thread.is_alive()}
+        if alive:
+            logger.error("PCAP index worker exceeded shutdown grace; lease will recover")
+        for index, item in enumerate(repositories):
+            owned_thread = threads[index] if index < len(threads) else None
+            if owned_thread in alive or (
+                fatal.is_set() and startup_complete and owned_thread in started_threads
+            ):
+                continue
+            try:
                 item.close()
-    return 2 if fatal.is_set() else 0
+            except Exception:
+                logger.warning("PCAP index worker repository close failed", exc_info=True)
+    return 2 if fatal.is_set() or any(thread.is_alive() for thread in started_threads) else 0
 
 
 if __name__ == "__main__":

@@ -23,6 +23,11 @@ from c2hunter_analysis.pcap import (
     parse_pcap,
 )
 from c2hunter_analysis.pcap_export import open_export_capture
+from c2hunter_analysis.pcap_postings import (
+    PCAP_FILTER_CONTRACT_VERSION,
+    PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+    PCAP_POSTING_INDEX_SCHEMA_VERSION,
+)
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -2886,6 +2891,12 @@ def create_app(
             max_packets=cast(int, config.pcap_offset_index_max_packets),
             max_interfaces=config.pcap_offset_index_max_interfaces,
             batch_size=config.pcap_offset_index_batch_size,
+            request_postings=config.pcap_posting_index_enabled,
+            posting_schema_version=PCAP_POSTING_INDEX_SCHEMA_VERSION,
+            posting_parser_contract_version=PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+            filter_contract_version=PCAP_FILTER_CONTRACT_VERSION,
+            posting_queue_capacity=config.pcap_posting_index_queue_capacity,
+            posting_max_attempts=config.pcap_posting_index_max_attempts,
         )
         del uploaded_bytes
         if isinstance(work_queue, MemoryControllerQueue):

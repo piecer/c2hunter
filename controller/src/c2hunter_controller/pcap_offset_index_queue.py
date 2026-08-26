@@ -113,15 +113,17 @@ def decode_task(raw: str) -> LiveIndexTask:
 
 
 def _tasks(repository: Any) -> dict[str, LiveIndexTask]:
-    return repository.live_segment_index_tasks
+    tasks: dict[str, LiveIndexTask] = repository.live_segment_index_tasks
+    return tasks
 
 
 def _segment(repository: Any, source_id: str) -> dict[str, Any] | None:
-    return (
+    segment: dict[str, Any] | None = (
         repository._get("sensor_pcap", source_id)
         if hasattr(repository, "connection")
         else deepcopy(repository.sensor_pcaps.get(source_id))
     )
+    return segment
 
 
 def _mark_intent(repository: Any, source_id: str, state: str) -> None:

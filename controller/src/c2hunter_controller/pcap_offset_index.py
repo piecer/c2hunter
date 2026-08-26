@@ -19,6 +19,11 @@ from c2hunter_analysis.pcap_index import (
     StructuralPacketEntry,
     scan_structural_packet_index,
 )
+from c2hunter_analysis.pcap_postings import (
+    PCAP_FILTER_CONTRACT_VERSION,
+    PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+    PCAP_POSTING_INDEX_SCHEMA_VERSION,
+)
 
 logger = logging.getLogger(__name__)
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -131,6 +136,11 @@ class StructuralIndexRepository(Protocol):
         binding: SourceIndexBinding,
         interfaces: tuple[StructuralInterfaceEntry, ...],
         packet_count: int,
+        *,
+        request_postings: bool = False,
+        posting_schema_version: int = PCAP_POSTING_INDEX_SCHEMA_VERSION,
+        posting_parser_contract_version: int = PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+        filter_contract_version: int = PCAP_FILTER_CONTRACT_VERSION,
     ) -> bool: ...
     def abort_structural_index(self, build_id: str) -> None: ...
 
@@ -230,6 +240,12 @@ def build_offline_upload_index(
     max_packets: int,
     max_interfaces: int,
     batch_size: int,
+    request_postings: bool = False,
+    posting_schema_version: int = PCAP_POSTING_INDEX_SCHEMA_VERSION,
+    posting_parser_contract_version: int = PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+    filter_contract_version: int = PCAP_FILTER_CONTRACT_VERSION,
+    posting_queue_capacity: int = 100,
+    posting_max_attempts: int = 3,
 ) -> bool:
     """Best-effort synchronous build for one canonical retained upload."""
     job = repository.get_job_summary(job_id)
@@ -253,7 +269,7 @@ def build_offline_upload_index(
             source_version is None
             or source_version.source_kind != "PCAP_UPLOAD"
             or source_version.source_id != job_id
-            or source_version.object_key != f"captures/{job_id}.pcap"
+            or not source_version.object_key
             or source_version.source_size_bytes != int(source_metadata["size_bytes"])
             or source_version.source_sha256 != str(source_metadata["sha256"])
         ):
@@ -284,9 +300,29 @@ def build_offline_upload_index(
             or result.capture_format != binding.capture_format
         ):
             return False
-        return repository.publish_structural_index(
-            build_id, binding, result.interfaces, result.packet_count
+        published = repository.publish_structural_index(
+            build_id,
+            binding,
+            result.interfaces,
+            result.packet_count,
+            request_postings=request_postings,
+            posting_schema_version=posting_schema_version,
+            posting_parser_contract_version=posting_parser_contract_version,
+            filter_contract_version=filter_contract_version,
         )
+        if not published:
+            return False
+        if request_postings:
+            try:
+                repository.admit_posting_index(  # type: ignore[attr-defined]
+                    "PCAP_UPLOAD",
+                    job_id,
+                    capacity=posting_queue_capacity,
+                    max_attempts=posting_max_attempts,
+                )
+            except Exception:
+                logger.warning("Posting index post-commit admission unavailable", exc_info=True)
+        return True
     except Exception:
         logger.warning("Offline structural index build unavailable", exc_info=True)
         return False
@@ -312,6 +348,12 @@ def build_live_segment_index(
     attempt: int | None = None,
     lease_token: str | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    request_postings: bool = False,
+    posting_schema_version: int = PCAP_POSTING_INDEX_SCHEMA_VERSION,
+    posting_parser_contract_version: int = PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+    filter_contract_version: int = PCAP_FILTER_CONTRACT_VERSION,
+    posting_queue_capacity: int = 100,
+    posting_max_attempts: int = 3,
 ) -> bool:
     """Build and atomically publish one immutable marked LIVE segment."""
     source = None
@@ -417,11 +459,27 @@ def build_live_segment_index(
                 source_version,
                 attempt=attempt,
                 lease_token=lease_token,
+                request_postings=request_postings,
+                posting_schema_version=posting_schema_version,
+                posting_parser_contract_version=posting_parser_contract_version,
+                filter_contract_version=filter_contract_version,
             )
         except Exception as exc:
             raise LiveIndexTransientError("INDEX_PUBLICATION_UNAVAILABLE") from exc
         if not published:
             raise LiveIndexPermanentError("INDEX_PUBLICATION_REJECTED")
+        if request_postings:
+            try:
+                repository.admit_posting_index(
+                    "LIVE_SEGMENT",
+                    segment_id,
+                    capacity=posting_queue_capacity,
+                    max_attempts=posting_max_attempts,
+                )
+            except Exception:
+                logger.warning(
+                    "LIVE posting index post-commit admission unavailable", exc_info=True
+                )
         return True
     finally:
         if begun:

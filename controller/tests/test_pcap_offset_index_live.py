@@ -73,7 +73,9 @@ def _save(repository: MemoryRepository | SQLiteRepository, content: bytes) -> No
     assert status == "OK" and stored is not None
 
 
-def _build(repository: MemoryRepository | SQLiteRepository) -> bool:
+def _build(
+    repository: MemoryRepository | SQLiteRepository, *, request_postings: bool = False
+) -> bool:
     repository.admit_live_segment_index("segment-1", capacity=1, max_attempts=3)
     task = repository.claim_live_segment_index(
         now=datetime.now(UTC) + timedelta(seconds=1), lease_seconds=120
@@ -87,6 +89,9 @@ def _build(repository: MemoryRepository | SQLiteRepository) -> bool:
         batch_size=1,
         attempt=task.attempt,
         lease_token=task.lease_token,
+        request_postings=request_postings,
+        posting_queue_capacity=1,
+        posting_max_attempts=3,
     )
 
 
@@ -114,6 +119,82 @@ def test_live_builder_binds_observed_version_and_publishes_segment_local_index(
     assert lookup.snapshot is not None and [
         packet.packet_index for packet in lookup.snapshot.packets
     ] == [0]
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+def test_live_publication_atomically_requests_and_admits_exact_posting(
+    kind: str, tmp_path: Path
+) -> None:
+    repository = _repository(kind, tmp_path)
+    _save(repository, _pcap())
+
+    assert _build(repository, request_postings=True)
+
+    intent = repository.get_posting_index_intent("LIVE_SEGMENT", "segment-1")
+    task = repository.get_posting_index_task("LIVE_SEGMENT", "segment-1")
+    owner = (
+        repository.structural_index_owners[("LIVE_SEGMENT", "segment-1")]
+        if kind == "memory"
+        else repository.connection.execute(
+            "SELECT build_id FROM pcap_offset_index_owners "
+            "WHERE source_kind='LIVE_SEGMENT' AND source_id='segment-1'"
+        ).fetchone()[0]
+    )
+    assert intent is not None and intent.spec.parent_structural_build_id == owner
+    assert task is not None and task.spec.identity == intent.spec.identity
+
+
+def test_live_postcommit_admission_failure_keeps_source_ack_and_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = MemoryRepository()
+    _save(repository, _pcap())
+    monkeypatch.setattr(
+        repository,
+        "admit_posting_index",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("queue unavailable")),
+    )
+
+    assert _build(repository, request_postings=True)
+    assert repository.get_sensor_pcap("segment-1") is not None
+    assert repository.get_live_segment_index_task("segment-1").status == "COMPLETED"
+    assert repository.get_posting_index_intent("LIVE_SEGMENT", "segment-1") is not None
+    assert repository.get_posting_index_task("LIVE_SEGMENT", "segment-1") is None
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+def test_live_marker_exception_rolls_back_ready_owner_and_ack(kind: str, tmp_path: Path) -> None:
+    repository = _repository(kind, tmp_path)
+    _save(repository, _pcap())
+    if kind == "memory":
+
+        class FailingMarkers(dict):
+            def __setitem__(self, key: object, value: object) -> None:
+                raise RuntimeError("marker write failed")
+
+        repository.posting_index_intents = FailingMarkers()
+    else:
+        repository.connection.execute(
+            "CREATE TRIGGER fail_posting_marker BEFORE INSERT ON pcap_posting_index_intents "
+            "BEGIN SELECT RAISE(ABORT, 'marker write failed'); END"
+        )
+        repository.connection.commit()
+
+    with pytest.raises(LiveIndexTransientError) as raised:
+        _build(repository, request_postings=True)
+    assert raised.value.code == "INDEX_PUBLICATION_UNAVAILABLE"
+    assert repository.get_live_segment_index_task("segment-1").status == "RUNNING"
+    if kind == "memory":
+        assert repository.structural_index_owners.get(("LIVE_SEGMENT", "segment-1")) is None
+    else:
+        assert (
+            repository.connection.execute(
+                "SELECT build_id FROM pcap_offset_index_owners "
+                "WHERE source_kind='LIVE_SEGMENT' AND source_id='segment-1'"
+            ).fetchone()
+            is None
+        )
+        assert not repository.connection.in_transaction
 
 
 @pytest.mark.parametrize("content", [_pcap(packet=b"")[:24], _pcap()[:-1]])

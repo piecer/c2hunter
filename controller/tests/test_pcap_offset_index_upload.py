@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from c2hunter_analysis.pcap_postings import (
+    PCAP_FILTER_CONTRACT_VERSION,
+    PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+    PCAP_POSTING_INDEX_SCHEMA_VERSION,
+)
 from fastapi.testclient import TestClient
 
 from c2hunter_controller.app import create_app
@@ -19,6 +24,7 @@ from c2hunter_controller.pcap_offset_index import (
     SourceIndexBinding,
     build_offline_upload_index,
 )
+from c2hunter_controller.pcap_posting_index_queue import PostingIndexAdmission
 from c2hunter_controller.repositories import MemoryRepository
 
 
@@ -98,6 +104,136 @@ def test_new_offline_upload_builds_ready_index_without_public_schema_drift() -> 
     assert "pcap_offset_index" not in str(client.get("/openapi.json").json())
 
 
+def test_production_upload_requests_posting_marker_and_task_when_enabled() -> None:
+    repository = MemoryRepository()
+    settings = Settings(
+        environment="test",
+        pcap_posting_index_enabled=True,
+        pcap_posting_index_queue_capacity=7,
+        pcap_posting_index_max_attempts=5,
+    )
+    client = TestClient(create_app(settings, repository))
+
+    response = _upload(client, key="posting-enabled-upload")
+
+    assert response.status_code == 201
+    job_id = response.json()["id"]
+    intent = repository.get_posting_index_intent("PCAP_UPLOAD", job_id)
+    task = repository.get_posting_index_task("PCAP_UPLOAD", job_id)
+    assert intent is not None
+    assert task is not None
+    assert (
+        intent.spec.posting_schema_version,
+        intent.spec.posting_parser_contract_version,
+        intent.spec.filter_contract_version,
+    ) == (
+        PCAP_POSTING_INDEX_SCHEMA_VERSION,
+        PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+        PCAP_FILTER_CONTRACT_VERSION,
+    )
+    assert intent.spec == task.spec
+    assert task.max_attempts == 5
+    assert (
+        not {
+            "posting_index",
+            "posting_build_id",
+            "posting_schema_version",
+            "posting_parser_contract_version",
+            "posting_filter_contract_version",
+            "index_requested_at",
+        }
+        & response.json().keys()
+    )
+
+
+def test_production_upload_does_not_request_postings_when_disabled() -> None:
+    repository = MemoryRepository()
+    client = TestClient(
+        create_app(
+            Settings(environment="test", pcap_posting_index_enabled=False),
+            repository,
+        )
+    )
+
+    response = _upload(client, key="posting-disabled-upload")
+
+    assert response.status_code == 201
+    job_id = response.json()["id"]
+    assert repository.get_posting_index_intent("PCAP_UPLOAD", job_id) is None
+    assert repository.get_posting_index_task("PCAP_UPLOAD", job_id) is None
+
+
+def test_posting_queue_admission_failure_keeps_upload_accepted(monkeypatch: Any) -> None:
+    repository = MemoryRepository()
+    calls: list[tuple[str, str, int, int]] = []
+
+    def reject(
+        source_kind: str, source_id: str, *, capacity: int, max_attempts: int
+    ) -> PostingIndexAdmission:
+        calls.append((source_kind, source_id, capacity, max_attempts))
+        return PostingIndexAdmission.DEFERRED
+
+    monkeypatch.setattr(repository, "admit_posting_index", reject)
+    client = TestClient(
+        create_app(
+            Settings(
+                environment="test",
+                pcap_posting_index_enabled=True,
+                pcap_posting_index_queue_capacity=9,
+                pcap_posting_index_max_attempts=4,
+            ),
+            repository,
+        )
+    )
+
+    response = _upload(client, key="posting-full-upload")
+
+    assert response.status_code == 201
+    assert calls == [("PCAP_UPLOAD", response.json()["id"], 9, 4)]
+    assert repository.get_posting_index_intent("PCAP_UPLOAD", response.json()["id"]) is not None
+    assert (
+        not {
+            "posting_index",
+            "posting_build_id",
+            "posting_schema_version",
+            "posting_parser_contract_version",
+            "posting_filter_contract_version",
+            "index_requested_at",
+        }
+        & response.json().keys()
+    )
+
+
+@pytest.mark.parametrize("mode", ["REANALYSIS", "HISTORICAL"])
+def test_offline_builder_never_indexes_non_current_upload_modes(mode: str) -> None:
+    repository = MemoryRepository()
+    repository.save_job({"id": f"not-current-{mode}", "mode": mode})
+
+    assert not build_offline_upload_index(
+        repository,
+        f"not-current-{mode}",
+        max_packets=10,
+        max_interfaces=4,
+        batch_size=2,
+        request_postings=True,
+    )
+    assert repository.get_posting_index_intent("PCAP_UPLOAD", f"not-current-{mode}") is None
+
+
+def test_offline_builder_never_indexes_jobless_source() -> None:
+    repository = MemoryRepository()
+
+    assert not build_offline_upload_index(
+        repository,
+        "jobless",
+        max_packets=10,
+        max_interfaces=4,
+        batch_size=2,
+        request_postings=True,
+    )
+    assert repository.get_posting_index_intent("PCAP_UPLOAD", "jobless") is None
+
+
 def test_index_failure_is_best_effort_and_replay_does_not_rebuild(monkeypatch: Any) -> None:
     repository = MemoryRepository()
     attempts = 0
@@ -156,7 +292,7 @@ def test_build_uses_durable_capture_version_instead_of_open_source_version() -> 
     durable = CaptureSourceVersion(
         source_kind="PCAP_UPLOAD",
         source_id=binding.source_id,
-        object_key=f"captures/{binding.source_id}.pcap",
+        object_key=f"captures/{binding.source_id}/immutable-generation.pcap",
         source_version_id=binding.source_version_id,
         source_size_bytes=binding.source_size_bytes,
         source_sha256=binding.source_sha256,

@@ -9,6 +9,7 @@ import threading
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from typing import Any, BinaryIO, cast
@@ -19,6 +20,15 @@ from c2hunter_analysis.pcap_index import (
     PCAP_OFFSET_INDEX_SCHEMA_VERSION,
     StructuralInterfaceEntry,
     StructuralPacketEntry,
+)
+from c2hunter_analysis.pcap_postings import (
+    PCAP_FILTER_CONTRACT_VERSION,
+    PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+    PCAP_POSTING_INDEX_SCHEMA_VERSION,
+    PostingChunk,
+    PostingDimension,
+    PostingGeneration,
+    PostingQueryLimits,
 )
 
 from c2hunter_controller.pcap_export_store import (
@@ -44,6 +54,26 @@ from c2hunter_controller.pcap_offset_index_queue import (
     eligible_live_segment,
     live_index_task_status,
 )
+from c2hunter_controller.pcap_posting_index import (
+    PostingIndexAvailability,
+    PostingIndexBinding,
+    PostingIndexIdentity,
+    PostingIndexIdentityLookup,
+    PostingIndexLookup,
+    PostingIndexSnapshot,
+    posting_index_identity_availability,
+    validate_posting_index,
+)
+from c2hunter_controller.pcap_posting_index_queue import (
+    PostingIndexAdmission,
+    PostingIndexIntent,
+    PostingIndexIntentStatus,
+    PostingIndexTask,
+    PostingIndexTaskSpec,
+    PostingIndexTaskStatus,
+    PostingSourceKind,
+    sanitize_error_code,
+)
 from c2hunter_controller.repositories import (
     ArtifactAlreadyExistsError,
     ArtifactMissingError,
@@ -51,6 +81,7 @@ from c2hunter_controller.repositories import (
     ArtifactStorageError,
     ArtifactWriteResult,
     CaptureSource,
+    Repository,
     _job_matches_structural_binding,
     _pcap_export_snapshot,
 )
@@ -343,7 +374,7 @@ class MinioBlobStore:
         self.client.remove_object(self.bucket, key)
 
 
-class PostgresRepository:
+class PostgresRepository(Repository):
     """PostgreSQL JSONB control-plane repository with MinIO export blobs and audit rows."""
 
     _DETECTOR_PRESET_ADVISORY_LOCK = 112737
@@ -1227,6 +1258,8 @@ class PostgresRepository:
                     "AND NOT EXISTS (SELECT 1 FROM pcap_export_jobs AS published "
                     "WHERE published.status='COMPLETED' "
                     "AND published.data->>'object_key'=controller_objects.data->>'object_key') "
+                    "AND NOT EXISTS (SELECT 1 FROM pcap_capture_source_versions AS capture "
+                    "WHERE capture.object_key=controller_objects.data->>'object_key') "
                     "ORDER BY id "
                     "FOR UPDATE SKIP LOCKED LIMIT %s",
                     (cutoff, limit),
@@ -1250,7 +1283,9 @@ class PostgresRepository:
                         "AND active.lease_token=(controller_objects.data->>'lease_token'))) "
                         "AND NOT EXISTS (SELECT 1 FROM pcap_export_jobs AS published "
                         "WHERE published.status='COMPLETED' "
-                        "AND published.data->>'object_key'=controller_objects.data->>'object_key')",
+                        "AND published.data->>'object_key'=controller_objects.data->>'object_key') "
+                        "AND NOT EXISTS (SELECT 1 FROM pcap_capture_source_versions AS capture "
+                        "WHERE capture.object_key=controller_objects.data->>'object_key')",
                         (cleanup_id, object_key, cutoff),
                     )
                     if cursor.rowcount == 1:
@@ -1267,6 +1302,8 @@ class PostgresRepository:
                         "WHERE active.export_id=artifact.id AND active.status='RUNNING' "
                         "AND active.attempt=COALESCE((artifact.data->>'attempt')::integer,-1) "
                         "AND active.lease_token=artifact.data->>'lease_token') "
+                        "AND NOT EXISTS (SELECT 1 FROM pcap_capture_source_versions AS capture "
+                        "WHERE capture.object_key=artifact.data->>'object_key') "
                         "ORDER BY (data->>'created_at')::timestamptz,id "
                         "FOR UPDATE SKIP LOCKED LIMIT %s",
                         (cutoff, remaining),
@@ -1610,6 +1647,186 @@ class PostgresRepository:
                           published_source_version_id text,
                           PRIMARY KEY(source_kind,source_id)
                         );
+                        CREATE TABLE IF NOT EXISTS pcap_posting_index_intents (
+                          source_kind text NOT NULL
+                            CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+                          source_id text NOT NULL,
+                          source_version_id text NOT NULL,
+                          source_size_bytes bigint NOT NULL CHECK(source_size_bytes>=0),
+                          source_sha256 text NOT NULL CHECK(source_sha256 ~ '^[0-9a-f]{64}$'),
+                          capture_format text NOT NULL CHECK(capture_format IN ('PCAP','PCAPNG')),
+                          parent_structural_build_id text NOT NULL
+                            REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
+                          parent_structural_index_sha256 text NOT NULL
+                            CHECK(parent_structural_index_sha256 ~ '^[0-9a-f]{64}$'),
+                          structural_schema_version integer NOT NULL
+                            CHECK(structural_schema_version>0),
+                          structural_parser_contract_version integer NOT NULL
+                            CHECK(structural_parser_contract_version>0),
+                          posting_schema_version integer NOT NULL CHECK(posting_schema_version>0),
+                          posting_parser_contract_version integer NOT NULL
+                            CHECK(posting_parser_contract_version>0),
+                          filter_contract_version integer NOT NULL CHECK(filter_contract_version>0),
+                          status text NOT NULL
+                            CHECK(status IN ('PENDING','DEFERRED','COMPLETED','FAILED')),
+                          requested_at timestamptz NOT NULL,
+                          updated_at timestamptz NOT NULL,
+                          published_build_id text,
+                          terminal_attempt integer
+                            CHECK(terminal_attempt IS NULL OR terminal_attempt>=0),
+                          terminal_max_attempts integer
+                            CHECK(terminal_max_attempts IS NULL OR terminal_max_attempts>0),
+                          error_code text
+                            CHECK(error_code IS NULL OR error_code ~ '^[A-Z][A-Z0-9_]{0,63}$'),
+                          PRIMARY KEY(source_kind,source_id),
+                          CONSTRAINT pcap_posting_index_intents_source_parent_key
+                            UNIQUE(source_kind,source_id,parent_structural_build_id),
+                          FOREIGN KEY(source_kind,source_id)
+                            REFERENCES pcap_capture_source_versions(source_kind,source_id)
+                            ON DELETE CASCADE
+                        );
+                        CREATE TABLE IF NOT EXISTS pcap_posting_index_jobs (
+                          source_kind text NOT NULL
+                            CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+                          source_id text NOT NULL,
+                          parent_structural_build_id text NOT NULL,
+                          status text NOT NULL
+                            CHECK(status IN ('QUEUED','RUNNING','COMPLETED','FAILED')),
+                          attempt integer NOT NULL DEFAULT 0 CHECK(attempt>=0),
+                          max_attempts integer NOT NULL CHECK(max_attempts>0),
+                          lease_token text,
+                          lease_expires_at timestamptz,
+                          next_attempt_at timestamptz NOT NULL,
+                          queued_at timestamptz NOT NULL,
+                          updated_at timestamptz NOT NULL,
+                          error_code text
+                            CHECK(error_code IS NULL OR error_code ~ '^[A-Z][A-Z0-9_]{0,63}$'),
+                          PRIMARY KEY(source_kind,source_id),
+                          CONSTRAINT pcap_posting_index_jobs_intent_parent_fkey
+                            FOREIGN KEY(source_kind,source_id,parent_structural_build_id)
+                            REFERENCES pcap_posting_index_intents(
+                              source_kind,source_id,parent_structural_build_id
+                            ) ON DELETE CASCADE
+                        );
+                        CREATE TABLE IF NOT EXISTS pcap_posting_index_generations (
+                          build_id text PRIMARY KEY,
+                          source_kind text NOT NULL
+                            CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+                          source_id text NOT NULL,
+                          source_version_id text NOT NULL,
+                          source_size_bytes bigint NOT NULL CHECK(source_size_bytes>=0),
+                          source_sha256 text NOT NULL CHECK(source_sha256 ~ '^[0-9a-f]{64}$'),
+                          capture_format text NOT NULL CHECK(capture_format IN ('PCAP','PCAPNG')),
+                          parent_structural_build_id text NOT NULL
+                            REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
+                          parent_structural_index_sha256 text NOT NULL
+                            CHECK(parent_structural_index_sha256 ~ '^[0-9a-f]{64}$'),
+                          structural_schema_version integer NOT NULL
+                            CHECK(structural_schema_version>0),
+                          structural_parser_contract_version integer NOT NULL
+                            CHECK(structural_parser_contract_version>0),
+                          posting_schema_version integer NOT NULL CHECK(posting_schema_version>0),
+                          posting_parser_contract_version integer NOT NULL
+                            CHECK(posting_parser_contract_version>0),
+                          filter_contract_version integer NOT NULL CHECK(filter_contract_version>0),
+                          state text NOT NULL CHECK(state IN ('STAGING','READY')),
+                          created_at timestamptz NOT NULL,
+                          packet_count bigint NOT NULL CHECK(packet_count>=0),
+                          supported_count bigint NOT NULL CHECK(supported_count>=0),
+                          membership_count bigint NOT NULL CHECK(membership_count>=0),
+                          distinct_key_count bigint NOT NULL CHECK(distinct_key_count>=0),
+                          chunk_count bigint NOT NULL CHECK(chunk_count>=0),
+                          encoded_byte_count bigint NOT NULL CHECK(encoded_byte_count>=0),
+                          complete_dimensions text[] NOT NULL,
+                          posting_index_sha256 text NOT NULL
+                            CHECK(posting_index_sha256 ~ '^[0-9a-f]{64}$'),
+                          binding_document bytea NOT NULL,
+                          builder_attempt integer NOT NULL CHECK(builder_attempt>0),
+                          lease_token text NOT NULL,
+                          expected_owner_build_id text,
+                          UNIQUE(source_kind,source_id,parent_structural_build_id,build_id),
+                          FOREIGN KEY(source_kind,source_id)
+                            REFERENCES pcap_capture_source_versions(source_kind,source_id)
+                            ON DELETE CASCADE
+                        );
+                        CREATE TABLE IF NOT EXISTS pcap_posting_index_chunks (
+                          build_id text NOT NULL
+                            REFERENCES pcap_posting_index_generations(build_id) ON DELETE CASCADE,
+                          dimension text NOT NULL CHECK(dimension IN (
+                            'ALL_PACKET','SUPPORTED','SRC_ADDRESS','DST_ADDRESS','SRC_PORT',
+                            'DST_PORT','PROTOCOL','HAS_PAYLOAD'
+                          )),
+                          canonical_value bytea NOT NULL,
+                          chunk_ordinal bigint NOT NULL CHECK(chunk_ordinal>=0),
+                          first_packet_index bigint NOT NULL CHECK(first_packet_index>=0),
+                          last_packet_index bigint NOT NULL
+                            CHECK(last_packet_index>=first_packet_index),
+                          membership_count bigint NOT NULL CHECK(membership_count>0),
+                          encoded_ordinals bytea NOT NULL,
+                          PRIMARY KEY(build_id,dimension,canonical_value,chunk_ordinal)
+                        );
+                        CREATE TABLE IF NOT EXISTS pcap_posting_index_owners (
+                          source_kind text NOT NULL
+                            CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+                          source_id text NOT NULL,
+                          parent_structural_build_id text NOT NULL,
+                          build_id text NOT NULL UNIQUE,
+                          PRIMARY KEY(source_kind,source_id,parent_structural_build_id),
+                          FOREIGN KEY(source_kind,source_id,parent_structural_build_id,build_id)
+                            REFERENCES pcap_posting_index_generations(
+                              source_kind,source_id,parent_structural_build_id,build_id
+                            ) ON DELETE CASCADE
+                        );
+                        DO $stage11$
+                        BEGIN
+                          IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint AS con
+                            JOIN pg_class AS rel ON rel.oid=con.conrelid
+                            JOIN pg_namespace AS nsp ON nsp.oid=rel.relnamespace
+                            WHERE nsp.nspname=current_schema()
+                              AND rel.relname='pcap_posting_index_intents'
+                              AND con.conname='pcap_posting_index_intents_source_parent_key'
+                          ) THEN
+                            ALTER TABLE pcap_posting_index_intents ADD CONSTRAINT
+                              pcap_posting_index_intents_source_parent_key
+                              UNIQUE(source_kind,source_id,parent_structural_build_id);
+                          END IF;
+                          IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint AS con
+                            JOIN pg_class AS rel ON rel.oid=con.conrelid
+                            JOIN pg_namespace AS nsp ON nsp.oid=rel.relnamespace
+                            WHERE nsp.nspname=current_schema()
+                              AND rel.relname='pcap_posting_index_jobs'
+                              AND con.conname='pcap_posting_index_jobs_intent_parent_fkey'
+                          ) THEN
+                            ALTER TABLE pcap_posting_index_jobs ADD CONSTRAINT
+                              pcap_posting_index_jobs_intent_parent_fkey
+                              FOREIGN KEY(source_kind,source_id,parent_structural_build_id)
+                              REFERENCES pcap_posting_index_intents(
+                                source_kind,source_id,parent_structural_build_id
+                              ) ON DELETE CASCADE;
+                          END IF;
+                          ALTER TABLE pcap_posting_index_jobs DROP CONSTRAINT IF EXISTS
+                            pcap_posting_index_jobs_source_kind_source_id_fkey;
+                          ALTER TABLE pcap_posting_index_jobs DROP CONSTRAINT IF EXISTS
+                            pcap_posting_index_jobs_parent_structural_build_id_fkey;
+                        END $stage11$;
+                        CREATE INDEX IF NOT EXISTS pcap_posting_index_jobs_claim
+                          ON pcap_posting_index_jobs(
+                            status,next_attempt_at,queued_at,source_kind,source_id
+                          );
+                        CREATE INDEX IF NOT EXISTS pcap_posting_index_jobs_lease
+                          ON pcap_posting_index_jobs(status,lease_expires_at,source_kind,source_id);
+                        CREATE INDEX IF NOT EXISTS pcap_posting_index_jobs_terminal
+                          ON pcap_posting_index_jobs(status,updated_at,source_kind,source_id);
+                        CREATE INDEX IF NOT EXISTS pcap_posting_index_intents_reconcile
+                          ON pcap_posting_index_intents(status,requested_at,source_kind,source_id);
+                        CREATE INDEX IF NOT EXISTS pcap_posting_index_generations_staging
+                          ON pcap_posting_index_generations(state,created_at,build_id);
+                        CREATE INDEX IF NOT EXISTS pcap_posting_index_chunks_read
+                          ON pcap_posting_index_chunks(
+                            build_id,dimension,canonical_value,chunk_ordinal
+                          );
                         DO $stage10$
                         DECLARE
                           target_table text;
@@ -1904,6 +2121,1498 @@ class PostgresRepository:
 
     def ready(self) -> bool:
         return self.database_ready() and self.blob_store.ready()
+
+    _POSTING_SPEC_COLUMNS = (
+        "source_kind,source_id,source_version_id,source_size_bytes,source_sha256,"
+        "capture_format,parent_structural_build_id,parent_structural_index_sha256,"
+        "structural_schema_version,structural_parser_contract_version,"
+        "posting_schema_version,posting_parser_contract_version,filter_contract_version"
+    )
+    _POSTING_INTENT_COLUMNS = (
+        _POSTING_SPEC_COLUMNS + ",status,requested_at,updated_at,published_build_id,error_code"
+    )
+    _POSTING_TASK_COLUMNS = (
+        _POSTING_SPEC_COLUMNS
+        + ",status,attempt,max_attempts,lease_token,lease_expires_at,next_attempt_at,"
+        "queued_at,updated_at,error_code"
+    )
+    _POSTING_TASK_PROJECTION = (
+        "intent."
+        + _POSTING_SPEC_COLUMNS.replace(",", ",intent.")
+        + ",task.status,task.attempt,task.max_attempts,task.lease_token,"
+        "task.lease_expires_at,task.next_attempt_at,task.queued_at,task.updated_at,"
+        "task.error_code"
+    )
+
+    @staticmethod
+    def _posting_spec(row: tuple[Any, ...]) -> PostingIndexTaskSpec:
+        return PostingIndexTaskSpec(
+            source_kind=cast(PostingSourceKind, str(row[0])),
+            source_id=str(row[1]),
+            source_version_id=str(row[2]),
+            source_size_bytes=int(row[3]),
+            source_sha256=str(row[4]),
+            capture_format=cast(Any, str(row[5])),
+            parent_structural_build_id=str(row[6]),
+            parent_structural_index_sha256=str(row[7]),
+            structural_schema_version=int(row[8]),
+            structural_parser_contract_version=int(row[9]),
+            posting_schema_version=int(row[10]),
+            posting_parser_contract_version=int(row[11]),
+            filter_contract_version=int(row[12]),
+        )
+
+    @classmethod
+    def _posting_intent(cls, row: tuple[Any, ...]) -> PostingIndexIntent:
+        return PostingIndexIntent(
+            cls._posting_spec(row),
+            PostingIndexIntentStatus(str(row[13])),
+            cast(datetime, row[14]),
+            cast(datetime, row[15]),
+            str(row[16]) if row[16] is not None else None,
+            str(row[17]) if row[17] is not None else None,
+        )
+
+    @classmethod
+    def _posting_task(cls, row: tuple[Any, ...]) -> PostingIndexTask:
+        return PostingIndexTask(
+            cls._posting_spec(row),
+            PostingIndexTaskStatus(str(row[13])),
+            int(row[14]),
+            int(row[15]),
+            str(row[16]) if row[16] is not None else None,
+            cast(datetime | None, row[17]),
+            cast(datetime, row[18]),
+            cast(datetime, row[19]),
+            cast(datetime, row[20]),
+            str(row[21]) if row[21] is not None else None,
+        )
+
+    @staticmethod
+    def _posting_spec_values(spec: PostingIndexTaskSpec) -> tuple[Any, ...]:
+        return (
+            spec.source_kind,
+            spec.source_id,
+            spec.source_version_id,
+            spec.source_size_bytes,
+            spec.source_sha256,
+            spec.capture_format,
+            spec.parent_structural_build_id,
+            spec.parent_structural_index_sha256,
+            spec.structural_schema_version,
+            spec.structural_parser_contract_version,
+            spec.posting_schema_version,
+            spec.posting_parser_contract_version,
+            spec.filter_contract_version,
+        )
+
+    @staticmethod
+    def _lock_posting_lifecycle_for_sources(
+        cursor: Any, source_kind: PostingSourceKind, source_ids: Iterable[str]
+    ) -> None:
+        """Lock exact posting rows in the one global PostgreSQL posting order.
+
+        Every request, publication, abort, cleanup, structural replacement, and
+        source deletion follows: canonical source/version -> structural
+        owner/generation -> intent -> task -> posting generation -> posting owner.
+        Object-store calls must happen only after the surrounding transaction commits.
+        """
+        selected_ids = sorted(set(source_ids))
+        if not selected_ids:
+            return
+        params = (source_kind, selected_ids)
+        cursor.execute(
+            "SELECT source_id FROM pcap_capture_source_versions WHERE source_kind=%s "
+            "AND source_id=ANY(%s) ORDER BY source_id FOR UPDATE",
+            params,
+        )
+        cursor.fetchall()
+        cursor.execute(
+            "SELECT owner.source_id,owner.build_id FROM pcap_offset_index_owners AS owner "
+            "JOIN pcap_offset_index_generations AS generation ON generation.build_id="
+            "owner.build_id WHERE owner.source_kind=%s AND owner.source_id=ANY(%s) "
+            "ORDER BY owner.source_id,owner.build_id FOR UPDATE OF owner,generation",
+            params,
+        )
+        cursor.fetchall()
+        cursor.execute(
+            "SELECT source_id,build_id FROM pcap_offset_index_generations WHERE "
+            "source_kind=%s AND source_id=ANY(%s) ORDER BY source_id,build_id FOR UPDATE",
+            params,
+        )
+        cursor.fetchall()
+        cursor.execute(
+            "SELECT source_id,parent_structural_build_id FROM pcap_posting_index_intents "
+            "WHERE source_kind=%s AND source_id=ANY(%s) ORDER BY source_id FOR UPDATE",
+            params,
+        )
+        cursor.fetchall()
+        cursor.execute(
+            "SELECT source_id,parent_structural_build_id FROM pcap_posting_index_jobs "
+            "WHERE source_kind=%s AND source_id=ANY(%s) ORDER BY source_id FOR UPDATE",
+            params,
+        )
+        cursor.fetchall()
+        cursor.execute(
+            "SELECT source_id,parent_structural_build_id,build_id FROM "
+            "pcap_posting_index_generations WHERE source_kind=%s AND source_id=ANY(%s) "
+            "ORDER BY source_id,parent_structural_build_id,build_id FOR UPDATE",
+            params,
+        )
+        cursor.fetchall()
+        cursor.execute(
+            "SELECT source_id,parent_structural_build_id,build_id FROM "
+            "pcap_posting_index_owners WHERE source_kind=%s AND source_id=ANY(%s) "
+            "ORDER BY source_id,parent_structural_build_id FOR UPDATE",
+            params,
+        )
+        cursor.fetchall()
+
+    @_serialize_shared_connection
+    def request_posting_index_backfill(self, *, limit: int) -> int:
+        if limit <= 0:
+            raise ValueError("posting backfill limit must be positive")
+        query = f"""
+WITH eligible_posting_parents AS (
+  SELECT source.source_kind,
+         source.source_id,
+         source.source_version_id,
+         source.source_size_bytes,
+         source.source_sha256,
+         generation.capture_format,
+         owner.build_id AS parent_structural_build_id,
+         generation.index_sha256 AS parent_structural_index_sha256,
+         generation.schema_version AS structural_schema_version,
+         generation.parser_contract_version AS structural_parser_contract_version
+  FROM pcap_offset_index_owners AS owner
+  JOIN pcap_offset_index_generations AS generation
+    ON generation.build_id=owner.build_id
+  JOIN pcap_capture_source_versions AS source
+    ON source.source_kind=owner.source_kind
+   AND source.source_id=owner.source_id
+  WHERE generation.state='READY'
+    AND generation.source_kind=source.source_kind
+    AND generation.source_id=source.source_id
+    AND generation.source_version_id=source.source_version_id
+    AND generation.source_size_bytes=source.source_size_bytes
+    AND generation.source_sha256=source.source_sha256
+    AND generation.schema_version=%s
+    AND generation.parser_contract_version=%s
+    AND (
+      (
+        source.source_kind='PCAP_UPLOAD'
+        AND EXISTS (
+          SELECT 1 FROM controller_objects AS job
+          WHERE job.kind='job'
+            AND job.id=source.source_id
+            AND job.data->>'mode'='PCAP_UPLOAD'
+        )
+      )
+      OR
+      (
+        source.source_kind='LIVE_SEGMENT'
+        AND EXISTS (
+          SELECT 1
+          FROM controller_objects AS segment
+          JOIN controller_objects AS job
+            ON job.kind='job'
+           AND job.id=segment.data->>'analysis_job_id'
+          WHERE segment.kind='sensor_pcap'
+            AND segment.id=source.source_id
+            AND job.data->>'mode'='LIVE'
+            AND segment.data->>'sha256'=source.source_sha256
+            AND (segment.data->>'size_bytes')::bigint=source.source_size_bytes
+        )
+        AND EXISTS (
+          SELECT 1 FROM pcap_offset_index_jobs AS live_task
+          WHERE live_task.source_kind='LIVE_SEGMENT'
+            AND live_task.source_id=source.source_id
+            AND live_task.status='COMPLETED'
+            AND live_task.source_size_bytes=source.source_size_bytes
+            AND live_task.source_sha256=source.source_sha256
+            AND live_task.published_source_version_id=source.source_version_id
+        )
+      )
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM pcap_posting_index_intents AS intent
+      WHERE intent.source_kind=source.source_kind
+        AND intent.source_id=source.source_id
+        AND intent.source_version_id=source.source_version_id
+        AND intent.parent_structural_build_id=owner.build_id
+        AND intent.posting_schema_version=%s
+        AND intent.posting_parser_contract_version=%s
+        AND intent.filter_contract_version=%s
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM pcap_posting_index_jobs AS task
+      JOIN pcap_posting_index_intents AS task_intent USING(source_kind,source_id)
+      WHERE task.source_kind=source.source_kind
+        AND task.source_id=source.source_id
+        AND task.parent_structural_build_id=owner.build_id
+        AND task_intent.source_version_id=source.source_version_id
+        AND task_intent.posting_schema_version=%s
+        AND task_intent.posting_parser_contract_version=%s
+        AND task_intent.filter_contract_version=%s
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM pcap_posting_index_owners AS posting_owner
+      JOIN pcap_posting_index_generations AS posting_generation
+        ON posting_generation.build_id=posting_owner.build_id
+      WHERE posting_owner.source_kind=source.source_kind
+        AND posting_owner.source_id=source.source_id
+        AND posting_owner.parent_structural_build_id=owner.build_id
+        AND posting_generation.state='READY'
+        AND posting_generation.source_version_id=source.source_version_id
+        AND posting_generation.posting_schema_version={PCAP_POSTING_INDEX_SCHEMA_VERSION}
+        AND posting_generation.posting_parser_contract_version=
+            {PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION}
+        AND posting_generation.filter_contract_version={PCAP_FILTER_CONTRACT_VERSION}
+    )
+  ORDER BY source.source_kind,source.source_id
+  LIMIT %s
+  FOR UPDATE OF owner SKIP LOCKED
+), inserted_posting_intents AS (
+  INSERT INTO pcap_posting_index_intents(
+    {self._POSTING_SPEC_COLUMNS},status,requested_at,updated_at,
+    published_build_id,error_code
+  )
+  SELECT source_kind,source_id,source_version_id,source_size_bytes,source_sha256,
+         capture_format,parent_structural_build_id,parent_structural_index_sha256,
+         structural_schema_version,structural_parser_contract_version,
+         {PCAP_POSTING_INDEX_SCHEMA_VERSION},
+         {PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION},
+         {PCAP_FILTER_CONTRACT_VERSION},
+         'PENDING',clock_timestamp(),clock_timestamp(),NULL,NULL
+  FROM eligible_posting_parents
+  ON CONFLICT(source_kind,source_id) DO NOTHING
+  RETURNING source_kind,source_id
+)
+SELECT source_kind,source_id
+FROM inserted_posting_intents
+ORDER BY source_kind,source_id
+"""  # noqa: S608 -- interpolation uses fixed internal columns/contracts only
+        connection = self.connection
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    query,
+                    (
+                        PCAP_OFFSET_INDEX_SCHEMA_VERSION,
+                        PCAP_OFFSET_INDEX_PARSER_CONTRACT_VERSION,
+                        PCAP_POSTING_INDEX_SCHEMA_VERSION,
+                        PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+                        PCAP_FILTER_CONTRACT_VERSION,
+                        PCAP_POSTING_INDEX_SCHEMA_VERSION,
+                        PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+                        PCAP_FILTER_CONTRACT_VERSION,
+                        limit,
+                    ),
+                )
+                inserted = cursor.fetchall()
+            connection.commit()
+            return len(inserted)
+        except Exception:
+            connection.rollback()
+            raise
+
+    @_serialize_shared_connection
+    def request_posting_index(
+        self, source_version: CaptureSourceVersion, parent: StructuralIndexSnapshot
+    ) -> PostingIndexIntent | None:
+        if (
+            source_version.source_kind not in {"PCAP_UPLOAD", "LIVE_SEGMENT"}
+            or not validate_structural_index(parent)
+            or parent.binding.source_kind != source_version.source_kind
+            or parent.binding.source_id != source_version.source_id
+            or parent.binding.source_version_id != source_version.source_version_id
+            or parent.binding.source_size_bytes != source_version.source_size_bytes
+            or parent.binding.source_sha256 != source_version.source_sha256
+        ):
+            return None
+        spec = PostingIndexTaskSpec.from_binding(source_version, parent)
+        connection = self.connection
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT source_kind,source_id,object_key,source_version_id,"
+                    "source_size_bytes,source_sha256 FROM pcap_capture_source_versions "
+                    "WHERE source_kind=%s AND source_id=%s FOR UPDATE",
+                    (spec.source_kind, spec.source_id),
+                )
+                source_row = cursor.fetchone()
+                if source_row != (
+                    source_version.source_kind,
+                    source_version.source_id,
+                    source_version.object_key,
+                    source_version.source_version_id,
+                    source_version.source_size_bytes,
+                    source_version.source_sha256,
+                ):
+                    connection.rollback()
+                    return None
+                cursor.execute(
+                    "SELECT owner.build_id,generation.index_sha256,generation.state "
+                    "FROM pcap_offset_index_owners AS owner JOIN "
+                    "pcap_offset_index_generations AS generation "
+                    "ON generation.build_id=owner.build_id WHERE owner.source_kind=%s "
+                    "AND owner.source_id=%s AND owner.build_id=%s AND generation.state='READY' "
+                    "FOR UPDATE OF owner,generation",
+                    (spec.source_kind, spec.source_id, spec.parent_structural_build_id),
+                )
+                if cursor.fetchone() != (
+                    parent.build_id,
+                    parent.index_sha256,
+                    "READY",
+                ):
+                    connection.rollback()
+                    return None
+                cursor.execute(
+                    f"SELECT {self._POSTING_INTENT_COLUMNS} "  # noqa: S608 -- fixed internal columns
+                    "FROM pcap_posting_index_intents WHERE source_kind=%s AND source_id=%s "
+                    "FOR UPDATE",
+                    (spec.source_kind, spec.source_id),
+                )
+                row = cursor.fetchone()
+                if row is not None:
+                    current = self._posting_intent(row)
+                    if current.spec.identity == spec.identity:
+                        connection.commit()
+                        return current
+                values = self._posting_spec_values(spec)
+                cursor.execute(
+                    "INSERT INTO pcap_posting_index_intents("
+                    + self._POSTING_SPEC_COLUMNS
+                    + ",status,requested_at,updated_at,published_build_id,error_code) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',"
+                    "clock_timestamp(),clock_timestamp(),NULL,NULL) "
+                    "ON CONFLICT(source_kind,source_id) DO UPDATE SET "
+                    "source_version_id=excluded.source_version_id,"
+                    "source_size_bytes=excluded.source_size_bytes,"
+                    "source_sha256=excluded.source_sha256,capture_format=excluded.capture_format,"
+                    "parent_structural_build_id=excluded.parent_structural_build_id,"
+                    "parent_structural_index_sha256=excluded.parent_structural_index_sha256,"
+                    "structural_schema_version=excluded.structural_schema_version,"
+                    "structural_parser_contract_version=excluded.structural_parser_contract_version,"
+                    "posting_schema_version=excluded.posting_schema_version,"
+                    "posting_parser_contract_version=excluded.posting_parser_contract_version,"
+                    "filter_contract_version=excluded.filter_contract_version,status='PENDING',"
+                    "requested_at=clock_timestamp(),updated_at=clock_timestamp(),"
+                    "published_build_id=NULL,error_code=NULL RETURNING "
+                    + self._POSTING_INTENT_COLUMNS,
+                    values,
+                )
+                stored = cursor.fetchone()
+                if stored is None or cursor.rowcount != 1:
+                    connection.rollback()
+                    return None
+            connection.commit()
+            return self._posting_intent(stored)
+        except Exception:
+            connection.rollback()
+            raise
+
+    @_serialize_shared_connection
+    def get_posting_index_intent(
+        self, source_kind: PostingSourceKind, source_id: str
+    ) -> PostingIndexIntent | None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                f"SELECT {self._POSTING_INTENT_COLUMNS} FROM pcap_posting_index_intents "  # noqa: S608 -- fixed internal columns
+                "WHERE source_kind=%s AND source_id=%s",
+                (source_kind, source_id),
+            )
+            row = cursor.fetchone()
+        self.connection.commit()
+        return self._posting_intent(row) if row is not None else None
+
+    @_serialize_shared_connection
+    def admit_posting_index(
+        self,
+        source_kind: PostingSourceKind,
+        source_id: str,
+        *,
+        capacity: int,
+        max_attempts: int,
+    ) -> PostingIndexAdmission:
+        if capacity <= 0 or max_attempts <= 0:
+            raise ValueError("posting queue bounds must be positive")
+        connection = self.connection
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"SELECT {self._POSTING_INTENT_COLUMNS} FROM pcap_posting_index_intents "  # noqa: S608 -- fixed internal columns
+                    "WHERE source_kind=%s AND source_id=%s FOR UPDATE",
+                    (source_kind, source_id),
+                )
+                intent_row = cursor.fetchone()
+                if intent_row is None:
+                    connection.commit()
+                    return PostingIndexAdmission.INELIGIBLE
+                intent = self._posting_intent(intent_row)
+                cursor.execute(
+                    "SELECT status FROM pcap_posting_index_jobs WHERE source_kind=%s "
+                    "AND source_id=%s FOR UPDATE",
+                    (source_kind, source_id),
+                )
+                if cursor.fetchone() is not None or intent.status in {
+                    PostingIndexIntentStatus.COMPLETED,
+                    PostingIndexIntentStatus.FAILED,
+                }:
+                    connection.commit()
+                    return PostingIndexAdmission.COALESCED
+                if intent.status not in {
+                    PostingIndexIntentStatus.PENDING,
+                    PostingIndexIntentStatus.DEFERRED,
+                }:
+                    connection.commit()
+                    return PostingIndexAdmission.INELIGIBLE
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                    ("pcap-posting-index-admission",),
+                )
+                cursor.execute(
+                    "SELECT COUNT(*) FROM pcap_posting_index_jobs "
+                    "WHERE status IN ('QUEUED','RUNNING')"
+                )
+                active_row = cursor.fetchone()
+                active = int(active_row[0]) if active_row else 0
+                if active >= capacity:
+                    cursor.execute(
+                        "UPDATE pcap_posting_index_intents SET status='DEFERRED',"
+                        "updated_at=clock_timestamp() WHERE source_kind=%s AND source_id=%s "
+                        "AND status IN ('PENDING','DEFERRED')",
+                        (source_kind, source_id),
+                    )
+                    if cursor.rowcount != 1:
+                        connection.rollback()
+                        return PostingIndexAdmission.INELIGIBLE
+                    connection.commit()
+                    return PostingIndexAdmission.DEFERRED
+                cursor.execute(
+                    "INSERT INTO pcap_posting_index_jobs(source_kind,source_id,"
+                    "parent_structural_build_id,status,attempt,max_attempts,lease_token,"
+                    "lease_expires_at,next_attempt_at,queued_at,updated_at,error_code) "
+                    "VALUES(%s,%s,%s,'QUEUED',0,%s,NULL,NULL,clock_timestamp(),"
+                    "clock_timestamp(),clock_timestamp(),NULL) ON CONFLICT DO NOTHING",
+                    (source_kind, source_id, intent.spec.parent_structural_build_id, max_attempts),
+                )
+                if cursor.rowcount != 1:
+                    connection.rollback()
+                    return PostingIndexAdmission.COALESCED
+            connection.commit()
+            return PostingIndexAdmission.QUEUED
+        except Exception:
+            connection.rollback()
+            raise
+
+    @_serialize_shared_connection
+    def get_posting_index_task(
+        self, source_kind: PostingSourceKind, source_id: str
+    ) -> PostingIndexTask | None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                f"SELECT {self._POSTING_TASK_PROJECTION} "  # noqa: S608 -- fixed internal projection
+                "FROM pcap_posting_index_jobs AS task "
+                "JOIN pcap_posting_index_intents AS intent USING(source_kind,source_id) "
+                "WHERE task.source_kind=%s AND task.source_id=%s",
+                (source_kind, source_id),
+            )
+            row = cursor.fetchone()
+        self.connection.commit()
+        return self._posting_task(row) if row is not None else None
+
+    @_serialize_shared_connection
+    def claim_posting_index(self, *, lease_seconds: int) -> PostingIndexTask | None:
+        if lease_seconds <= 0:
+            raise ValueError("posting lease must be positive")
+        token = secrets.token_hex(16)
+        connection = self.connection
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "WITH selected AS (SELECT task.source_kind,task.source_id FROM "  # noqa: S608 -- fixed internal projection appended below
+                    "pcap_posting_index_jobs AS task WHERE task.status='QUEUED' "
+                    "AND task.next_attempt_at<=clock_timestamp() AND EXISTS (SELECT 1 FROM "
+                    "pcap_posting_index_intents AS intent WHERE "
+                    "intent.source_kind=task.source_kind AND intent.source_id=task.source_id "
+                    "AND intent.parent_structural_build_id=task.parent_structural_build_id "
+                    "AND intent.status IN ('PENDING','DEFERRED')) "
+                    "ORDER BY task.next_attempt_at,task.queued_at,task.source_kind,task.source_id "
+                    "FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE pcap_posting_index_jobs AS task "
+                    "SET status='RUNNING',attempt=task.attempt+1,lease_token=%s,"
+                    "lease_expires_at=clock_timestamp()+make_interval(secs=>%s),"
+                    "updated_at=clock_timestamp(),error_code=NULL FROM selected,"
+                    "pcap_posting_index_intents AS intent WHERE "
+                    "task.source_kind=selected.source_kind "
+                    "AND task.source_id=selected.source_id AND intent.source_kind=task.source_kind "
+                    "AND intent.source_id=task.source_id RETURNING "
+                    + self._POSTING_TASK_PROJECTION,
+                    (token, lease_seconds),
+                )
+                row = cursor.fetchone()
+                if row is not None and cursor.rowcount != 1:
+                    connection.rollback()
+                    return None
+            connection.commit()
+            return self._posting_task(row) if row is not None else None
+        except Exception:
+            connection.rollback()
+            raise
+
+    @_serialize_shared_connection
+    def heartbeat_posting_index(
+        self,
+        source_kind: PostingSourceKind,
+        source_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        lease_seconds: int,
+    ) -> bool:
+        if lease_seconds <= 0 or attempt <= 0 or not lease_token:
+            return False
+        connection = self.connection
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE pcap_posting_index_jobs SET "
+                    "lease_expires_at=clock_timestamp()+make_interval(secs=>%s),"
+                    "updated_at=clock_timestamp() WHERE source_kind=%s AND source_id=%s "
+                    "AND status='RUNNING' AND attempt=%s AND lease_token=%s "
+                    "AND lease_expires_at>clock_timestamp()",
+                    (lease_seconds, source_kind, source_id, attempt, lease_token),
+                )
+                updated = bool(cursor.rowcount == 1)
+                if not updated:
+                    connection.rollback()
+                    return False
+            connection.commit()
+            return True
+        except Exception:
+            connection.rollback()
+            raise
+
+    @_serialize_shared_connection
+    def fail_posting_index(
+        self,
+        source_kind: PostingSourceKind,
+        source_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        transient: bool,
+        error_code: str,
+        retry_base_seconds: int,
+    ) -> bool:
+        if attempt <= 0 or not lease_token or retry_base_seconds <= 0:
+            return False
+        code = sanitize_error_code(error_code)
+        connection = self.connection
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT parent_structural_build_id FROM pcap_posting_index_intents "
+                    "WHERE source_kind=%s AND source_id=%s "
+                    "AND status IN ('PENDING','DEFERRED') FOR UPDATE",
+                    (source_kind, source_id),
+                )
+                intent_row = cursor.fetchone()
+                if intent_row is None:
+                    connection.rollback()
+                    return False
+                parent_id = str(intent_row[0])
+                cursor.execute(
+                    "SELECT task.max_attempts FROM pcap_posting_index_jobs AS task "
+                    "WHERE task.source_kind=%s AND task.source_id=%s "
+                    "AND task.parent_structural_build_id=%s AND task.status='RUNNING' "
+                    "AND task.attempt=%s AND task.lease_token=%s "
+                    "AND task.lease_expires_at>clock_timestamp() FOR UPDATE",
+                    (source_kind, source_id, parent_id, attempt, lease_token),
+                )
+                task_row = cursor.fetchone()
+                if task_row is None:
+                    connection.rollback()
+                    return False
+                max_attempts = int(task_row[0])
+                retry = transient and attempt < max_attempts
+                task_status = "QUEUED" if retry else "FAILED"
+                intent_status = "PENDING" if retry else "FAILED"
+                cursor.execute(
+                    "UPDATE pcap_posting_index_jobs SET status=%s,lease_token=NULL,"
+                    "lease_expires_at=NULL,next_attempt_at=CASE WHEN %s THEN "
+                    "clock_timestamp()+make_interval(secs=>LEAST(%s::bigint*"
+                    "(1::bigint << LEAST(attempt-1,20)),2147483647)::integer) "
+                    "ELSE next_attempt_at END,updated_at=clock_timestamp(),error_code=%s "
+                    "WHERE source_kind=%s AND source_id=%s AND parent_structural_build_id=%s "
+                    "AND status='RUNNING' AND attempt=%s AND lease_token=%s "
+                    "AND lease_expires_at>clock_timestamp()",
+                    (
+                        task_status,
+                        retry,
+                        retry_base_seconds,
+                        code,
+                        source_kind,
+                        source_id,
+                        parent_id,
+                        attempt,
+                        lease_token,
+                    ),
+                )
+                task_count = cursor.rowcount
+                cursor.execute(
+                    "UPDATE pcap_posting_index_intents SET status=%s,"
+                    "updated_at=clock_timestamp(),error_code=%s,terminal_attempt=%s,"
+                    "terminal_max_attempts=%s WHERE source_kind=%s AND source_id=%s "
+                    "AND parent_structural_build_id=%s AND status IN ('PENDING','DEFERRED')",
+                    (
+                        intent_status,
+                        code,
+                        attempt,
+                        max_attempts,
+                        source_kind,
+                        source_id,
+                        parent_id,
+                    ),
+                )
+                if task_count != 1 or cursor.rowcount != 1:
+                    connection.rollback()
+                    return False
+            connection.commit()
+            return True
+        except Exception:
+            connection.rollback()
+            raise
+
+    @_serialize_shared_connection
+    def recover_posting_indexes(self) -> int:
+        connection = self.connection
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT intent.source_kind,intent.source_id,"
+                    "intent.parent_structural_build_id FROM pcap_posting_index_intents AS intent "
+                    "WHERE intent.status IN ('PENDING','DEFERRED') AND EXISTS (SELECT 1 FROM "
+                    "pcap_posting_index_jobs AS task WHERE task.source_kind=intent.source_kind "
+                    "AND task.source_id=intent.source_id AND task.parent_structural_build_id="
+                    "intent.parent_structural_build_id AND task.status='RUNNING' "
+                    "AND task.lease_expires_at<=clock_timestamp()) "
+                    "ORDER BY intent.updated_at,intent.source_kind,intent.source_id "
+                    "FOR UPDATE OF intent SKIP LOCKED LIMIT %s",
+                    (100,),
+                )
+                intents = cursor.fetchall()
+                recovered = 0
+                for kind, selected_id, parent_id in intents:
+                    cursor.execute(
+                        "SELECT task.max_attempts,task.attempt FROM "
+                        "pcap_posting_index_jobs AS task WHERE task.source_kind=%s "
+                        "AND task.source_id=%s AND task.parent_structural_build_id=%s "
+                        "AND task.status='RUNNING' AND "
+                        "task.lease_expires_at<=clock_timestamp() FOR UPDATE SKIP LOCKED",
+                        (kind, selected_id, parent_id),
+                    )
+                    task_row = cursor.fetchone()
+                    if task_row is None:
+                        continue
+                    maximum, task_attempt = int(task_row[0]), int(task_row[1])
+                    retry = task_attempt < maximum
+                    status = "QUEUED" if retry else "FAILED"
+                    code = None if retry else "POSTING_LEASE_EXPIRED"
+                    cursor.execute(
+                        "UPDATE pcap_posting_index_jobs SET status=%s,lease_token=NULL,"
+                        "lease_expires_at=NULL,next_attempt_at=clock_timestamp(),"
+                        "updated_at=clock_timestamp(),error_code=%s WHERE source_kind=%s "
+                        "AND source_id=%s AND parent_structural_build_id=%s "
+                        "AND status='RUNNING' AND attempt=%s "
+                        "AND lease_expires_at<=clock_timestamp()",
+                        (status, code, kind, selected_id, parent_id, task_attempt),
+                    )
+                    task_count = cursor.rowcount
+                    cursor.execute(
+                        "UPDATE pcap_posting_index_intents SET status=%s,"
+                        "updated_at=clock_timestamp(),error_code=%s,terminal_attempt=%s,"
+                        "terminal_max_attempts=%s WHERE source_kind=%s AND source_id=%s "
+                        "AND parent_structural_build_id=%s AND status IN ('PENDING','DEFERRED')",
+                        (
+                            "PENDING" if status == "QUEUED" else "FAILED",
+                            code,
+                            task_attempt,
+                            maximum,
+                            kind,
+                            selected_id,
+                            parent_id,
+                        ),
+                    )
+                    if task_count != 1 or cursor.rowcount != 1:
+                        connection.rollback()
+                        return 0
+                    recovered += 1
+            connection.commit()
+            return recovered
+        except Exception:
+            connection.rollback()
+            raise
+
+    def reconcile_posting_indexes(
+        self,
+        *,
+        capacity: int,
+        max_attempts: int,
+        limit: int,
+    ) -> int:
+        if limit <= 0:
+            raise ValueError("posting reconciliation limit must be positive")
+        with self._lock, self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT intent.source_kind,intent.source_id FROM "
+                "pcap_posting_index_intents AS intent WHERE "
+                "intent.status IN ('PENDING','DEFERRED') AND NOT EXISTS (SELECT 1 FROM "
+                "pcap_posting_index_jobs AS task WHERE task.source_kind=intent.source_kind "
+                "AND task.source_id=intent.source_id) ORDER BY intent.requested_at,"
+                "intent.source_kind,intent.source_id LIMIT %s",
+                (limit,),
+            )
+            rows = [
+                (cast(PostingSourceKind, str(row[0])), str(row[1])) for row in cursor.fetchall()
+            ]
+            self.connection.commit()
+        admitted = 0
+        for kind, selected_id in rows:
+            if (
+                self.admit_posting_index(
+                    kind,
+                    selected_id,
+                    capacity=capacity,
+                    max_attempts=max_attempts,
+                )
+                is PostingIndexAdmission.QUEUED
+            ):
+                admitted += 1
+        return admitted
+
+    @_serialize_shared_connection
+    def get_posting_index_queue_depth(self) -> dict[str, int]:
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT status,COUNT(*) FROM pcap_posting_index_jobs GROUP BY status")
+            rows = cursor.fetchall()
+        self.connection.commit()
+        counts = {str(status): int(count) for status, count in rows}
+        return {status.value: counts.get(status.value, 0) for status in PostingIndexTaskStatus}
+
+    @_serialize_shared_connection
+    def cleanup_terminal_posting_indexes(self, *, max_age_seconds: int, limit: int) -> int:
+        if max_age_seconds <= 0 or limit <= 0:
+            raise ValueError("posting terminal cleanup bounds must be positive")
+        connection = self.connection
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT source_kind,source_id FROM pcap_posting_index_jobs "
+                    "WHERE status IN ('COMPLETED','FAILED') "
+                    "AND updated_at<=clock_timestamp()-make_interval(secs=>%s) "
+                    "ORDER BY updated_at,source_kind,source_id LIMIT %s",
+                    (max_age_seconds, limit),
+                )
+                selected = [
+                    (cast(PostingSourceKind, str(row[0])), str(row[1])) for row in cursor.fetchall()
+                ]
+                grouped: dict[PostingSourceKind, list[str]] = {}
+                for source_kind, source_id in selected:
+                    grouped.setdefault(source_kind, []).append(source_id)
+                deleted = 0
+                for source_kind in sorted(grouped):
+                    source_ids = grouped[source_kind]
+                    self._lock_posting_lifecycle_for_sources(cursor, source_kind, source_ids)
+                    cursor.execute(
+                        "DELETE FROM pcap_posting_index_jobs WHERE source_kind=%s "
+                        "AND source_id=ANY(%s) AND status IN ('COMPLETED','FAILED') "
+                        "AND updated_at<=clock_timestamp()-make_interval(secs=>%s) "
+                        "RETURNING source_id",
+                        (source_kind, source_ids, max_age_seconds),
+                    )
+                    deleted += len(cursor.fetchall())
+            connection.commit()
+            return deleted
+        except Exception:
+            connection.rollback()
+            raise
+
+    @_serialize_shared_connection
+    def cleanup_stale_posting_indexes(self, *, max_age_seconds: int, limit: int) -> int:
+        if max_age_seconds <= 0 or limit <= 0:
+            raise ValueError("posting staging cleanup bounds must be positive")
+        connection = self.connection
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT generation.source_kind,generation.source_id,generation.build_id FROM "
+                    "pcap_posting_index_generations AS generation WHERE "
+                    "generation.state='STAGING' AND generation.created_at<"
+                    "clock_timestamp()-make_interval(secs=>%s) AND NOT EXISTS (SELECT 1 "
+                    "FROM pcap_posting_index_owners AS owner WHERE "
+                    "owner.build_id=generation.build_id) AND NOT EXISTS (SELECT 1 FROM "
+                    "pcap_posting_index_jobs AS task WHERE "
+                    "task.source_kind=generation.source_kind AND "
+                    "task.source_id=generation.source_id AND task.parent_structural_build_id="
+                    "generation.parent_structural_build_id AND task.status='RUNNING' "
+                    "AND task.attempt=generation.builder_attempt AND "
+                    "task.lease_token=generation.lease_token AND "
+                    "task.lease_expires_at>clock_timestamp()) ORDER BY generation.created_at,"
+                    "generation.build_id LIMIT %s",
+                    (max_age_seconds, limit),
+                )
+                selected = [
+                    (cast(PostingSourceKind, str(row[0])), str(row[1]), str(row[2]))
+                    for row in cursor.fetchall()
+                ]
+                grouped: dict[PostingSourceKind, list[str]] = {}
+                for source_kind, source_id, _build_id in selected:
+                    grouped.setdefault(source_kind, []).append(source_id)
+                for source_kind in sorted(grouped):
+                    self._lock_posting_lifecycle_for_sources(
+                        cursor, source_kind, grouped[source_kind]
+                    )
+                build_ids = [build_id for _kind, _source_id, build_id in selected]
+                rows: list[tuple[Any, ...]] = []
+                if build_ids:
+                    cursor.execute(
+                        "DELETE FROM pcap_posting_index_generations AS generation WHERE "
+                        "generation.build_id=ANY(%s) AND generation.state='STAGING' AND "
+                        "generation.created_at<clock_timestamp()-make_interval(secs=>%s) "
+                        "AND NOT EXISTS (SELECT 1 FROM pcap_posting_index_owners AS owner "
+                        "WHERE owner.build_id=generation.build_id) AND NOT EXISTS (SELECT 1 "
+                        "FROM pcap_posting_index_jobs AS task WHERE task.source_kind="
+                        "generation.source_kind AND task.source_id=generation.source_id AND "
+                        "task.parent_structural_build_id=generation.parent_structural_build_id "
+                        "AND task.status='RUNNING' AND task.attempt=generation.builder_attempt "
+                        "AND task.lease_token=generation.lease_token AND "
+                        "task.lease_expires_at>clock_timestamp()) RETURNING generation.build_id",
+                        (build_ids, max_age_seconds),
+                    )
+                    rows = cursor.fetchall()
+            connection.commit()
+            return len(rows)
+        except Exception:
+            connection.rollback()
+            raise
+
+    @staticmethod
+    def _posting_chunks(rows: Iterable[tuple[Any, ...]]) -> tuple[PostingChunk, ...]:
+        return tuple(
+            PostingChunk(
+                PostingDimension(str(row[0])),
+                bytes(row[1]),
+                int(row[2]),
+                int(row[3]),
+                int(row[4]),
+                int(row[5]),
+                bytes(row[6]),
+            )
+            for row in rows
+        )
+
+    @classmethod
+    def _posting_snapshot_from_generation(
+        cls, row: tuple[Any, ...], chunks: tuple[PostingChunk, ...]
+    ) -> PostingIndexSnapshot:
+        binding = PostingIndexBinding(
+            cast(Any, str(row[1])),
+            str(row[2]),
+            str(row[3]),
+            int(row[4]),
+            str(row[5]),
+            cast(Any, str(row[6])),
+            str(row[7]),
+            str(row[8]),
+            int(row[9]),
+            int(row[10]),
+            int(row[11]),
+            int(row[12]),
+            int(row[13]),
+        )
+        generation = PostingGeneration(
+            int(row[11]),
+            int(row[12]),
+            int(row[13]),
+            int(row[16]),
+            int(row[17]),
+            int(row[18]),
+            int(row[19]),
+            int(row[21]),
+            frozenset(PostingDimension(str(value)) for value in row[22]),
+            chunks,
+            str(row[23]),
+            bytes(row[24]),
+        )
+        return PostingIndexSnapshot(str(row[0]), binding, cast(datetime, row[15]), generation)
+
+    @_serialize_shared_connection
+    def begin_posting_index(
+        self,
+        snapshot: PostingIndexSnapshot,
+        *,
+        attempt: int,
+        lease_token: str,
+    ) -> None:
+        if attempt <= 0 or not lease_token:
+            raise ValueError("posting task lease is required")
+        spec = PostingIndexTaskSpec(**snapshot.binding.__dict__)
+        generation = snapshot.generation
+        connection = self.connection
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"SELECT {self._POSTING_TASK_PROJECTION} FROM "  # noqa: S608 -- fixed internal projection
+                    "pcap_posting_index_intents AS intent JOIN pcap_posting_index_jobs AS task "
+                    "USING(source_kind,source_id) WHERE task.source_kind=%s "
+                    "AND task.source_id=%s AND task.parent_structural_build_id=%s "
+                    "AND task.status='RUNNING' AND task.attempt=%s AND task.lease_token=%s "
+                    "AND task.lease_expires_at>clock_timestamp() FOR UPDATE OF intent,task",
+                    (
+                        spec.source_kind,
+                        spec.source_id,
+                        spec.parent_structural_build_id,
+                        attempt,
+                        lease_token,
+                    ),
+                )
+                task_row = cursor.fetchone()
+                if task_row is None or self._posting_task(task_row).spec != spec:
+                    connection.rollback()
+                    raise ValueError("posting task lease is not current")
+                cursor.execute(
+                    "SELECT build_id FROM pcap_posting_index_owners WHERE source_kind=%s "
+                    "AND source_id=%s AND parent_structural_build_id=%s FOR UPDATE",
+                    (spec.source_kind, spec.source_id, spec.parent_structural_build_id),
+                )
+                owner = cursor.fetchone()
+                cursor.execute(
+                    "INSERT INTO pcap_posting_index_generations(build_id,"
+                    + self._POSTING_SPEC_COLUMNS
+                    + ",state,created_at,packet_count,supported_count,membership_count,"
+                    "distinct_key_count,chunk_count,encoded_byte_count,complete_dimensions,"
+                    "posting_index_sha256,binding_document,builder_attempt,lease_token,"
+                    "expected_owner_build_id) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+                    "%s,%s,'STAGING',clock_timestamp(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (
+                        snapshot.build_id,
+                        *self._posting_spec_values(spec),
+                        generation.packet_count,
+                        generation.supported_count,
+                        generation.membership_count,
+                        generation.distinct_key_count,
+                        len(generation.chunks),
+                        generation.encoded_byte_count,
+                        [value.value for value in sorted(generation.complete_dimensions, key=str)],
+                        generation.digest,
+                        generation.binding_document,
+                        attempt,
+                        lease_token,
+                        str(owner[0]) if owner else None,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    connection.rollback()
+                    raise ValueError("posting generation was not created")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    @_serialize_shared_connection
+    def stage_posting_index_chunks(
+        self,
+        build_id: str,
+        chunks: tuple[PostingChunk, ...],
+        *,
+        source_kind: PostingSourceKind,
+        source_id: str,
+        attempt: int,
+        lease_token: str,
+    ) -> None:
+        connection = self.connection
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT task.parent_structural_build_id FROM pcap_posting_index_jobs AS task "
+                    "JOIN pcap_posting_index_intents AS intent USING(source_kind,source_id) "
+                    "WHERE task.source_kind=%s AND task.source_id=%s AND task.status='RUNNING' "
+                    "AND task.attempt=%s AND task.lease_token=%s "
+                    "AND task.lease_expires_at>clock_timestamp() AND intent.status IN "
+                    "('PENDING','DEFERRED') AND intent.parent_structural_build_id="
+                    "task.parent_structural_build_id FOR UPDATE OF intent,task",
+                    (source_kind, source_id, attempt, lease_token),
+                )
+                task_row = cursor.fetchone()
+                if task_row is None:
+                    connection.rollback()
+                    raise ValueError("posting task lease is not current")
+                cursor.execute(
+                    "SELECT build_id FROM pcap_posting_index_generations WHERE build_id=%s "
+                    "AND source_kind=%s AND source_id=%s AND parent_structural_build_id=%s "
+                    "AND state='STAGING' AND builder_attempt=%s AND lease_token=%s FOR UPDATE",
+                    (
+                        build_id,
+                        source_kind,
+                        source_id,
+                        str(task_row[0]),
+                        attempt,
+                        lease_token,
+                    ),
+                )
+                if cursor.fetchone() is None:
+                    connection.rollback()
+                    raise ValueError("posting generation is not current")
+                if chunks:
+                    cursor.executemany(
+                        "INSERT INTO pcap_posting_index_chunks(build_id,dimension,"
+                        "canonical_value,chunk_ordinal,first_packet_index,last_packet_index,"
+                        "membership_count,encoded_ordinals) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                        [
+                            (
+                                build_id,
+                                chunk.dimension.value,
+                                chunk.value,
+                                chunk.chunk_ordinal,
+                                chunk.first_packet_index,
+                                chunk.last_packet_index,
+                                chunk.count,
+                                chunk.encoded_ordinals,
+                            )
+                            for chunk in chunks
+                        ],
+                    )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    @_serialize_shared_connection
+    def publish_posting_index(
+        self,
+        build_id: str,
+        *,
+        source_version: CaptureSourceVersion,
+        parent: StructuralIndexSnapshot,
+        attempt: int,
+        lease_token: str,
+    ) -> bool:
+        if source_version.source_kind not in {"PCAP_UPLOAD", "LIVE_SEGMENT"}:
+            return False
+        key = (source_version.source_kind, source_version.source_id, parent.build_id)
+        connection = self.connection
+        try:
+            with connection.cursor() as cursor:
+                # Deterministic lock order: source -> structural owner/parent -> intent ->
+                # exact task -> staging generation -> current posting owner.
+                cursor.execute(
+                    "SELECT source_kind,source_id,object_key,source_version_id,"
+                    "source_size_bytes,source_sha256 FROM pcap_capture_source_versions "
+                    "WHERE source_kind=%s AND source_id=%s FOR UPDATE",
+                    key[:2],
+                )
+                source_row = cursor.fetchone()
+                if source_row != (
+                    source_version.source_kind,
+                    source_version.source_id,
+                    source_version.object_key,
+                    source_version.source_version_id,
+                    source_version.source_size_bytes,
+                    source_version.source_sha256,
+                ):
+                    connection.rollback()
+                    return False
+                cursor.execute(
+                    "SELECT owner.build_id,generation.index_sha256,generation.state "
+                    "FROM pcap_offset_index_owners AS owner JOIN "
+                    "pcap_offset_index_generations AS generation "
+                    "ON generation.build_id=owner.build_id WHERE owner.source_kind=%s "
+                    "AND owner.source_id=%s AND owner.build_id=%s "
+                    "AND generation.state='READY' FOR UPDATE OF owner,generation",
+                    key,
+                )
+                if cursor.fetchone() != (parent.build_id, parent.index_sha256, "READY"):
+                    connection.rollback()
+                    return False
+                cursor.execute(
+                    f"SELECT {self._POSTING_INTENT_COLUMNS} FROM "  # noqa: S608 -- fixed internal columns
+                    "pcap_posting_index_intents WHERE source_kind=%s AND source_id=%s "
+                    "AND parent_structural_build_id=%s AND status IN ('PENDING','DEFERRED') "
+                    "FOR UPDATE",
+                    key,
+                )
+                intent_row = cursor.fetchone()
+                if intent_row is None:
+                    connection.rollback()
+                    return False
+                intent = self._posting_intent(intent_row)
+                cursor.execute(
+                    f"SELECT {self._POSTING_TASK_PROJECTION} FROM "  # noqa: S608 -- fixed internal projection
+                    "pcap_posting_index_intents AS intent JOIN pcap_posting_index_jobs AS task "
+                    "USING(source_kind,source_id) WHERE task.source_kind=%s "
+                    "AND task.source_id=%s AND task.parent_structural_build_id=%s "
+                    "AND task.status='RUNNING' AND task.attempt=%s AND task.lease_token=%s "
+                    "AND task.lease_expires_at>clock_timestamp() FOR UPDATE OF task",
+                    (*key, attempt, lease_token),
+                )
+                task_row = cursor.fetchone()
+                if task_row is None:
+                    connection.rollback()
+                    return False
+                task = self._posting_task(task_row)
+                cursor.execute(
+                    "SELECT build_id,source_kind,source_id,source_version_id,"
+                    "source_size_bytes,source_sha256,capture_format,parent_structural_build_id,"
+                    "parent_structural_index_sha256,structural_schema_version,"
+                    "structural_parser_contract_version,posting_schema_version,"
+                    "posting_parser_contract_version,filter_contract_version,state,created_at,"
+                    "packet_count,supported_count,membership_count,distinct_key_count,chunk_count,"
+                    "encoded_byte_count,complete_dimensions,posting_index_sha256,binding_document,"
+                    "builder_attempt,lease_token,expected_owner_build_id FROM "
+                    "pcap_posting_index_generations WHERE build_id=%s AND source_kind=%s "
+                    "AND source_id=%s AND parent_structural_build_id=%s AND state='STAGING' "
+                    "FOR UPDATE",
+                    (build_id, *key),
+                )
+                generation_row = cursor.fetchone()
+                if generation_row is None:
+                    connection.rollback()
+                    return False
+                cursor.execute(
+                    "SELECT build_id FROM pcap_posting_index_owners WHERE source_kind=%s "
+                    "AND source_id=%s AND parent_structural_build_id=%s FOR UPDATE",
+                    key,
+                )
+                owner_row = cursor.fetchone()
+                current_owner = str(owner_row[0]) if owner_row else None
+                if (
+                    intent.spec != task.spec
+                    or task.spec != PostingIndexTaskSpec.from_binding(source_version, parent)
+                    or int(generation_row[25]) != attempt
+                    or str(generation_row[26]) != lease_token
+                    or generation_row[27] != current_owner
+                ):
+                    connection.rollback()
+                    return False
+                cursor.execute(
+                    "SELECT dimension,canonical_value,chunk_ordinal,first_packet_index,"
+                    "last_packet_index,membership_count,encoded_ordinals FROM "
+                    "pcap_posting_index_chunks WHERE build_id=%s ORDER BY "
+                    "dimension,canonical_value,chunk_ordinal",
+                    (build_id,),
+                )
+                chunk_rows: list[tuple[Any, ...]] = []
+                while batch := cursor.fetchmany(1_000):
+                    chunk_rows.extend(batch)
+                snapshot = self._posting_snapshot_from_generation(
+                    generation_row, self._posting_chunks(chunk_rows)
+                )
+                if len(chunk_rows) != int(generation_row[20]) or not validate_posting_index(
+                    snapshot, source_version=source_version, parent=parent
+                ):
+                    connection.rollback()
+                    return False
+                cursor.execute(
+                    "UPDATE pcap_posting_index_generations SET state='READY' WHERE "
+                    "build_id=%s AND state='STAGING' AND builder_attempt=%s AND lease_token=%s",
+                    (build_id, attempt, lease_token),
+                )
+                generation_count = cursor.rowcount
+                if current_owner is None:
+                    cursor.execute(
+                        "INSERT INTO pcap_posting_index_owners(source_kind,source_id,"
+                        "parent_structural_build_id,build_id) VALUES(%s,%s,%s,%s) "
+                        "ON CONFLICT DO NOTHING",
+                        (*key, build_id),
+                    )
+                else:
+                    cursor.execute(
+                        "INSERT INTO pcap_posting_index_owners(source_kind,source_id,"
+                        "parent_structural_build_id,build_id) VALUES(%s,%s,%s,%s) ON CONFLICT("
+                        "source_kind,source_id,parent_structural_build_id) DO UPDATE SET "
+                        "build_id=excluded.build_id WHERE "
+                        "pcap_posting_index_owners.build_id=%s",
+                        (*key, build_id, current_owner),
+                    )
+                owner_count = cursor.rowcount
+                cursor.execute(
+                    "UPDATE pcap_posting_index_jobs SET status='COMPLETED',lease_token=NULL,"
+                    "lease_expires_at=NULL,updated_at=clock_timestamp(),error_code=NULL WHERE "
+                    "source_kind=%s AND source_id=%s AND parent_structural_build_id=%s "
+                    "AND status='RUNNING' AND attempt=%s AND lease_token=%s "
+                    "AND lease_expires_at>clock_timestamp()",
+                    (*key, attempt, lease_token),
+                )
+                task_count = cursor.rowcount
+                cursor.execute(
+                    "UPDATE pcap_posting_index_intents SET status='COMPLETED',"
+                    "updated_at=clock_timestamp(),published_build_id=%s,error_code=NULL,"
+                    "terminal_attempt=%s,terminal_max_attempts=%s WHERE source_kind=%s "
+                    "AND source_id=%s AND parent_structural_build_id=%s "
+                    "AND status IN ('PENDING','DEFERRED')",
+                    (build_id, task.attempt, task.max_attempts, *key),
+                )
+                intent_count = cursor.rowcount
+                if (generation_count, owner_count, task_count, intent_count) != (1, 1, 1, 1):
+                    connection.rollback()
+                    return False
+                if current_owner is not None and current_owner != build_id:
+                    cursor.execute(
+                        "DELETE FROM pcap_posting_index_generations WHERE build_id=%s",
+                        (current_owner,),
+                    )
+            connection.commit()
+            return True
+        except Exception:
+            connection.rollback()
+            raise
+
+    @_serialize_shared_connection
+    def get_posting_index_identity(
+        self,
+        source_version: CaptureSourceVersion,
+        parent: StructuralIndexSnapshot,
+    ) -> PostingIndexIdentityLookup:
+        key = (source_version.source_kind, source_version.source_id, parent.build_id)
+        connection = self.connection
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT owner.build_id,generation.source_kind,generation.source_id,"
+                    "generation.source_version_id,generation.source_size_bytes,"
+                    "generation.source_sha256,generation.capture_format,"
+                    "generation.parent_structural_build_id,"
+                    "generation.parent_structural_index_sha256,"
+                    "generation.structural_schema_version,"
+                    "generation.structural_parser_contract_version,"
+                    "generation.posting_schema_version,"
+                    "generation.posting_parser_contract_version,"
+                    "generation.filter_contract_version,generation.state,"
+                    "generation.created_at,generation.packet_count,"
+                    "generation.supported_count,generation.membership_count,"
+                    "generation.distinct_key_count,generation.chunk_count,"
+                    "generation.encoded_byte_count,generation.complete_dimensions,"
+                    "generation.posting_index_sha256,generation.binding_document FROM "
+                    "pcap_posting_index_owners AS owner LEFT JOIN "
+                    "pcap_posting_index_generations AS generation ON "
+                    "generation.build_id=owner.build_id WHERE owner.source_kind=%s AND "
+                    "owner.source_id=%s AND owner.parent_structural_build_id=%s LIMIT 1",
+                    key,
+                )
+                row = cursor.fetchone()
+            connection.commit()
+            if row is None:
+                return PostingIndexIdentityLookup(PostingIndexAvailability.MISSING)
+            if row[1] is None or row[14] != "READY":
+                return PostingIndexIdentityLookup(PostingIndexAvailability.CORRUPT)
+            numeric_indexes = tuple(range(9, 14)) + tuple(range(16, 22))
+            if (
+                any(type(row[index]) is not int for index in numeric_indexes)
+                or not isinstance(row[15], datetime)
+                or not isinstance(row[22], list | tuple)
+                or not all(isinstance(item, str) for item in row[22])
+                or not isinstance(row[23], str)
+                or not isinstance(row[24], bytes | bytearray | memoryview)
+            ):
+                return PostingIndexIdentityLookup(PostingIndexAvailability.CORRUPT)
+            identity = PostingIndexIdentity(
+                str(row[0]),
+                PostingIndexBinding(
+                    cast(Any, row[1]),
+                    str(row[2]),
+                    str(row[3]),
+                    row[4],
+                    str(row[5]),
+                    cast(Any, row[6]),
+                    str(row[7]),
+                    str(row[8]),
+                    row[9],
+                    row[10],
+                    row[11],
+                    row[12],
+                    row[13],
+                ),
+                row[15],
+                row[11],
+                row[12],
+                row[13],
+                row[16],
+                row[17],
+                row[18],
+                row[19],
+                row[20],
+                row[21],
+                tuple(sorted(row[22])),
+                row[23],
+                bytes(row[24]),
+            )
+            availability = posting_index_identity_availability(
+                identity, source_version=source_version, parent=parent
+            )
+            return PostingIndexIdentityLookup(
+                availability,
+                identity if availability is PostingIndexAvailability.READY else None,
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            connection.rollback()
+            return PostingIndexIdentityLookup(PostingIndexAvailability.CORRUPT)
+        except Exception:
+            connection.rollback()
+            raise
+
+    @_serialize_shared_connection
+    def get_posting_index(
+        self,
+        source_version: CaptureSourceVersion,
+        parent: StructuralIndexSnapshot,
+        limits: PostingQueryLimits | None = None,
+    ) -> PostingIndexLookup:
+        key = (source_version.source_kind, source_version.source_id, parent.build_id)
+        connection = self.connection
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT build_id FROM pcap_posting_index_owners WHERE source_kind=%s "
+                    "AND source_id=%s AND parent_structural_build_id=%s",
+                    key,
+                )
+                owner = cursor.fetchone()
+                if owner is None:
+                    connection.commit()
+                    return PostingIndexLookup(PostingIndexAvailability.MISSING)
+                cursor.execute(
+                    "SELECT source_kind,source_id,object_key,source_version_id,"
+                    "source_size_bytes,source_sha256 FROM pcap_capture_source_versions "
+                    "WHERE source_kind=%s AND source_id=%s",
+                    key[:2],
+                )
+                source_row = cursor.fetchone()
+                if source_row != (
+                    source_version.source_kind,
+                    source_version.source_id,
+                    source_version.object_key,
+                    source_version.source_version_id,
+                    source_version.source_size_bytes,
+                    source_version.source_sha256,
+                ):
+                    connection.commit()
+                    return PostingIndexLookup(PostingIndexAvailability.STALE)
+                cursor.execute(
+                    "SELECT owner.build_id,generation.index_sha256,generation.state FROM "
+                    "pcap_offset_index_owners AS owner JOIN pcap_offset_index_generations AS "
+                    "generation ON generation.build_id=owner.build_id WHERE "
+                    "owner.source_kind=%s AND owner.source_id=%s AND owner.build_id=%s",
+                    key,
+                )
+                if cursor.fetchone() != (parent.build_id, parent.index_sha256, "READY"):
+                    connection.commit()
+                    return PostingIndexLookup(PostingIndexAvailability.STALE)
+                cursor.execute(
+                    "SELECT build_id,source_kind,source_id,source_version_id,source_size_bytes,"
+                    "source_sha256,capture_format,parent_structural_build_id,"
+                    "parent_structural_index_sha256,structural_schema_version,"
+                    "structural_parser_contract_version,posting_schema_version,"
+                    "posting_parser_contract_version,filter_contract_version,state,created_at,"
+                    "packet_count,supported_count,membership_count,distinct_key_count,chunk_count,"
+                    "encoded_byte_count,complete_dimensions,posting_index_sha256,binding_document,"
+                    "builder_attempt,lease_token,expected_owner_build_id FROM "
+                    "pcap_posting_index_generations WHERE build_id=%s AND state='READY'",
+                    (owner[0],),
+                )
+                generation_row = cursor.fetchone()
+                if generation_row is None:
+                    connection.commit()
+                    return PostingIndexLookup(PostingIndexAvailability.CORRUPT)
+                chunk_count = int(generation_row[20])
+                if limits is not None and chunk_count > limits.max_directory_chunks:
+                    connection.commit()
+                    return PostingIndexLookup(PostingIndexAvailability.RESOURCE_LIMIT)
+                chunk_limit = (
+                    limits.max_directory_chunks + 1 if limits is not None else chunk_count + 1
+                )
+                cursor.execute(
+                    "SELECT dimension,canonical_value,chunk_ordinal,first_packet_index,"
+                    "last_packet_index,membership_count,encoded_ordinals FROM "
+                    "pcap_posting_index_chunks WHERE build_id=%s ORDER BY "
+                    "dimension,canonical_value,chunk_ordinal LIMIT %s",
+                    (owner[0], chunk_limit),
+                )
+                chunk_rows: list[tuple[Any, ...]] = []
+                while batch := cursor.fetchmany(1_000):
+                    chunk_rows.extend(batch)
+                if len(chunk_rows) > chunk_count or (
+                    limits is not None and len(chunk_rows) > limits.max_directory_chunks
+                ):
+                    connection.commit()
+                    return PostingIndexLookup(PostingIndexAvailability.RESOURCE_LIMIT)
+                snapshot = self._posting_snapshot_from_generation(
+                    generation_row, self._posting_chunks(chunk_rows)
+                )
+            connection.commit()
+            if len(chunk_rows) != int(generation_row[20]) or not validate_posting_index(
+                snapshot, source_version=source_version, parent=parent
+            ):
+                return PostingIndexLookup(PostingIndexAvailability.CORRUPT)
+            return PostingIndexLookup(PostingIndexAvailability.READY, snapshot)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            connection.rollback()
+            return PostingIndexLookup(PostingIndexAvailability.CORRUPT)
+        except Exception:
+            connection.rollback()
+            raise
+
+    @_serialize_shared_connection
+    def abort_posting_index(
+        self,
+        build_id: str,
+        *,
+        source_kind: PostingSourceKind,
+        source_id: str,
+        parent_structural_build_id: str,
+        attempt: int,
+        lease_token: str,
+    ) -> bool:
+        if attempt <= 0 or not lease_token:
+            return False
+        connection = self.connection
+        try:
+            with connection.cursor() as cursor:
+                self._lock_posting_lifecycle_for_sources(cursor, source_kind, [source_id])
+                cursor.execute(
+                    "DELETE FROM pcap_posting_index_generations AS generation USING "
+                    "pcap_posting_index_jobs AS task,pcap_posting_index_intents AS intent "
+                    "WHERE generation.build_id=%s AND generation.source_kind=%s "
+                    "AND generation.source_id=%s AND generation.parent_structural_build_id=%s "
+                    "AND generation.state='STAGING' AND generation.builder_attempt=%s "
+                    "AND generation.lease_token=%s AND task.source_kind=generation.source_kind "
+                    "AND task.source_id=generation.source_id AND task.parent_structural_build_id="
+                    "generation.parent_structural_build_id AND task.status='RUNNING' "
+                    "AND task.attempt=generation.builder_attempt AND task.lease_token="
+                    "generation.lease_token AND task.lease_expires_at>clock_timestamp() "
+                    "AND intent.source_kind=task.source_kind AND intent.source_id=task.source_id "
+                    "AND intent.parent_structural_build_id=task.parent_structural_build_id "
+                    "AND intent.status IN ('PENDING','DEFERRED')",
+                    (
+                        build_id,
+                        source_kind,
+                        source_id,
+                        parent_structural_build_id,
+                        attempt,
+                        lease_token,
+                    ),
+                )
+                deleted = cursor.rowcount == 1
+                if not deleted:
+                    connection.rollback()
+                    return False
+            connection.commit()
+            return True
+        except Exception:
+            connection.rollback()
+            raise
 
     def database_ready(self) -> bool:
         try:
@@ -2319,7 +4028,15 @@ class PostgresRepository:
                     (f"job-delete:{job_id}:{export_id}", object_key)
                     for export_id, object_key in export_objects
                 ]
-                capture_key = self._capture_key(job_id)
+                cursor.execute(
+                    "SELECT object_key FROM pcap_capture_source_versions "
+                    "WHERE source_kind='PCAP_UPLOAD' AND source_id=%s",
+                    (job_id,),
+                )
+                capture_row = cursor.fetchone()
+                capture_key = (
+                    str(capture_row[0]) if capture_row is not None else self._capture_key(job_id)
+                )
                 cleanup_objects.append((f"job-delete:{job_id}:capture", capture_key))
             unique_cleanup_objects: dict[str, str] = {}
             for cleanup_source, object_key in cleanup_objects:
@@ -2379,8 +4096,21 @@ class PostgresRepository:
             cursor.execute("DELETE FROM job_flow_record_chunks WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM job_flow_records WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM job_payload_signatures WHERE job_id=%s", (job_id,))
+            self._lock_posting_lifecycle_for_sources(cursor, "PCAP_UPLOAD", [job_id])
             cursor.execute(
-                "DELETE FROM pcap_offset_index_generations WHERE source_id=%s", (job_id,)
+                "DELETE FROM pcap_posting_index_intents WHERE source_kind='PCAP_UPLOAD' "
+                "AND source_id=%s",
+                (job_id,),
+            )
+            cursor.execute(
+                "DELETE FROM pcap_posting_index_generations WHERE source_kind='PCAP_UPLOAD' "
+                "AND source_id=%s",
+                (job_id,),
+            )
+            cursor.execute(
+                "DELETE FROM pcap_offset_index_generations WHERE source_kind='PCAP_UPLOAD' "
+                "AND source_id=%s",
+                (job_id,),
             )
             cursor.execute(
                 "DELETE FROM pcap_capture_source_versions WHERE source_kind='PCAP_UPLOAD' "
@@ -2389,6 +4119,17 @@ class PostgresRepository:
             )
             if live_segment_rows:
                 segment_ids = [segment_id for segment_id, _object_key in live_segment_rows]
+                self._lock_posting_lifecycle_for_sources(cursor, "LIVE_SEGMENT", segment_ids)
+                cursor.execute(
+                    "DELETE FROM pcap_posting_index_intents WHERE source_kind='LIVE_SEGMENT' "
+                    "AND source_id=ANY(%s)",
+                    (segment_ids,),
+                )
+                cursor.execute(
+                    "DELETE FROM pcap_posting_index_generations "
+                    "WHERE source_kind='LIVE_SEGMENT' AND source_id=ANY(%s)",
+                    (segment_ids,),
+                )
                 cursor.execute(
                     "DELETE FROM pcap_offset_index_jobs WHERE source_kind='LIVE_SEGMENT' "
                     "AND source_id=ANY(%s)",
@@ -2446,42 +4187,38 @@ class PostgresRepository:
 
     @staticmethod
     def _capture_key(job_id: str) -> str:
+        """Return the historical deterministic key used by legacy stored rows."""
         return f"captures/{job_id}.pcap"
 
-    def _cleanup_failed_capture_upload(self, job_id: str, object_key: str) -> None:
-        cleanup_id = self._pcap_cleanup_id(f"capture-upload:{job_id}", object_key)
-        try:
-            with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT source_version_id FROM pcap_capture_source_versions "
-                    "WHERE source_kind='PCAP_UPLOAD' AND source_id=%s FOR UPDATE",
-                    (job_id,),
-                )
-                if cursor.fetchone() is not None:
-                    self.connection.commit()
-                    return
-                cursor.execute(
-                    "INSERT INTO controller_objects(kind,id,data) "
-                    "VALUES('pcap_export_cleanup',%s,%s::jsonb) "
-                    "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
-                    (
-                        cleanup_id,
-                        self._json(
-                            {
-                                "object_key": object_key,
-                                "created_at": datetime.now(UTC).isoformat(),
-                            }
-                        ),
-                    ),
-                )
-                self.connection.commit()
-        except Exception as exc:
-            raise ArtifactStorageError("capture cleanup intent unavailable") from exc
+    @staticmethod
+    def _capture_generation_key(job_id: str) -> str:
+        return f"captures/{job_id}/{uuid4().hex}.pcap"
+
+    def _queue_capture_cleanup(self, cursor: Any, scope: str, object_key: str) -> str:
+        cleanup_id = self._pcap_cleanup_id(scope, object_key)
+        cursor.execute(
+            "INSERT INTO controller_objects(kind,id,data) "
+            "VALUES('pcap_export_cleanup',%s,%s::jsonb) "
+            "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+            (
+                cleanup_id,
+                self._json(
+                    {
+                        "object_key": object_key,
+                        "created_at": datetime.now(UTC).isoformat(),
+                        "state": "READY",
+                    }
+                ),
+            ),
+        )
+        return cleanup_id
+
+    def _perform_capture_cleanup(self, cleanup_id: str, object_key: str) -> None:
         try:
             self.blob_store.delete(object_key)
         except Exception:
             logger.warning(
-                "Failed to delete unowned capture upload %s; cleanup remains queued",
+                "Failed to delete obsolete capture object %s; cleanup remains queued",
                 object_key,
                 exc_info=True,
             )
@@ -2496,16 +4233,42 @@ class PostgresRepository:
                 self.connection.commit()
         except Exception:
             logger.warning(
-                "Failed to acknowledge capture upload cleanup %s",
+                "Failed to acknowledge capture object cleanup %s",
                 object_key,
                 exc_info=True,
             )
 
+    def _cleanup_failed_capture_upload(self, job_id: str, object_key: str) -> None:
+        cleanup_id = self._pcap_cleanup_id(f"capture-upload:{job_id}", object_key)
+        try:
+            with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT object_key FROM pcap_capture_source_versions "
+                    "WHERE source_kind='PCAP_UPLOAD' AND source_id=%s FOR UPDATE",
+                    (job_id,),
+                )
+                current = cursor.fetchone()
+                if current is not None and str(current[0]) == object_key:
+                    cursor.execute(
+                        "DELETE FROM controller_objects WHERE kind='pcap_export_cleanup' "
+                        "AND data->>'object_key'=%s",
+                        (object_key,),
+                    )
+                    self.connection.commit()
+                    return
+                self._queue_capture_cleanup(cursor, f"capture-upload:{job_id}", object_key)
+                self.connection.commit()
+        except Exception as exc:
+            raise ArtifactStorageError("capture cleanup intent unavailable") from exc
+        self._perform_capture_cleanup(cleanup_id, object_key)
+
     def save_job_capture(self, job_id: str, content: bytes) -> None:
-        object_key = self._capture_key(job_id)
+        object_key = self._capture_generation_key(job_id)
         expected_size = len(content)
         expected_sha256 = hashlib.sha256(content).hexdigest()
+        upload_attempted = False
         try:
+            upload_attempted = True
             self.blob_store.put(object_key, content)
             source = self.blob_store.open(object_key)
             with source:
@@ -2515,13 +4278,17 @@ class PostgresRepository:
                     actual_size += len(chunk)
                     digest.update(chunk)
                 source_version_id = source.version_id
-        except ArtifactStorageError:
-            raise
         except Exception as exc:
+            if upload_attempted:
+                self._cleanup_failed_capture_upload(job_id, object_key)
+            if isinstance(exc, ArtifactStorageError):
+                raise
             raise ArtifactStorageError("MinIO capture upload verification failed") from exc
         if actual_size != expected_size or digest.hexdigest() != expected_sha256:
+            self._cleanup_failed_capture_upload(job_id, object_key)
             raise ArtifactStorageError("MinIO capture upload verification mismatch")
 
+        prior_cleanup: tuple[str, str] | None = None
         try:
             with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
                 cursor.execute(
@@ -2545,13 +4312,20 @@ class PostgresRepository:
                     self.connection.rollback()
                     raise ArtifactStorageError("canonical capture metadata does not match upload")
                 cursor.execute(
+                    "SELECT object_key FROM pcap_capture_source_versions "
+                    "WHERE source_kind='PCAP_UPLOAD' AND source_id=%s FOR UPDATE",
+                    (job_id,),
+                )
+                prior_row = cursor.fetchone()
+                prior_key = str(prior_row[0]) if prior_row is not None else None
+                cursor.execute(
                     "INSERT INTO pcap_capture_source_versions("
                     "source_kind,source_id,object_key,source_version_id,source_size_bytes,"
                     "source_sha256,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s) "
                     "ON CONFLICT(source_kind,source_id) DO UPDATE SET "
                     "object_key=excluded.object_key,source_version_id=excluded.source_version_id,"
                     "source_size_bytes=excluded.source_size_bytes,source_sha256=excluded.source_sha256,"
-                    "updated_at=excluded.updated_at",
+                    "updated_at=excluded.updated_at RETURNING object_key",
                     (
                         "PCAP_UPLOAD",
                         job_id,
@@ -2562,10 +4336,23 @@ class PostgresRepository:
                         datetime.now(UTC),
                     ),
                 )
+                stored = cursor.fetchone()
+                if cursor.rowcount != 1 or stored != (object_key,):
+                    self.connection.rollback()
+                    raise ArtifactStorageError("capture version persistence rowcount mismatch")
+                if prior_key is not None and prior_key != object_key:
+                    prior_cleanup = (
+                        self._queue_capture_cleanup(
+                            cursor, f"capture-replacement:{job_id}", prior_key
+                        ),
+                        prior_key,
+                    )
                 self.connection.commit()
         except Exception as exc:
             self._cleanup_failed_capture_upload(job_id, object_key)
             raise ArtifactStorageError("capture version persistence failed") from exc
+        if prior_cleanup is not None:
+            self._perform_capture_cleanup(*prior_cleanup)
 
     def get_job_capture(self, job_id: str) -> bytes | None:
         source = self.open_job_capture(job_id)
@@ -2575,12 +4362,29 @@ class PostgresRepository:
             return b"".join(source.iter_chunks())
 
     def open_job_capture(self, job_id: str) -> CaptureSource | None:
+        with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT object_key,source_version_id FROM pcap_capture_source_versions "
+                "WHERE source_kind='PCAP_UPLOAD' AND source_id=%s",
+                (job_id,),
+            )
+            row = cursor.fetchone()
+            self.connection.commit()
+        if row is None:
+            return None
+        object_key, expected_version_id = str(row[0]), str(row[1])
         try:
-            return self.blob_store.open(self._capture_key(job_id))
+            source = self.blob_store.open(object_key)
         except Exception as exc:
             if _is_missing_object_error(exc):
                 return None
             raise
+        if source.version_id != expected_version_id:
+            source.close()
+            raise ArtifactStorageError(
+                "capture object version does not match authoritative metadata"
+            )
+        return source
 
     def get_capture_source_version(self, job_id: str) -> CaptureSourceVersion | None:
         with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
@@ -2683,12 +4487,37 @@ class PostgresRepository:
     def admit_live_segment_index(
         self, source_id: str, *, capacity: int, max_attempts: int
     ) -> IndexAdmission:
-        now = datetime.now(UTC)
         with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
             cursor.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                 ("live-offset-index-admission",),
             )
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='sensor' AND id=("
+                "SELECT data->>'sensor_id' FROM controller_objects "
+                "WHERE kind='sensor_pcap' AND id=%s) FOR UPDATE",
+                (source_id,),
+            )
+            sensor_row = cursor.fetchone()
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='job' AND id=("
+                "SELECT data->>'analysis_job_id' FROM controller_objects "
+                "WHERE kind='sensor_pcap' AND id=%s) FOR UPDATE",
+                (source_id,),
+            )
+            job_row = cursor.fetchone()
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='sensor_pcap' AND id=%s FOR UPDATE",
+                (source_id,),
+            )
+            segment_row = cursor.fetchone()
+            if sensor_row is None or job_row is None or segment_row is None:
+                self.connection.commit()
+                return IndexAdmission.DEFERRED
+            segment = (
+                segment_row[0] if isinstance(segment_row[0], dict) else json.loads(segment_row[0])
+            )
+            job = job_row[0] if isinstance(job_row[0], dict) else json.loads(job_row[0])
             cursor.execute(
                 f"SELECT {self._LIVE_TASK_COLUMNS} FROM pcap_offset_index_jobs "  # noqa: S608 -- fixed internal column list
                 "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s FOR UPDATE",
@@ -2697,29 +4526,6 @@ class PostgresRepository:
             if cursor.fetchone() is not None:
                 self.connection.commit()
                 return IndexAdmission.COALESCED
-            cursor.execute(
-                "SELECT data FROM controller_objects WHERE kind='sensor_pcap' AND id=%s FOR UPDATE",
-                (source_id,),
-            )
-            segment_row = cursor.fetchone()
-            if segment_row is None:
-                self.connection.commit()
-                return IndexAdmission.DEFERRED
-            segment = (
-                segment_row[0] if isinstance(segment_row[0], dict) else json.loads(segment_row[0])
-            )
-            cursor.execute(
-                "SELECT data FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
-                (str(segment.get("analysis_job_id", "")),),
-            )
-            job_row = cursor.fetchone()
-            job = (
-                job_row[0]
-                if job_row is not None and isinstance(job_row[0], dict)
-                else json.loads(job_row[0])
-                if job_row is not None
-                else None
-            )
             if not segment.get("index_requested_at") or not eligible_live_segment(job, segment):
                 self.connection.commit()
                 return IndexAdmission.DEFERRED
@@ -2740,7 +4546,8 @@ class PostgresRepository:
                 "source_kind,source_id,sensor_id,analysis_job_id,object_key,source_size_bytes,"
                 "source_sha256,capture_format,schema_version,parser_contract_version,status,attempt,"
                 "max_attempts,next_attempt_at,queued_at,updated_at) "
-                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'QUEUED',0,%s,%s,%s,%s) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'QUEUED',0,%s,"
+                "clock_timestamp(),clock_timestamp(),clock_timestamp()) "
                 "ON CONFLICT(source_kind,source_id) DO NOTHING",
                 (
                     spec.source_kind,
@@ -2754,9 +4561,6 @@ class PostgresRepository:
                     spec.schema_version,
                     spec.parser_contract_version,
                     max_attempts,
-                    now,
-                    now,
-                    now,
                 ),
             )
             queued = cursor.rowcount == 1
@@ -2777,20 +4581,20 @@ class PostgresRepository:
             return task
 
     def claim_live_segment_index(
-        self, *, now: datetime, lease_seconds: int
+        self, *, now: datetime | None = None, lease_seconds: int
     ) -> LiveIndexTask | None:
         token = secrets.token_hex(16)
-        expires = now + timedelta(seconds=lease_seconds)
         with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
             cursor.execute(
                 "WITH selected AS (SELECT source_kind,source_id FROM pcap_offset_index_jobs "  # noqa: S608 -- fixed internal RETURNING columns
-                "WHERE status='QUEUED' AND next_attempt_at<=%s "
+                "WHERE status='QUEUED' AND next_attempt_at<=clock_timestamp() "
                 "ORDER BY next_attempt_at,queued_at,source_id FOR UPDATE SKIP LOCKED LIMIT 1) "
                 "UPDATE pcap_offset_index_jobs AS task SET status='RUNNING',attempt=task.attempt+1,"
-                "lease_expires_at=%s,lease_token=%s,updated_at=%s FROM selected "
+                "lease_token=%s,lease_expires_at=clock_timestamp()+make_interval(secs => %s),"
+                "updated_at=clock_timestamp() FROM selected "
                 "WHERE task.source_kind=selected.source_kind AND task.source_id=selected.source_id "
                 f"RETURNING {self._LIVE_TASK_COLUMNS}",
-                (now, expires, token, now),
+                (token, lease_seconds),
             )
             task = self._live_task_from_row(cursor.fetchone())
             self.connection.commit()
@@ -2802,33 +4606,34 @@ class PostgresRepository:
         *,
         attempt: int,
         lease_token: str,
-        now: datetime,
+        now: datetime | None = None,
         lease_seconds: int,
     ) -> bool:
         with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
             cursor.execute(
-                "UPDATE pcap_offset_index_jobs SET lease_expires_at=%s,updated_at=%s "
+                "UPDATE pcap_offset_index_jobs SET "
+                "lease_expires_at=clock_timestamp()+make_interval(secs => %s),"
+                "updated_at=clock_timestamp() "
                 "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s AND status='RUNNING' "
-                "AND attempt=%s AND lease_token=%s AND lease_expires_at>%s",
-                (now + timedelta(seconds=lease_seconds), now, source_id, attempt, lease_token, now),
+                "AND attempt=%s AND lease_token=%s AND lease_expires_at>clock_timestamp()",
+                (lease_seconds, source_id, attempt, lease_token),
             )
-            updated = cursor.rowcount == 1
+            updated = bool(cursor.rowcount == 1)
             self.connection.commit()
             return updated
 
     def complete_live_segment_index(
         self, source_id: str, *, attempt: int, lease_token: str
     ) -> bool:
-        now = datetime.now(UTC)
         with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
             cursor.execute(
                 "UPDATE pcap_offset_index_jobs SET status='COMPLETED',lease_token=NULL,"
-                "lease_expires_at=NULL,completed_at=%s,updated_at=%s "
+                "lease_expires_at=NULL,completed_at=clock_timestamp(),updated_at=clock_timestamp() "
                 "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s AND status='RUNNING' "
-                "AND attempt=%s AND lease_token=%s AND lease_expires_at>%s",
-                (now, now, source_id, attempt, lease_token, now),
+                "AND attempt=%s AND lease_token=%s AND lease_expires_at>clock_timestamp()",
+                (source_id, attempt, lease_token),
             )
-            updated = cursor.rowcount == 1
+            updated = bool(cursor.rowcount == 1)
             if updated:
                 self._mark_live_index_intent(cursor, source_id, "COMPLETED")
             self.connection.commit()
@@ -2842,61 +4647,60 @@ class PostgresRepository:
         lease_token: str,
         transient: bool,
         error_code: str,
-        now: datetime,
+        now: datetime | None = None,
         retry_base_seconds: int,
     ) -> bool:
         with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
             cursor.execute(
                 f"SELECT {self._LIVE_TASK_COLUMNS} FROM pcap_offset_index_jobs "  # noqa: S608 -- fixed internal column list
                 "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s AND status='RUNNING' "
-                "AND attempt=%s AND lease_token=%s AND lease_expires_at>%s FOR UPDATE",
-                (source_id, attempt, lease_token, now),
+                "AND attempt=%s AND lease_token=%s "
+                "AND lease_expires_at>clock_timestamp() FOR UPDATE",
+                (source_id, attempt, lease_token),
             )
             task = self._live_task_from_row(cursor.fetchone())
             if task is None:
                 self.connection.commit()
                 return False
             retry = transient and task.attempt < task.max_attempts
-            next_attempt = (
-                now + timedelta(seconds=retry_base_seconds * 2 ** max(task.attempt - 1, 0))
-                if retry
-                else task.next_attempt_at
-            )
+            retry_delay = retry_base_seconds * 2 ** max(task.attempt - 1, 0)
             cursor.execute(
                 "UPDATE pcap_offset_index_jobs SET "
                 "status=%s,lease_token=NULL,lease_expires_at=NULL,"
-                "next_attempt_at=%s,updated_at=%s,error_code=%s WHERE source_kind='LIVE_SEGMENT' "
+                "next_attempt_at=CASE WHEN %s THEN "
+                "clock_timestamp()+make_interval(secs => %s) ELSE next_attempt_at END,"
+                "updated_at=clock_timestamp(),error_code=%s WHERE source_kind='LIVE_SEGMENT' "
                 "AND source_id=%s AND status='RUNNING' AND attempt=%s AND lease_token=%s",
                 (
                     "QUEUED" if retry else "FAILED",
-                    next_attempt,
-                    now,
+                    retry,
+                    retry_delay,
                     error_code[:64],
                     source_id,
                     attempt,
                     lease_token,
                 ),
             )
-            updated = cursor.rowcount == 1
+            updated = bool(cursor.rowcount == 1)
             if updated:
                 self._mark_live_index_intent(cursor, source_id, "PENDING" if retry else "FAILED")
             self.connection.commit()
             return updated
 
-    def recover_live_segment_indexes(self, *, now: datetime) -> int:
+    def recover_live_segment_indexes(self, *, now: datetime | None = None) -> int:
         with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
             cursor.execute(
                 "WITH selected AS (SELECT source_kind,source_id FROM pcap_offset_index_jobs "
-                "WHERE status='RUNNING' AND lease_expires_at<=%s "
+                "WHERE status='RUNNING' AND lease_expires_at<=clock_timestamp() "
                 "ORDER BY lease_expires_at,source_id "
                 "FOR UPDATE SKIP LOCKED) UPDATE pcap_offset_index_jobs AS task SET "
                 "status=CASE WHEN task.attempt<task.max_attempts THEN 'QUEUED' ELSE 'FAILED' END,"
-                "lease_token=NULL,lease_expires_at=NULL,next_attempt_at=%s,updated_at=%s,"
+                "lease_token=NULL,lease_expires_at=NULL,next_attempt_at=clock_timestamp(),"
+                "updated_at=clock_timestamp(),"
                 "error_code=CASE WHEN task.attempt<task.max_attempts "
                 "THEN NULL ELSE 'LEASE_EXPIRED' END "
                 "FROM selected WHERE task.source_kind=selected.source_kind "
-                "AND task.source_id=selected.source_id RETURNING source_id,status",
-                (now, now, now),
+                "AND task.source_id=selected.source_id RETURNING source_id,status"
             )
             recovered_rows = cursor.fetchall()
             for source_id, status in recovered_rows:
@@ -3126,21 +4930,23 @@ class PostgresRepository:
         *,
         object_key: str | None = None,
     ) -> bool:
-        return row is not None and (
-            str(row[0]),
-            str(row[1]),
-            str(row[2]),
-            str(row[3]),
-            int(row[4]),
-            str(row[5]),
-        ) == (
+        if row is None or not str(row[2]):
+            return False
+        expected = (
             binding.source_kind,
             binding.source_id,
-            object_key or cls._capture_key(binding.source_id),
             binding.source_version_id,
             binding.source_size_bytes,
             binding.source_sha256,
         )
+        actual = (
+            str(row[0]),
+            str(row[1]),
+            str(row[3]),
+            int(row[4]),
+            str(row[5]),
+        )
+        return actual == expected and (object_key is None or str(row[2]) == object_key)
 
     def publish_structural_index(
         self,
@@ -3148,6 +4954,11 @@ class PostgresRepository:
         binding: SourceIndexBinding,
         interfaces: tuple[StructuralInterfaceEntry, ...],
         packet_count: int,
+        *,
+        request_postings: bool = False,
+        posting_schema_version: int = PCAP_POSTING_INDEX_SCHEMA_VERSION,
+        posting_parser_contract_version: int = PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+        filter_contract_version: int = PCAP_FILTER_CONTRACT_VERSION,
     ) -> bool:
         with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
             cursor.execute(
@@ -3170,11 +4981,14 @@ class PostgresRepository:
             ) or not self._capture_source_row_matches(source_version_row, binding):
                 self.connection.rollback()
                 return False
+            self._lock_posting_lifecycle_for_sources(
+                cursor, binding.source_kind, [binding.source_id]
+            )
             cursor.execute(
                 "SELECT source_kind,source_id,source_version_id,source_size_bytes,source_sha256,"
                 "capture_format,schema_version,parser_contract_version,created_at "
                 "FROM pcap_offset_index_generations "
-                "WHERE build_id=%s AND state='STAGING' FOR UPDATE",
+                "WHERE build_id=%s AND state='STAGING'",
                 (build_id,),
             )
             generation = cursor.fetchone()
@@ -3231,10 +5045,20 @@ class PostgresRepository:
             )
             cursor.execute(
                 "SELECT build_id FROM pcap_offset_index_owners "
-                "WHERE source_kind=%s AND source_id=%s FOR UPDATE",
+                "WHERE source_kind=%s AND source_id=%s",
                 (binding.source_kind, binding.source_id),
             )
             owner = cursor.fetchone()
+            if owner is not None and str(owner[0]) != build_id:
+                cursor.execute(
+                    "SELECT 1 FROM pcap_posting_index_jobs WHERE source_kind=%s "
+                    "AND source_id=%s AND parent_structural_build_id=%s "
+                    "AND status IN ('QUEUED','RUNNING')",
+                    (binding.source_kind, binding.source_id, str(owner[0])),
+                )
+                if cursor.fetchone() is not None:
+                    self.connection.rollback()
+                    return False
             cursor.execute(
                 "UPDATE pcap_offset_index_generations SET state='READY',packet_count=%s,"
                 "interface_count=%s,index_sha256=%s WHERE build_id=%s AND state='STAGING'",
@@ -3250,6 +5074,59 @@ class PostgresRepository:
                 cursor.execute(
                     "DELETE FROM pcap_offset_index_generations WHERE build_id=%s", (owner[0],)
                 )
+            if request_postings:
+                source_version = CaptureSourceVersion(*source_version_row)
+                spec = replace(
+                    PostingIndexTaskSpec.from_binding(source_version, snapshot),
+                    posting_schema_version=posting_schema_version,
+                    posting_parser_contract_version=posting_parser_contract_version,
+                    filter_contract_version=filter_contract_version,
+                )
+                cursor.execute(
+                    "INSERT INTO pcap_posting_index_intents("
+                    + self._POSTING_SPEC_COLUMNS
+                    + ",status,requested_at,updated_at,published_build_id,error_code) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',"
+                    "clock_timestamp(),clock_timestamp(),NULL,NULL) "
+                    "ON CONFLICT(source_kind,source_id) DO UPDATE SET "
+                    "source_version_id=excluded.source_version_id,"
+                    "source_size_bytes=excluded.source_size_bytes,"
+                    "source_sha256=excluded.source_sha256,capture_format=excluded.capture_format,"
+                    "parent_structural_build_id=excluded.parent_structural_build_id,"
+                    "parent_structural_index_sha256=excluded.parent_structural_index_sha256,"
+                    "structural_schema_version=excluded.structural_schema_version,"
+                    "structural_parser_contract_version="
+                    "excluded.structural_parser_contract_version,"
+                    "posting_schema_version=excluded.posting_schema_version,"
+                    "posting_parser_contract_version=excluded.posting_parser_contract_version,"
+                    "filter_contract_version=excluded.filter_contract_version,status='PENDING',"
+                    "requested_at=clock_timestamp(),updated_at=clock_timestamp(),"
+                    "published_build_id=NULL,error_code=NULL "
+                    "WHERE (pcap_posting_index_intents.source_version_id,"
+                    "pcap_posting_index_intents.parent_structural_build_id,"
+                    "pcap_posting_index_intents.parent_structural_index_sha256,"
+                    "pcap_posting_index_intents.posting_schema_version,"
+                    "pcap_posting_index_intents.posting_parser_contract_version,"
+                    "pcap_posting_index_intents.filter_contract_version) IS DISTINCT FROM "
+                    "(excluded.source_version_id,excluded.parent_structural_build_id,"
+                    "excluded.parent_structural_index_sha256,excluded.posting_schema_version,"
+                    "excluded.posting_parser_contract_version,excluded.filter_contract_version)",
+                    self._posting_spec_values(spec),
+                )
+                if cursor.rowcount != 1:
+                    cursor.execute(
+                        "SELECT " + self._POSTING_INTENT_COLUMNS + " "
+                        "FROM pcap_posting_index_intents "
+                        "WHERE source_kind=%s AND source_id=%s FOR UPDATE",
+                        (spec.source_kind, spec.source_id),
+                    )
+                    marker = cursor.fetchone()
+                    if (
+                        marker is None
+                        or self._posting_intent(marker).spec.identity != spec.identity
+                    ):
+                        self.connection.rollback()
+                        return False
             self.connection.commit()
             return True
 
@@ -3263,10 +5140,13 @@ class PostgresRepository:
         *,
         attempt: int,
         lease_token: str,
+        request_postings: bool = False,
+        posting_schema_version: int = PCAP_POSTING_INDEX_SCHEMA_VERSION,
+        posting_parser_contract_version: int = PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+        filter_contract_version: int = PCAP_FILTER_CONTRACT_VERSION,
     ) -> bool:
         if binding.source_kind != "LIVE_SEGMENT" or packet_count < 1:
             return False
-        now = datetime.now(UTC)
         with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
             # Lock the canonical ownership chain before any derived row can become visible.
             cursor.execute(
@@ -3327,15 +5207,40 @@ class PostgresRepository:
                 or task.attempt != attempt
                 or task.lease_token != lease_token
                 or task.lease_expires_at is None
-                or task.lease_expires_at <= now
             ):
                 self.connection.rollback()
                 return False
             cursor.execute(
+                "INSERT INTO pcap_capture_source_versions("
+                "source_kind,source_id,object_key,source_version_id,"
+                "source_size_bytes,source_sha256,updated_at) "
+                "VALUES(%s,%s,%s,%s,%s,%s,clock_timestamp()) "
+                "ON CONFLICT(source_kind,source_id) DO NOTHING",
+                (
+                    source_version.source_kind,
+                    source_version.source_id,
+                    source_version.object_key,
+                    source_version.source_version_id,
+                    source_version.source_size_bytes,
+                    source_version.source_sha256,
+                ),
+            )
+            cursor.execute(
+                "SELECT source_kind,source_id,object_key,source_version_id,source_size_bytes,"
+                "source_sha256 FROM pcap_capture_source_versions "
+                "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s FOR UPDATE",
+                (binding.source_id,),
+            )
+            persisted = cursor.fetchone()
+            if persisted is None or CaptureSourceVersion(*persisted) != source_version:
+                self.connection.rollback()
+                return False
+            self._lock_posting_lifecycle_for_sources(cursor, "LIVE_SEGMENT", [binding.source_id])
+            cursor.execute(
                 "SELECT source_kind,source_id,source_version_id,source_size_bytes,source_sha256,"
                 "capture_format,schema_version,parser_contract_version,created_at "
                 "FROM pcap_offset_index_generations "
-                "WHERE build_id=%s AND state='STAGING' FOR UPDATE",
+                "WHERE build_id=%s AND state='STAGING'",
                 (build_id,),
             )
             generation = cursor.fetchone()
@@ -3374,35 +5279,20 @@ class PostgresRepository:
                 return False
             cursor.execute(
                 "SELECT build_id FROM pcap_offset_index_owners "
-                "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s FOR UPDATE",
+                "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s",
                 (binding.source_id,),
             )
             previous = cursor.fetchone()
-            cursor.execute(
-                "INSERT INTO pcap_capture_source_versions("
-                "source_kind,source_id,object_key,source_version_id,"
-                "source_size_bytes,source_sha256,updated_at) "
-                "VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(source_kind,source_id) DO NOTHING",
-                (
-                    source_version.source_kind,
-                    source_version.source_id,
-                    source_version.object_key,
-                    source_version.source_version_id,
-                    source_version.source_size_bytes,
-                    source_version.source_sha256,
-                    now,
-                ),
-            )
-            cursor.execute(
-                "SELECT source_kind,source_id,object_key,source_version_id,source_size_bytes,"
-                "source_sha256 FROM pcap_capture_source_versions "
-                "WHERE source_kind='LIVE_SEGMENT' AND source_id=%s FOR UPDATE",
-                (binding.source_id,),
-            )
-            persisted = cursor.fetchone()
-            if persisted is None or CaptureSourceVersion(*persisted) != source_version:
-                self.connection.rollback()
-                return False
+            if previous is not None and str(previous[0]) != build_id:
+                cursor.execute(
+                    "SELECT 1 FROM pcap_posting_index_jobs WHERE source_kind='LIVE_SEGMENT' "
+                    "AND source_id=%s AND parent_structural_build_id=%s "
+                    "AND status IN ('QUEUED','RUNNING')",
+                    (binding.source_id, str(previous[0])),
+                )
+                if cursor.fetchone() is not None:
+                    self.connection.rollback()
+                    return False
             cursor.executemany(
                 "INSERT INTO pcap_offset_index_interfaces("
                 "build_id,interface_ordinal,section_index,interface_id,link_type,snaplen,"
@@ -3441,20 +5331,71 @@ class PostgresRepository:
                 cursor.execute(
                     "DELETE FROM pcap_offset_index_generations WHERE build_id=%s", (previous[0],)
                 )
+            if request_postings:
+                spec = replace(
+                    PostingIndexTaskSpec.from_binding(source_version, snapshot),
+                    posting_schema_version=posting_schema_version,
+                    posting_parser_contract_version=posting_parser_contract_version,
+                    filter_contract_version=filter_contract_version,
+                )
+                cursor.execute(
+                    "INSERT INTO pcap_posting_index_intents("
+                    + self._POSTING_SPEC_COLUMNS
+                    + ",status,requested_at,updated_at,published_build_id,error_code) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',"
+                    "clock_timestamp(),clock_timestamp(),NULL,NULL) "
+                    "ON CONFLICT(source_kind,source_id) DO UPDATE SET "
+                    "source_version_id=excluded.source_version_id,"
+                    "source_size_bytes=excluded.source_size_bytes,"
+                    "source_sha256=excluded.source_sha256,capture_format=excluded.capture_format,"
+                    "parent_structural_build_id=excluded.parent_structural_build_id,"
+                    "parent_structural_index_sha256=excluded.parent_structural_index_sha256,"
+                    "structural_schema_version=excluded.structural_schema_version,"
+                    "structural_parser_contract_version="
+                    "excluded.structural_parser_contract_version,"
+                    "posting_schema_version=excluded.posting_schema_version,"
+                    "posting_parser_contract_version=excluded.posting_parser_contract_version,"
+                    "filter_contract_version=excluded.filter_contract_version,status='PENDING',"
+                    "requested_at=clock_timestamp(),updated_at=clock_timestamp(),"
+                    "published_build_id=NULL,error_code=NULL "
+                    "WHERE (pcap_posting_index_intents.source_version_id,"
+                    "pcap_posting_index_intents.parent_structural_build_id,"
+                    "pcap_posting_index_intents.parent_structural_index_sha256,"
+                    "pcap_posting_index_intents.posting_schema_version,"
+                    "pcap_posting_index_intents.posting_parser_contract_version,"
+                    "pcap_posting_index_intents.filter_contract_version) IS DISTINCT FROM "
+                    "(excluded.source_version_id,excluded.parent_structural_build_id,"
+                    "excluded.parent_structural_index_sha256,excluded.posting_schema_version,"
+                    "excluded.posting_parser_contract_version,excluded.filter_contract_version)",
+                    self._posting_spec_values(spec),
+                )
+                if cursor.rowcount != 1:
+                    cursor.execute(
+                        "SELECT " + self._POSTING_INTENT_COLUMNS + " "
+                        "FROM pcap_posting_index_intents "
+                        "WHERE source_kind=%s AND source_id=%s FOR UPDATE",
+                        (spec.source_kind, spec.source_id),
+                    )
+                    marker = cursor.fetchone()
+                    if (
+                        marker is None
+                        or self._posting_intent(marker).spec.identity != spec.identity
+                    ):
+                        self.connection.rollback()
+                        return False
             cursor.execute(
                 "UPDATE pcap_offset_index_jobs SET status='COMPLETED',lease_token=NULL,"
-                "lease_expires_at=NULL,completed_at=%s,updated_at=%s,published_build_id=%s,"
+                "lease_expires_at=NULL,completed_at=clock_timestamp(),"
+                "updated_at=clock_timestamp(),published_build_id=%s,"
                 "published_source_version_id=%s WHERE source_kind='LIVE_SEGMENT' AND source_id=%s "
-                "AND status='RUNNING' AND attempt=%s AND lease_token=%s AND lease_expires_at>%s",
+                "AND status='RUNNING' AND attempt=%s AND lease_token=%s "
+                "AND lease_expires_at>clock_timestamp()",
                 (
-                    now,
-                    now,
                     build_id,
                     binding.source_version_id,
                     binding.source_id,
                     attempt,
                     lease_token,
-                    now,
                 ),
             )
             if cursor.rowcount != 1:
@@ -3568,6 +5509,9 @@ class PostgresRepository:
         self, source_id: str, *, source_kind: str = "PCAP_UPLOAD"
     ) -> None:
         with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
+            self._lock_posting_lifecycle_for_sources(
+                cursor, cast(PostingSourceKind, source_kind), [source_id]
+            )
             cursor.execute(
                 "DELETE FROM pcap_offset_index_generations WHERE source_kind=%s AND source_id=%s",
                 (source_kind, source_id),
@@ -3577,13 +5521,28 @@ class PostgresRepository:
     def cleanup_stale_structural_indexes(self, *, before: datetime, limit: int) -> int:
         with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
             cursor.execute(
-                "WITH selected AS (SELECT build_id FROM pcap_offset_index_generations "
-                "WHERE state='STAGING' AND created_at<=%s ORDER BY created_at,build_id "
-                "FOR UPDATE SKIP LOCKED LIMIT %s) DELETE FROM pcap_offset_index_generations g "
-                "USING selected WHERE g.build_id=selected.build_id RETURNING g.build_id",
+                "SELECT source_kind,source_id,build_id FROM pcap_offset_index_generations "
+                "WHERE state='STAGING' AND created_at<=%s ORDER BY created_at,build_id LIMIT %s",
                 (before, limit),
             )
-            deleted = len(cursor.fetchall())
+            selected = [
+                (cast(PostingSourceKind, str(row[0])), str(row[1]), str(row[2]))
+                for row in cursor.fetchall()
+            ]
+            grouped: dict[PostingSourceKind, list[str]] = {}
+            for source_kind, source_id, _build_id in selected:
+                grouped.setdefault(source_kind, []).append(source_id)
+            for source_kind in sorted(grouped):
+                self._lock_posting_lifecycle_for_sources(cursor, source_kind, grouped[source_kind])
+            build_ids = [build_id for _kind, _source_id, build_id in selected]
+            deleted = 0
+            if build_ids:
+                cursor.execute(
+                    "DELETE FROM pcap_offset_index_generations WHERE build_id=ANY(%s) "
+                    "AND state='STAGING' AND created_at<=%s RETURNING build_id",
+                    (build_ids, before),
+                )
+                deleted = len(cursor.fetchall())
             self.connection.commit()
             return deleted
 

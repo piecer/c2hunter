@@ -666,6 +666,11 @@ def test_postgres_guarded_compensation_and_bounded_orphan_cleanup() -> None:
     assert orphan_connection.calls[1][1][1] == 1
     assert "active.status='RUNNING'" in orphan_connection.calls[0][0]
     assert "published.status='COMPLETED'" in orphan_connection.calls[0][0]
+    assert "FROM pcap_capture_source_versions AS capture" in orphan_connection.calls[0][0]
+    assert (
+        "capture.object_key=controller_objects.data->>'object_key'" in orphan_connection.calls[0][0]
+    )
+    assert "FROM pcap_capture_source_versions AS capture" in orphan_connection.calls[1][0]
 
 
 def test_postgres_cleanup_ids_and_acknowledgements_are_bound_to_object_keys() -> None:

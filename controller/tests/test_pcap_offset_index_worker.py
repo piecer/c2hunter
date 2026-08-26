@@ -4,10 +4,16 @@ import hashlib
 import struct
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any
 
 import pytest
+from c2hunter_analysis.pcap_postings import (
+    PCAP_FILTER_CONTRACT_VERSION,
+    PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+    PCAP_POSTING_INDEX_SCHEMA_VERSION,
+)
 from prometheus_client import CollectorRegistry, generate_latest
 
 from c2hunter_controller import pcap_offset_index_worker as worker_module
@@ -22,9 +28,10 @@ from c2hunter_controller.pcap_offset_index_metrics import PcapOffsetIndexMetrics
 from c2hunter_controller.pcap_offset_index_queue import LiveIndexTask, LiveIndexTaskSpec
 from c2hunter_controller.pcap_offset_index_worker import (
     PcapOffsetIndexWorker,
+    create_pcap_offset_index_worker,
     parse_worker_command,
 )
-from c2hunter_controller.repositories import MemoryRepository
+from c2hunter_controller.repositories import MemoryRepository, SQLiteRepository
 
 NOW = datetime(2026, 8, 25, tzinfo=UTC)
 
@@ -132,6 +139,132 @@ def test_settings_stage10_defaults_and_cross_field_validation() -> None:
             pcap_offset_index_queue_capacity=1,
             pcap_offset_index_worker_concurrency=2,
         )
+
+
+def test_production_factory_propagates_posting_admission_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Any, str, dict[str, Any]]] = []
+
+    def build(repository: Any, source_id: str, **kwargs: Any) -> bool:
+        calls.append((repository, source_id, kwargs))
+        return True
+
+    monkeypatch.setattr(worker_module, "build_live_segment_index", build)
+    repository = object()
+    lease = {"attempt": 2, "lease_token": "lease-1", "should_cancel": lambda: False}
+
+    for enabled in (True, False):
+        settings = Settings(
+            environment="test",
+            pcap_posting_index_enabled=enabled,
+            pcap_posting_index_queue_capacity=17,
+            pcap_posting_index_max_attempts=4,
+        )
+        worker = create_pcap_offset_index_worker(repository, settings)
+        assert worker.builder(repository, "segment-1", **lease)
+
+        assert calls.pop() == (
+            repository,
+            "segment-1",
+            {
+                "max_packets": settings.pcap_offset_index_max_packets,
+                "max_interfaces": settings.pcap_offset_index_max_interfaces,
+                "batch_size": settings.pcap_offset_index_batch_size,
+                "request_postings": enabled,
+                "posting_queue_capacity": 17,
+                "posting_max_attempts": 4,
+                **lease,
+            },
+        )
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("posting_enabled", [True, False])
+def test_deployed_live_factory_creates_exact_posting_once_when_enabled(
+    kind: str,
+    posting_enabled: bool,
+    tmp_path: Path,
+) -> None:
+    repository: MemoryRepository | SQLiteRepository
+    repository = (
+        MemoryRepository()
+        if kind == "memory"
+        else SQLiteRepository(str(tmp_path / "controller.sqlite"))
+    )
+    content = (
+        struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65_535, 1)
+        + struct.pack("<IIII", 1, 2, 3, 3)
+        + b"abc"
+    )
+    digest = hashlib.sha256(content).hexdigest()
+    repository.save_job(
+        {"id": "job-1", "mode": "LIVE", "status": "CAPTURING", "capture": {"store_pcap": True}}
+    )
+    stored, status = repository.save_sensor_pcap_limited(
+        {
+            "id": "segment-1",
+            "sensor_id": "sensor-1",
+            "analysis_job_id": "job-1",
+            "filename": "segment-1.pcap",
+            "size_bytes": len(content),
+            "sha256": digest,
+            "uploaded_at": NOW.isoformat(),
+        },
+        content,
+        None,
+        require_open_job=True,
+    )
+    assert stored is not None and status == "OK"
+    repository.admit_live_segment_index("segment-1", capacity=5, max_attempts=3)
+    settings = Settings(
+        environment="test",
+        pcap_posting_index_enabled=posting_enabled,
+        pcap_posting_index_queue_capacity=17,
+        pcap_posting_index_max_attempts=4,
+    )
+    worker = create_pcap_offset_index_worker(repository, settings)
+    worker.now = lambda: datetime.now(UTC) + timedelta(seconds=1)
+
+    assert worker.run_once()
+    structural_task = repository.get_live_segment_index_task("segment-1")
+    assert structural_task is not None and structural_task.status == "COMPLETED"
+    intent = repository.get_posting_index_intent("LIVE_SEGMENT", "segment-1")
+    posting_task = repository.get_posting_index_task("LIVE_SEGMENT", "segment-1")
+
+    if posting_enabled:
+        assert intent is not None and intent.status.value == "PENDING"
+        assert posting_task is not None and posting_task.status.value == "QUEUED"
+        assert posting_task.max_attempts == 4 and posting_task.spec == intent.spec
+        assert (
+            intent.spec.source_kind,
+            intent.spec.source_id,
+            intent.spec.source_version_id,
+            intent.spec.source_size_bytes,
+            intent.spec.source_sha256,
+            intent.spec.capture_format,
+            intent.spec.posting_schema_version,
+            intent.spec.posting_parser_contract_version,
+            intent.spec.filter_contract_version,
+        ) == (
+            "LIVE_SEGMENT",
+            "segment-1",
+            "sha256:" + digest,
+            len(content),
+            digest,
+            "PCAP",
+            PCAP_POSTING_INDEX_SCHEMA_VERSION,
+            PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+            PCAP_FILTER_CONTRACT_VERSION,
+        )
+    else:
+        assert intent is None and posting_task is None
+
+    repository.admit_live_segment_index("segment-1", capacity=5, max_attempts=3)
+    assert worker.run_once() is False
+    assert repository.get_posting_index_intent("LIVE_SEGMENT", "segment-1") == intent
+    assert repository.get_posting_index_task("LIVE_SEGMENT", "segment-1") == posting_task
+    repository.close()
 
 
 def test_worker_success_relies_on_publication_to_complete_task() -> None:
@@ -757,7 +890,7 @@ def test_main_bounds_forced_shutdown_and_leaves_repository_for_lease_recovery(
 
     trigger = Thread(target=stop_after_entry, daemon=True)
     trigger.start()
-    assert worker_module.main(["run"]) == 0
+    assert worker_module.main(["run"]) == 2
     trigger.join(1)
     assert entered.is_set()
     assert repository.closes == 0

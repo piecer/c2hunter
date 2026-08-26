@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
@@ -62,7 +64,17 @@ class RecordingCursor:
                     else None
                 )
             if "FROM pcap_capture_source_versions" in query:
-                return self.connection.source_version_row
+                source_row = self.connection.source_version_row
+                if source_row is None:
+                    return None
+                if query.startswith("SELECT object_key,source_version_id"):
+                    return (source_row[2], source_row[3])
+                if query.startswith("SELECT object_key"):
+                    return (source_row[2],)
+                return source_row
+            if query.startswith("INSERT INTO pcap_capture_source_versions"):
+                params = self.connection.calls[-1][1]
+                return (params[2],)  # type: ignore[index]
             if "FROM pcap_offset_index_owners" in query:
                 return (
                     (self.connection.owner_build_id,)
@@ -121,6 +133,38 @@ class RecordingConnection:
         self.closed = True
 
 
+class StatefulUploadCursor(RecordingCursor):
+    def execute(self, query: str, params: object = None) -> None:
+        super().execute(query, params)
+        if query.startswith("INSERT INTO pcap_capture_source_versions"):
+            values = cast(tuple[Any, ...], params)
+            cast(StatefulUploadConnection, self.connection).pending_source_version = values[:6]
+
+
+class StatefulUploadConnection(RecordingConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pending_source_version: tuple[Any, ...] | None = None
+        self.raise_ambiguous_commit = False
+
+    def cursor(self) -> StatefulUploadCursor:
+        return StatefulUploadCursor(self)
+
+    def commit(self) -> None:
+        pending = self.pending_source_version
+        self.pending_source_version = None
+        if pending is not None:
+            self.source_version_row = pending
+        self.commits += 1
+        if pending is not None and self.raise_ambiguous_commit:
+            self.raise_ambiguous_commit = False
+            raise RuntimeError("commit outcome unknown")
+
+    def rollback(self) -> None:
+        self.pending_source_version = None
+        super().rollback()
+
+
 def _repository(connection: RecordingConnection) -> PostgresRepository:
     repository = PostgresRepository(
         "postgresql://stage9.invalid/controller", cast(MinioBlobStore, SimpleNamespace())
@@ -154,12 +198,15 @@ def _job(binding: SourceIndexBinding) -> dict[str, Any]:
 
 
 def _source_version_row(
-    binding: SourceIndexBinding, *, version_id: str | None = None
+    binding: SourceIndexBinding,
+    *,
+    version_id: str | None = None,
+    object_key: str | None = None,
 ) -> tuple[Any, ...]:
     return (
         binding.source_kind,
         binding.source_id,
-        f"captures/{binding.source_id}.pcap",
+        object_key or f"captures/{binding.source_id}.pcap",
         version_id or binding.source_version_id,
         binding.source_size_bytes,
         binding.source_sha256,
@@ -251,23 +298,35 @@ def test_postgres_save_capture_verifies_without_lock_and_persists_durable_versio
 
     repository.save_job_capture("upload-1", content)
 
-    assert events == [
-        ("put", "captures/upload-1.pcap"),
-        ("open", "captures/upload-1.pcap"),
-    ]
+    assert len(events) == 2
+    object_key = events[0][1]
+    assert events == [("put", object_key), ("open", object_key)]
+    assert re.fullmatch(r"captures/upload-1/[0-9a-f]{32}\.pcap", object_key)
     upsert = next(
         call for call in connection.calls if "INSERT INTO pcap_capture_source_versions" in call[0]
     )
     assert upsert[1][0:6] == (
         "PCAP_UPLOAD",
         "upload-1",
-        "captures/upload-1.pcap",
+        object_key,
         "s3-version:opaque-v2",
         len(content),
         digest,
     )
     assert connection.commits == 1
     assert connection.rollbacks == 0
+    transaction_sql = [query for query, _params in connection.calls]
+    job_lock = next(
+        index
+        for index, query in enumerate(transaction_sql)
+        if "FROM controller_objects WHERE kind='job'" in query and "FOR UPDATE" in query
+    )
+    source_lock = next(
+        index
+        for index, query in enumerate(transaction_sql)
+        if "FROM pcap_capture_source_versions" in query and "FOR UPDATE" in query
+    )
+    assert job_lock < source_lock
 
 
 def test_postgres_reads_durable_capture_version_for_stage_binding() -> None:
@@ -311,13 +370,15 @@ def test_postgres_save_capture_persistence_failure_queues_then_deletes_unowned_u
     with pytest.raises(ArtifactStorageError, match="capture version persistence failed"):
         repository.save_job_capture("upload-1", content)
 
-    assert deleted == ["captures/upload-1.pcap"]
+    assert len(deleted) == 1
+    assert re.fullmatch(r"captures/upload-1/[0-9a-f]{32}\.pcap", deleted[0])
     sql = "\n".join(query for query, _params in connection.calls)
     assert "VALUES('pcap_export_cleanup'" in sql
     assert "kind='pcap_export_cleanup'" in sql and "DELETE FROM controller_objects" in sql
 
 
 def test_postgres_save_capture_persistence_failure_preserves_prior_authoritative_winner() -> None:
+    prior_content = b"prior-winner"
     content = b"replacement-upload"
     digest = __import__("hashlib").sha256(content).hexdigest()
     connection = RecordingConnection()
@@ -325,26 +386,151 @@ def test_postgres_save_capture_persistence_failure_preserves_prior_authoritative
         "PCAP_UPLOAD", "upload-1", "s3-version:prior", len(content), digest, "PCAP"
     )
     connection.job_data = _job(binding)
-    connection.source_version_row = _source_version_row(binding)
+    prior_key = "captures/upload-1.pcap"
+    connection.source_version_row = _source_version_row(binding, object_key=prior_key)
     connection.fail_source_version_upsert = True
     deleted: list[str] = []
+    objects = {prior_key: prior_content}
     repository = _repository(connection)
+
+    def put(key: str, uploaded: bytes) -> None:
+        assert key != prior_key
+        objects[key] = uploaded
+
+    def delete(key: str) -> None:
+        deleted.append(key)
+        objects.pop(key, None)
+
     repository.blob_store = cast(
         MinioBlobStore,
         SimpleNamespace(
-            put=lambda _key, _content: None,
-            open=lambda _key: CaptureSource(
-                __import__("io").BytesIO(content), "s3-version:replacement"
+            put=put,
+            open=lambda key: CaptureSource(
+                __import__("io").BytesIO(objects[key]), "s3-version:replacement"
             ),
-            delete=deleted.append,
+            delete=delete,
         ),
     )
 
     with pytest.raises(ArtifactStorageError, match="capture version persistence failed"):
         repository.save_job_capture("upload-1", content)
 
+    assert len(deleted) == 1 and deleted[0] != prior_key
+    assert objects == {prior_key: prior_content}
+    assert connection.source_version_row == _source_version_row(binding, object_key=prior_key)
+    assert any("VALUES('pcap_export_cleanup'" in query for query, _ in connection.calls)
+
+
+@pytest.mark.parametrize(
+    "object_key",
+    ["captures/upload-1/generation-a.pcap", "captures/upload-1.pcap"],
+)
+def test_postgres_open_capture_uses_authoritative_object_key_and_version_outside_lock(
+    object_key: str,
+) -> None:
+    binding = _binding()
+    connection = RecordingConnection()
+    connection.source_version_row = _source_version_row(
+        binding, object_key=object_key, version_id="s3-version:exact"
+    )
+    repository = _repository(connection)
+    opened: list[str] = []
+
+    def open_exact(key: str) -> CaptureSource:
+        assert not repository._lock._is_owned()  # type: ignore[attr-defined]
+        opened.append(key)
+        return CaptureSource(__import__("io").BytesIO(b"payload"), "s3-version:exact")
+
+    repository.blob_store = cast(MinioBlobStore, SimpleNamespace(open=open_exact))
+
+    source = repository.open_job_capture(binding.source_id)
+
+    assert source is not None
+    source.close()
+    assert opened == [object_key]
+    assert connection.commits == 1
+
+
+def test_postgres_concurrent_capture_replacements_leave_one_immutable_winner() -> None:
+    content = b"concurrent-replacement"
+    digest = __import__("hashlib").sha256(content).hexdigest()
+    connection = StatefulUploadConnection()
+    connection.job_data = _job(
+        SourceIndexBinding("PCAP_UPLOAD", "upload-1", "unused", len(content), digest, "PCAP")
+    )
+    repository = _repository(connection)
+    objects: dict[str, bytes] = {}
+    deleted: list[str] = []
+    object_lock = threading.Lock()
+    uploads = threading.Barrier(2)
+
+    def put(key: str, uploaded: bytes) -> None:
+        with object_lock:
+            assert key not in objects
+            objects[key] = uploaded
+        uploads.wait(timeout=5)
+
+    def open_capture(key: str) -> CaptureSource:
+        with object_lock:
+            payload = objects[key]
+        return CaptureSource(__import__("io").BytesIO(payload), f"version:{key}")
+
+    def delete(key: str) -> None:
+        with object_lock:
+            deleted.append(key)
+            objects.pop(key, None)
+
+    repository.blob_store = cast(
+        MinioBlobStore, SimpleNamespace(put=put, open=open_capture, delete=delete)
+    )
+    executor = ThreadPoolExecutor(max_workers=2)
+    try:
+        futures = [
+            executor.submit(repository.save_job_capture, "upload-1", content) for _ in range(2)
+        ]
+        for future in futures:
+            future.result(timeout=10)
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+    assert connection.source_version_row is not None
+    winner_key = str(connection.source_version_row[2])
+    assert re.fullmatch(r"captures/upload-1/[0-9a-f]{32}\.pcap", winner_key)
+    assert objects == {winner_key: content}
+    assert len(deleted) == 1 and deleted[0] != winner_key
+
+
+def test_postgres_ambiguous_commit_never_compensates_committed_capture_winner() -> None:
+    content = b"ambiguous-commit"
+    digest = __import__("hashlib").sha256(content).hexdigest()
+    connection = StatefulUploadConnection()
+    connection.job_data = _job(
+        SourceIndexBinding("PCAP_UPLOAD", "upload-1", "unused", len(content), digest, "PCAP")
+    )
+    connection.raise_ambiguous_commit = True
+    objects: dict[str, bytes] = {}
+    deleted: list[str] = []
+    repository = _repository(connection)
+
+    def open_capture(key: str) -> CaptureSource:
+        return CaptureSource(__import__("io").BytesIO(objects[key]), f"version:{key}")
+
+    repository.blob_store = cast(
+        MinioBlobStore,
+        SimpleNamespace(
+            put=lambda key, uploaded: objects.__setitem__(key, uploaded),
+            open=open_capture,
+            delete=lambda key: (deleted.append(key), objects.pop(key, None)),
+        ),
+    )
+
+    with pytest.raises(ArtifactStorageError, match="capture version persistence failed"):
+        repository.save_job_capture("upload-1", content)
+
+    assert connection.source_version_row is not None
+    winner_key = str(connection.source_version_row[2])
+    assert objects == {winner_key: content}
     assert deleted == []
-    assert not any("VALUES('pcap_export_cleanup'" in query for query, _ in connection.calls)
 
 
 def test_postgres_staging_sql_is_parameterized_and_normalized() -> None:
@@ -459,7 +645,69 @@ def test_postgres_source_deletion_sql_cascades_only_matching_kind_generations() 
     repository.delete_structural_indexes_for_source("upload-1")
     repository.delete_structural_indexes_for_source("segment-1", source_kind="LIVE_SEGMENT")
 
-    assert connection.calls == [
+    expected_calls: list[tuple[str, object]] = []
+    for source_kind, source_id in (
+        ("PCAP_UPLOAD", "upload-1"),
+        ("LIVE_SEGMENT", "segment-1"),
+    ):
+        source_ids = [source_id]
+        lock_params = (source_kind, source_ids)
+        expected_calls.extend(
+            [
+                (
+                    "SELECT source_id FROM pcap_capture_source_versions WHERE source_kind=%s "
+                    "AND source_id=ANY(%s) ORDER BY source_id FOR UPDATE",
+                    lock_params,
+                ),
+                (
+                    "SELECT owner.source_id,owner.build_id FROM "
+                    "pcap_offset_index_owners AS owner JOIN "
+                    "pcap_offset_index_generations AS generation ON generation.build_id="
+                    "owner.build_id WHERE owner.source_kind=%s AND owner.source_id=ANY(%s) "
+                    "ORDER BY owner.source_id,owner.build_id FOR UPDATE OF owner,generation",
+                    lock_params,
+                ),
+                (
+                    "SELECT source_id,build_id FROM pcap_offset_index_generations WHERE "
+                    "source_kind=%s AND source_id=ANY(%s) "
+                    "ORDER BY source_id,build_id FOR UPDATE",
+                    lock_params,
+                ),
+                (
+                    "SELECT source_id,parent_structural_build_id FROM "
+                    "pcap_posting_index_intents WHERE source_kind=%s AND source_id=ANY(%s) "
+                    "ORDER BY source_id FOR UPDATE",
+                    lock_params,
+                ),
+                (
+                    "SELECT source_id,parent_structural_build_id FROM "
+                    "pcap_posting_index_jobs WHERE source_kind=%s AND source_id=ANY(%s) "
+                    "ORDER BY source_id FOR UPDATE",
+                    lock_params,
+                ),
+                (
+                    "SELECT source_id,parent_structural_build_id,build_id FROM "
+                    "pcap_posting_index_generations WHERE source_kind=%s "
+                    "AND source_id=ANY(%s) ORDER BY "
+                    "source_id,parent_structural_build_id,build_id FOR UPDATE",
+                    lock_params,
+                ),
+                (
+                    "SELECT source_id,parent_structural_build_id,build_id FROM "
+                    "pcap_posting_index_owners WHERE source_kind=%s AND source_id=ANY(%s) "
+                    "ORDER BY source_id,parent_structural_build_id FOR UPDATE",
+                    lock_params,
+                ),
+                (
+                    "DELETE FROM pcap_offset_index_generations "
+                    "WHERE source_kind=%s AND source_id=%s",
+                    (source_kind, source_id),
+                ),
+            ]
+        )
+
+    assert connection.calls == expected_calls
+    assert [call for call in connection.calls if call[0].startswith("DELETE ")] == [
         (
             "DELETE FROM pcap_offset_index_generations WHERE source_kind=%s AND source_id=%s",
             ("PCAP_UPLOAD", "upload-1"),
@@ -570,7 +818,7 @@ def _live_task_row(
 def test_postgres_live_queue_claim_uses_skip_locked_and_returns_opaque_lease() -> None:
     def respond(query: str, params: object) -> tuple[list[tuple[Any, ...]], int]:
         if "UPDATE pcap_offset_index_jobs AS task" in query:
-            token = cast(tuple[Any, ...], params)[2]
+            token = cast(tuple[Any, ...], params)[0]
             return [_live_task_row(status="RUNNING", attempt=1, lease_token=str(token))], 1
         return [], 0
 
@@ -586,6 +834,8 @@ def test_postgres_live_queue_claim_uses_skip_locked_and_returns_opaque_lease() -
     claim_sql = connection.calls[0][0]
     assert "ORDER BY next_attempt_at,queued_at,source_id" in claim_sql
     assert "FOR UPDATE SKIP LOCKED LIMIT 1" in claim_sql
+    assert "clock_timestamp()" in claim_sql
+    assert datetime(2026, 8, 25, tzinfo=UTC) not in cast(tuple[Any, ...], connection.calls[0][1])
 
 
 def test_postgres_live_queue_cas_paths_are_parameterized_and_bounded() -> None:
@@ -618,9 +868,14 @@ def test_postgres_live_queue_cas_paths_are_parameterized_and_bounded() -> None:
 
     sql = "\n".join(query for query, _ in connection.calls)
     assert "attempt=%s AND lease_token=%s" in sql
-    assert "lease_expires_at>%s" in sql
-    assert "next_attempt_at=%s" in sql
+    assert "lease_expires_at>clock_timestamp()" in sql
+    assert "next_attempt_at=clock_timestamp()" in sql
     assert "FOR UPDATE SKIP LOCKED" in sql
+    assert now not in [
+        value
+        for _query, params in connection.calls
+        for value in (() if params is None else cast(tuple[Any, ...], params))
+    ]
     intent_updates = [
         params for query, params in connection.calls if "SET data=data || %s::jsonb" in query
     ]
@@ -1027,9 +1282,16 @@ def test_postgres_live_publication_locks_and_completes_exact_attempt_atomically(
     assert "WHERE kind='sensor'" in connection.calls[0][0]
     assert "WHERE kind='job'" in connection.calls[1][0]
     assert "WHERE kind='sensor_pcap'" in connection.calls[2][0]
+    task_lock = next(
+        index
+        for index, (query, _params) in enumerate(connection.calls)
+        if "FROM pcap_offset_index_jobs" in query and "FOR UPDATE" in query
+    )
+    assert task_lock > 2
     assert "FOR UPDATE" in sql
     assert "status='COMPLETED'" in sql
-    assert "attempt=%s AND lease_token=%s AND lease_expires_at>%s" in sql
+    assert "attempt=%s AND lease_token=%s AND lease_expires_at>clock_timestamp()" in sql
+    assert "completed_at=clock_timestamp(),updated_at=clock_timestamp()" in sql
     assert "SET data=data || %s::jsonb" in sql
     assert any(
         '"index_intent_state":"COMPLETED"' in str(params)

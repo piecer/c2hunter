@@ -46,6 +46,39 @@ class Settings(BaseSettings):
     pcap_offset_index_terminal_cleanup_batch_size: int = Field(default=100, gt=0, le=10_000)
     pcap_offset_index_shutdown_grace_seconds: int = Field(default=30, gt=0)
     pcap_offset_index_metrics_port: int = Field(default=9104, ge=1024, le=65535)
+    pcap_posting_index_enabled: bool = False
+    pcap_posting_index_queue_capacity: int = Field(default=100, gt=0, le=100_000)
+    pcap_posting_index_worker_concurrency: int = Field(default=1, gt=0, le=64)
+    pcap_posting_index_lease_seconds: int = Field(default=120, gt=1, le=86_400)
+    pcap_posting_index_heartbeat_interval_seconds: int = Field(default=30, gt=0, le=43_200)
+    pcap_posting_index_max_attempts: int = Field(default=3, ge=1, le=20)
+    pcap_posting_index_retry_base_seconds: int = Field(default=5, gt=0, le=86_400)
+    pcap_posting_index_operation_timeout_seconds: int = Field(default=1800, gt=0, le=86_400)
+    pcap_posting_index_poll_interval_seconds: float = Field(default=0.25, gt=0, le=60)
+    pcap_posting_index_reconcile_interval_seconds: int = Field(default=30, gt=0, le=86_400)
+    pcap_posting_index_reconcile_batch_size: int = Field(default=100, gt=0, le=10_000)
+    pcap_posting_index_staging_max_age_seconds: int = Field(default=3600, gt=0, le=31_536_000)
+    pcap_posting_index_staging_cleanup_batch_size: int = Field(default=100, gt=0, le=10_000)
+    pcap_posting_index_terminal_retention_seconds: int = Field(default=604_800, gt=0, le=31_536_000)
+    pcap_posting_index_terminal_cleanup_batch_size: int = Field(default=100, gt=0, le=10_000)
+    pcap_posting_index_build_max_packets: int = Field(default=10_000_000, gt=0, le=10_000_000)
+    pcap_posting_index_build_max_memberships: int = Field(default=20_000_000, gt=0, le=20_000_000)
+    pcap_posting_index_build_max_distinct_keys: int = Field(default=1_000_000, gt=0, le=1_000_000)
+    pcap_posting_index_build_max_encoded_bytes: int = Field(
+        default=512 * 1024 * 1024, gt=0, le=512 * 1024 * 1024
+    )
+    pcap_posting_index_build_max_chunks: int = Field(default=1_000_000, gt=0, le=1_000_000)
+    pcap_posting_index_build_batch_size: int = Field(default=1_000, gt=0, le=100_000)
+    pcap_posting_index_query_max_operations: int = Field(default=100_000, gt=0, le=10_000_000)
+    pcap_posting_index_query_max_result_ordinals: int = Field(default=100_000, gt=0, le=10_000_000)
+    pcap_posting_index_query_max_decoded_memberships: int = Field(
+        default=100_000, gt=0, le=10_000_000
+    )
+    pcap_posting_index_query_max_directory_chunks: int = Field(default=100_000, gt=0, le=10_000_000)
+    pcap_posting_index_query_max_dictionary_terms: int = Field(default=100_000, gt=0, le=10_000_000)
+    pcap_posting_index_metrics_enabled: bool = True
+    pcap_posting_index_backfill_enabled: bool = False
+    pcap_posting_index_backfill_batch_size: int = Field(default=100, gt=0, le=10_000)
     pcap_export_max_bytes: int | None = Field(default=None, ge=24)
     pcap_export_scan_max_bytes: int | None = Field(default=None, gt=0)
     pcap_export_scan_max_packets: int | None = Field(default=None, gt=0)
@@ -159,6 +192,23 @@ class Settings(BaseSettings):
             raise ValueError("PCAP offset index timeout must exceed the lease duration")
         if self.pcap_offset_index_worker_concurrency > self.pcap_offset_index_queue_capacity:
             raise ValueError("PCAP offset index worker concurrency must not exceed queue capacity")
+        if (
+            self.pcap_posting_index_heartbeat_interval_seconds * 2
+            > self.pcap_posting_index_lease_seconds
+        ):
+            raise ValueError("PCAP posting index heartbeat must be at most half the lease duration")
+        if (
+            self.pcap_posting_index_operation_timeout_seconds
+            <= self.pcap_posting_index_lease_seconds
+        ):
+            raise ValueError("PCAP posting index timeout must exceed the lease duration")
+        if (
+            self.pcap_posting_index_operation_timeout_seconds
+            <= self.pcap_posting_index_heartbeat_interval_seconds
+        ):
+            raise ValueError("PCAP posting index timeout must exceed the heartbeat interval")
+        if self.pcap_posting_index_worker_concurrency > self.pcap_posting_index_queue_capacity:
+            raise ValueError("PCAP posting index worker concurrency must not exceed queue capacity")
         if self.pcap_export_lease_renew_seconds * 2 > self.pcap_export_lease_seconds:
             raise ValueError("pcap export lease renewal must be at most half the lease duration")
         if self.pcap_export_job_timeout_seconds <= self.pcap_export_lease_seconds:

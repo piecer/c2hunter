@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, cast
 
 import pytest
@@ -53,9 +54,44 @@ class _FailingBlobStore:
         raise self.error
 
 
-def test_get_job_capture_only_treats_missing_objects_as_absent() -> None:
+class _CaptureVersionCursor:
+    def __enter__(self) -> _CaptureVersionCursor:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def execute(self, query: str, params: tuple[object, ...]) -> None:
+        assert "FROM pcap_capture_source_versions" in query
+        assert params == ("job-a",)
+
+    def fetchone(self) -> tuple[str, str]:
+        return ("captures/job-a/authoritative.pcap", "s3-version:authoritative")
+
+
+class _CaptureVersionConnection:
+    closed = False
+
+    def cursor(self) -> _CaptureVersionCursor:
+        return _CaptureVersionCursor()
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+
+def _capture_repository(error: Exception) -> PostgresRepository:
     repository = PostgresRepository.__new__(PostgresRepository)
-    repository.blob_store = cast(Any, _FailingBlobStore(KeyError("missing")))
+    repository._lock = threading.RLock()
+    repository._connection = _CaptureVersionConnection()
+    repository.blob_store = cast(Any, _FailingBlobStore(error))
+    return repository
+
+
+def test_get_job_capture_only_treats_missing_objects_as_absent() -> None:
+    repository = _capture_repository(KeyError("missing"))
     assert repository.get_job_capture("job-a") is None
 
     repository.blob_store = cast(Any, _FailingBlobStore(TimeoutError("object store unavailable")))
@@ -82,8 +118,7 @@ class _ObjectStoreError(RuntimeError):
 def test_postgres_open_job_capture_treats_only_authoritative_missing_as_absent(
     error: Exception,
 ) -> None:
-    repository = PostgresRepository.__new__(PostgresRepository)
-    repository.blob_store = cast(Any, _FailingBlobStore(error))
+    repository = _capture_repository(error)
 
     assert repository.open_job_capture("job-a") is None
 
@@ -99,8 +134,7 @@ def test_postgres_open_job_capture_treats_only_authoritative_missing_as_absent(
     ],
 )
 def test_postgres_open_job_capture_propagates_outages(error: Exception) -> None:
-    repository = PostgresRepository.__new__(PostgresRepository)
-    repository.blob_store = cast(Any, _FailingBlobStore(error))
+    repository = _capture_repository(error)
 
     with pytest.raises(type(error), match=str(error)):
         repository.open_job_capture("job-a")

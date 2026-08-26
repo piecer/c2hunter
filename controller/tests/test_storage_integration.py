@@ -5,8 +5,11 @@ import os
 import struct
 import sys
 import threading
+import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import CancelledError, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +17,7 @@ from typing import Any, cast
 
 import pytest
 from minio.error import S3Error
+from psycopg.errors import ForeignKeyViolation
 
 from c2hunter_controller.pcap_export_queue import (
     ExportPrincipalLimitError,
@@ -25,6 +29,10 @@ from c2hunter_controller.pcap_offset_index import (
     SourceIndexBinding,
     build_live_segment_index,
     build_offline_upload_index,
+)
+from c2hunter_controller.pcap_posting_index import (
+    PostingIndexAvailability,
+    build_source_posting_index,
 )
 from c2hunter_controller.production import MinioBlobStore, PostgresRepository
 from c2hunter_controller.queueing import RedisControllerQueue
@@ -62,6 +70,64 @@ _postgres_minio_integration = pytest.mark.skipif(
         "connection variables for the live structural-index integration test"
     ),
 )
+
+
+def _release_and_drain_publication_probe(
+    *,
+    release: Callable[[], None],
+    interrupt: Callable[[], None],
+    publication: Any,
+    executor: Any,
+    result_timeout: float,
+) -> None:
+    """Release the source lock before bounded future/executor cleanup."""
+    release_error: BaseException | None = None
+    try:
+        release()
+    except BaseException as exc:
+        release_error = exc
+
+    completed = True
+    if publication is not None:
+        publication.cancel()
+        try:
+            publication.result(timeout=result_timeout)
+        except CancelledError:
+            pass
+        except FutureTimeoutError:
+            interrupt()
+            try:
+                publication.result(timeout=result_timeout)
+            except CancelledError:
+                pass
+            except FutureTimeoutError:
+                completed = False
+            except Exception:
+                pass
+        except Exception:
+            pass
+    executor.shutdown(wait=completed, cancel_futures=True)
+    if not completed:
+        raise AssertionError("publication worker did not stop after connection cancellation")
+    if release_error is not None:
+        raise release_error
+
+
+def _assert_minio_object_missing(blob: MinioBlobStore, object_key: str) -> None:
+    """Require authoritative provider not-found from both read and metadata paths."""
+    operations = (
+        ("read", lambda: blob.get(object_key)),
+        ("stat", lambda: blob.client.stat_object(blob.bucket, object_key)),
+    )
+    for operation_name, operation in operations:
+        try:
+            operation()
+        except S3Error as exc:
+            assert exc.code in {"NoSuchKey", "NoSuchObject", "NoSuchVersion"}, (
+                f"MinIO {operation_name} failed for {object_key} with non-missing code {exc.code}"
+            )
+        else:
+            pytest.fail(f"MinIO {operation_name} unexpectedly found deleted object {object_key}")
 
 
 def _stage9_capture() -> bytes:
@@ -453,7 +519,9 @@ def test_real_postgres_minio_structural_index_publication_read_and_source_delete
         repository.save_job_capture(job_id, capture)
         durable_version = repository.get_capture_source_version(job_id)
         assert durable_version is not None
-        assert durable_version.object_key == f"captures/{job_id}.pcap"
+        assert durable_version.object_key.startswith(f"captures/{job_id}/")
+        assert durable_version.object_key.endswith(".pcap")
+        assert blob.get(durable_version.object_key) == capture
         assert durable_version.source_size_bytes == len(capture)
         assert durable_version.source_sha256 == capture_sha256
         binding = SourceIndexBinding(
@@ -627,3 +695,404 @@ def test_real_postgres_minio_live_segment_index_lease_recovery_publication_and_j
         if created:
             repository.delete_job(job_id)
         repository.close()
+
+
+@_postgres_minio_integration
+def test_real_stage11_postgres_minio_posting_lifecycle_is_fenced_and_cascading() -> None:
+    """Opt-in only: migration twice, upload/LIVE posting, reclaim, readback, and cascade."""
+    suffix = uuid.uuid4().hex
+    upload_id = f"stage11-upload-{suffix}"
+    live_job_id = f"stage11-live-job-{suffix}"
+    sensor_id = f"stage11-live-sensor-{suffix}"
+    segment_id = f"stage11-live-segment-{suffix}"
+    capture = _stage9_capture()
+    digest = hashlib.sha256(capture).hexdigest()
+    blob = MinioBlobStore(
+        os.environ["C2HUNTER_S3_ENDPOINT"],
+        os.environ["C2HUNTER_S3_ACCESS_KEY"],
+        os.environ["C2HUNTER_S3_SECRET_KEY"],
+        os.getenv("C2HUNTER_S3_BUCKET", "c2hunter"),
+    )
+    assert blob.ready()
+    # Each facade runs the additive schema migration, proving a second application is safe.
+    first = PostgresRepository(os.environ["C2HUNTER_DATABASE_URL"], blob)
+    second = PostgresRepository(os.environ["C2HUNTER_DATABASE_URL"], blob)
+    created_upload = False
+    created_live = False
+    build_ids: list[str] = []
+    object_keys: list[str] = []
+
+    def build_posting(
+        repository: PostgresRepository, source: Any, parent: Any, stream: Any, name: str
+    ):
+        with stream:
+            return build_source_posting_index(
+                stream,
+                source_version=source,
+                parent=parent,
+                internal_networks=["10.0.0.0/8"],
+                build_id=name,
+            )
+
+    def publish_posting(
+        repository: PostgresRepository, source: Any, parent: Any, posting: Any
+    ) -> Any:
+        assert repository.request_posting_index(source, parent) is not None
+        assert repository.admit_posting_index(
+            source.source_kind, source.source_id, capacity=8, max_attempts=3
+        ).value in {"QUEUED", "COALESCED"}
+        claim = repository.claim_posting_index(lease_seconds=120)
+        assert claim is not None and claim.lease_token
+        repository.begin_posting_index(
+            posting, attempt=claim.attempt, lease_token=claim.lease_token
+        )
+        repository.stage_posting_index_chunks(
+            posting.build_id,
+            posting.generation.chunks,
+            source_kind=source.source_kind,
+            source_id=source.source_id,
+            attempt=claim.attempt,
+            lease_token=claim.lease_token,
+        )
+        assert repository.publish_posting_index(
+            posting.build_id,
+            source_version=source,
+            parent=parent,
+            attempt=claim.attempt,
+            lease_token=claim.lease_token,
+        )
+        return claim
+
+    try:
+        with first.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM pg_constraint WHERE conrelid="
+                "'pcap_posting_index_jobs'::regclass AND "
+                "conname='pcap_posting_index_jobs_intent_parent_fkey'"
+            )
+            assert cursor.fetchone() == (1,)
+        first.connection.commit()
+
+        stored, was_created = first.create_job(
+            {
+                "id": upload_id,
+                "idempotency_key": f"stage11-upload-{suffix}",
+                "status": "COMPLETED",
+                "mode": "PCAP_UPLOAD",
+                "sensor_ids": ["uploaded"],
+                "source": {
+                    "packet_bytes_retained": True,
+                    "size_bytes": len(capture),
+                    "sha256": digest,
+                    "packet_count": 1,
+                    "capture_format": "PCAP",
+                },
+            }
+        )
+        assert was_created and stored["id"] == upload_id
+        created_upload = True
+        first.save_job_capture(upload_id, capture)
+        assert build_offline_upload_index(
+            first, upload_id, max_packets=10, max_interfaces=4, batch_size=2
+        )
+        upload_source = first.get_capture_source_version(upload_id)
+        assert upload_source is not None
+        upload_object_key = upload_source.object_key
+        assert upload_object_key.startswith(f"captures/{upload_id}/")
+        assert upload_object_key.endswith(".pcap")
+        assert blob.get(upload_object_key) == capture
+        object_keys.append(upload_object_key)
+        upload_binding = SourceIndexBinding(
+            upload_source.source_kind,
+            upload_source.source_id,
+            upload_source.source_version_id,
+            upload_source.source_size_bytes,
+            upload_source.source_sha256,
+            "PCAP",
+        )
+        upload_parent_lookup = first.get_structural_index(upload_binding)
+        assert upload_parent_lookup.snapshot is not None
+        upload_parent = upload_parent_lookup.snapshot
+        upload_stream = first.open_job_capture(upload_id)
+        assert upload_stream is not None
+        upload_posting = build_posting(
+            first, upload_source, upload_parent, upload_stream, f"stage11-upload-posting-{suffix}"
+        )
+        build_ids.append(upload_posting.build_id)
+
+        # Abandon attempt one, recover through the second facade, and publish attempt two.
+        assert first.request_posting_index(upload_source, upload_parent) is not None
+        with first.connection.cursor() as cursor:
+            cursor.execute("SAVEPOINT stage11_composite_fk_mismatch")
+            with pytest.raises(ForeignKeyViolation) as rejected:
+                now = datetime.now(UTC)
+                cursor.execute(
+                    "INSERT INTO pcap_posting_index_jobs("
+                    "source_kind,source_id,parent_structural_build_id,status,attempt,max_attempts,"
+                    "next_attempt_at,queued_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (
+                        upload_source.source_kind,
+                        upload_source.source_id,
+                        f"{upload_parent.build_id}-mismatch",
+                        "QUEUED",
+                        0,
+                        3,
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+            assert rejected.value.sqlstate == "23503"
+            cursor.execute("ROLLBACK TO SAVEPOINT stage11_composite_fk_mismatch")
+            cursor.execute("RELEASE SAVEPOINT stage11_composite_fk_mismatch")
+        first.connection.commit()
+        assert (
+            first.admit_posting_index(
+                upload_source.source_kind, upload_source.source_id, capacity=8, max_attempts=3
+            ).value
+            == "QUEUED"
+        )
+        abandoned = first.claim_posting_index(lease_seconds=120)
+        assert abandoned is not None and abandoned.lease_token
+        with first.connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE pcap_posting_index_jobs SET lease_expires_at=clock_timestamp()-"
+                "make_interval(secs=>1) WHERE source_kind=%s AND source_id=%s",
+                (upload_source.source_kind, upload_source.source_id),
+            )
+        first.connection.commit()
+        assert second.recover_posting_indexes() == 1
+        winner = second.claim_posting_index(lease_seconds=120)
+        assert winner is not None and winner.attempt == 2 and winner.lease_token
+        winner_lease_token = winner.lease_token
+        assert winner_lease_token is not None
+        assert winner_lease_token != abandoned.lease_token
+        second.begin_posting_index(
+            upload_posting, attempt=winner.attempt, lease_token=winner_lease_token
+        )
+        second.stage_posting_index_chunks(
+            upload_posting.build_id,
+            upload_posting.generation.chunks,
+            source_kind=upload_source.source_kind,
+            source_id=upload_source.source_id,
+            attempt=winner.attempt,
+            lease_token=winner_lease_token,
+        )
+        assert second.publish_posting_index(
+            upload_posting.build_id,
+            source_version=upload_source,
+            parent=upload_parent,
+            attempt=winner.attempt,
+            lease_token=winner_lease_token,
+        )
+        upload_lookup = first.get_posting_index(upload_source, upload_parent)
+        assert upload_lookup.availability is PostingIndexAvailability.READY
+        assert upload_lookup.snapshot is not None
+
+        first.upsert_sensor({"sensor_id": sensor_id, "name": "stage11-live"})
+        live_job, was_created = first.create_job(
+            {
+                "id": live_job_id,
+                "idempotency_key": f"stage11-live-{suffix}",
+                "status": "CAPTURING",
+                "mode": "LIVE",
+                "sensor_ids": [sensor_id],
+                "capture": {"store_pcap": True},
+            }
+        )
+        assert was_created
+        created_live = True
+        marker = datetime.now(UTC).isoformat()
+        live_segment, status = first.save_sensor_pcap_limited(
+            {
+                "id": segment_id,
+                "sensor_id": sensor_id,
+                "analysis_job_id": live_job_id,
+                "filename": f"{segment_id}.pcap",
+                "size_bytes": len(capture),
+                "sha256": digest,
+                "uploaded_at": marker,
+                "index_requested_at": marker,
+            },
+            capture,
+            None,
+            require_open_job=True,
+        )
+        assert status == "OK" and live_segment is not None
+        live_object_key = str(live_segment["object_key"])
+        assert live_object_key.startswith(f"sensor-pcaps/{sensor_id}/{segment_id}/")
+        assert live_object_key.endswith(".pcap")
+        assert blob.get(live_object_key) == capture
+        object_keys.append(live_object_key)
+        assert (
+            first.admit_live_segment_index(segment_id, capacity=8, max_attempts=3).value == "QUEUED"
+        )
+        structural_claim = first.claim_live_segment_index(now=datetime.now(UTC), lease_seconds=120)
+        assert structural_claim is not None and structural_claim.lease_token
+        assert build_live_segment_index(
+            first,
+            segment_id,
+            max_packets=10,
+            max_interfaces=4,
+            batch_size=2,
+            attempt=structural_claim.attempt,
+            lease_token=structural_claim.lease_token,
+        )
+        live_source = first.get_live_capture_source_version(segment_id)
+        assert live_source is not None
+        assert live_source.object_key == live_object_key
+        live_binding = SourceIndexBinding(
+            live_source.source_kind,
+            live_source.source_id,
+            live_source.source_version_id,
+            live_source.source_size_bytes,
+            live_source.source_sha256,
+            "PCAP",
+        )
+        live_parent_lookup = first.get_structural_index(live_binding)
+        assert live_parent_lookup.snapshot is not None
+        live_parent = live_parent_lookup.snapshot
+        first.save_job_metadata({**live_job, "status": "COMPLETED"})
+        live_opened = first.open_sensor_pcap(segment_id)
+        assert live_opened is not None
+        _version, live_stream = live_opened
+        live_posting = build_posting(
+            first, live_source, live_parent, live_stream, f"stage11-live-posting-{suffix}"
+        )
+        build_ids.append(live_posting.build_id)
+        publish_posting(first, live_source, live_parent, live_posting)
+        live_lookup = second.get_posting_index(live_source, live_parent)
+        assert live_lookup.availability is PostingIndexAvailability.READY
+        assert live_lookup.snapshot is not None
+
+        failed_deletes = set(object_keys)
+
+        def fail_first_delete(object_key: str) -> None:
+            if object_key in failed_deletes:
+                failed_deletes.remove(object_key)
+                raise RuntimeError(f"forced first cleanup attempt for {object_key}")
+            blob.delete(object_key)
+
+        cleanup_blob = cast(MinioBlobStore, SimpleNamespace(delete=fail_first_delete))
+        first.blob_store = cleanup_blob
+        second.blob_store = cleanup_blob
+
+        with second.connection.cursor() as cursor:
+            cursor.execute("SET LOCAL lock_timeout TO '5s'")
+            cursor.execute("SET LOCAL statement_timeout TO '10s'")
+            cursor.execute("SELECT pg_backend_pid()")
+            second_backend_pid = int(cursor.fetchone()[0])
+        publication_started = threading.Event()
+
+        def publish_while_deleting() -> bool:
+            publication_started.set()
+            return second.publish_posting_index(
+                upload_posting.build_id,
+                source_version=upload_source,
+                parent=upload_parent,
+                attempt=winner.attempt,
+                lease_token=winner_lease_token,
+            )
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        publication = None
+        source_lock_acquired = False
+        try:
+            with first.connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT source_id FROM pcap_capture_source_versions "
+                    "WHERE source_kind=%s AND source_id=%s FOR UPDATE",
+                    (upload_source.source_kind, upload_source.source_id),
+                )
+                assert cursor.fetchone() == (upload_id,)
+            source_lock_acquired = True
+            assert source_lock_acquired
+            publication = executor.submit(publish_while_deleting)
+            assert publication_started.wait(timeout=5)
+            deadline = time.monotonic() + 5
+            blocked_on_lock = False
+            while time.monotonic() < deadline:
+                with first.connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT wait_event_type FROM pg_stat_activity WHERE pid=%s",
+                        (second_backend_pid,),
+                    )
+                    activity = cursor.fetchone()
+                if activity == ("Lock",):
+                    blocked_on_lock = True
+                    break
+                time.sleep(0.02)
+            assert blocked_on_lock, "publication never blocked behind the canonical source lock"
+            assert first.delete_retained_source(upload_id)
+            created_upload = False
+            assert publication.result(timeout=10) is False
+        finally:
+            _release_and_drain_publication_probe(
+                release=first.connection.rollback,
+                interrupt=second.connection.cancel,
+                publication=publication,
+                executor=executor,
+                result_timeout=12,
+            )
+
+        assert second.delete_job(live_job_id)
+        created_live = False
+        with first.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM controller_objects WHERE kind='pcap_export_cleanup' "
+                "AND data->>'object_key'=ANY(%s)",
+                (object_keys,),
+            )
+            assert cursor.fetchone() == (2,)
+        first.connection.commit()
+
+        acknowledged = first.cleanup_pcap_export_orphans(
+            now=datetime.now(UTC), max_age_seconds=0, limit=100
+        )
+        assert set(object_keys).issubset(acknowledged)
+        source_predicate = (
+            "((source_kind=%s AND source_id=%s) OR (source_kind=%s AND source_id=%s))"
+        )
+        source_params = (
+            upload_source.source_kind,
+            upload_source.source_id,
+            live_source.source_kind,
+            live_source.source_id,
+        )
+        with first.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT "
+                f"(SELECT COUNT(*) FROM pcap_posting_index_intents WHERE {source_predicate}),"
+                f"(SELECT COUNT(*) FROM pcap_posting_index_jobs WHERE {source_predicate}),"
+                f"(SELECT COUNT(*) FROM pcap_posting_index_generations WHERE {source_predicate}),"
+                f"(SELECT COUNT(*) FROM pcap_posting_index_owners WHERE {source_predicate}),"
+                "(SELECT COUNT(*) FROM pcap_posting_index_chunks WHERE build_id=ANY(%s)),"
+                f"(SELECT COUNT(*) FROM pcap_capture_source_versions WHERE {source_predicate}),"
+                "(SELECT COUNT(*) FROM controller_objects WHERE "
+                "(kind='job' AND id=ANY(%s)) OR (kind='sensor_pcap' AND id=%s)),"
+                "(SELECT COUNT(*) FROM controller_objects WHERE kind='pcap_export_cleanup' "
+                "AND data->>'object_key'=ANY(%s))",
+                (
+                    *source_params,
+                    *source_params,
+                    *source_params,
+                    *source_params,
+                    build_ids,
+                    *source_params,
+                    [upload_id, live_job_id],
+                    segment_id,
+                    object_keys,
+                ),
+            )
+            assert cursor.fetchone() == (0, 0, 0, 0, 0, 0, 0, 0)
+        first.connection.commit()
+        assert failed_deletes == set()
+        for object_key in object_keys:
+            _assert_minio_object_missing(blob, object_key)
+    finally:
+        if created_upload:
+            first.delete_retained_source(upload_id)
+        if created_live:
+            first.delete_job(live_job_id)
+        second.close()
+        first.close()

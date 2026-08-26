@@ -20,6 +20,15 @@ from c2hunter_analysis.pcap_index import (
     StructuralInterfaceEntry,
     StructuralPacketEntry,
 )
+from c2hunter_analysis.pcap_postings import (
+    PCAP_FILTER_CONTRACT_VERSION,
+    PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+    PCAP_POSTING_INDEX_SCHEMA_VERSION,
+    PostingChunk,
+    PostingDimension,
+    PostingGeneration,
+    PostingQueryLimits,
+)
 
 from .pcap_export_store import ExportQueueStorageError, RepositoryQueueStore
 from .pcap_offset_index import (
@@ -68,6 +77,62 @@ from .pcap_offset_index_queue import (
 from .pcap_offset_index_queue import (
     recover as recover_live_indexes,
 )
+from .pcap_posting_index import (
+    PostingIndexAvailability,
+    PostingIndexBinding,
+    PostingIndexIdentity,
+    PostingIndexIdentityLookup,
+    PostingIndexLookup,
+    PostingIndexSnapshot,
+    posting_index_identity,
+    posting_index_identity_availability,
+    validate_posting_index,
+)
+from .pcap_posting_index_queue import (
+    PostingIndexAdmission,
+    PostingIndexIntent,
+    PostingIndexIntentStatus,
+    PostingIndexTask,
+    PostingIndexTaskSpec,
+    PostingIndexTaskStatus,
+    PostingSourceKind,
+    is_posting_source_kind,
+)
+from .pcap_posting_index_queue import (
+    _encode as encode_posting_lifecycle,
+)
+from .pcap_posting_index_queue import _put_intent as put_posting_intent
+from .pcap_posting_index_queue import (
+    admit as admit_posting_task,
+)
+from .pcap_posting_index_queue import (
+    claim as claim_posting_task,
+)
+from .pcap_posting_index_queue import (
+    cleanup_terminal as cleanup_terminal_posting_tasks,
+)
+from .pcap_posting_index_queue import (
+    fail as fail_posting_task,
+)
+from .pcap_posting_index_queue import (
+    heartbeat as heartbeat_posting_task,
+)
+from .pcap_posting_index_queue import (
+    owns_unexpired as owns_unexpired_posting_task,
+)
+from .pcap_posting_index_queue import (
+    queue_depth as posting_queue_depth,
+)
+from .pcap_posting_index_queue import (
+    reconcile as reconcile_posting_tasks,
+)
+from .pcap_posting_index_queue import (
+    recover as recover_posting_tasks,
+)
+from .pcap_posting_index_queue import (
+    request as request_posting_task,
+)
+from .pcap_posting_index_queue import request_backfill as request_posting_backfill
 
 _AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 _JOB_TERMINAL_STATUSES = {"COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELLED"}
@@ -578,6 +643,11 @@ class Repository(Protocol):
         binding: SourceIndexBinding,
         interfaces: tuple[StructuralInterfaceEntry, ...],
         packet_count: int,
+        *,
+        request_postings: bool = False,
+        posting_schema_version: int = PCAP_POSTING_INDEX_SCHEMA_VERSION,
+        posting_parser_contract_version: int = PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+        filter_contract_version: int = PCAP_FILTER_CONTRACT_VERSION,
     ) -> bool: ...
     def abort_structural_index(self, build_id: str) -> None: ...
     def get_structural_index(self, binding: SourceIndexBinding) -> StructuralIndexLookup: ...
@@ -585,6 +655,120 @@ class Repository(Protocol):
         self, source_id: str, *, source_kind: str = "PCAP_UPLOAD"
     ) -> None: ...
     def cleanup_stale_structural_indexes(self, *, before: datetime, limit: int) -> int: ...
+    def request_posting_index(
+        self, source_version: CaptureSourceVersion, parent: StructuralIndexSnapshot
+    ) -> PostingIndexIntent | None: ...
+
+    def request_posting_index_backfill(self, *, limit: int) -> int: ...
+
+    def admit_posting_index(
+        self,
+        source_kind: PostingSourceKind,
+        source_id: str,
+        *,
+        capacity: int,
+        max_attempts: int,
+    ) -> PostingIndexAdmission: ...
+
+    def claim_posting_index(self, *, lease_seconds: int) -> PostingIndexTask | None: ...
+
+    def heartbeat_posting_index(
+        self,
+        source_kind: PostingSourceKind,
+        source_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        lease_seconds: int,
+    ) -> bool: ...
+
+    def fail_posting_index(
+        self,
+        source_kind: PostingSourceKind,
+        source_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        transient: bool,
+        error_code: str,
+        retry_base_seconds: int,
+    ) -> bool: ...
+
+    def recover_posting_indexes(self) -> int: ...
+
+    def reconcile_posting_indexes(
+        self,
+        *,
+        capacity: int,
+        max_attempts: int,
+        limit: int,
+    ) -> int: ...
+
+    def get_posting_index_queue_depth(self) -> dict[str, int]: ...
+
+    def cleanup_terminal_posting_indexes(self, *, max_age_seconds: int, limit: int) -> int: ...
+
+    def cleanup_stale_posting_indexes(self, *, max_age_seconds: int, limit: int) -> int: ...
+
+    def begin_posting_index(
+        self,
+        snapshot: PostingIndexSnapshot,
+        *,
+        attempt: int,
+        lease_token: str,
+    ) -> None:
+        raise NotImplementedError("posting indexes are unavailable")
+
+    def stage_posting_index_chunks(
+        self,
+        build_id: str,
+        chunks: tuple[PostingChunk, ...],
+        *,
+        source_kind: PostingSourceKind,
+        source_id: str,
+        attempt: int,
+        lease_token: str,
+    ) -> None:
+        raise NotImplementedError("posting indexes are unavailable")
+
+    def publish_posting_index(
+        self,
+        build_id: str,
+        *,
+        source_version: CaptureSourceVersion,
+        parent: StructuralIndexSnapshot,
+        attempt: int,
+        lease_token: str,
+    ) -> bool:
+        raise NotImplementedError("posting indexes are unavailable")
+
+    def get_posting_index(
+        self,
+        source_version: CaptureSourceVersion,
+        parent: StructuralIndexSnapshot,
+        limits: PostingQueryLimits | None = None,
+    ) -> PostingIndexLookup:
+        raise NotImplementedError("posting indexes are unavailable")
+
+    def get_posting_index_identity(
+        self,
+        source_version: CaptureSourceVersion,
+        parent: StructuralIndexSnapshot,
+    ) -> PostingIndexIdentityLookup:
+        raise NotImplementedError("posting indexes are unavailable")
+
+    def abort_posting_index(
+        self,
+        build_id: str,
+        *,
+        source_kind: PostingSourceKind,
+        source_id: str,
+        parent_structural_build_id: str,
+        attempt: int,
+        lease_token: str,
+    ) -> bool:
+        raise NotImplementedError("posting indexes are unavailable")
+
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None: ...
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]: ...
     def get_candidate(self, candidate_id: str) -> tuple[str, dict[str, Any]] | None: ...
@@ -718,6 +902,12 @@ class _LiveIndexRepositoryBackend(Protocol):
 
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None: ...
 
+    def _posting_now(self) -> datetime: ...
+
+    def get_posting_index_intent(
+        self, source_kind: PostingSourceKind, source_id: str
+    ) -> PostingIndexIntent | None: ...
+
 
 class _SQLiteLiveIndexRepositoryBackend(_LiveIndexRepositoryBackend, Protocol):
     connection: sqlite3.Connection
@@ -738,6 +928,7 @@ class _MemoryLiveIndexRepositoryBackend(_LiveIndexRepositoryBackend, Protocol):
     structural_index_generations: dict[str, StructuralIndexSnapshot]
     structural_index_owners: dict[tuple[str, str], str]
     live_segment_index_tasks: dict[str, LiveIndexTask]
+    posting_index_intents: dict[tuple[str, str], PostingIndexIntent]
 
 
 def _is_sqlite_live_index_backend(
@@ -888,6 +1079,10 @@ class LiveIndexQueueRepositoryMixin:
         *,
         attempt: int,
         lease_token: str,
+        request_postings: bool = False,
+        posting_schema_version: int = PCAP_POSTING_INDEX_SCHEMA_VERSION,
+        posting_parser_contract_version: int = PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+        filter_contract_version: int = PCAP_FILTER_CONTRACT_VERSION,
     ) -> bool:
         if binding.source_kind != "LIVE_SEGMENT" or packet_count < 1:
             return False
@@ -988,6 +1183,23 @@ class LiveIndexQueueRepositoryMixin:
                 if _is_sqlite_live_index_backend(self):
                     self.connection.rollback()
                 return False
+            posting_intent = None
+            if request_postings:
+                spec = replace(
+                    PostingIndexTaskSpec.from_binding(source_version, snapshot),
+                    posting_schema_version=posting_schema_version,
+                    posting_parser_contract_version=posting_parser_contract_version,
+                    filter_contract_version=filter_contract_version,
+                )
+                current = self.get_posting_index_intent(spec.source_kind, spec.source_id)
+                if current is None or current.spec.identity != spec.identity:
+                    requested_at = self._posting_now()
+                    posting_intent = PostingIndexIntent(
+                        spec,
+                        PostingIndexIntentStatus.PENDING,
+                        requested_at,
+                        requested_at,
+                    )
             if _is_sqlite_live_index_backend(self):
                 try:
                     self.connection.execute(
@@ -1069,6 +1281,8 @@ class LiveIndexQueueRepositoryMixin:
                         self.connection.rollback()
                         return False
                     _mark_intent(self, binding.source_id, "COMPLETED")
+                    if posting_intent is not None:
+                        put_posting_intent(self, posting_intent)
                     self.connection.commit()
                 except Exception:
                     self.connection.rollback()
@@ -1076,6 +1290,12 @@ class LiveIndexQueueRepositoryMixin:
             else:
                 if not _is_memory_live_index_backend(self):
                     raise TypeError("unsupported LIVE index repository backend")
+                # Marker creation is the only injected mapping operation in this branch;
+                # perform it before publishing READY ownership or acknowledging the task.
+                if posting_intent is not None:
+                    self.posting_index_intents[(binding.source_kind, binding.source_id)] = (
+                        posting_intent
+                    )
                 self.capture_source_versions[f"LIVE_SEGMENT:{binding.source_id}"] = source_version
                 previous = self.structural_index_owners.get(
                     (binding.source_kind, binding.source_id)
@@ -1096,8 +1316,1041 @@ class LiveIndexQueueRepositoryMixin:
             return True
 
 
-class MemoryRepository(LiveIndexQueueRepositoryMixin):
-    def __init__(self) -> None:
+def _posting_generation_metadata(generation: PostingGeneration) -> str:
+    return json.dumps(
+        {
+            "schema_version": generation.schema_version,
+            "parser_contract_version": generation.parser_contract_version,
+            "filter_contract_version": generation.filter_contract_version,
+            "packet_count": generation.packet_count,
+            "supported_count": generation.supported_count,
+            "membership_count": generation.membership_count,
+            "distinct_key_count": generation.distinct_key_count,
+            "chunk_count": len(generation.chunks),
+            "encoded_byte_count": generation.encoded_byte_count,
+            "complete_dimensions": sorted(item.value for item in generation.complete_dimensions),
+            "digest": generation.digest,
+            "binding_document": generation.binding_document.hex(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _posting_generation_from_metadata(
+    metadata: str, chunks: tuple[PostingChunk, ...]
+) -> PostingGeneration:
+    value = json.loads(metadata)
+    return PostingGeneration(
+        int(value["schema_version"]),
+        int(value["parser_contract_version"]),
+        int(value["filter_contract_version"]),
+        int(value["packet_count"]),
+        int(value["supported_count"]),
+        int(value["membership_count"]),
+        int(value["distinct_key_count"]),
+        int(value["encoded_byte_count"]),
+        frozenset(PostingDimension(item) for item in value["complete_dimensions"]),
+        chunks,
+        str(value["digest"]),
+        bytes.fromhex(str(value["binding_document"])),
+    )
+
+
+def _posting_identity_from_metadata(
+    build_id: object,
+    binding: object,
+    created_at: object,
+    metadata: object,
+) -> PostingIndexIdentity:
+    if (
+        not isinstance(build_id, str)
+        or not isinstance(binding, str)
+        or not isinstance(created_at, str)
+        or not isinstance(metadata, str)
+    ):
+        raise TypeError("posting identity metadata has invalid storage types")
+    value = json.loads(metadata)
+    integer_fields = (
+        "schema_version",
+        "parser_contract_version",
+        "filter_contract_version",
+        "packet_count",
+        "supported_count",
+        "membership_count",
+        "distinct_key_count",
+        "chunk_count",
+        "encoded_byte_count",
+    )
+    if any(type(value.get(field)) is not int for field in integer_fields):
+        raise TypeError("posting identity numeric metadata is invalid")
+    dimensions = value.get("complete_dimensions")
+    if not isinstance(dimensions, list) or not all(isinstance(item, str) for item in dimensions):
+        raise TypeError("posting identity dimensions are invalid")
+    digest = value.get("digest")
+    binding_document = value.get("binding_document")
+    if not isinstance(digest, str) or not isinstance(binding_document, str):
+        raise TypeError("posting identity digest metadata is invalid")
+    return PostingIndexIdentity(
+        build_id,
+        PostingIndexBinding(**json.loads(binding)),
+        datetime.fromisoformat(created_at),
+        value["schema_version"],
+        value["parser_contract_version"],
+        value["filter_contract_version"],
+        value["packet_count"],
+        value["supported_count"],
+        value["membership_count"],
+        value["distinct_key_count"],
+        value["chunk_count"],
+        value["encoded_byte_count"],
+        tuple(sorted(dimensions)),
+        digest,
+        bytes.fromhex(binding_document),
+    )
+
+
+def _posting_chunks_from_rows(rows: Iterable[tuple[Any, ...]]) -> tuple[PostingChunk, ...]:
+    return tuple(
+        PostingChunk(
+            PostingDimension(str(row[0])),
+            bytes(row[1]),
+            int(row[2]),
+            int(row[3]),
+            int(row[4]),
+            int(row[5]),
+            bytes(row[6]),
+        )
+        for row in rows
+    )
+
+
+def _posting_task_matches_snapshot(
+    task: PostingIndexTask | None, snapshot: PostingIndexSnapshot
+) -> bool:
+    try:
+        expected = PostingIndexTaskSpec(**asdict(snapshot.binding))
+    except (TypeError, ValueError):
+        return False
+    return task is not None and task.spec == expected
+
+
+def _aware_posting_time(value: datetime, *, field: str) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"posting {field} must be timezone-aware")
+    return value.astimezone(UTC)
+
+
+class _PostingIndexRepositoryBackend(Protocol):
+    _lock: RLock
+
+    def _posting_now(self) -> datetime: ...
+
+    def get_posting_index_task(
+        self, source_kind: PostingSourceKind, source_id: str
+    ) -> PostingIndexTask | None: ...
+
+    def get_posting_index_intent(
+        self, source_kind: PostingSourceKind, source_id: str
+    ) -> PostingIndexIntent | None: ...
+
+
+class _SQLitePostingIndexRepositoryBackend(_PostingIndexRepositoryBackend, Protocol):
+    connection: sqlite3.Connection
+
+
+class _MemoryPostingIndexRepositoryBackend(_PostingIndexRepositoryBackend, Protocol):
+    capture_source_versions: dict[str, CaptureSourceVersion]
+    structural_index_generations: dict[str, StructuralIndexSnapshot]
+    structural_index_owners: dict[tuple[str, str], str]
+    posting_index_staging: dict[
+        str, tuple[PostingIndexSnapshot, int, str, str | None, list[PostingChunk]]
+    ]
+    posting_index_generations: dict[str, PostingIndexSnapshot]
+    posting_index_owners: dict[tuple[str, str, str], str]
+    posting_index_intents: dict[tuple[str, str], PostingIndexIntent]
+    posting_index_tasks: dict[tuple[str, str], PostingIndexTask]
+
+
+def _is_sqlite_posting_index_backend(
+    repository: _PostingIndexRepositoryBackend,
+) -> TypeGuard[_SQLitePostingIndexRepositoryBackend]:
+    return isinstance(getattr(repository, "connection", None), sqlite3.Connection)
+
+
+def _is_memory_posting_index_backend(
+    repository: _PostingIndexRepositoryBackend,
+) -> TypeGuard[_MemoryPostingIndexRepositoryBackend]:
+    return not hasattr(repository, "connection")
+
+
+class PostingIndexQueueRepositoryMixin:
+    _lock: RLock
+
+    def _posting_now(self) -> datetime:
+        raise NotImplementedError
+
+    def request_posting_index(
+        self,
+        source_version: CaptureSourceVersion,
+        parent: StructuralIndexSnapshot,
+        *,
+        requested_at: datetime | None = None,
+    ) -> PostingIndexIntent | None:
+        return request_posting_task(self, source_version, parent, requested_at=requested_at)
+
+    def request_posting_index_backfill(self, *, limit: int) -> int:
+        return request_posting_backfill(self, limit=limit)
+
+    def get_posting_index_intent(
+        self, source_kind: PostingSourceKind, source_id: str
+    ) -> PostingIndexIntent | None:
+        from .pcap_posting_index_queue import _get_intent
+
+        with self._lock:
+            return _get_intent(self, source_kind, source_id)
+
+    def admit_posting_index(
+        self,
+        source_kind: PostingSourceKind,
+        source_id: str,
+        *,
+        capacity: int,
+        max_attempts: int,
+        now: datetime | None = None,
+    ) -> PostingIndexAdmission:
+        return admit_posting_task(
+            self, source_kind, source_id, capacity=capacity, max_attempts=max_attempts, now=now
+        )
+
+    def get_posting_index_task(
+        self, source_kind: PostingSourceKind, source_id: str
+    ) -> PostingIndexTask | None:
+        from .pcap_posting_index_queue import _get_task
+
+        with self._lock:
+            return _get_task(self, source_kind, source_id)
+
+    def claim_posting_index(
+        self, *, now: datetime | None = None, lease_seconds: int
+    ) -> PostingIndexTask | None:
+        return claim_posting_task(self, now=now, lease_seconds=lease_seconds)
+
+    def heartbeat_posting_index(
+        self,
+        source_kind: PostingSourceKind,
+        source_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        now: datetime | None = None,
+        lease_seconds: int,
+    ) -> bool:
+        return heartbeat_posting_task(
+            self,
+            source_kind,
+            source_id,
+            attempt=attempt,
+            lease_token=lease_token,
+            now=now,
+            lease_seconds=lease_seconds,
+        )
+
+    def fail_posting_index(
+        self,
+        source_kind: PostingSourceKind,
+        source_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        transient: bool,
+        error_code: str,
+        now: datetime | None = None,
+        retry_base_seconds: int,
+    ) -> bool:
+        return fail_posting_task(
+            self,
+            source_kind,
+            source_id,
+            attempt=attempt,
+            lease_token=lease_token,
+            transient=transient,
+            error_code=error_code,
+            now=now,
+            retry_base_seconds=retry_base_seconds,
+        )
+
+    def recover_posting_indexes(self, *, now: datetime | None = None) -> int:
+        return recover_posting_tasks(self, now=now)
+
+    def reconcile_posting_indexes(
+        self,
+        *,
+        capacity: int,
+        max_attempts: int,
+        limit: int,
+        now: datetime | None = None,
+    ) -> int:
+        return reconcile_posting_tasks(
+            self, capacity=capacity, max_attempts=max_attempts, limit=limit, now=now
+        )
+
+    def get_posting_index_queue_depth(self) -> dict[str, int]:
+        return posting_queue_depth(self)
+
+    def cleanup_terminal_posting_indexes(self, *, max_age_seconds: int, limit: int) -> int:
+        return cleanup_terminal_posting_tasks(self, max_age_seconds=max_age_seconds, limit=limit)
+
+    def cleanup_stale_posting_indexes(
+        self: _PostingIndexRepositoryBackend,
+        *,
+        max_age_seconds: int,
+        limit: int,
+    ) -> int:
+        if limit <= 0 or max_age_seconds <= 0:
+            raise ValueError("posting staging cleanup bounds must be positive")
+        current = _aware_posting_time(self._posting_now(), field="cleanup time")
+        cutoff = current - timedelta(seconds=max_age_seconds)
+        with self._lock:
+            if _is_sqlite_posting_index_backend(self):
+                self.connection.execute("BEGIN IMMEDIATE")
+                try:
+                    rows = self.connection.execute(
+                        "SELECT g.build_id FROM pcap_posting_index_generations g "
+                        "WHERE g.state='STAGING' AND g.created_at<? "
+                        "AND NOT EXISTS (SELECT 1 FROM pcap_posting_index_owners o "
+                        "WHERE o.build_id=g.build_id) AND NOT EXISTS ("
+                        "SELECT 1 FROM pcap_posting_index_jobs j WHERE "
+                        "j.source_kind=g.source_kind AND j.source_id=g.source_id "
+                        "AND j.parent_structural_build_id=g.parent_structural_build_id "
+                        "AND j.status='RUNNING' AND j.attempt=g.builder_attempt "
+                        "AND j.lease_token=g.lease_token AND j.lease_expires_at>?) "
+                        "ORDER BY g.created_at,g.build_id LIMIT ?",
+                        (cutoff.isoformat(), current.isoformat(), limit),
+                    ).fetchall()
+                    self.connection.executemany(
+                        "DELETE FROM pcap_posting_index_generations "
+                        "WHERE build_id=? AND state='STAGING'",
+                        rows,
+                    )
+                    self.connection.commit()
+                    return len(rows)
+                except Exception:
+                    self.connection.rollback()
+                    raise
+            if not _is_memory_posting_index_backend(self):
+                raise TypeError("unsupported posting index repository backend")
+            owners = set(self.posting_index_owners.values())
+            selected = sorted(
+                (
+                    (staged[0].created_at, build_id)
+                    for build_id, staged in self.posting_index_staging.items()
+                    if staged[0].created_at < cutoff
+                    and build_id not in owners
+                    and not owns_unexpired_posting_task(
+                        self.posting_index_tasks.get(
+                            (staged[0].binding.source_kind, staged[0].binding.source_id)
+                        ),
+                        attempt=staged[1],
+                        lease_token=staged[2],
+                        now=current,
+                    )
+                )
+            )[:limit]
+            for _created_at, build_id in selected:
+                self.posting_index_staging.pop(build_id, None)
+            return len(selected)
+
+
+class PostingIndexRepositoryMixin:
+    """Additive Phase-A STAGING/READY posting repository contract.
+
+    Publication here is an internal synchronous Phase-A seam. Durable task lease
+    ownership and worker CAS deliberately remain Phase B responsibilities.
+    """
+
+    def begin_posting_index(
+        self: _PostingIndexRepositoryBackend,
+        snapshot: PostingIndexSnapshot,
+        *,
+        attempt: int,
+        lease_token: str,
+        now: datetime | None = None,
+    ) -> None:
+        if not lease_token or attempt <= 0:
+            raise ValueError("posting task lease is required")
+        # ``now`` is compatibility-only; durable creation time is repository-owned.
+        staged_at = _aware_posting_time(self._posting_now(), field="begin time")
+        if not is_posting_source_kind(snapshot.binding.source_kind):
+            raise ValueError("posting source kind is invalid")
+        key = (
+            snapshot.binding.source_kind,
+            snapshot.binding.source_id,
+            snapshot.binding.parent_structural_build_id,
+        )
+        with self._lock:
+            if _is_sqlite_posting_index_backend(self):
+                self.connection.execute("BEGIN IMMEDIATE")
+                try:
+                    task = self.get_posting_index_task(key[0], key[1])
+                    if not owns_unexpired_posting_task(
+                        task,
+                        attempt=attempt,
+                        lease_token=lease_token,
+                        now=self._posting_now(),
+                    ) or not _posting_task_matches_snapshot(task, snapshot):
+                        self.connection.rollback()
+                        raise ValueError("posting task lease is not current")
+                    owner = self.connection.execute(
+                        "SELECT build_id FROM pcap_posting_index_owners "
+                        "WHERE source_kind=? AND source_id=? AND parent_structural_build_id=?",
+                        key,
+                    ).fetchone()
+                    self.connection.execute(
+                        "INSERT INTO pcap_posting_index_generations("
+                        "build_id,source_kind,source_id,parent_structural_build_id,state,binding,"
+                        "created_at,generation_metadata,builder_attempt,lease_token,"
+                        "expected_owner_build_id) VALUES(?,?,?,?,'STAGING',?,?,?,?,?,?)",
+                        (
+                            snapshot.build_id,
+                            *key,
+                            json.dumps(
+                                asdict(snapshot.binding), sort_keys=True, separators=(",", ":")
+                            ),
+                            staged_at.isoformat(),
+                            _posting_generation_metadata(snapshot.generation),
+                            attempt,
+                            lease_token,
+                            str(owner[0]) if owner else None,
+                        ),
+                    )
+                    self.connection.commit()
+                    return
+                except Exception:
+                    self.connection.rollback()
+                    raise
+            if not _is_memory_posting_index_backend(self):
+                raise TypeError("unsupported posting index repository backend")
+            task = self.get_posting_index_task(key[0], key[1])
+            if not owns_unexpired_posting_task(
+                task,
+                attempt=attempt,
+                lease_token=lease_token,
+                now=self._posting_now(),
+            ) or not _posting_task_matches_snapshot(task, snapshot):
+                raise ValueError("posting task lease is not current")
+            owner = self.posting_index_owners.get(key)
+            metadata_generation = replace(snapshot.generation, chunks=())
+            metadata_snapshot = replace(
+                snapshot, created_at=staged_at, generation=metadata_generation
+            )
+            self.posting_index_staging[snapshot.build_id] = (
+                metadata_snapshot,
+                attempt,
+                lease_token,
+                owner,
+                [],
+            )
+
+    def stage_posting_index_chunks(
+        self: _PostingIndexRepositoryBackend,
+        build_id: str,
+        chunks: tuple[PostingChunk, ...],
+        *,
+        source_kind: PostingSourceKind,
+        source_id: str,
+        attempt: int,
+        lease_token: str,
+        now: datetime | None = None,
+    ) -> None:
+        with self._lock:
+            if _is_sqlite_posting_index_backend(self):
+                self.connection.execute("BEGIN IMMEDIATE")
+                try:
+                    task = self.get_posting_index_task(source_kind, source_id)
+                    generation = self.connection.execute(
+                        "SELECT builder_attempt,lease_token FROM pcap_posting_index_generations "
+                        "WHERE build_id=? AND source_kind=? AND source_id=? AND state='STAGING'",
+                        (build_id, source_kind, source_id),
+                    ).fetchone()
+                    if not owns_unexpired_posting_task(
+                        task,
+                        attempt=attempt,
+                        lease_token=lease_token,
+                        now=self._posting_now(),
+                    ) or generation != (attempt, lease_token):
+                        self.connection.rollback()
+                        raise ValueError("posting task lease is not current")
+                    self.connection.executemany(
+                        "INSERT INTO pcap_posting_index_chunks("
+                        "build_id,dimension,canonical_value,chunk_ordinal,first_packet_index,"
+                        "last_packet_index,membership_count,encoded_ordinals) "
+                        "VALUES(?,?,?,?,?,?,?,?)",
+                        [
+                            (
+                                build_id,
+                                item.dimension.value,
+                                sqlite3.Binary(item.value),
+                                item.chunk_ordinal,
+                                item.first_packet_index,
+                                item.last_packet_index,
+                                item.count,
+                                sqlite3.Binary(item.encoded_ordinals),
+                            )
+                            for item in chunks
+                        ],
+                    )
+                    self.connection.commit()
+                    return
+                except Exception:
+                    self.connection.rollback()
+                    raise
+            if not _is_memory_posting_index_backend(self):
+                raise TypeError("unsupported posting index repository backend")
+            staged = self.posting_index_staging.get(build_id)
+            task = self.get_posting_index_task(source_kind, source_id)
+            if (
+                staged is None
+                or staged[1:3] != (attempt, lease_token)
+                or staged[0].binding.source_kind != source_kind
+                or staged[0].binding.source_id != source_id
+                or not owns_unexpired_posting_task(
+                    task,
+                    attempt=attempt,
+                    lease_token=lease_token,
+                    now=self._posting_now(),
+                )
+            ):
+                raise ValueError("posting task lease is not current")
+            snapshot, stored_attempt, token, expected_owner, stored = staged
+            stored.extend(chunks)
+            self.posting_index_staging[build_id] = (
+                snapshot,
+                stored_attempt,
+                token,
+                expected_owner,
+                stored,
+            )
+
+    def publish_posting_index(
+        self: _PostingIndexRepositoryBackend,
+        build_id: str,
+        *,
+        source_version: CaptureSourceVersion,
+        parent: StructuralIndexSnapshot,
+        attempt: int,
+        lease_token: str,
+        now: datetime | None = None,
+    ) -> bool:
+        if not is_posting_source_kind(source_version.source_kind):
+            return False
+        key = (source_version.source_kind, source_version.source_id, parent.build_id)
+        with self._lock:
+            authoritative_now = _aware_posting_time(self._posting_now(), field="publication time")
+            if _is_sqlite_posting_index_backend(self):
+                self.connection.execute("BEGIN IMMEDIATE")
+                try:
+                    generation_row = self.connection.execute(
+                        "SELECT binding,created_at,generation_metadata,builder_attempt,lease_token,"
+                        "expected_owner_build_id FROM pcap_posting_index_generations "
+                        "WHERE build_id=? AND state='STAGING'",
+                        (build_id,),
+                    ).fetchone()
+                    task = self.get_posting_index_task(key[0], key[1])
+                    intent = self.get_posting_index_intent(key[0], key[1])
+                    source_row = self.connection.execute(
+                        "SELECT source_kind,source_id,object_key,source_version_id,"
+                        "source_size_bytes,source_sha256 FROM pcap_capture_source_versions "
+                        "WHERE source_kind=? AND source_id=?",
+                        key[:2],
+                    ).fetchone()
+                    structural_owner = self.connection.execute(
+                        "SELECT build_id FROM pcap_offset_index_owners "
+                        "WHERE source_kind=? AND source_id=?",
+                        key[:2],
+                    ).fetchone()
+                    parent_row = self.connection.execute(
+                        "SELECT index_sha256,state FROM pcap_offset_index_generations "
+                        "WHERE build_id=?",
+                        (parent.build_id,),
+                    ).fetchone()
+                    owner = self.connection.execute(
+                        "SELECT build_id FROM pcap_posting_index_owners "
+                        "WHERE source_kind=? AND source_id=? AND parent_structural_build_id=?",
+                        key,
+                    ).fetchone()
+                    if generation_row is None:
+                        self.connection.rollback()
+                        return False
+                    expected_owner = generation_row[5]
+                    current_owner = str(owner[0]) if owner else None
+                    if (
+                        int(generation_row[3]) != attempt
+                        or str(generation_row[4]) != lease_token
+                        or not owns_unexpired_posting_task(
+                            task,
+                            attempt=attempt,
+                            lease_token=lease_token,
+                            now=authoritative_now,
+                        )
+                        or intent is None
+                        or task is None
+                        or intent.spec.identity != task.spec.identity
+                        or intent.spec.parent_structural_build_id != parent.build_id
+                        or expected_owner != current_owner
+                        or source_row is None
+                        or CaptureSourceVersion(*source_row) != source_version
+                        or structural_owner is None
+                        or str(structural_owner[0]) != parent.build_id
+                        or parent_row != (parent.index_sha256, "READY")
+                    ):
+                        self.connection.rollback()
+                        return False
+                    rows = self.connection.execute(
+                        "SELECT dimension,canonical_value,chunk_ordinal,first_packet_index,"
+                        "last_packet_index,membership_count,encoded_ordinals "
+                        "FROM pcap_posting_index_chunks WHERE build_id=? "
+                        "ORDER BY dimension,canonical_value,chunk_ordinal",
+                        (build_id,),
+                    ).fetchall()
+                    snapshot = PostingIndexSnapshot(
+                        build_id,
+                        PostingIndexBinding(**json.loads(generation_row[0])),
+                        datetime.fromisoformat(generation_row[1]),
+                        _posting_generation_from_metadata(
+                            generation_row[2], _posting_chunks_from_rows(rows)
+                        ),
+                    )
+                    if not validate_posting_index(
+                        snapshot, source_version=source_version, parent=parent
+                    ):
+                        self.connection.rollback()
+                        return False
+                    generation_cas = self.connection.execute(
+                        "UPDATE pcap_posting_index_generations SET state='READY' "
+                        "WHERE build_id=? AND state='STAGING'",
+                        (build_id,),
+                    )
+                    owner_cas = self.connection.execute(
+                        "INSERT INTO pcap_posting_index_owners("
+                        "source_kind,source_id,parent_structural_build_id,build_id) "
+                        "VALUES(?,?,?,?) "
+                        "ON CONFLICT(source_kind,source_id,parent_structural_build_id) "
+                        "DO UPDATE SET build_id=excluded.build_id",
+                        (*key, build_id),
+                    )
+                    if current_owner and current_owner != build_id:
+                        self.connection.execute(
+                            "DELETE FROM pcap_posting_index_generations WHERE build_id=?",
+                            (current_owner,),
+                        )
+                    completed_task = replace(
+                        task,
+                        status=PostingIndexTaskStatus.COMPLETED,
+                        lease_token=None,
+                        lease_expires_at=None,
+                        updated_at=authoritative_now,
+                        error_code=None,
+                    )
+                    completed_intent = replace(
+                        intent,
+                        status=PostingIndexIntentStatus.COMPLETED,
+                        updated_at=authoritative_now,
+                        published_build_id=build_id,
+                        error_code=None,
+                    )
+                    task_cas = self.connection.execute(
+                        "UPDATE pcap_posting_index_jobs SET status='COMPLETED',lease_token=NULL,"
+                        "lease_expires_at=NULL,updated_at=?,data=? WHERE "
+                        "source_kind=? AND source_id=? "
+                        "AND parent_structural_build_id=? AND status='RUNNING' AND attempt=? "
+                        "AND lease_token=? AND lease_expires_at>?",
+                        (
+                            authoritative_now.isoformat(),
+                            encode_posting_lifecycle(completed_task),
+                            key[0],
+                            key[1],
+                            key[2],
+                            attempt,
+                            lease_token,
+                            authoritative_now.isoformat(),
+                        ),
+                    )
+                    intent_cas = self.connection.execute(
+                        "UPDATE pcap_posting_index_intents SET "
+                        "status='COMPLETED',updated_at=?,data=? "
+                        "WHERE source_kind=? AND source_id=? AND parent_structural_build_id=? "
+                        "AND status IN ('PENDING','DEFERRED')",
+                        (
+                            authoritative_now.isoformat(),
+                            encode_posting_lifecycle(completed_intent),
+                            key[0],
+                            key[1],
+                            key[2],
+                        ),
+                    )
+                    if any(
+                        cursor.rowcount != 1
+                        for cursor in (generation_cas, owner_cas, task_cas, intent_cas)
+                    ):
+                        self.connection.rollback()
+                        return False
+                    self.connection.commit()
+                    return True
+                except Exception:
+                    self.connection.rollback()
+                    raise
+            if not _is_memory_posting_index_backend(self):
+                raise TypeError("unsupported posting index repository backend")
+            staged = self.posting_index_staging.get(build_id)
+            current_source = self.capture_source_versions.get(
+                source_version.source_id
+                if source_version.source_kind == "PCAP_UPLOAD"
+                else f"LIVE_SEGMENT:{source_version.source_id}"
+            )
+            current_owner = self.posting_index_owners.get(key)
+            current_parent = self.structural_index_generations.get(parent.build_id)
+            task = self.get_posting_index_task(key[0], key[1])
+            intent = self.get_posting_index_intent(key[0], key[1])
+            if (
+                staged is None
+                or staged[1:3] != (attempt, lease_token)
+                or staged[3] != current_owner
+                or not owns_unexpired_posting_task(
+                    task,
+                    attempt=attempt,
+                    lease_token=lease_token,
+                    now=authoritative_now,
+                )
+                or task is None
+                or intent is None
+                or task.spec.identity != intent.spec.identity
+                or intent.spec.parent_structural_build_id != parent.build_id
+                or current_source != source_version
+                or self.structural_index_owners.get(key[:2]) != parent.build_id
+                or current_parent is None
+                or current_parent.binding != parent.binding
+                or current_parent.index_sha256 != parent.index_sha256
+                or current_parent.interfaces != parent.interfaces
+                or current_parent.packets != parent.packets
+            ):
+                return False
+            metadata_snapshot, _, _, _, chunks = staged
+            snapshot = replace(
+                metadata_snapshot,
+                generation=replace(metadata_snapshot.generation, chunks=tuple(chunks)),
+            )
+            if not validate_posting_index(snapshot, source_version=source_version, parent=parent):
+                return False
+            generation_before = {
+                generation_id: deepcopy(self.posting_index_generations[generation_id])
+                for generation_id in {build_id, current_owner}
+                if generation_id is not None and generation_id in self.posting_index_generations
+            }
+            generation_presence = {
+                generation_id: generation_id in self.posting_index_generations
+                for generation_id in {build_id, current_owner}
+                if generation_id is not None
+            }
+            owner_present = key in self.posting_index_owners
+            owner_before = deepcopy(self.posting_index_owners.get(key))
+            lifecycle_key = key[:2]
+            task_present = lifecycle_key in self.posting_index_tasks
+            task_before = deepcopy(self.posting_index_tasks.get(lifecycle_key))
+            intent_present = lifecycle_key in self.posting_index_intents
+            intent_before = deepcopy(self.posting_index_intents.get(lifecycle_key))
+            staging_present = build_id in self.posting_index_staging
+            staging_before = deepcopy(self.posting_index_staging.get(build_id))
+
+            def restore(mapping: dict[Any, Any], item_key: Any, present: bool, value: Any) -> None:
+                if present:
+                    mapping[item_key] = deepcopy(value)
+                else:
+                    mapping.pop(item_key, None)
+
+            try:
+                self.posting_index_generations[build_id] = snapshot
+                self.posting_index_owners[key] = build_id
+                self.posting_index_staging.pop(build_id, None)
+                self.posting_index_tasks[lifecycle_key] = replace(
+                    task,
+                    status=PostingIndexTaskStatus.COMPLETED,
+                    lease_token=None,
+                    lease_expires_at=None,
+                    updated_at=authoritative_now,
+                    error_code=None,
+                )
+                self.posting_index_intents[lifecycle_key] = replace(
+                    intent,
+                    status=PostingIndexIntentStatus.COMPLETED,
+                    updated_at=authoritative_now,
+                    published_build_id=build_id,
+                    error_code=None,
+                )
+                if current_owner and current_owner != build_id:
+                    self.posting_index_generations.pop(current_owner, None)
+            except Exception:
+                for generation_id, present in generation_presence.items():
+                    restore(
+                        self.posting_index_generations,
+                        generation_id,
+                        present,
+                        generation_before.get(generation_id),
+                    )
+                restore(self.posting_index_owners, key, owner_present, owner_before)
+                restore(self.posting_index_tasks, lifecycle_key, task_present, task_before)
+                restore(self.posting_index_intents, lifecycle_key, intent_present, intent_before)
+                restore(self.posting_index_staging, build_id, staging_present, staging_before)
+                raise
+            return True
+
+    def get_posting_index_identity(
+        self: _PostingIndexRepositoryBackend,
+        source_version: CaptureSourceVersion,
+        parent: StructuralIndexSnapshot,
+    ) -> PostingIndexIdentityLookup:
+        key = (source_version.source_kind, source_version.source_id, parent.build_id)
+        with self._lock:
+            if _is_sqlite_posting_index_backend(self):
+                row = self.connection.execute(
+                    "SELECT owner.build_id,generation.binding,generation.created_at,"
+                    "generation.generation_metadata,generation.state FROM "
+                    "pcap_posting_index_owners AS owner LEFT JOIN "
+                    "pcap_posting_index_generations AS generation ON "
+                    "generation.build_id=owner.build_id WHERE owner.source_kind=? AND "
+                    "owner.source_id=? AND owner.parent_structural_build_id=? LIMIT 1",
+                    key,
+                ).fetchone()
+                if row is None:
+                    return PostingIndexIdentityLookup(PostingIndexAvailability.MISSING)
+                if row[1] is None or row[4] != "READY":
+                    return PostingIndexIdentityLookup(PostingIndexAvailability.CORRUPT)
+                try:
+                    identity = _posting_identity_from_metadata(*row[:4])
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    return PostingIndexIdentityLookup(PostingIndexAvailability.CORRUPT)
+            else:
+                if not _is_memory_posting_index_backend(self):
+                    raise TypeError("unsupported posting index repository backend")
+                owner_id = self.posting_index_owners.get(key)
+                if owner_id is None:
+                    return PostingIndexIdentityLookup(PostingIndexAvailability.MISSING)
+                snapshot = self.posting_index_generations.get(owner_id)
+                if snapshot is None or snapshot.build_id != owner_id:
+                    return PostingIndexIdentityLookup(PostingIndexAvailability.CORRUPT)
+                identity = posting_index_identity(snapshot)
+            availability = posting_index_identity_availability(
+                identity, source_version=source_version, parent=parent
+            )
+            return PostingIndexIdentityLookup(
+                availability,
+                identity if availability is PostingIndexAvailability.READY else None,
+            )
+
+    def get_posting_index(
+        self: _PostingIndexRepositoryBackend,
+        source_version: CaptureSourceVersion,
+        parent: StructuralIndexSnapshot,
+        limits: PostingQueryLimits | None = None,
+    ) -> PostingIndexLookup:
+        key = (source_version.source_kind, source_version.source_id, parent.build_id)
+        with self._lock:
+            if _is_sqlite_posting_index_backend(self):
+                owner = self.connection.execute(
+                    "SELECT build_id FROM pcap_posting_index_owners "
+                    "WHERE source_kind=? AND source_id=? AND parent_structural_build_id=?",
+                    key,
+                ).fetchone()
+                if owner is None:
+                    return PostingIndexLookup(PostingIndexAvailability.MISSING)
+                generation_row = self.connection.execute(
+                    "SELECT binding,created_at,generation_metadata,state "
+                    "FROM pcap_posting_index_generations WHERE build_id=?",
+                    (owner[0],),
+                ).fetchone()
+                if generation_row is None or generation_row[3] != "READY":
+                    return PostingIndexLookup(PostingIndexAvailability.CORRUPT)
+                try:
+                    metadata = json.loads(generation_row[2])
+                    metadata_chunk_count = metadata.get("chunk_count")
+                    if metadata_chunk_count is None:
+                        counted = self.connection.execute(
+                            "SELECT COUNT(*) FROM pcap_posting_index_chunks WHERE build_id=?",
+                            (owner[0],),
+                        ).fetchone()
+                        if counted is None:
+                            return PostingIndexLookup(PostingIndexAvailability.CORRUPT)
+                        chunk_count = int(counted[0])
+                    else:
+                        chunk_count = int(metadata_chunk_count)
+                    if limits is not None and chunk_count > limits.max_directory_chunks:
+                        return PostingIndexLookup(PostingIndexAvailability.RESOURCE_LIMIT)
+                    chunk_limit = (
+                        limits.max_directory_chunks + 1 if limits is not None else chunk_count + 1
+                    )
+                    rows = self.connection.execute(
+                        "SELECT dimension,canonical_value,chunk_ordinal,first_packet_index,"
+                        "last_packet_index,membership_count,encoded_ordinals "
+                        "FROM pcap_posting_index_chunks WHERE build_id=? "
+                        "ORDER BY dimension,canonical_value,chunk_ordinal LIMIT ?",
+                        (owner[0], chunk_limit),
+                    ).fetchall()
+                    if len(rows) > chunk_count or (
+                        limits is not None and len(rows) > limits.max_directory_chunks
+                    ):
+                        return PostingIndexLookup(PostingIndexAvailability.RESOURCE_LIMIT)
+                    snapshot = PostingIndexSnapshot(
+                        str(owner[0]),
+                        PostingIndexBinding(**json.loads(generation_row[0])),
+                        datetime.fromisoformat(generation_row[1]),
+                        _posting_generation_from_metadata(
+                            generation_row[2], _posting_chunks_from_rows(rows)
+                        ),
+                    )
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    return PostingIndexLookup(PostingIndexAvailability.CORRUPT)
+            else:
+                if not _is_memory_posting_index_backend(self):
+                    raise TypeError("unsupported posting index repository backend")
+                owner_id = self.posting_index_owners.get(key)
+                if owner_id is None:
+                    return PostingIndexLookup(PostingIndexAvailability.MISSING)
+                memory_snapshot = self.posting_index_generations.get(owner_id)
+                if memory_snapshot is None:
+                    return PostingIndexLookup(PostingIndexAvailability.CORRUPT)
+                if (
+                    limits is not None
+                    and len(memory_snapshot.generation.chunks) > limits.max_directory_chunks
+                ):
+                    return PostingIndexLookup(PostingIndexAvailability.RESOURCE_LIMIT)
+                snapshot = memory_snapshot
+            if snapshot.binding != PostingIndexBinding(
+                source_version.source_kind,
+                source_version.source_id,
+                source_version.source_version_id,
+                source_version.source_size_bytes,
+                source_version.source_sha256,
+                parent.binding.capture_format,
+                parent.build_id,
+                parent.index_sha256,
+                parent.binding.schema_version,
+                parent.binding.parser_contract_version,
+            ):
+                return PostingIndexLookup(PostingIndexAvailability.STALE)
+            if not validate_posting_index(snapshot, source_version=source_version, parent=parent):
+                return PostingIndexLookup(PostingIndexAvailability.CORRUPT)
+            return PostingIndexLookup(PostingIndexAvailability.READY, snapshot)
+
+    def abort_posting_index(
+        self: _PostingIndexRepositoryBackend,
+        build_id: str,
+        *,
+        source_kind: PostingSourceKind,
+        source_id: str,
+        parent_structural_build_id: str,
+        attempt: int,
+        lease_token: str,
+    ) -> bool:
+        if not is_posting_source_kind(source_kind) or attempt <= 0 or not lease_token:
+            return False
+        key = (source_kind, source_id)
+        with self._lock:
+            authoritative_now = self._posting_now()
+            if _is_sqlite_posting_index_backend(self):
+                self.connection.execute("BEGIN IMMEDIATE")
+                try:
+                    task = self.get_posting_index_task(*key)
+                    intent = self.get_posting_index_intent(*key)
+                    generation = self.connection.execute(
+                        "SELECT source_kind,source_id,parent_structural_build_id,state,"
+                        "builder_attempt,lease_token FROM pcap_posting_index_generations "
+                        "WHERE build_id=?",
+                        (build_id,),
+                    ).fetchone()
+                    eligible = (
+                        owns_unexpired_posting_task(
+                            task,
+                            attempt=attempt,
+                            lease_token=lease_token,
+                            now=authoritative_now,
+                        )
+                        and task is not None
+                        and intent is not None
+                        and task.spec.identity == intent.spec.identity
+                        and task.spec.parent_structural_build_id == parent_structural_build_id
+                        and intent.spec.parent_structural_build_id == parent_structural_build_id
+                        and intent.status
+                        in {PostingIndexIntentStatus.PENDING, PostingIndexIntentStatus.DEFERRED}
+                        and generation
+                        == (
+                            source_kind,
+                            source_id,
+                            parent_structural_build_id,
+                            "STAGING",
+                            attempt,
+                            lease_token,
+                        )
+                    )
+                    if not eligible:
+                        self.connection.rollback()
+                        return False
+                    deleted = self.connection.execute(
+                        "DELETE FROM pcap_posting_index_generations "
+                        "WHERE build_id=? AND source_kind=? AND source_id=? "
+                        "AND parent_structural_build_id=? AND state='STAGING' "
+                        "AND builder_attempt=? AND lease_token=?",
+                        (
+                            build_id,
+                            source_kind,
+                            source_id,
+                            parent_structural_build_id,
+                            attempt,
+                            lease_token,
+                        ),
+                    )
+                    if deleted.rowcount != 1:
+                        self.connection.rollback()
+                        return False
+                    self.connection.commit()
+                    return True
+                except Exception:
+                    self.connection.rollback()
+                    raise
+            if not _is_memory_posting_index_backend(self):
+                raise TypeError("unsupported posting index repository backend")
+            task = self.posting_index_tasks.get(key)
+            intent = self.posting_index_intents.get(key)
+            staged = self.posting_index_staging.get(build_id)
+            if (
+                not owns_unexpired_posting_task(
+                    task,
+                    attempt=attempt,
+                    lease_token=lease_token,
+                    now=authoritative_now,
+                )
+                or task is None
+                or intent is None
+                or task.spec.identity != intent.spec.identity
+                or task.spec.parent_structural_build_id != parent_structural_build_id
+                or intent.spec.parent_structural_build_id != parent_structural_build_id
+                or intent.status
+                not in {PostingIndexIntentStatus.PENDING, PostingIndexIntentStatus.DEFERRED}
+                or staged is None
+                or staged[0].binding.source_kind != source_kind
+                or staged[0].binding.source_id != source_id
+                or staged[0].binding.parent_structural_build_id != parent_structural_build_id
+                or staged[1:3] != (attempt, lease_token)
+            ):
+                return False
+            self.posting_index_staging.pop(build_id)
+            return True
+
+
+class MemoryRepository(
+    PostingIndexQueueRepositoryMixin, PostingIndexRepositoryMixin, LiveIndexQueueRepositoryMixin
+):
+    def __init__(self, *, _lease_clock: Callable[[], datetime] | None = None) -> None:
+        self._lease_clock = _lease_clock or (lambda: datetime.now(UTC))
         self.sensors: dict[str, dict[str, Any]] = {}
         self.groups: dict[str, dict[str, Any]] = {}
         self.jobs: dict[str, dict[str, Any]] = {}
@@ -1133,7 +2386,17 @@ class MemoryRepository(LiveIndexQueueRepositoryMixin):
         ] = {}
         self.structural_index_generations: dict[str, StructuralIndexSnapshot] = {}
         self.structural_index_owners: dict[object, str] = {}
+        self.posting_index_intents: dict[tuple[str, str], PostingIndexIntent] = {}
+        self.posting_index_tasks: dict[tuple[str, str], PostingIndexTask] = {}
+        self.posting_index_staging: dict[
+            str, tuple[PostingIndexSnapshot, int, str, str | None, list[PostingChunk]]
+        ] = {}
+        self.posting_index_generations: dict[str, PostingIndexSnapshot] = {}
+        self.posting_index_owners: dict[tuple[str, str, str], str] = {}
         self._lock = threading.RLock()
+
+    def _posting_now(self) -> datetime:
+        return self._lease_clock()
 
     def ready(self) -> bool:
         return True
@@ -1514,6 +2777,7 @@ class MemoryRepository(LiveIndexQueueRepositoryMixin):
             self.candidates.pop(job_id, None)
             self.job_captures.pop(job_id, None)
             self.capture_source_versions.pop(job_id, None)
+            self._delete_posting_indexes_for_source("PCAP_UPLOAD", job_id)
             self.delete_structural_indexes_for_source(job_id)
             export_ids = [
                 export_id
@@ -1539,6 +2803,7 @@ class MemoryRepository(LiveIndexQueueRepositoryMixin):
                 self.sensor_pcap_content.pop(segment_id, None)
                 self.live_segment_index_tasks.pop(segment_id, None)
                 self.capture_source_versions.pop(f"LIVE_SEGMENT:{segment_id}", None)
+                self._delete_posting_indexes_for_source("LIVE_SEGMENT", segment_id)
                 self.delete_structural_indexes_for_source(segment_id, source_kind="LIVE_SEGMENT")
             return True
 
@@ -1600,6 +2865,11 @@ class MemoryRepository(LiveIndexQueueRepositoryMixin):
         binding: SourceIndexBinding,
         interfaces: tuple[StructuralInterfaceEntry, ...],
         packet_count: int,
+        *,
+        request_postings: bool = False,
+        posting_schema_version: int = PCAP_POSTING_INDEX_SCHEMA_VERSION,
+        posting_parser_contract_version: int = PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+        filter_contract_version: int = PCAP_FILTER_CONTRACT_VERSION,
     ) -> bool:
         with self._lock:
             staged = self.structural_index_staging.get(build_id)
@@ -1607,7 +2877,7 @@ class MemoryRepository(LiveIndexQueueRepositoryMixin):
             expected_version = CaptureSourceVersion(
                 binding.source_kind,
                 binding.source_id,
-                f"captures/{binding.source_id}.pcap",
+                source_version.object_key if source_version is not None else "",
                 binding.source_version_id,
                 binding.source_size_bytes,
                 binding.source_sha256,
@@ -1632,12 +2902,115 @@ class MemoryRepository(LiveIndexQueueRepositoryMixin):
                 return False
             owner_key = (binding.source_kind, binding.source_id)
             previous = self.structural_index_owners.get(owner_key)
+            if (
+                previous is not None
+                and previous != build_id
+                and any(
+                    task.spec.source_kind == binding.source_kind
+                    and task.spec.source_id == binding.source_id
+                    and task.spec.parent_structural_build_id == previous
+                    and task.status
+                    in {
+                        PostingIndexTaskStatus.QUEUED,
+                        PostingIndexTaskStatus.RUNNING,
+                    }
+                    for task in self.posting_index_tasks.values()
+                )
+            ):
+                return False
+            posting_intent = None
+            if request_postings:
+                spec = replace(
+                    PostingIndexTaskSpec.from_binding(expected_version, snapshot),
+                    posting_schema_version=posting_schema_version,
+                    posting_parser_contract_version=posting_parser_contract_version,
+                    filter_contract_version=filter_contract_version,
+                )
+                current = self.posting_index_intents.get(owner_key)
+                if current is None or current.spec.identity != spec.identity:
+                    requested_at = self._posting_now()
+                    posting_intent = PostingIndexIntent(
+                        spec,
+                        PostingIndexIntentStatus.PENDING,
+                        requested_at,
+                        requested_at,
+                    )
+            if previous is not None and previous != build_id:
+                lifecycle = (
+                    self.posting_index_tasks.copy(),
+                    self.posting_index_intents.copy(),
+                    self.posting_index_staging.copy(),
+                    self.posting_index_generations.copy(),
+                    self.posting_index_owners.copy(),
+                )
+                try:
+                    self._delete_posting_indexes_for_source(
+                        binding.source_kind,
+                        binding.source_id,
+                        parent_structural_build_id=previous,
+                    )
+                    if posting_intent is not None:
+                        self.posting_index_intents[owner_key] = posting_intent
+                except Exception:
+                    (
+                        self.posting_index_tasks,
+                        self.posting_index_intents,
+                        self.posting_index_staging,
+                        self.posting_index_generations,
+                        self.posting_index_owners,
+                    ) = lifecycle
+                    raise
+            elif posting_intent is not None:
+                # Install the marker before publishing READY ownership. A failing
+                # mapping backend must leave the still-STAGING build untouched.
+                self.posting_index_intents[owner_key] = posting_intent
             self.structural_index_generations[build_id] = snapshot
             self.structural_index_owners[owner_key] = build_id
             self.structural_index_staging.pop(build_id, None)
             if previous is not None and previous != build_id:
                 self.structural_index_generations.pop(previous, None)
             return True
+
+    def _delete_posting_indexes_for_source(
+        self,
+        source_kind: PostingSourceKind,
+        source_id: str,
+        *,
+        parent_structural_build_id: str | None = None,
+    ) -> None:
+        """Delete one source's posting lifecycle while the repository lock is held."""
+        with self._lock:
+
+            def matches_parent(candidate: str) -> bool:
+                return parent_structural_build_id is None or candidate == parent_structural_build_id
+
+            key = (source_kind, source_id)
+            task = self.posting_index_tasks.get(key)
+            if task is not None and matches_parent(task.spec.parent_structural_build_id):
+                self.posting_index_tasks.pop(key, None)
+            intent = self.posting_index_intents.get(key)
+            if intent is not None and matches_parent(intent.spec.parent_structural_build_id):
+                self.posting_index_intents.pop(key, None)
+            for build_id, staged in list(self.posting_index_staging.items()):
+                binding = staged[0].binding
+                if (
+                    binding.source_kind == source_kind
+                    and binding.source_id == source_id
+                    and matches_parent(binding.parent_structural_build_id)
+                ):
+                    self.posting_index_staging.pop(build_id, None)
+            for owner_key, owner_id in list(self.posting_index_owners.items()):
+                if owner_key[:2] == key and matches_parent(owner_key[2]):
+                    self.posting_index_owners.pop(owner_key, None)
+                    self.posting_index_generations.pop(owner_id, None)
+            for build_id, generation in list(self.posting_index_generations.items()):
+                binding = generation.binding
+                if (
+                    binding.source_kind == source_kind
+                    and binding.source_id == source_id
+                    and matches_parent(binding.parent_structural_build_id)
+                ):
+                    self.posting_index_generations.pop(build_id, None)
 
     def abort_structural_index(self, build_id: str) -> None:
         with self._lock:
@@ -1671,8 +3044,9 @@ class MemoryRepository(LiveIndexQueueRepositoryMixin):
                 source_key = f"LIVE_SEGMENT:{binding.source_id}"
                 canonical_matches = _live_segment_matches_structural_binding(self, binding)
             else:
-                object_key = f"captures/{binding.source_id}.pcap"
                 source_key = binding.source_id
+                stored_source = self.capture_source_versions.get(source_key)
+                object_key = stored_source.object_key if stored_source is not None else ""
                 canonical_matches = _job_matches_structural_binding(
                     self.jobs.get(binding.source_id), binding
                 )
@@ -1697,6 +3071,8 @@ class MemoryRepository(LiveIndexQueueRepositoryMixin):
         self, source_id: str, *, source_kind: str = "PCAP_UPLOAD"
     ) -> None:
         with self._lock:
+            if is_posting_source_kind(source_kind):
+                self._delete_posting_indexes_for_source(source_kind, source_id)
             self.structural_index_owners.pop((source_kind, source_id), None)
             for build_id, snapshot in list(self.structural_index_generations.items()):
                 if (
@@ -1704,10 +3080,13 @@ class MemoryRepository(LiveIndexQueueRepositoryMixin):
                     and snapshot.binding.source_id == source_id
                 ):
                     self.structural_index_generations.pop(build_id, None)
-            for build_id, (binding, _created_at, _packets) in list(
+            for build_id, (structural_binding, _created_at, _packets) in list(
                 self.structural_index_staging.items()
             ):
-                if binding.source_kind == source_kind and binding.source_id == source_id:
+                if (
+                    structural_binding.source_kind == source_kind
+                    and structural_binding.source_id == source_id
+                ):
                     self.structural_index_staging.pop(build_id, None)
 
     def cleanup_stale_structural_indexes(self, *, before: datetime, limit: int) -> int:
@@ -2367,11 +3746,20 @@ class MemoryRepository(LiveIndexQueueRepositoryMixin):
             return deepcopy(selected)
 
 
-class SQLiteRepository(LiveIndexQueueRepositoryMixin):
+class SQLiteRepository(
+    PostingIndexQueueRepositoryMixin, PostingIndexRepositoryMixin, LiveIndexQueueRepositoryMixin
+):
     """외부 서비스 없이 계약 테스트 가능한 SQLite adapter. 같은 경계로 PostgreSQL 교체 가능."""
 
-    def __init__(self, path: str | Path) -> None:
-        self.connection = sqlite3.connect(str(path), check_same_thread=False)
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        _lease_clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._path = str(path)
+        self._lease_clock = _lease_clock or (lambda: datetime.now(UTC))
+        self.connection = sqlite3.connect(self._path, check_same_thread=False)
         self.connection.execute("PRAGMA foreign_keys=ON")
         self._lock = threading.RLock()
         self.connection.executescript("""
@@ -2531,6 +3919,87 @@ class SQLiteRepository(LiveIndexQueueRepositoryMixin):
               ON pcap_offset_index_packets(build_id,packet_index);
             CREATE INDEX IF NOT EXISTS pcap_offset_index_generations_staging
               ON pcap_offset_index_generations(state,created_at,build_id);
+            CREATE TABLE IF NOT EXISTS pcap_posting_index_intents (
+              source_kind TEXT NOT NULL CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+              source_id TEXT NOT NULL,
+              parent_structural_build_id TEXT NOT NULL
+                REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
+              status TEXT NOT NULL CHECK(status IN ('PENDING','DEFERRED','COMPLETED','FAILED')),
+              requested_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              data TEXT NOT NULL,
+              PRIMARY KEY(source_kind,source_id),
+              UNIQUE(source_kind,source_id,parent_structural_build_id),
+              FOREIGN KEY(source_kind,source_id)
+                REFERENCES pcap_capture_source_versions(source_kind,source_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS pcap_posting_index_intents_reconcile
+              ON pcap_posting_index_intents(status,requested_at,source_kind,source_id);
+            CREATE TABLE IF NOT EXISTS pcap_posting_index_jobs (
+              source_kind TEXT NOT NULL CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+              source_id TEXT NOT NULL,
+              parent_structural_build_id TEXT NOT NULL,
+              status TEXT NOT NULL CHECK(status IN ('QUEUED','RUNNING','COMPLETED','FAILED')),
+              attempt INTEGER NOT NULL CHECK(attempt>=0),
+              lease_token TEXT,
+              lease_expires_at TEXT,
+              next_attempt_at TEXT NOT NULL,
+              queued_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              data TEXT NOT NULL,
+              PRIMARY KEY(source_kind,source_id),
+              FOREIGN KEY(source_kind,source_id,parent_structural_build_id)
+                REFERENCES pcap_posting_index_intents(
+                  source_kind,source_id,parent_structural_build_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS pcap_posting_index_jobs_claim
+              ON pcap_posting_index_jobs(status,next_attempt_at,queued_at,source_kind,source_id);
+            CREATE INDEX IF NOT EXISTS pcap_posting_index_jobs_lease
+              ON pcap_posting_index_jobs(status,lease_expires_at,source_kind,source_id);
+            CREATE TABLE IF NOT EXISTS pcap_posting_index_generations (
+              build_id TEXT PRIMARY KEY,
+              source_kind TEXT NOT NULL CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+              source_id TEXT NOT NULL,
+              parent_structural_build_id TEXT NOT NULL
+                REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
+              state TEXT NOT NULL CHECK(state IN ('STAGING','READY')),
+              binding TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              generation_metadata TEXT NOT NULL,
+              builder_attempt INTEGER NOT NULL CHECK(builder_attempt>0),
+              lease_token TEXT NOT NULL,
+              expected_owner_build_id TEXT,
+              UNIQUE(source_kind,source_id,parent_structural_build_id,build_id)
+            );
+            CREATE TABLE IF NOT EXISTS pcap_posting_index_chunks (
+              build_id TEXT NOT NULL REFERENCES pcap_posting_index_generations(build_id)
+                ON DELETE CASCADE,
+              dimension TEXT NOT NULL CHECK(dimension IN (
+                'ALL_PACKET','SUPPORTED','SRC_ADDRESS','DST_ADDRESS',
+                'SRC_PORT','DST_PORT','PROTOCOL','HAS_PAYLOAD')),
+              canonical_value BLOB NOT NULL,
+              chunk_ordinal INTEGER NOT NULL CHECK(chunk_ordinal>=0),
+              first_packet_index INTEGER NOT NULL CHECK(first_packet_index>=0),
+              last_packet_index INTEGER NOT NULL CHECK(last_packet_index>=first_packet_index),
+              membership_count INTEGER NOT NULL CHECK(membership_count>0),
+              encoded_ordinals BLOB NOT NULL,
+              PRIMARY KEY(build_id,dimension,canonical_value,chunk_ordinal)
+            );
+            CREATE TABLE IF NOT EXISTS pcap_posting_index_owners (
+              source_kind TEXT NOT NULL CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+              source_id TEXT NOT NULL,
+              parent_structural_build_id TEXT NOT NULL
+                REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
+              build_id TEXT NOT NULL UNIQUE,
+              PRIMARY KEY(source_kind,source_id,parent_structural_build_id),
+              FOREIGN KEY(source_kind,source_id,parent_structural_build_id,build_id)
+                REFERENCES pcap_posting_index_generations(
+                  source_kind,source_id,parent_structural_build_id,build_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS pcap_posting_index_generations_staging
+              ON pcap_posting_index_generations(state,created_at,build_id);
+            CREATE INDEX IF NOT EXISTS pcap_posting_index_chunks_lookup
+              ON pcap_posting_index_chunks(build_id,dimension,canonical_value,chunk_ordinal);
             CREATE INDEX IF NOT EXISTS objects_sensor_pcap_job_uploaded_id
               ON objects(
                 json_extract(data, '$.analysis_job_id'),
@@ -2539,6 +4008,7 @@ class SQLiteRepository(LiveIndexQueueRepositoryMixin):
               ) WHERE kind='sensor_pcap';
         """)
         self._migrate_stage10_offset_index_schema()
+        self._migrate_stage11_posting_owner_schema()
         candidate_columns = {
             str(row[1]) for row in self.connection.execute("PRAGMA table_info(candidate_records)")
         }
@@ -2563,11 +4033,68 @@ class SQLiteRepository(LiveIndexQueueRepositoryMixin):
         self._migrate_legacy_candidates()
         self.connection.commit()
 
+    def _migrate_stage11_posting_owner_schema(self) -> None:
+        """Bind each posting owner to one exact source/parent generation identity."""
+        owner_row = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='pcap_posting_index_owners'"
+        ).fetchone()
+        normalized = "" if owner_row is None else "".join(str(owner_row[0]).split()).lower()
+        composite = (
+            "foreignkey(source_kind,source_id,parent_structural_build_id,build_id)"
+            "referencespcap_posting_index_generations("
+            "source_kind,source_id,parent_structural_build_id,build_id)"
+        )
+        if composite in normalized:
+            return
+        self.connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS pcap_posting_index_generations_identity "
+            "ON pcap_posting_index_generations("
+            "source_kind,source_id,parent_structural_build_id,build_id)"
+        )
+        self.connection.commit()
+        self.connection.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self.connection.executescript("""
+                BEGIN IMMEDIATE;
+                CREATE TABLE pcap_posting_index_owners_stage11 (
+                  source_kind TEXT NOT NULL
+                    CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+                  source_id TEXT NOT NULL,
+                  parent_structural_build_id TEXT NOT NULL
+                    REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
+                  build_id TEXT NOT NULL UNIQUE,
+                  PRIMARY KEY(source_kind,source_id,parent_structural_build_id),
+                  FOREIGN KEY(source_kind,source_id,parent_structural_build_id,build_id)
+                    REFERENCES pcap_posting_index_generations(
+                      source_kind,source_id,parent_structural_build_id,build_id
+                    ) ON DELETE CASCADE
+                );
+                INSERT INTO pcap_posting_index_owners_stage11(
+                  source_kind,source_id,parent_structural_build_id,build_id
+                ) SELECT source_kind,source_id,parent_structural_build_id,build_id
+                  FROM pcap_posting_index_owners;
+                DROP TABLE pcap_posting_index_owners;
+                ALTER TABLE pcap_posting_index_owners_stage11
+                  RENAME TO pcap_posting_index_owners;
+                COMMIT;
+            """)
+        except Exception:
+            self.connection.rollback()
+            raise
+        finally:
+            self.connection.execute("PRAGMA foreign_keys=ON")
+        violations = self.connection.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise sqlite3.IntegrityError(
+                f"Stage11 posting owner migration violated FKs: {violations}"
+            )
+
     def _migrate_stage10_offset_index_schema(self) -> None:
         """Transactionally rebuild deployed Stage9 index tables exactly once."""
-        columns = lambda table: {  # noqa: E731 - local schema probe
-            str(row[1]) for row in self.connection.execute(f"PRAGMA table_info({table})")
-        }
+
+        def columns(table: str) -> set[str]:
+            return {str(row[1]) for row in self.connection.execute(f"PRAGMA table_info({table})")}
+
         source_row = self.connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' "
             "AND name='pcap_capture_source_versions'"
@@ -2771,12 +4298,15 @@ class SQLiteRepository(LiveIndexQueueRepositoryMixin):
         except sqlite3.Error:
             return False
 
+    def _posting_now(self) -> datetime:
+        return self._lease_clock()
+
     def close(self) -> None:
         with self._lock:
             self.connection.close()
 
     def for_background_worker(self) -> SQLiteRepository:
-        return self
+        return SQLiteRepository(self._path, _lease_clock=self._lease_clock)
 
     def snapshot_pcap_export_source(
         self,
@@ -3389,6 +4919,11 @@ class SQLiteRepository(LiveIndexQueueRepositoryMixin):
         binding: SourceIndexBinding,
         interfaces: tuple[StructuralInterfaceEntry, ...],
         packet_count: int,
+        *,
+        request_postings: bool = False,
+        posting_schema_version: int = PCAP_POSTING_INDEX_SCHEMA_VERSION,
+        posting_parser_contract_version: int = PCAP_POSTING_INDEX_PARSER_CONTRACT_VERSION,
+        filter_contract_version: int = PCAP_FILTER_CONTRACT_VERSION,
     ) -> bool:
         with self._lock:
             try:
@@ -3448,6 +4983,21 @@ class SQLiteRepository(LiveIndexQueueRepositoryMixin):
                 if not validate_structural_index(snapshot):
                     self.connection.rollback()
                     return False
+                previous = self.connection.execute(
+                    "SELECT build_id FROM pcap_offset_index_owners "
+                    "WHERE source_kind=? AND source_id=?",
+                    (binding.source_kind, binding.source_id),
+                ).fetchone()
+                if previous is not None and str(previous[0]) != build_id:
+                    active = self.connection.execute(
+                        "SELECT 1 FROM pcap_posting_index_jobs WHERE source_kind=? "
+                        "AND source_id=? AND parent_structural_build_id=? "
+                        "AND status IN ('QUEUED','RUNNING') LIMIT 1",
+                        (binding.source_kind, binding.source_id, str(previous[0])),
+                    ).fetchone()
+                    if active is not None:
+                        self.connection.rollback()
+                        return False
                 self.connection.executemany(
                     "INSERT INTO pcap_offset_index_interfaces(build_id,interface_ordinal,data) "
                     "VALUES(?,?,?)",
@@ -3456,11 +5006,6 @@ class SQLiteRepository(LiveIndexQueueRepositoryMixin):
                         for interface in interfaces
                     ],
                 )
-                previous = self.connection.execute(
-                    "SELECT build_id FROM pcap_offset_index_owners "
-                    "WHERE source_kind=? AND source_id=?",
-                    (binding.source_kind, binding.source_id),
-                ).fetchone()
                 self.connection.execute(
                     "UPDATE pcap_offset_index_generations SET state='READY',packet_count=?,"
                     "interface_count=?,index_sha256=? WHERE build_id=?",
@@ -3472,6 +5017,34 @@ class SQLiteRepository(LiveIndexQueueRepositoryMixin):
                     "DO UPDATE SET build_id=excluded.build_id",
                     (binding.source_kind, binding.source_id, build_id),
                 )
+                if previous is not None and str(previous[0]) != build_id:
+                    # A terminal task still references the old intent parent. Remove
+                    # it before repointing the marker; active tasks were rejected above.
+                    self.connection.execute(
+                        "DELETE FROM pcap_posting_index_jobs WHERE source_kind=? "
+                        "AND source_id=? AND parent_structural_build_id=?",
+                        (binding.source_kind, binding.source_id, str(previous[0])),
+                    )
+                if request_postings:
+                    source = CaptureSourceVersion(*source_version)
+                    spec = replace(
+                        PostingIndexTaskSpec.from_binding(source, snapshot),
+                        posting_schema_version=posting_schema_version,
+                        posting_parser_contract_version=posting_parser_contract_version,
+                        filter_contract_version=filter_contract_version,
+                    )
+                    current = self.get_posting_index_intent(spec.source_kind, spec.source_id)
+                    if current is None or current.spec.identity != spec.identity:
+                        requested_at = self._posting_now()
+                        put_posting_intent(
+                            self,
+                            PostingIndexIntent(
+                                spec,
+                                PostingIndexIntentStatus.PENDING,
+                                requested_at,
+                                requested_at,
+                            ),
+                        )
                 if previous is not None and str(previous[0]) != build_id:
                     self.connection.execute(
                         "DELETE FROM pcap_offset_index_generations WHERE build_id=?",

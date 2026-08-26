@@ -25,6 +25,44 @@ from c2hunter_controller.repositories import (
 )
 
 
+def test_locked_publication_probe_releases_before_waiting_after_assertion_failure() -> None:
+    from test_storage_integration import _release_and_drain_publication_probe
+
+    events: list[str] = []
+
+    class ProbeFuture:
+        def cancel(self) -> bool:
+            events.append("cancel")
+            return False
+
+        def result(self, *, timeout: float) -> bool:
+            assert timeout > 0
+            events.append("future-wait")
+            assert events[0] == "release"
+            return False
+
+    class ProbeExecutor:
+        def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+            assert wait
+            assert cancel_futures
+            events.append("executor-wait")
+            assert events[0] == "release"
+
+    with pytest.raises(AssertionError, match="simulated probe failure"):
+        try:
+            raise AssertionError("simulated probe failure")
+        finally:
+            _release_and_drain_publication_probe(
+                release=lambda: events.append("release"),
+                interrupt=lambda: events.append("interrupt"),
+                publication=ProbeFuture(),
+                executor=ProbeExecutor(),
+                result_timeout=1,
+            )
+
+    assert events == ["release", "cancel", "future-wait", "executor-wait"]
+
+
 class FakeCursor:
     def __init__(self, connection: FakeConnection) -> None:
         self.connection = connection
@@ -436,7 +474,10 @@ def test_delete_job_cascades_ai_ledgers_before_run(monkeypatch: Any) -> None:
     assert "DELETE FROM ai_analysis_runs" in sql
     assert "VALUES('pcap_export_cleanup'" in sql
     assert "DELETE FROM pcap_export_jobs WHERE parent_job_id=%s" in sql
-    assert "DELETE FROM pcap_offset_index_generations WHERE source_id=%s" in sql
+    assert (
+        "DELETE FROM pcap_offset_index_generations "
+        "WHERE source_kind='PCAP_UPLOAD' AND source_id=%s" in sql
+    )
     assert "DELETE FROM pcap_capture_source_versions WHERE source_kind='PCAP_UPLOAD'" in sql
     assert sql.index("DELETE FROM pcap_offset_index_generations") < sql.index(
         "DELETE FROM pcap_capture_source_versions"
