@@ -47,6 +47,51 @@ def _sql_without_literals(query: str) -> str:
     return "".join(result)
 
 
+def _split_top_level_sql(code: str, delimiter: str) -> list[str]:
+    """Split outside parentheses after SQL literals have been blanked."""
+
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    for index, character in enumerate(code):
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth = max(0, depth - 1)
+        elif character == delimiter and depth == 0:
+            parts.append(code[start:index])
+            start = index + 1
+    parts.append(code[start:])
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _top_level_words(code: str) -> list[tuple[str, int, int]]:
+    """Return SQL words outside nested CTEs, expressions, and subqueries."""
+
+    words: list[tuple[str, int, int]] = []
+    depth = 0
+    index = 0
+    while index < len(code):
+        character = code[index]
+        if character == "(":
+            depth += 1
+            index += 1
+            continue
+        if character == ")":
+            depth = max(0, depth - 1)
+            index += 1
+            continue
+        if depth == 0 and (character.isalpha() or character == "_"):
+            end = index + 1
+            while end < len(code) and (code[end].isalnum() or code[end] in "_$"):
+                end += 1
+            words.append((code[index:end].upper(), index, end))
+            index = end
+            continue
+        index += 1
+    return words
+
+
 def _validate_postgres_sql(query: str, params: object = None, *, many: bool = False) -> None:
     """Reject common fake-only SQL mistakes before scripted responses can hide them."""
     code = _sql_without_literals(query)
@@ -60,6 +105,10 @@ def _validate_postgres_sql(query: str, params: object = None, *, many: bool = Fa
     else:
         values = () if params is None else cast(tuple[Any, ...], params)
         assert len(values) == placeholder_count, "placeholder count mismatch"
+
+    statements = _split_top_level_sql(code, ";")
+    assert len(statements) == 1, "runtime execute requires exactly one SQL statement"
+    statement = statements[0]
 
     tokens = re.findall(
         r"%s|[A-Za-z_][A-Za-z_0-9$]*|\d+|::|->>|->|<=|>=|<>|!=|=>|<<|[(),.*=<>+\-/]",
@@ -91,6 +140,18 @@ def _validate_postgres_sql(query: str, params: object = None, *, many: bool = Fa
         projection = upper[returning_index + 1]
         assert projection not in {",", ")", "WHERE", "RETURNING"}, "malformed RETURNING"
 
+    top_level = _top_level_words(statement)
+    positions = {word: (start, end) for word, start, end in top_level}
+    update_from = "UPDATE" in positions and "SET" in positions and "FROM" in positions
+    delete_using = "DELETE" in positions and "USING" in positions
+    if (update_from or delete_using) and "RETURNING" in positions:
+        returning_code = statement[positions["RETURNING"][1] :]
+        projections = _split_top_level_sql(returning_code, ",")
+        assert projections, "RETURNING requires a projection"
+        assert not any(re.fullmatch(r"[A-Za-z_][A-Za-z_0-9$]*", item) for item in projections), (
+            "multi-relation DML must qualify bare RETURNING columns"
+        )
+
     if re.search(r"\bFOR\s+UPDATE\b", code, re.IGNORECASE):
         assert not re.search(r"\b(COUNT|MAX|MIN|SUM|AVG)\s*\(", code, re.IGNORECASE), (
             "PostgreSQL cannot lock aggregate rows"
@@ -105,6 +166,19 @@ def _validate_postgres_sql(query: str, params: object = None, *, many: bool = Fa
         ("UPDATE pcap_posting_index_jobs SET status=%q", ("RUNNING",)),
         ("UPDATE pcap_posting_index_jobs SET status=%s RETURNING", ("RUNNING",)),
         ("SELECT COUNT(*) FROM pcap_posting_index_jobs FOR UPDATE", None),
+        (
+            "WITH selected AS (SELECT source_id FROM jobs) "
+            "UPDATE jobs AS task SET status='QUEUED' FROM selected "
+            "WHERE task.source_id=selected.source_id RETURNING source_id,status",
+            None,
+        ),
+        (
+            "UPDATE jobs AS task SET status='QUEUED' FROM selected "
+            "WHERE task.source_id=selected.source_id RETURNING task.source_id;"
+            "UPDATE jobs AS task SET status='FAILED' FROM selected "
+            "WHERE task.source_id=selected.source_id RETURNING source_id",
+            None,
+        ),
     ],
 )
 def test_postgres_runtime_sql_validator_rejects_structurally_invalid_sql(
@@ -118,6 +192,38 @@ def test_postgres_runtime_sql_validator_accepts_valid_update() -> None:
     _validate_postgres_sql(
         "UPDATE pcap_posting_index_jobs SET status=%s WHERE source_id=%s RETURNING source_id",
         ("RUNNING", "source"),
+    )
+    _validate_postgres_sql(
+        "WITH selected AS (SELECT source_id FROM jobs) "
+        "UPDATE jobs AS task SET status='QUEUED' FROM selected "
+        "WHERE task.source_id=selected.source_id RETURNING task.source_id,task.status"
+    )
+
+
+@pytest.mark.parametrize(
+    "projection",
+    [
+        "task.source_id AS recovered_source_id",
+        "task.source_id::text",
+        "task.attempt + 1",
+        "COALESCE(task.source_id, selected.source_id)",
+        "task.*",
+    ],
+)
+def test_postgres_runtime_sql_validator_accepts_qualified_returning_expressions(
+    projection: str,
+) -> None:
+    _validate_postgres_sql(
+        "UPDATE jobs AS task SET status='QUEUED' FROM selected "
+        f"WHERE task.source_id=selected.source_id RETURNING {projection}"
+    )
+
+
+def test_postgres_runtime_sql_validator_ignores_from_inside_set_subquery() -> None:
+    _validate_postgres_sql(
+        "UPDATE jobs AS task SET status=(SELECT source.status FROM source WHERE source.id=%s) "
+        "WHERE task.source_id=%s RETURNING source_id",
+        ("source-1", "source-1"),
     )
 
 

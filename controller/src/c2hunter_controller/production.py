@@ -494,6 +494,7 @@ class PostgresRepository(Repository):
         "source_sha256,capture_format,schema_version,parser_contract_version,status,attempt,"
         "max_attempts,lease_token,lease_expires_at,next_attempt_at,queued_at,updated_at,error_code"
     )
+    _LIVE_TASK_RETURNING_COLUMNS = "task." + _LIVE_TASK_COLUMNS.replace(",", ",task.")
 
     def __init__(self, database_url: str, blob_store: MinioBlobStore) -> None:
         self.database_url = database_url
@@ -4745,7 +4746,7 @@ ORDER BY source_kind,source_id
                 "lease_token=%s,lease_expires_at=clock_timestamp()+make_interval(secs => %s),"
                 "updated_at=clock_timestamp() FROM selected "
                 "WHERE task.source_kind=selected.source_kind AND task.source_id=selected.source_id "
-                f"RETURNING {self._LIVE_TASK_COLUMNS}",
+                f"RETURNING {self._LIVE_TASK_RETURNING_COLUMNS}",
                 (token, lease_seconds),
             )
             task = self._live_task_from_row(cursor.fetchone())
@@ -4852,7 +4853,8 @@ ORDER BY source_kind,source_id
                 "error_code=CASE WHEN task.attempt<task.max_attempts "
                 "THEN NULL ELSE 'LEASE_EXPIRED' END "
                 "FROM selected WHERE task.source_kind=selected.source_kind "
-                "AND task.source_id=selected.source_id RETURNING source_id,status"
+                "AND task.source_id=selected.source_id "
+                "RETURNING task.source_id,task.status"
             )
             recovered_rows = cursor.fetchall()
             for source_id, status in recovered_rows:

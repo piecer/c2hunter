@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import pytest
 from c2hunter_analysis.pcap_index import StructuralInterfaceEntry, StructuralPacketEntry
+from test_pcap_posting_index_postgres import _validate_postgres_sql
 
 from c2hunter_controller.pcap_offset_index import (
     CaptureSourceVersion,
@@ -862,6 +863,7 @@ class ScriptedCursor(RecordingCursor):
         self.result: list[tuple[Any, ...]] = []
 
     def execute(self, query: str, params: object = None) -> None:
+        _validate_postgres_sql(query, params)
         if params not in (None, ()):
             assert "%s" in query
         if "SKIP LOCKED" in query:
@@ -932,6 +934,7 @@ def test_postgres_live_queue_claim_uses_skip_locked_and_returns_opaque_lease() -
     assert "ORDER BY next_attempt_at,queued_at,source_id" in claim_sql
     assert "FOR UPDATE SKIP LOCKED LIMIT 1" in claim_sql
     assert "clock_timestamp()" in claim_sql
+    assert "RETURNING task.source_kind,task.source_id" in claim_sql
     assert datetime(2026, 8, 25, tzinfo=UTC) not in cast(tuple[Any, ...], connection.calls[0][1])
 
 
@@ -939,7 +942,7 @@ def test_postgres_live_queue_cas_paths_are_parameterized_and_bounded() -> None:
     now = datetime(2026, 8, 25, tzinfo=UTC)
 
     def respond(query: str, _params: object) -> tuple[list[tuple[Any, ...]], int]:
-        if "RETURNING source_id,status" in query:
+        if "RETURNING task.source_id,task.status" in query:
             return [("segment-1", "QUEUED")], 1
         if "SELECT " in query and "pcap_offset_index_jobs" in query and "FOR UPDATE" in query:
             return [_live_task_row(status="RUNNING", attempt=1, lease_token="winner")], 1
@@ -968,6 +971,7 @@ def test_postgres_live_queue_cas_paths_are_parameterized_and_bounded() -> None:
     assert "lease_expires_at>clock_timestamp()" in sql
     assert "next_attempt_at=clock_timestamp()" in sql
     assert "FOR UPDATE SKIP LOCKED" in sql
+    assert "RETURNING task.source_id,task.status" in sql
     assert now not in [
         value
         for _query, params in connection.calls
