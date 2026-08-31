@@ -21,8 +21,8 @@ type pcapArchiveUploaderStub struct {
 
 func (u *pcapArchiveUploaderStub) UploadPCAPSegment(_ context.Context, sensorID, segmentID, jobID, filename string, content io.Reader, size int64) error {
 	u.mu.Lock()
+	defer u.mu.Unlock()
 	u.calls++
-	u.mu.Unlock()
 	if u.err != nil {
 		return u.err
 	}
@@ -166,6 +166,30 @@ type permanentArchiveError struct{}
 func (permanentArchiveError) Error() string   { return "quota exhausted" }
 func (permanentArchiveError) Permanent() bool { return true }
 
+type segmentPermanentArchiveError struct{}
+
+func (segmentPermanentArchiveError) Error() string   { return "segment conflict" }
+func (segmentPermanentArchiveError) Permanent() bool { return true }
+func (segmentPermanentArchiveError) BlocksJob() bool { return false }
+
+type sequencedArchiveUploader struct {
+	mu        sync.Mutex
+	calls     []string
+	firstErr  error
+	succeeded []string
+}
+
+func (u *sequencedArchiveUploader) UploadPCAPSegment(_ context.Context, _, _, _, filename string, _ io.Reader, _ int64) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.calls = append(u.calls, filename)
+	if len(u.calls) == 1 && u.firstErr != nil {
+		return u.firstErr
+	}
+	u.succeeded = append(u.succeeded, filename)
+	return nil
+}
+
 func TestPCAPArchiveStopsRetryingJobAfterPermanentRejection(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"job-a--eth0-000001.pcap", "job-a--eth1-000001.pcap"} {
@@ -197,5 +221,85 @@ func TestPCAPArchiveStopsRetryingJobAfterPermanentRejection(t *testing.T) {
 	}
 	if len(rejected) != 2 {
 		t.Fatalf("rejected files = %v", rejected)
+	}
+	if snapshot := manager.Snapshot(); snapshot.LastError != "" {
+		t.Fatalf("permanent rejection left sensor degraded: %+v", snapshot)
+	}
+}
+
+func TestPCAPArchiveRejectsOnlyConflictingSegmentAndUploadsSibling(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "job-a--eth0-000001.pcap")
+	second := filepath.Join(dir, "job-a--eth1-000001.pcap")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, []byte("pcap"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(first, time.Unix(1, 0), time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(second, time.Unix(2, 0), time.Unix(2, 0)); err != nil {
+		t.Fatal(err)
+	}
+	uploader := &sequencedArchiveUploader{firstErr: segmentPermanentArchiveError{}}
+	manager, err := NewPCAPArchiveManager(PCAPArchiveManagerConfig{
+		SensorID: "sensor-a", Directory: dir, Uploader: uploader, ScanInterval: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	if err := manager.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	uploader.mu.Lock()
+	calls := append([]string(nil), uploader.calls...)
+	succeeded := append([]string(nil), uploader.succeeded...)
+	uploader.mu.Unlock()
+	if len(calls) != 2 || len(succeeded) != 1 || succeeded[0] != filepath.Base(second) {
+		t.Fatalf("calls = %v, succeeded = %v", calls, succeeded)
+	}
+	if _, err := os.Stat(first + ".rejected"); err != nil {
+		t.Fatalf("conflicting segment was not rejected: %v", err)
+	}
+	if _, err := os.Stat(second + ".uploaded"); err != nil {
+		t.Fatalf("sibling segment was not uploaded: %v", err)
+	}
+}
+
+func TestPCAPArchiveStopsScanWhenPermanentRejectRenameFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "job-a--eth0-000001.pcap")
+	if err := os.WriteFile(path, []byte("pcap"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path+".rejected", 0700); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewPCAPArchiveManager(PCAPArchiveManagerConfig{
+		SensorID: "sensor-a", Directory: dir,
+		Uploader: &pcapArchiveUploaderStub{err: permanentArchiveError{}}, ScanInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		manager.uploadAvailable(ctx)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		cancel()
+		<-done
+		t.Fatal("permanent reject rename failure caused a busy loop")
+	}
+	cancel()
+	if snapshot := manager.Snapshot(); !strings.Contains(snapshot.LastError, "reject PCAP claim") {
+		t.Fatalf("rename failure was not reported: %+v", snapshot)
 	}
 }

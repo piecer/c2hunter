@@ -238,6 +238,84 @@ func TestHTTPTransportUploadsPCAPSegmentWithSensorAuthentication(t *testing.T) {
 	}
 }
 
+func TestHTTPTransportTreatsClosedPCAPJobAsPermanentUploadRejection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		_, _ = io.Copy(io.Discard, request.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"error":{"code":"PCAP_JOB_CLOSED","message":"job closed"}}`)
+	}))
+	defer server.Close()
+	client, err := NewHTTP(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.UploadPCAPSegment(
+		context.Background(),
+		"sensor-a",
+		"segment-a",
+		"job-a",
+		"job-a--eth0-000001.pcap",
+		strings.NewReader("pcap"),
+		4,
+	)
+	if err == nil {
+		t.Fatal("closed job upload was accepted")
+	}
+	permanent, ok := err.(interface{ Permanent() bool })
+	if !ok || !permanent.Permanent() {
+		t.Fatalf("closed job rejection is retryable: %T %v", err, err)
+	}
+}
+
+func TestPCAPControllerResponseErrorKeepsRetryableStatusesRetryable(t *testing.T) {
+	for _, statusCode := range []int{
+		http.StatusRequestTimeout,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusServiceUnavailable,
+	} {
+		if (controllerResponseError{statusCode: statusCode}).Permanent() {
+			t.Fatalf("status %d was classified as permanent", statusCode)
+		}
+	}
+}
+
+func TestPCAPControllerResponseErrorScopesPermanentRejections(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    int
+		code      string
+		permanent bool
+		blocksJob bool
+	}{
+		{name: "closed job", status: http.StatusConflict, code: "PCAP_JOB_CLOSED", permanent: true, blocksJob: true},
+		{name: "legacy closed job typo", status: http.StatusConflict, code: "PCAP_JOB_COLSED", permanent: true, blocksJob: true},
+		{name: "segment conflict", status: http.StatusConflict, code: "PCAP_SEGMENT_CONFLICT", permanent: true},
+		{name: "unknown conflict", status: http.StatusConflict, code: "UNKNOWN_CONFLICT"},
+		{name: "malformed conflict", status: http.StatusConflict},
+		{name: "analysis quota", status: http.StatusRequestEntityTooLarge, code: "PCAP_ANALYSIS_LIMIT_REACHED", permanent: true, blocksJob: true},
+		{name: "segment too large", status: http.StatusRequestEntityTooLarge, code: "PCAP_TOO_LARGE", permanent: true},
+		{name: "invalid analysis job", status: http.StatusUnprocessableEntity, code: "INVALID_PCAP_ANALYSIS_JOB", permanent: true, blocksJob: true},
+		{name: "invalid pcap", status: http.StatusUnprocessableEntity, code: "INVALID_PCAP", permanent: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rawBody := "not-json"
+			if test.code != "" {
+				rawBody = fmt.Sprintf(`{"error":{"code":%q}}`, test.code)
+			}
+			err := controllerResponseError{statusCode: test.status, rawBody: rawBody}
+			if got := err.Permanent(); got != test.permanent {
+				t.Fatalf("Permanent() = %v, want %v", got, test.permanent)
+			}
+			if got := err.BlocksJob(); got != test.blocksJob {
+				t.Fatalf("BlocksJob() = %v, want %v", got, test.blocksJob)
+			}
+		})
+	}
+}
+
 func TestHTTPTransportRejectsMismatchedPCAPAcknowledgement(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		_, _ = io.Copy(io.Discard, request.Body)

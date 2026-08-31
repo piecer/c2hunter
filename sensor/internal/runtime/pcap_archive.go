@@ -65,6 +65,10 @@ type permanentPCAPUploadError interface {
 	Permanent() bool
 }
 
+type jobBlockingPCAPUploadError interface {
+	BlocksJob() bool
+}
+
 func (m *PCAPArchiveManager) Run(ctx context.Context) error {
 	if m.cfg.Startup != nil {
 		if err := m.cfg.Startup.Prepare(); err != nil {
@@ -137,17 +141,29 @@ func (m *PCAPArchiveManager) uploadAvailable(ctx context.Context) {
 		_, blocked := m.blockedJobs[jobID]
 		m.mu.RUnlock()
 		if jobID != "" && blocked {
-			_ = rejectPCAPClaim(*claim)
+			if err := rejectPCAPClaim(*claim); err != nil {
+				restorePCAPClaim(*claim)
+				m.fail("reject PCAP claim: " + err.Error())
+				return
+			}
 			continue
 		}
 		if err := m.uploadClaim(ctx, *claim); err != nil {
 			if permanent, ok := err.(permanentPCAPUploadError); ok && permanent.Permanent() {
-				if jobID != "" {
+				if rejectErr := rejectPCAPClaim(*claim); rejectErr != nil {
+					restorePCAPClaim(*claim)
+					m.fail("reject PCAP claim: " + rejectErr.Error())
+					return
+				}
+				blocksJob := true
+				if scoped, ok := err.(jobBlockingPCAPUploadError); ok {
+					blocksJob = scoped.BlocksJob()
+				}
+				if jobID != "" && blocksJob {
 					m.mu.Lock()
 					m.blockedJobs[jobID] = struct{}{}
 					m.mu.Unlock()
 				}
-				_ = rejectPCAPClaim(*claim)
 				m.fail("PCAP upload permanently rejected: " + err.Error())
 				continue
 			}

@@ -75,10 +75,41 @@ func (e controllerResponseError) Error() string {
 	return fmt.Sprintf("controller returned %d: %s", e.statusCode, strings.TrimSpace(e.rawBody))
 }
 
+func (e controllerResponseError) code() string {
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(e.rawBody), &envelope) != nil {
+		return ""
+	}
+	return envelope.Error.Code
+}
+
 // Permanent returns true when the controller rejects a PCAP segment with a status that indicates
-// the upload will not succeed on retry (e.g., quota exceeded, invalid analysis job).
+// the exact upload will not succeed on retry. Unknown 409 responses remain retryable so a future
+// controller conflict cannot silently discard capture data.
 func (e controllerResponseError) Permanent() bool {
+	if e.statusCode == 409 {
+		switch e.code() {
+		case "PCAP_JOB_CLOSED", "PCAP_JOB_COLSED", "PCAP_SEGMENT_CONFLICT":
+			return true
+		default:
+			return false
+		}
+	}
 	return e.statusCode == 413 || e.statusCode == 422
+}
+
+// BlocksJob distinguishes job-terminal rejections from errors scoped to one immutable segment.
+func (e controllerResponseError) BlocksJob() bool {
+	switch e.code() {
+	case "PCAP_JOB_CLOSED", "PCAP_JOB_COLSED", "PCAP_ANALYSIS_LIMIT_REACHED", "INVALID_PCAP_ANALYSIS_JOB":
+		return true
+	default:
+		return false
+	}
 }
 
 type DesiredConfig struct {
