@@ -21,7 +21,7 @@ class Detector:
 4. **시계 보정**: heartbeat offset을 관찰 timestamp에 적용하고 기본 ±2초 tolerance를 사용한다. offset >2초 센서는 `DEGRADED`, 증거와 결과에 경고/신뢰도 저하를 표시한다.
 5. **중복 제거**: 5-tuple, IP ID, TCP seq, payload length/hash, timestamp bucket으로 canonical packet을 정한다. sensor observation은 별도 집합으로 보존한다.
 6. **후보 universe**: 내부↔외부 Flow의 외부 IP를 후보로 만든다. internal/allowlist 명시 제외 대상은 suppression 통계만 남긴다.
-7. **TCP 세션 gate**: TCP는 내부 endpoint의 `SYN && !ACK` 시작 또는 handshake/양방향 ACK·Payload로 성립한 세션만 일반 detector 입력에 포함한다. inbound SYN/ACK/NULL scan과 RST 응답만 존재하는 연결은 후보 입력에서 제외한다. 외부가 시작한 짧은 no-payload full-connect가 다수 내부 host로 확산되면 connect scan으로 추가 억제한다. 구버전 Flow처럼 TCP flag metadata가 없는 기록은 기본적으로 호환 모드로 유지한다.
+7. **TCP 세션 gate**: TCP는 내부 endpoint의 `SYN && !ACK` 시작 또는 handshake/양방향 ACK·Payload로 성립한 세션만 일반 detector 입력에 포함한다. inbound SYN/ACK/NULL scan과 RST 응답만 존재하는 연결은 후보 입력에서 제외한다. 외부가 시작한 짧은 no-payload full-connect가 다수 내부 host로 확산되면 connect scan으로 추가 억제한다. 동일 5-tuple의 주기적 outbound SYN-only 재시도는 일반 C2 evidence와 분리해 통신 상태 evidence로 보존한다. 구버전 Flow처럼 TCP flag metadata가 없는 기록은 기본적으로 호환 모드로 유지한다.
 8. **time bucket/feature**: 외부 IP·내부 host·sensor·protocol/port별 count/bytes/size/fingerprint 시계열을 bounded bucket으로 집계한다.
 
 ## 3. Detector
@@ -48,6 +48,59 @@ TCP flag를 단순 ACK 총계가 아니라 `SYN-only`, `SYN+ACK`, `ACK without S
 - 외부 시작 세션이 ACK까지 완료돼도 payload 없이 4 packet 이하로 끝나는 연결이 기본 8개 이상 내부 host에 80% 이상 확산되면 full-connect scan으로 억제한다.
 
 이 evidence는 다른 detector가 이미 지지하는 Candidate에만 결합하며 정상 outbound TCP 연결 자체로 후보를 만들지 않는다.
+
+### 3.1.2 TCP 통신 재시도 상태 (C2 contribution 0)
+
+Sensor는 동일 방향 5-tuple에서 SYN-only packet의 flow-start 상대 offset과 TCP initial sequence를
+최대 16개 보존한다. PCAP packet-level 분석도 packet timestamp와 TCP sequence를 같은 계약으로
+변환한다. 기본 detector는 동일 sequence의 최소 4회 SYN 전송(3 interval), 500~120,000ms
+범위에서 최소 interval을 기준으로 최대 8배까지의 비감소 정수 배수와 250ms 또는 20% 중 큰 tolerance를
+허용한다. 따라서 2초 고정 재전송과 2/4/6초 backoff를 인식하지만 source port나 initial
+sequence가 바뀐 별도 application connect는 하나의 retransmission episode로 합치지 않는다.
+Interval 최소·최대 경계는 microsecond 원값으로 먼저 검사하며 millisecond 반올림으로 경계를
+통과시키지 않는다.
+같은 sequence가 나중에 재사용되어 cadence가 reset되더라도 이미 완성된 유효 retry prefix는
+보존하고 이후 구간을 새 cadence segment로 평가한다.
+다른 sequence가 같은 tuple의 retry 관측 사이에 나타나면 기존 sequence train도 그 경계에서
+분할해 중간 application attempt의 응답을 앞선 retry에 귀속하지 않는다.
+Episode 뒤 grace window 안에서 다른 initial sequence의 새 outbound SYN이 시작되면 그 시각에서
+이전 episode의 response correlation을 종료해 후속 연결 결과가 과거 retry 결과를 바꾸지 않게 한다.
+다른 sequence가 episode 마지막 SYN과 동일 timestamp에 있어도 새 attempt 경계로 처리한다.
+같은 Sensor aggregate에 이전 retry와 새 sequence가 함께 있으면 aggregate-level ACK/Payload 결과를
+이전 episode에 귀속하지 않고 response timing을 approximate로 표시한다.
+별도 response aggregate도 새 sequence 경계에 걸쳐 있으면 내부 flag 시각을 확정할 수 없으므로
+그 aggregate의 ACK/SYN-ACK/RST/Payload를 이전 episode outcome에 사용하지 않는다.
+새 sequence가 없어도 aggregate가 response deadline 뒤까지 이어지면 deadline 이후일 수 있는
+ACK/RST/Payload를 outcome에 사용하지 않고 response timing을 approximate로 표시한다.
+분석 시 connection당 최대 4,096 observations, 64 episodes와 4,096 response rows만 처리하고
+candidate당 최대 64개, analysis 전체 최대 512개의 retry evidence만 생성하며 evidence 하나에는
+최대 15개 interval을 노출한다. 예산 초과, legacy metadata 누락 또는 truncated
+telemetry는 기존 C2 입력을
+제거하지 않는 fail-open으로 처리한다. 분석 예산 초과는 score 0의
+`TCP_COMMUNICATION_ATTEMPT_ANALYSIS_INCOMPLETE` operational evidence로 명시한다.
+정확히 64개/512개인 경우는 complete이며 다음 evidence가 실제로 초과할 때만 마지막 상세 항목을
+bounded incomplete marker로 교체한다.
+Response row 예산이 잘리면 bounded prefix에서 관찰된 응답은 보존하고
+`response_correlation_truncated` warning으로 나머지 상관분석의 불완전성을 표시한다. Sensor
+aggregate는 시작 시각뿐 아니라 duration이 retry episode와 겹치는지도 확인한다.
+
+- SYN-ACK 뒤 ACK 또는 양방향 ACK/Payload: outcome `ESTABLISHED_OBSERVED`
+- SYN-ACK만 관측: outcome `PEER_RESPONSE_OBSERVED`
+- inbound RST: outcome `REFUSED_OR_RESET_OBSERVED`
+- outbound ACK만 관측: outcome `LOCAL_ACK_OBSERVED`; peer 응답을 직접 관측한 것으로 간주하지 않음
+- 완료 신호 미관측: outcome `NO_COMPLETION_OBSERVED`; 통신 불가를 확정하지 않음
+
+Operational evidence는 C2 점수와 detector weight에 영향을 주지 않고 `candidate_kind`를
+`COMMUNICATION_STATUS`로 표시한다. 최소 C2 score가 높아도 통신 상태 후보는 유지한다.
+Minimum score 우회는 순수 `COMMUNICATION_STATUS`에만 적용하고 mixed `C2` candidate는 일반
+threshold를 그대로 적용한다.
+Mixed candidate에서도 operational evidence의 host, sensor, metrics는 C2 감점·가점 계산에
+사용하지 않으며 전체 관측 표시에만 보존한다.
+같은 peer에 별도의 payload/UDP/성립 TCP 근거가 있으면 해당 근거는 그대로 C2 분석에 사용한다.
+운영 후보만으로 AI의 `SUSPICIOUS`/`LIKELY_C2` verdict를 허용하지 않으며 자동 TI enrichment나
+MISP management registration 대상으로도 사용하지 않는다.
+Analyst가 수동 TI lookup을 실행해도 그 결과가 operational candidate를 자동 MISP export,
+`CONFIRMED_C2` verdict 또는 response action으로 전환하지 않는다.
 
 ### 3.2 PERIODIC_BEACON (최대 15)
 
@@ -146,6 +199,8 @@ anomaly-only Candidate까지 생성하려면 `ml_anomaly_allow_standalone=true`�
 |---|---:|
 | COMMON_DESTINATION | 20 |
 | TCP_SESSION_QUALITY | 15 |
+| TCP_COMMUNICATION_ATTEMPT_PATTERN | 0 (operational) |
+| TCP_COMMUNICATION_ATTEMPT_ANALYSIS_INCOMPLETE | 0 (operational) |
 | PERIODIC_BEACON | 15 |
 | SINGLE_HOST_BEACON | 35 |
 | ANALYST_PAYLOAD_SIGNATURE | 80 |
@@ -182,7 +237,7 @@ TCP 대용량 판정은 센서별 내부 endpoint와 외부 후보 endpoint의 �
 
 Detector weight preset은 모든 detector의 완전한 weight map으로 저장한다. 하나의 preset만 system default일 수 있으며 새 sensor 분석이나 PCAP 업로드에서 weight를 생략하면 해당 default를 job snapshot에 복사한다. 요청이 weight를 명시하면 preset보다 우선한다. Reanalysis는 원 job의 snapshot을 기본으로 유지하고, analyst가 저장 preset을 선택하거나 weight를 수정했을 때만 override한다. 이후 preset 변경이나 삭제는 이미 생성된 job의 계산 재현성에 영향을 주지 않는다.
 
-Severity는 `0–39 LOW`, `40–59 MEDIUM`, `60–79 HIGH`, `80–100 CRITICAL`이다. 후보 최소 점수는 반환 필터이지 원 evidence 삭제 기준이 아니다.
+Severity는 `0–39 LOW`, `40–59 MEDIUM`, `60–79 HIGH`, `80–100 CRITICAL`이다. 후보 최소 점수는 반환 필터이지 원 evidence 삭제 기준이 아니다. 단, TCP 통신 상태 evidence는 C2 점수 필터와 독립적으로 보존한다.
 
 ## 5. 오탐 제어와 설명 가능성
 

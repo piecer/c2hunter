@@ -57,7 +57,7 @@ test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', 
   await expect(evidenceCard).toBeVisible();
   expect(await evidenceCard.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.getByRole('button', { name: 'Export candidate PCAP' }).click();
-  await expect(page.getByText('PCAP export requested')).toBeVisible();
+  await expect(page.getByText('Candidate PCAP downloaded (1 packets).')).toBeVisible();
   await page.getByRole('button', { name: 'Reanalyze' }).click();
   await expect(page.getByText('Reanalysis created')).toBeVisible();
   await page.getByRole('button', { name: 'Mark C2 e2e-flow' }).click();

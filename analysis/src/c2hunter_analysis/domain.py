@@ -33,7 +33,7 @@ class Flow:
     attack_target_ip: str | None = None
     duration_seconds: float = 0.0
     last_payload_hash: str | None = None
-    tcp_flags: Mapping[str, int] | None = None
+    tcp_flags: Mapping[str, int | float] | None = None
     tcp_flags_observed: bool = False
     tcp_syn_count: int = 0
     tcp_ack_count: int = 0
@@ -41,7 +41,30 @@ class Flow:
     tcp_syn_only_count: int = 0
     tcp_syn_ack_count: int = 0
     tcp_ack_only_count: int = 0
+    tcp_syn_only_observations: tuple[tuple[int, int], ...] | None = None
+    tcp_syn_only_observations_truncated: bool = False
     bidirectional: bool = False
+
+
+def normalize_tcp_syn_observations(value: object) -> tuple[tuple[int, int], ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list | tuple):
+        raise ValueError("TCP SYN observations must be an array")
+    normalized: list[tuple[int, int]] = []
+    for item in value:
+        if isinstance(item, Mapping):
+            offset, sequence = item.get("offset_us"), item.get("sequence")
+        elif isinstance(item, list | tuple) and len(item) == 2:
+            offset, sequence = item
+        else:
+            raise ValueError("invalid TCP SYN observation")
+        if isinstance(offset, bool) or not isinstance(offset, int):
+            raise ValueError("invalid TCP SYN observation offset")
+        if isinstance(sequence, bool) or not isinstance(sequence, int):
+            raise ValueError("invalid TCP SYN sequence")
+        normalized.append((offset, sequence))
+    return tuple(normalized)
 
 
 @dataclass(frozen=True)
@@ -263,6 +286,7 @@ class Candidate:
     sensors: tuple[str, ...]
     first_seen: datetime | None
     last_seen: datetime | None
+    candidate_kind: str = "C2"
 
 
 @dataclass(frozen=True)

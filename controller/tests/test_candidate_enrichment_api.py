@@ -339,6 +339,84 @@ def test_management_event_registration_runs_for_new_candidates_when_enabled() ->
     assert management[0]["status"] == "EXPORTED"
 
 
+def test_operational_communication_status_is_not_auto_enriched_or_exported() -> None:
+    client, repository, threat_intel, misp = _client()
+    current = client.get("/api/v1/integration-settings").json()
+    payload = {
+        **{
+            key: value
+            for key, value in current.items()
+            if key not in {"version", "updated_at", "updated_by"}
+        },
+        "expected_version": current["version"],
+        "misp_enabled": True,
+        "misp_url": "https://misp.example",
+        "management_event_id": "100",
+        "management_auto_register": True,
+        "candidate_auto_enrichment_enabled": True,
+    }
+    assert client.put("/api/v1/integration-settings", json=payload).status_code == 200
+    status_candidate = {
+        "id": "candidate-status",
+        "candidate_ip": "203.0.113.40",
+        "candidate_kind": "COMMUNICATION_STATUS",
+        "score": 0,
+        "severity": "LOW",
+    }
+
+    client.app.state.schedule_candidate_enrichment("job-1", [status_candidate])
+    client.app.state.wait_for_candidate_enrichment()
+
+    assert threat_intel.lookups == []
+    assert misp.exports == []
+    assert repository.list_candidate_ti_lookups("candidate-status") == []
+    assert repository.list_candidate_misp_actions("candidate-status") == []
+
+
+def test_manual_ti_lookup_cannot_trigger_immediate_action_for_operational_status() -> None:
+    client, repository, threat_intel, misp = _client()
+    status_candidate = {
+        "id": "candidate-status",
+        "candidate_ip": "203.0.113.40",
+        "candidate_kind": "COMMUNICATION_STATUS",
+        "score": 0,
+        "severity": "LOW",
+        "evidence": [],
+        "adjustments": [],
+        "hosts": ["10.0.0.1"],
+        "sensors": ["sensor-1"],
+    }
+    repository.save_candidates("job-1", [status_candidate])
+    current = client.get("/api/v1/integration-settings").json()
+    settings = {
+        **{
+            key: value
+            for key, value in current.items()
+            if key not in {"version", "updated_at", "updated_by"}
+        },
+        "expected_version": current["version"],
+        "virustotal_enabled": True,
+        "abuseipdb_enabled": True,
+        "misp_enabled": True,
+        "misp_url": "https://misp.example",
+        "abuseipdb_positive_threshold": 80,
+        "immediate_action_event_id": "200",
+        "immediate_action_auto_register": True,
+        "immediate_action_min_positive_providers": 2,
+    }
+    assert client.put("/api/v1/integration-settings", json=settings).status_code == 200
+
+    lookup = client.post("/api/v1/candidates/candidate-status/threat-intelligence/lookups")
+
+    assert lookup.status_code == 200
+    assert threat_intel.lookups == ["203.0.113.40"]
+    assert misp.lookups == ["203.0.113.40"]
+    assert misp.exports == []
+    assert repository.list_candidate_decisions("candidate-status") == []
+    assert repository.list_candidate_actions("candidate-status") == []
+    assert repository.list_candidate_misp_actions("candidate-status") == []
+
+
 def test_candidate_bulk_verdict_returns_item_level_partial_results() -> None:
     client, repository, _, _ = _client()
 

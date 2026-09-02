@@ -100,6 +100,8 @@ def limit_flow_records(
         if item.get("tcp_flags_observed"):
             for field in _TCP_SESSION_COUNTER_FIELDS:
                 item[field] = 0
+            item["tcp_syn_only_observations"] = []
+            item["tcp_syn_only_observations_truncated"] = True
             item["bidirectional"] = False
         retained.append(item)
         retained_packets += remaining

@@ -43,6 +43,7 @@ class TestPcapExtractsTcpFlags:
         assert isinstance(flags, dict)
         assert "syn" in flags
         assert "ack" in flags
+        assert tcp_flags_recs[0]["tcp_syn_only_observations"] == []
 
     def test_tcp_flags_not_on_udp(self):
         import struct

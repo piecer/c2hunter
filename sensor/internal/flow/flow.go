@@ -12,6 +12,8 @@ import (
 	"c2hunter/sensor/internal/payloadfeature"
 )
 
+const maxTCPSYNOnlyObservations = 16
+
 type Key struct {
 	SensorID                    string
 	Direction                   direction.Direction
@@ -21,6 +23,10 @@ type Key struct {
 	Protocol                    packet.Protocol
 }
 type FlagCounts struct{ FIN, SYN, RST, PSH, ACK, URG, ECE, CWR uint64 }
+type TCPSYNOnlyObservation struct {
+	OffsetUS uint64
+	Sequence uint32
+}
 type Record struct {
 	Key                                Key
 	CaptureJobID                       string
@@ -32,6 +38,8 @@ type Record struct {
 	TCPFlagsObserved                   bool
 	TCPSYNOnlyCount, TCPSYNACKCount    uint64
 	TCPACKOnlyCount                    uint64
+	TCPSYNOnlyObservations             []TCPSYNOnlyObservation
+	TCPSYNOnlyObservationsTruncated    bool
 	SYNACKRatio                        *float64 `json:"syn_ack_ratio,omitempty"`
 	RSTRatio                           *float64 `json:"rst_ratio,omitempty"`
 	ConnectionCount                    *uint64  `json:"connection_count,omitempty"`
@@ -92,7 +100,9 @@ func (a *Aggregator) AddWithMetadata(p packet.Packet, protocolMetadata metadata.
 		r = &Record{Key: key, CaptureJobID: a.jobID, StartTime: p.Timestamp, MinPacketSize: wireLength, MinPayloadLength: uint32(len(p.Payload))} // #nosec G115 -- payload is bounded by frame size
 		a.active[key] = r
 	}
-	r.EndTime = p.Timestamp
+	if p.Timestamp.After(r.EndTime) {
+		r.EndTime = p.Timestamp
+	}
 	r.PacketCount++
 	r.TotalBytes += uint64(p.WireLength)    // #nosec G115 -- negative lengths are rejected at this public boundary
 	r.packetSizeSum += uint64(p.WireLength) // #nosec G115 -- negative lengths are rejected at this public boundary
@@ -220,6 +230,14 @@ func trackTCPFlagCombinations(record *Record, p packet.Packet) {
 		record.TCPSYNACKCount++
 	case p.TCPFlags.SYN && !p.TCPFlags.ACK && !p.TCPFlags.RST:
 		record.TCPSYNOnlyCount++
+		offset := p.Timestamp.Sub(record.StartTime).Microseconds()
+		if offset < 0 || (len(record.TCPSYNOnlyObservations) > 0 && uint64(offset) <= record.TCPSYNOnlyObservations[len(record.TCPSYNOnlyObservations)-1].OffsetUS) {
+			record.TCPSYNOnlyObservationsTruncated = true
+		} else if len(record.TCPSYNOnlyObservations) < maxTCPSYNOnlyObservations {
+			record.TCPSYNOnlyObservations = append(record.TCPSYNOnlyObservations, TCPSYNOnlyObservation{OffsetUS: uint64(offset), Sequence: p.TCPSequence}) // #nosec G115 -- offset is non-negative and bounded by flow lifetime
+		} else {
+			record.TCPSYNOnlyObservationsTruncated = true
+		}
 	case p.TCPFlags.ACK && !p.TCPFlags.SYN && !p.TCPFlags.RST:
 		// FIN/PSH + ACK packets are valid post-handshake traffic. RST+ACK is
 		// intentionally excluded so a closed-port response cannot look like

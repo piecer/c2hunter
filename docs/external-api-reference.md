@@ -115,19 +115,22 @@ Authorization: Bearer <YOUR_TOKEN>
       "CAPTURING": 1
     }
   },
-  "candidates": {               // 후보 요약
-    "total_24h": 8,             // 24시간 신규
-    "severity_counts": {        // 심각도별 카운트
-      "CRITICAL": 1,
-      "HIGH": 3,
-      "MEDIUM": 2,
-      "LOW": 2
-    }
+  "candidates": {               // C2 threat 후보 요약
+    "total": 8,
+    "communication_status": 2,  // C2 지표와 분리된 운영 통신 상태
+    "critical": 1,
+    "high": 3,
+    "medium": 2,
+    "low": 2,
+    "new_24h": 3,
+    "needs_review": 2,
+    "in_review": 1,
+    "action_required": 1
   },
-  "candidate_trend": {          // 시간대별 트렌드 (24시간)
-    "2026-08-01T14:00:00Z": 1,
-    "2026-08-01T15:00:00Z": 3
-  },
+  "candidate_trend": [          // C2 threat 시간대별 트렌드 (24시간)
+    {"hour": "2026-08-01T14:00:00Z", "count": 1},
+    {"hour": "2026-08-01T15:00:00Z", "count": 3}
+  ],
   "priority_candidates": [...], // Critical/High 우선 후보 (max 5)
   "recent_analyses": [...],     // 최근 분석 (max 5)
   "sensor_quality": [...],      // sensor 품질 상태 (max 5)
@@ -135,6 +138,10 @@ Authorization: Bearer <YOUR_TOKEN>
   "generated_at": "2026-08-02T14:30:00Z"
 }
 ```
+
+`candidates.total`, severity, workflow, `candidate_trend`, `priority_candidates`는 C2 threat 후보만
+집계한다. `COMMUNICATION_STATUS`는 `candidates.communication_status`로 별도 반환하며 자동 TI
+enrichment와 MISP management registration에서 제외한다.
 
 ---
 
@@ -190,6 +197,10 @@ Sensor agent가 Controller로 실시간 데이터를 업로드하는 엔드포�
 | `PUT` | `/api/v1/sensors/{sensor_id}/pcap-segments/{segment_id}` | 201 | PCAP 세그먼트 업로드 |
 | `GET` | `/api/v1/sensor-pcaps` | 200 | 업로드된 PCAP 목록 |
 | `GET` | `/api/v1/sensor-pcaps/{segment_id}/download` | 200 | 개별 PCAP 다운로드 |
+
+Flow batch의 `tcp_flags`는 FIN/SYN/RST/ACK 등의 uint64 count와 `rst_ratio`,
+`syn_ack_ratio`의 finite non-negative floating-point 값을 구분해 보존한다. Count field의 fractional
+값은 validation error로 거부한다.
 
 #### Enrollment 토큰 생성 (예시)
 
@@ -260,6 +271,10 @@ Content-Type: application/json
     "minimum_candidate_score": 20,   // 최소 후보 점수
     "minimum_distinct_clients": 3,   // 최소 distinct client 수
     "periodicity_min_samples": 5,    // 주기성 검출 최소 샘플
+    "tcp_syn_retry_detection_enabled": true,
+    "tcp_syn_retry_min_intervals": 3,
+    "tcp_syn_retry_min_interval_ms": 500,
+    "tcp_syn_retry_max_interval_ms": 120000,
     "detector_weights": {       //探测器가중치 (선택)
       "common_destination": 1.0,
       "periodic_beacon": 2.0
@@ -351,6 +366,7 @@ Content-Type: application/vnd.tcpdump.pcap    // raw PCAP data
 {
   "id": "...",                 // UUID
   "candidate_ip": "203.0.113.50",
+  "candidate_kind": "C2",       // C2 또는 COMMUNICATION_STATUS
   "score": 85,                // C2 suspicion score (0-100)
   "severity": "CRITICAL",     // LOW/MEDIUM/HIGH/CRITICAL
   "evidence_count": 7,        // 근거 수
@@ -373,6 +389,12 @@ Content-Type: application/vnd.tcpdump.pcap    // raw PCAP data
   ]
 }
 ```
+
+`COMMUNICATION_STATUS`는 C2 악성 점수와 분리된 운영 후보이다. 동일 initial sequence의
+주기적 outbound SYN 재전송은 `TCP_COMMUNICATION_ATTEMPT_PATTERN` evidence로 표현하며,
+`NO_COMPLETION_OBSERVED`는 응답 부재를 기록할 뿐 host/service 통신 불가를 확정하지 않는다.
+Connection별 분석 예산을 초과하면 기존 C2 입력을 보존하고
+`TCP_COMMUNICATION_ATTEMPT_ANALYSIS_INCOMPLETE` evidence로 불완전성을 알린다.
 
 #### API 엔드포인트
 

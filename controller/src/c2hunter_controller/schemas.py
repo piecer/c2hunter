@@ -320,10 +320,16 @@ class AnalysisParameters(BaseModel):
     tcp_scan_min_targets: int = Field(default=8, ge=2, le=100000)
     tcp_scan_probe_max_packets: int = Field(default=4, ge=1, le=100)
     tcp_scan_probe_ratio: float = Field(default=0.8, ge=0, le=1)
-    # Outbound SYN without a SYN-ACK or ACK means the connection never
-    # completed. Enabling this removes such half-open candidates and sessions
-    # from evidence, filtering out scan-retry / no-accept traffic that would
-    # otherwise look like outbound C2 initiation.
+    tcp_syn_retry_detection_enabled: bool = True
+    tcp_syn_retry_min_intervals: int = Field(default=3, ge=3, le=15)
+    tcp_syn_retry_min_interval_ms: int = Field(default=500, ge=1, le=300_000)
+    tcp_syn_retry_max_interval_ms: int = Field(default=120_000, ge=1, le=300_000)
+    tcp_syn_retry_max_interval_multiple: int = Field(default=8, ge=1, le=32)
+    tcp_syn_retry_absolute_tolerance_ms: int = Field(default=250, ge=0, le=10_000)
+    tcp_syn_retry_tolerance_ratio: float = Field(default=0.20, ge=0, le=0.5)
+    # This optional policy excludes outbound sessions for which completion was
+    # not observed. Missing replies can also mean capture loss or asymmetry, so
+    # the default remains fail-open.
     tcp_require_established_outbound: bool = False
     detector_weights: dict[str, float] = Field(
         default_factory=lambda: dict(DEFAULT_DETECTOR_WEIGHTS)
@@ -357,6 +363,19 @@ class AnalysisParameters(BaseModel):
             normalized[str(name)] = weight
         return normalized
 
+    @model_validator(mode="after")
+    def ordered_syn_retry_interval_bounds(self) -> AnalysisParameters:
+        if self.tcp_syn_retry_max_interval_ms < self.tcp_syn_retry_min_interval_ms:
+            raise ValueError("TCP SYN retry maximum interval must not be below minimum interval")
+        return self
+
+
+class TCPSYNOnlyObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    offset_us: int = Field(ge=0, le=31_536_000_000_000)
+    sequence: int = Field(ge=0, le=2**32 - 1)
+
 
 class FlowRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -371,16 +390,16 @@ class FlowRecord(BaseModel):
     packet_count: int = Field(default=1, ge=1)
     total_bytes: int = Field(default=0, ge=0)
     duration_seconds: float = Field(default=0, ge=0, le=31_536_000, allow_inf_nan=False)
-    tcp_flags: dict[str, int] | None = Field(default=None)
+    tcp_flags: dict[str, int | float] | None = Field(default=None)
 
     @field_validator("tcp_flags", mode="before")
     @classmethod
-    def validate_tcp_flags(cls, value: object) -> dict[str, int] | None:
+    def validate_tcp_flags(cls, value: object) -> dict[str, int | float] | None:
         if value is None:
             return None
         if not isinstance(value, dict):
             raise ValueError("tcp_flags must be an object or null")
-        normalized: dict[str, int] = {}
+        normalized: dict[str, int | float] = {}
         for key, val in value.items():
             name = str(key).strip().lower()
             if not name or len(name) > 64:
@@ -389,16 +408,19 @@ class FlowRecord(BaseModel):
                 raise ValueError(f"duplicate TCP flag: {name}")
             if not isinstance(val, int | float) or isinstance(val, bool):
                 raise ValueError(f"tcp_flags[{key}] must be numeric")
-            if isinstance(val, int):
-                count = val
-            else:
+            count: int | float = val
+            if isinstance(val, float):
                 if not math.isfinite(val):
                     raise ValueError(f"tcp_flags[{key}] must be finite")
                 if val < 0:
                     raise ValueError(f"tcp_flags[{key}] must be non-negative")
                 if val > 2**64 - 1:
                     raise ValueError(f"tcp_flags[{key}] exceeds uint64")
-                count = int(val)
+                if name not in {"rst_ratio", "syn_ack_ratio"}:
+                    if not val.is_integer():
+                        raise ValueError(f"tcp_flags[{key}] must be an integer count")
+                    count = int(val)
+
             if count < 0:
                 raise ValueError(f"tcp_flags[{key}] must be non-negative")
             if count > 2**64 - 1:
@@ -428,7 +450,12 @@ class FlowRecord(BaseModel):
     tcp_syn_only_count: int = Field(default=0, ge=0)
     tcp_syn_ack_count: int = Field(default=0, ge=0)
     tcp_ack_only_count: int = Field(default=0, ge=0)
+    tcp_syn_only_observations: list[TCPSYNOnlyObservation] | None = Field(
+        default=None, max_length=16
+    )
+    tcp_syn_only_observations_truncated: bool = False
     bidirectional: bool = False
+
     raw_packet_hex: str | None = Field(default=None, pattern=r"^(?:[0-9a-fA-F]{2})+$")
 
     @model_validator(mode="after")
@@ -449,6 +476,21 @@ class FlowRecord(BaseModel):
             raise ValueError("TCP SYN combination counters exceed tcp_syn_count")
         if self.tcp_syn_ack_count + self.tcp_ack_only_count > self.tcp_ack_count:
             raise ValueError("TCP ACK combination counters exceed tcp_ack_count")
+        if self.tcp_syn_only_observations is not None:
+            if not self.tcp_flags_observed or self.protocol.upper() != "TCP":
+                raise ValueError("TCP SYN observations require observed TCP metadata")
+            offsets = [observation.offset_us for observation in self.tcp_syn_only_observations]
+            if offsets != sorted(set(offsets)):
+                raise ValueError("TCP SYN observation offsets must be unique and increasing")
+            if offsets and offsets[-1] > round(self.duration_seconds * 1_000_000):
+                raise ValueError("TCP SYN observation offset exceeds flow duration")
+            if (
+                not self.tcp_syn_only_observations_truncated
+                and len(self.tcp_syn_only_observations) != self.tcp_syn_only_count
+            ):
+                raise ValueError("complete TCP SYN observations must match SYN-only count")
+        elif self.tcp_syn_only_observations_truncated:
+            raise ValueError("truncated TCP SYN observations require an observation array")
         return self
 
 

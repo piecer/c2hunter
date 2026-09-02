@@ -25,6 +25,48 @@ def test_execute_analysis_runs_real_detector_pipeline() -> None:
     assert result == {"candidates": []}
 
 
+def test_execute_analysis_preserves_operational_syn_status_below_c2_threshold() -> None:
+    result = execute_analysis(
+        {
+            "dataset_id": "dataset-1",
+            "start_time": "2026-01-01T00:00:00+00:00",
+            "end_time": "2026-01-01T01:00:00+00:00",
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "analysis": {"periodicity_min_samples": 5, "minimum_candidate_score": 60},
+            "flow_records": [
+                {
+                    "sensor_id": "sensor-a",
+                    "timestamp": "2026-01-01T00:00:00+00:00",
+                    "source_ip": "10.0.0.1",
+                    "destination_ip": "203.0.113.40",
+                    "source_port": 50000,
+                    "destination_port": 443,
+                    "protocol": "TCP",
+                    "direction": "OUTBOUND",
+                    "packet_count": 4,
+                    "total_bytes": 240,
+                    "duration_seconds": 12,
+                    "tcp_flags": {"syn": 4},
+                    "tcp_flags_observed": True,
+                    "tcp_syn_count": 4,
+                    "tcp_syn_only_count": 4,
+                    "tcp_syn_only_observations": [
+                        {"offset_us": 0, "sequence": 12345},
+                        {"offset_us": 2_000_000, "sequence": 12345},
+                        {"offset_us": 6_000_000, "sequence": 12345},
+                        {"offset_us": 12_000_000, "sequence": 12345},
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert len(result["candidates"]) == 1
+    assert result["candidates"][0]["candidate_kind"] == "COMMUNICATION_STATUS"
+    assert result["candidates"][0]["score"] == 0
+
+
 def test_execute_analysis_loads_operator_configured_custom_detectors(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

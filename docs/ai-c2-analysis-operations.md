@@ -37,11 +37,20 @@ AI worker는 시작 시 provider의 model 목록을 조회해 readiness를 확�
 ## High-Recall prefilter
 
 - prefilter는 기존 detector score를 수정하지 않는 결정론적 보조 rank다.
-- `ai-prefilter-v2` factor와 score는 AI Run candidate snapshot에만 저장한다.
+- `ai-prefilter-v3` factor와 score는 AI Run candidate snapshot에만 저장한다.
 - common DNS/NTP, bulk transfer, trusted peer penalty는 LLM 호출 전에 적용된다.
 - payload가 없고 응답/ACK이 적은 고속 outbound SYN/FIN/RST 지배 트래픽은 공격 대상일
   가능성이 높으므로 해당 control flow만 생성 후보와 신규 결정론적 evidence에서 제외한다.
   같은 peer의 UDP, inbound, ACK 및 payload flow와 기존 저장 Candidate는 유지한다.
+- 동일 5-tuple과 동일 TCP initial sequence의 outbound SYN-only 전송이 최소 4회 관측되고
+  0.5~120초 간격이 고정 주기 또는 2/4/6초 같은 bounded 배수 backoff를 이루면 하나의
+  logical connection attempt로 deduplicate하고 `COMMUNICATION_STATUS` 후보를 함께 만든다.
+  RST는 `REFUSED_OR_RESET_OBSERVED`, SYN-ACK/ACK는 `PEER_RESPONSE_OBSERVED` 또는
+  `ESTABLISHED_OBSERVED`, 완료 신호가 없으면 `NO_COMPLETION_OBSERVED`로 기록한다.
+- 응답 부재만으로 host/service unavailable을 확정하지 않는다. `NO_COMPLETION_OBSERVED`는
+  `no_response_is_not_host_unavailable`, `capture_loss_or_asymmetry_possible` warning과 낮은
+  confidence를 포함한다. timing/sequence가 없거나 truncated된 구버전·불완전 record는
+  deduplicate하지 않고 기존 C2 분석 입력으로 보존한다.
 - Flow가 없으면 기존 Candidate만 사용하고, 기존 Candidate가 없어도 적합한 external peer가 있으면 AI Run을 생성할 수 있다.
 
 ## Splunk/MISP 초안

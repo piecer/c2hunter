@@ -3,6 +3,7 @@ package flowbatch
 import (
 	"encoding/json"
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
@@ -86,6 +87,97 @@ func TestPayloadFeatureZeroValuesRemainPresent(t *testing.T) {
 	}
 	if _, ok := payload["payload_printable_ratio"]; !ok {
 		t.Fatalf("zero printable ratio was omitted: %s", encoded)
+	}
+}
+
+func TestNewPreservesSYNOnlyObservations(t *testing.T) {
+	record := flow.Record{
+		Key: flow.Key{
+			SensorID: "sensor-a", Direction: direction.Outbound, IPVersion: 4,
+			SourceIP: netip.MustParseAddr("10.0.0.2"), DestinationIP: netip.MustParseAddr("203.0.113.8"),
+			SourcePort: 50000, DestinationPort: 443, Protocol: packet.TCP,
+		},
+		StartTime:       time.Unix(1, 0).UTC(),
+		EndTime:         time.Unix(13, 0).UTC(),
+		PacketCount:     4,
+		TCPSYNOnlyCount: 4,
+		TCPSYNOnlyObservations: []flow.TCPSYNOnlyObservation{
+			{OffsetUS: 0, Sequence: 12345},
+			{OffsetUS: 2_000_000, Sequence: 12345},
+			{OffsetUS: 6_000_000, Sequence: 12345},
+			{OffsetUS: 12_000_000, Sequence: 12345},
+		},
+	}
+
+	batch, err := New([]flow.Record{record})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []TCPSYNOnlyObservation{{0, 12345}, {2_000_000, 12345}, {6_000_000, 12345}, {12_000_000, 12345}}
+	if batch.Flows[0].TCPSYNOnlyObservations == nil || !slices.Equal(*batch.Flows[0].TCPSYNOnlyObservations, want) {
+		t.Fatalf("SYN observations = %v", batch.Flows[0].TCPSYNOnlyObservations)
+	}
+}
+
+func TestNewOmitsSYNObservationFieldFromNonTCPFlows(t *testing.T) {
+	record := flow.Record{
+		Key: flow.Key{
+			SensorID: "sensor-a", Direction: direction.Outbound, IPVersion: 4,
+			SourceIP: netip.MustParseAddr("10.0.0.2"), DestinationIP: netip.MustParseAddr("203.0.113.8"),
+			SourcePort: 50000, DestinationPort: 53, Protocol: packet.UDP,
+		},
+		StartTime: time.Unix(1, 0).UTC(), EndTime: time.Unix(1, 0).UTC(), PacketCount: 1,
+	}
+
+	batch, err := New([]flow.Record{record})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := Encode(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Flows []map[string]any `json:"flows"`
+	}
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := payload.Flows[0]["tcp_syn_only_observations"]; exists {
+		t.Fatalf("non-TCP flow carries SYN observation field: %s", encoded)
+	}
+}
+
+func TestNewMarksCurrentTCPObservationCapabilityWithEmptyArray(t *testing.T) {
+	record := flow.Record{
+		Key: flow.Key{
+			SensorID: "sensor-a", Direction: direction.Outbound, IPVersion: 4,
+			SourceIP: netip.MustParseAddr("10.0.0.2"), DestinationIP: netip.MustParseAddr("203.0.113.8"),
+			SourcePort: 50000, DestinationPort: 443, Protocol: packet.TCP,
+		},
+		StartTime: time.Unix(1, 0).UTC(), EndTime: time.Unix(1, 0).UTC(), PacketCount: 1,
+	}
+
+	batch, err := New([]flow.Record{record})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := Encode(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Flows []map[string]any `json:"flows"`
+	}
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	observations, exists := payload.Flows[0]["tcp_syn_only_observations"]
+	if !exists {
+		t.Fatalf("current TCP flow omitted observation capability: %s", encoded)
+	}
+	if values, ok := observations.([]any); !ok || len(values) != 0 {
+		t.Fatalf("TCP observation capability = %#v, want []", observations)
 	}
 }
 

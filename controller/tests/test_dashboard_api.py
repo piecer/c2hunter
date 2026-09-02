@@ -130,6 +130,7 @@ def test_dashboard_prioritizes_operational_health_and_recent_threats() -> None:
         "id",
         "job_id",
         "candidate_ip",
+        "candidate_kind",
         "score",
         "severity",
         "last_seen",
@@ -157,6 +158,36 @@ def test_dashboard_prioritizes_operational_health_and_recent_threats() -> None:
         "FAILED_ANALYSIS",
         "CRITICAL_CANDIDATE",
     }
+
+
+def test_dashboard_separates_communication_status_from_threat_metrics() -> None:
+    now = datetime.now(UTC)
+    repository = MemoryRepository()
+    repository.jobs["job-1"] = {"id": "job-1", "name": "Status analysis"}
+    repository.save_candidates(
+        "job-1",
+        [
+            {
+                "id": "candidate-status",
+                "candidate_ip": "203.0.113.40",
+                "candidate_kind": "COMMUNICATION_STATUS",
+                "score": 0,
+                "severity": "LOW",
+                "first_seen": now.isoformat(),
+                "last_seen": now.isoformat(),
+            }
+        ],
+    )
+    client = TestClient(create_app(Settings(environment="test"), repository))
+
+    dashboard = client.get("/api/v1/dashboard").json()
+
+    assert dashboard["candidates"]["total"] == 0
+    assert dashboard["candidates"]["low"] == 0
+    assert dashboard["candidates"]["needs_review"] == 0
+    assert dashboard["candidates"]["communication_status"] == 1
+    assert sum(bucket["count"] for bucket in dashboard["candidate_trend"]) == 0
+    assert dashboard["priority_candidates"] == []
 
 
 def test_dashboard_work_queue_hides_completed_items_and_orders_latest_candidates() -> None:

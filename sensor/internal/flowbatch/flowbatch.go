@@ -13,39 +13,46 @@ import (
 )
 
 type FlowRecord struct {
-	SensorID               string    `json:"sensor_id"`
-	Timestamp              time.Time `json:"timestamp"`
-	SourceIP               string    `json:"source_ip"`
-	DestinationIP          string    `json:"destination_ip"`
-	SourcePort             uint16    `json:"source_port"`
-	DestinationPort        uint16    `json:"destination_port"`
-	Protocol               string    `json:"protocol"`
-	Direction              string    `json:"direction"`
-	PacketCount            uint64    `json:"packet_count"`
-	TotalBytes             uint64    `json:"total_bytes"`
-	DurationSeconds        float64   `json:"duration_seconds"`
-	TcpFlags               *TcpFlags `json:"tcp_flags,omitempty"`
-	TCPFlagsObserved       bool      `json:"tcp_flags_observed,omitempty"`
-	TCPSYNCount            uint64    `json:"tcp_syn_count,omitempty"`
-	TCPACKCount            uint64    `json:"tcp_ack_count,omitempty"`
-	TCPRSTCount            uint64    `json:"tcp_rst_count,omitempty"`
-	TCPSYNOnlyCount        uint64    `json:"tcp_syn_only_count,omitempty"`
-	TCPSYNACKCount         uint64    `json:"tcp_syn_ack_count,omitempty"`
-	TCPACKOnlyCount        uint64    `json:"tcp_ack_only_count,omitempty"`
-	Bidirectional          bool      `json:"bidirectional,omitempty"`
-	PayloadHash            string    `json:"payload_hash,omitempty"`
-	LastPayloadHash        string    `json:"last_payload_hash,omitempty"`
-	PayloadPrefixHash      string    `json:"payload_prefix_hash,omitempty"`
-	PayloadSampleHex       string    `json:"payload_sample_hex,omitempty"`
-	PayloadLength          *uint32   `json:"payload_length,omitempty"`
-	PayloadEntropy         *float64  `json:"payload_entropy,omitempty"`
-	PayloadPrintableRatio  *float64  `json:"payload_printable_ratio,omitempty"`
-	PayloadSimHash         string    `json:"payload_simhash,omitempty"`
-	PayloadFeatureVersion  string    `json:"payload_feature_version,omitempty"`
-	TLSFingerprint         string    `json:"tls_fingerprint,omitempty"`
-	CertificateFingerprint string    `json:"certificate_fingerprint,omitempty"`
-	Domain                 string    `json:"domain,omitempty"`
-	PacketSizes            []uint32  `json:"packet_sizes"`
+	SensorID                        string                   `json:"sensor_id"`
+	Timestamp                       time.Time                `json:"timestamp"`
+	SourceIP                        string                   `json:"source_ip"`
+	DestinationIP                   string                   `json:"destination_ip"`
+	SourcePort                      uint16                   `json:"source_port"`
+	DestinationPort                 uint16                   `json:"destination_port"`
+	Protocol                        string                   `json:"protocol"`
+	Direction                       string                   `json:"direction"`
+	PacketCount                     uint64                   `json:"packet_count"`
+	TotalBytes                      uint64                   `json:"total_bytes"`
+	DurationSeconds                 float64                  `json:"duration_seconds"`
+	TcpFlags                        *TcpFlags                `json:"tcp_flags,omitempty"`
+	TCPFlagsObserved                bool                     `json:"tcp_flags_observed,omitempty"`
+	TCPSYNCount                     uint64                   `json:"tcp_syn_count,omitempty"`
+	TCPACKCount                     uint64                   `json:"tcp_ack_count,omitempty"`
+	TCPRSTCount                     uint64                   `json:"tcp_rst_count,omitempty"`
+	TCPSYNOnlyCount                 uint64                   `json:"tcp_syn_only_count,omitempty"`
+	TCPSYNACKCount                  uint64                   `json:"tcp_syn_ack_count,omitempty"`
+	TCPACKOnlyCount                 uint64                   `json:"tcp_ack_only_count,omitempty"`
+	TCPSYNOnlyObservations          *[]TCPSYNOnlyObservation `json:"tcp_syn_only_observations,omitempty"`
+	TCPSYNOnlyObservationsTruncated bool                     `json:"tcp_syn_only_observations_truncated,omitempty"`
+	Bidirectional                   bool                     `json:"bidirectional,omitempty"`
+	PayloadHash                     string                   `json:"payload_hash,omitempty"`
+	LastPayloadHash                 string                   `json:"last_payload_hash,omitempty"`
+	PayloadPrefixHash               string                   `json:"payload_prefix_hash,omitempty"`
+	PayloadSampleHex                string                   `json:"payload_sample_hex,omitempty"`
+	PayloadLength                   *uint32                  `json:"payload_length,omitempty"`
+	PayloadEntropy                  *float64                 `json:"payload_entropy,omitempty"`
+	PayloadPrintableRatio           *float64                 `json:"payload_printable_ratio,omitempty"`
+	PayloadSimHash                  string                   `json:"payload_simhash,omitempty"`
+	PayloadFeatureVersion           string                   `json:"payload_feature_version,omitempty"`
+	TLSFingerprint                  string                   `json:"tls_fingerprint,omitempty"`
+	CertificateFingerprint          string                   `json:"certificate_fingerprint,omitempty"`
+	Domain                          string                   `json:"domain,omitempty"`
+	PacketSizes                     []uint32                 `json:"packet_sizes"`
+}
+
+type TCPSYNOnlyObservation struct {
+	OffsetUS uint64 `json:"offset_us"`
+	Sequence uint32 `json:"sequence"`
 }
 
 type TcpFlags struct {
@@ -116,19 +123,30 @@ func fromRecord(record flow.Record) FlowRecord {
 		SourcePort: record.Key.SourcePort, DestinationPort: record.Key.DestinationPort,
 		Protocol: protocolName(record.Key.Protocol), Direction: record.Key.Direction.String(),
 		PacketCount: record.PacketCount, TotalBytes: record.TotalBytes,
-		DurationSeconds:  durationSeconds,
-		TCPFlagsObserved: record.TCPFlagsObserved,
-		TCPSYNCount:      record.TCPFlags.SYN,
-		TCPACKCount:      record.TCPFlags.ACK,
-		TCPRSTCount:      record.TCPFlags.RST,
-		TCPSYNOnlyCount:  record.TCPSYNOnlyCount,
-		TCPSYNACKCount:   record.TCPSYNACKCount,
-		TCPACKOnlyCount:  record.TCPACKOnlyCount,
-		Bidirectional:    record.Bidirectional,
-		PayloadHash:      record.FirstPayloadHash, LastPayloadHash: record.LastPayloadHash,
+		DurationSeconds:                 durationSeconds,
+		TCPFlagsObserved:                record.TCPFlagsObserved,
+		TCPSYNCount:                     record.TCPFlags.SYN,
+		TCPACKCount:                     record.TCPFlags.ACK,
+		TCPRSTCount:                     record.TCPFlags.RST,
+		TCPSYNOnlyCount:                 record.TCPSYNOnlyCount,
+		TCPSYNACKCount:                  record.TCPSYNACKCount,
+		TCPACKOnlyCount:                 record.TCPACKOnlyCount,
+		TCPSYNOnlyObservationsTruncated: record.TCPSYNOnlyObservationsTruncated,
+		Bidirectional:                   record.Bidirectional,
+		PayloadHash:                     record.FirstPayloadHash, LastPayloadHash: record.LastPayloadHash,
 		PayloadPrefixHash: record.PayloadPrefixHash, PayloadSampleHex: record.PayloadSampleHex,
 		PayloadSimHash:        record.PayloadSimHash,
 		PayloadFeatureVersion: record.PayloadFeatureVersion,
+	}
+	if record.Key.Protocol == packet.TCP {
+		observations := make([]TCPSYNOnlyObservation, 0, len(record.TCPSYNOnlyObservations))
+		for _, observation := range record.TCPSYNOnlyObservations {
+			observations = append(observations, TCPSYNOnlyObservation{
+				OffsetUS: observation.OffsetUS,
+				Sequence: observation.Sequence,
+			})
+		}
+		out.TCPSYNOnlyObservations = &observations
 	}
 	if record.FirstPayloadHash != "" {
 		out.PayloadLength = &record.FirstPayloadLength

@@ -30,6 +30,8 @@ Dashboard는 단순 누적 숫자가 아니라 분석가가 접속 직후 다음
 - 최근 24개 정시 구간에 Candidate `first_seen`을 배치한다.
 - 데이터가 없는 시간도 0으로 반환해 그래프 축이 흔들리지 않게 한다.
 - 심각도 분포는 Critical, High, Medium, Low의 전체 비율을 비교한다.
+- `COMMUNICATION_STATUS`는 위협 총계, 심각도, 추세, review/action queue에서 제외하고 상단
+  `통신 상태` 운영 지표로 별도 집계한다.
 
 ### 3. 지금 확인할 항목
 
@@ -44,7 +46,7 @@ Dashboard는 단순 누적 숫자가 아니라 분석가가 접속 직후 다음
 ### 4. 우선 조사 후보와 최근 분석
 
 - Critical을 High보다 먼저 배치하고 같은 심각도에서는 점수가 높은 후보를 우선한다.
-- 후보 목록은 최대 5개이며 IP, 점수, severity, 근거 수, 마지막 관측 시각만 반환한다.
+- 후보 목록은 최대 5개이며 IP, candidate kind, 점수, severity, 근거 수, 마지막 관측 시각만 반환한다.
 - 최근 분석은 최대 5개이며 상태, Candidate 수, Packet/Flow 수, 생성 시각만 반환한다.
 - Dashboard 응답에 전체 evidence, flow, detector 설정을 포함하지 않는다.
 

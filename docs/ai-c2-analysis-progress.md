@@ -38,9 +38,13 @@ Phase 8 완료 — TI enrichment와 analyst response workflow
 - 완료된 Job의 external peer universe를 기존 Candidate와 독립적으로 집계하되, payload가
   없고 응답/ACK이 적은 고속 outbound SYN/FIN/RST 지배 트래픽의 공격 대상은 제외한다.
 - single-host beacon, payload cluster, synchronized cluster, robust volume anomaly를 가산하고 common service, high volume, trusted peer를 감점한다.
-- 모든 factor는 이름, 가감점, 설명, metrics를 보존하며 `ai-prefilter-v2` 버전과 0~100 score를 생성한다.
+- 모든 factor는 이름, 가감점, 설명, metrics를 보존하며 `ai-prefilter-v3` 버전과 0~100 score를 생성한다.
 - 기존 Candidate와 생성 후보를 결정론적으로 병합하고 상위 N개를 AI Run의 bounded candidate snapshot에 저장한다.
-- control-flow suppression의 영향을 받는 결정론적 detector evidence version은 `1.1.0`이다.
+- control-flow suppression과 SYN retransmission deduplication의 영향을 받는 결정론적 detector evidence version은 `1.2.0`이다.
+- Sensor가 bounded SYN-only offset/initial-sequence observation을 전송하고 분석기는 동일
+  sequence의 고정/배수 backoff를 `TCP_COMMUNICATION_ATTEMPT_PATTERN` operational evidence로
+  분류한다. 이 evidence는 C2 점수에 기여하지 않지만 최소 C2 점수와 무관하게 후보에 남으며,
+  응답 부재만으로 통신 불가를 확정하지 않는다.
 - 생성 후보는 기존 Candidate repository를 변경하지 않으며 worker Queue에는 계속 Run ID만 전달한다.
 - AI-A~AI-J fixture와 31-peer recall fixture에서 알려진 beacon peer가 top 20에 포함되는 것을 검증한다.
 
