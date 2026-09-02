@@ -37,8 +37,11 @@ AI worker는 시작 시 provider의 model 목록을 조회해 readiness를 확�
 ## High-Recall prefilter
 
 - prefilter는 기존 detector score를 수정하지 않는 결정론적 보조 rank다.
-- `ai-prefilter-v1` factor와 score는 AI Run candidate snapshot에만 저장한다.
+- `ai-prefilter-v2` factor와 score는 AI Run candidate snapshot에만 저장한다.
 - common DNS/NTP, bulk transfer, trusted peer penalty는 LLM 호출 전에 적용된다.
+- payload가 없고 응답/ACK이 적은 고속 outbound SYN/FIN/RST 지배 트래픽은 공격 대상일
+  가능성이 높으므로 해당 control flow만 생성 후보와 신규 결정론적 evidence에서 제외한다.
+  같은 peer의 UDP, inbound, ACK 및 payload flow와 기존 저장 Candidate는 유지한다.
 - Flow가 없으면 기존 Candidate만 사용하고, 기존 Candidate가 없어도 적합한 external peer가 있으면 AI Run을 생성할 수 있다.
 
 ## Splunk/MISP 초안

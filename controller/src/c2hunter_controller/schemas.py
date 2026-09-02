@@ -370,6 +370,7 @@ class FlowRecord(BaseModel):
     direction: Direction
     packet_count: int = Field(default=1, ge=1)
     total_bytes: int = Field(default=0, ge=0)
+    duration_seconds: float = Field(default=0, ge=0, le=31_536_000, allow_inf_nan=False)
     tcp_flags: dict[str, int] | None = Field(default=None)
 
     @field_validator("tcp_flags", mode="before")
@@ -379,12 +380,31 @@ class FlowRecord(BaseModel):
             return None
         if not isinstance(value, dict):
             raise ValueError("tcp_flags must be an object or null")
+        normalized: dict[str, int] = {}
         for key, val in value.items():
+            name = str(key).strip().lower()
+            if not name or len(name) > 64:
+                raise ValueError("TCP flag name must contain 1 to 64 characters")
+            if name in normalized:
+                raise ValueError(f"duplicate TCP flag: {name}")
             if not isinstance(val, int | float) or isinstance(val, bool):
                 raise ValueError(f"tcp_flags[{key}] must be numeric")
-            if int(val) < 0:
+            if isinstance(val, int):
+                count = val
+            else:
+                if not math.isfinite(val):
+                    raise ValueError(f"tcp_flags[{key}] must be finite")
+                if val < 0:
+                    raise ValueError(f"tcp_flags[{key}] must be non-negative")
+                if val > 2**64 - 1:
+                    raise ValueError(f"tcp_flags[{key}] exceeds uint64")
+                count = int(val)
+            if count < 0:
                 raise ValueError(f"tcp_flags[{key}] must be non-negative")
-        return {k: int(v) for k, v in value.items()}
+            if count > 2**64 - 1:
+                raise ValueError(f"tcp_flags[{key}] exceeds uint64")
+            normalized[name] = count
+        return normalized
 
     payload_hash: str | None = None
     last_payload_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")

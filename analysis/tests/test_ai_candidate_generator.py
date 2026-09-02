@@ -20,6 +20,8 @@ def flow(
     packets: int = 1,
     total_bytes: int = 128,
     payload_hash: str | None = None,
+    last_payload_hash: str | None = None,
+    flags: dict[str, int] | None = None,
 ) -> Flow:
     # 테스트는 외부 peer로 향하는 outbound Flow만 만들어 feature 차이를 격리한다.
     return Flow(
@@ -34,6 +36,8 @@ def flow(
         packet_count=packets,
         total_bytes=total_bytes,
         payload_hash=payload_hash,
+        last_payload_hash=last_payload_hash,
+        tcp_flags=flags,
     )
 
 
@@ -154,3 +158,122 @@ def test_benign_penalties_reduce_score_without_hiding_explanations() -> None:
 
     assert trusted.prefilter_score < unpenalized.prefilter_score
     assert any(factor.points < 0 for factor in trusted.factors)
+
+
+@pytest.mark.parametrize("flag", ["syn", "fin", "rst"])
+def test_outbound_tcp_control_flood_is_not_recommended_as_a_c2_candidate(
+    flag: str,
+) -> None:
+    peer = "203.0.113.200"
+    flows = [
+        flow(
+            index / 10,
+            "10.0.0.10",
+            peer,
+            packets=20,
+            total_bytes=1_200,
+            flags={flag: 20},
+        )
+        for index in range(6)
+    ]
+
+    assert generate_high_recall_candidates(context(flows)) == []
+
+
+def test_acknowledged_or_payload_bearing_control_traffic_remains_recommendable() -> None:
+    acknowledged_peer = "203.0.113.201"
+    payload_peer = "203.0.113.202"
+    flows = [
+        flow(
+            index / 10,
+            "10.0.0.10",
+            acknowledged_peer,
+            packets=20,
+            flags={"syn": 20, "ack": 20},
+        )
+        for index in range(6)
+    ]
+    flows.extend(
+        flow(
+            index / 10,
+            "10.0.0.11",
+            payload_peer,
+            packets=20,
+            payload_hash="c2-payload",
+            flags={"fin": 20},
+        )
+        for index in range(6)
+    )
+
+    candidates = generate_high_recall_candidates(context(flows))
+
+    assert {candidate.candidate_ip for candidate in candidates} == {
+        acknowledged_peer,
+        payload_peer,
+    }
+
+
+def test_slow_periodic_syn_retries_are_not_treated_as_an_attack_burst() -> None:
+    peer = "203.0.113.203"
+    flows = [
+        flow(
+            index * 30,
+            "10.0.0.10",
+            peer,
+            flags={"syn": 1},
+        )
+        for index in range(40)
+    ]
+
+    assert [
+        candidate.candidate_ip for candidate in generate_high_recall_candidates(context(flows))
+    ] == [peer]
+
+
+def test_control_flood_does_not_hide_payload_bearing_udp_to_same_peer() -> None:
+    peer = "203.0.113.204"
+    flood = [
+        flow(
+            index / 10,
+            "10.0.0.10",
+            peer,
+            packets=20,
+            flags={"syn": 20},
+        )
+        for index in range(6)
+    ]
+    udp_c2 = [
+        flow(
+            index * 30,
+            "10.0.0.11",
+            peer,
+            protocol="UDP",
+            payload_hash="udp-c2",
+        )
+        for index in range(6)
+    ]
+
+    candidate = generate_high_recall_candidates(context([*flood, *udp_c2]))[0]
+    baseline = next(factor for factor in candidate.factors if factor.name == "PEER_BASELINE")
+
+    assert candidate.candidate_ip == peer
+    assert baseline.metrics["flow_count"] == len(udp_c2)
+
+
+def test_last_payload_hash_prevents_control_flow_suppression() -> None:
+    peer = "203.0.113.205"
+    flows = [
+        flow(
+            index / 10,
+            "10.0.0.10",
+            peer,
+            packets=20,
+            last_payload_hash="last-payload",
+            flags={"fin": 20},
+        )
+        for index in range(6)
+    ]
+
+    assert [
+        candidate.candidate_ip for candidate in generate_high_recall_candidates(context(flows))
+    ] == [peer]

@@ -7,8 +7,9 @@ from datetime import datetime
 from statistics import median
 
 from .domain import AnalysisContext, Flow
+from .traffic_suppression import outbound_control_flood_flow_ids
 
-PREFILTER_VERSION = "ai-prefilter-v1"
+PREFILTER_VERSION = "ai-prefilter-v2"
 _COMMON_SERVICE_PORTS = {53, 123}
 
 
@@ -159,7 +160,7 @@ def generate_high_recall_candidates(
     trusted_peers: set[str] | None = None,
     limit: int | None = None,
 ) -> list[PrefilterCandidate]:
-    """Rank every scoped external peer without changing deterministic detector results."""
+    """Rank plausible peers for bounded AI review."""
     if limit is not None and limit < 1:
         raise ValueError("limit must be positive")
     trusted = trusted_peers or set()
@@ -170,6 +171,15 @@ def generate_high_recall_candidates(
             continue
         peer, host, port = endpoint
         grouped[peer].append((flow, host, port))
+    for peer, peer_flows in tuple(grouped.items()):
+        suppressed = outbound_control_flood_flow_ids(
+            context, (flow for flow, _host, _port in peer_flows)
+        )
+        retained = [row for row in peer_flows if id(row[0]) not in suppressed]
+        if retained:
+            grouped[peer] = retained
+        else:
+            del grouped[peer]
     profiles = [
         (len(peer_flows), sum(max(0, flow.total_bytes) for flow, _host, _port in peer_flows))
         for peer_flows in grouped.values()

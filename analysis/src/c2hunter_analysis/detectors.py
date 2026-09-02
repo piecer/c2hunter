@@ -10,10 +10,27 @@ from datetime import timedelta
 from .domain import AnalysisContext, Detector, Evidence, Flow
 from .payload_features import simhash_hamming_distance
 from .tcp_sessions import (
+    control_filtered_tcp_profiles,
     qualified_candidate_groups,
     qualified_tcp_flow_ids,
     scan_suppressed_keys,
-    tcp_profiles,
+)
+
+TCP_CONTROL_SUPPRESSION_DETECTOR_VERSION = "1.1.0"
+_TCP_CONTROL_SUPPRESSION_DETECTORS = frozenset(
+    {
+        "common_destination",
+        "non_well_known_port",
+        "periodic_beacon",
+        "single_host_composite_beacon",
+        "synchronized_communication",
+        "command_attack_correlation",
+        "persistence_rarity",
+        "protocol_similarity",
+        "ml_population_anomaly",
+        "multi_sensor_context",
+        "tcp_session_quality",
+    }
 )
 
 
@@ -64,11 +81,16 @@ def _base_evidence(
     warnings: tuple[str, ...] = (),
 ) -> Evidence:
     timestamps = [flow.timestamp for _, flow in rows]
+    version = (
+        TCP_CONTROL_SUPPRESSION_DETECTOR_VERSION
+        if detector in _TCP_CONTROL_SUPPRESSION_DETECTORS
+        else "1.0.0"
+    )
     return Evidence(
         candidate,
         kind,
         detector,
-        "1.0.0",
+        version,
         contribution,
         contribution,
         description,
@@ -85,7 +107,7 @@ def _base_evidence(
 @dataclass(frozen=True)
 class CommonDestinationDetector:
     name: str = "common_destination"
-    version: str = "1.0.0"
+    version: str = TCP_CONTROL_SUPPRESSION_DETECTOR_VERSION
 
     def analyze(self, context: AnalysisContext) -> list[Evidence]:
         minimum = int(context.parameters.get("minimum_distinct_clients", 3))
@@ -170,7 +192,7 @@ class NonWellKnownPortDetector:
     """
 
     name: str = "non_well_known_port"
-    version: str = "1.0.0"
+    version: str = TCP_CONTROL_SUPPRESSION_DETECTOR_VERSION
 
     def analyze(self, context: AnalysisContext) -> list[Evidence]:
         maximum = max(
@@ -238,7 +260,7 @@ class NonWellKnownPortDetector:
 @dataclass(frozen=True)
 class PeriodicBeaconDetector:
     name: str = "periodic_beacon"
-    version: str = "1.0.0"
+    version: str = TCP_CONTROL_SUPPRESSION_DETECTOR_VERSION
 
     def analyze(self, context: AnalysisContext) -> list[Evidence]:
         minimum = int(context.parameters.get("periodicity_min_samples", 5))
@@ -303,7 +325,7 @@ class PeriodicBeaconDetector:
 @dataclass(frozen=True)
 class SingleHostCompositeBeaconDetector:
     name: str = "single_host_composite_beacon"
-    version: str = "1.0.0"
+    version: str = TCP_CONTROL_SUPPRESSION_DETECTOR_VERSION
 
     def analyze(self, context: AnalysisContext) -> list[Evidence]:
         minimum = int(context.parameters.get("periodicity_min_samples", 5))
@@ -529,7 +551,7 @@ class AnalystPayloadSignatureDetector:
 @dataclass(frozen=True)
 class SynchronizedCommunicationDetector:
     name: str = "synchronized_communication"
-    version: str = "1.0.0"
+    version: str = TCP_CONTROL_SUPPRESSION_DETECTOR_VERSION
 
     def analyze(self, context: AnalysisContext) -> list[Evidence]:
         window = float(context.parameters.get("synchronization_window_seconds", 2.0))
@@ -586,7 +608,7 @@ class SynchronizedCommunicationDetector:
 @dataclass(frozen=True)
 class CommandAttackDetector:
     name: str = "command_attack_correlation"
-    version: str = "1.0.0"
+    version: str = TCP_CONTROL_SUPPRESSION_DETECTOR_VERSION
 
     def analyze(self, context: AnalysisContext) -> list[Evidence]:
         minimum = int(context.parameters.get("minimum_distinct_clients", 3))
@@ -662,7 +684,7 @@ class CommandAttackDetector:
 @dataclass(frozen=True)
 class PersistenceRarityDetector:
     name: str = "persistence_rarity"
-    version: str = "1.0.0"
+    version: str = TCP_CONTROL_SUPPRESSION_DETECTOR_VERSION
 
     def analyze(self, context: AnalysisContext) -> list[Evidence]:
         minimum = int(context.parameters.get("minimum_distinct_clients", 3))
@@ -701,7 +723,7 @@ class PersistenceRarityDetector:
 @dataclass(frozen=True)
 class ProtocolSimilarityDetector:
     name: str = "protocol_similarity"
-    version: str = "1.0.0"
+    version: str = TCP_CONTROL_SUPPRESSION_DETECTOR_VERSION
 
     def analyze(self, context: AnalysisContext) -> list[Evidence]:
         minimum = int(context.parameters.get("minimum_distinct_clients", 3))
@@ -833,7 +855,7 @@ class PopulationAnomalyDetector:
     """
 
     name: str = "ml_population_anomaly"
-    version: str = "1.0.0"
+    version: str = TCP_CONTROL_SUPPRESSION_DETECTOR_VERSION
 
     def analyze(self, context: AnalysisContext) -> list[Evidence]:
         if not bool(context.parameters.get("ml_anomaly_enabled", False)):
@@ -961,7 +983,7 @@ class PopulationAnomalyDetector:
 @dataclass(frozen=True)
 class MultiSensorDetector:
     name: str = "multi_sensor_context"
-    version: str = "1.0.0"
+    version: str = TCP_CONTROL_SUPPRESSION_DETECTOR_VERSION
 
     def analyze(self, context: AnalysisContext) -> list[Evidence]:
         minimum = int(context.parameters.get("minimum_distinct_clients", 3))
@@ -1001,7 +1023,7 @@ class TCPSessionQualityDetector:
     """Add connection-state context only to candidates supported by another detector."""
 
     name: str = "tcp_session_quality"
-    version: str = "1.0.0"
+    version: str = TCP_CONTROL_SUPPRESSION_DETECTOR_VERSION
 
     def analyze(self, context: AnalysisContext) -> list[Evidence]:
         if not bool(context.parameters.get("tcp_session_gating_enabled", True)):
@@ -1014,7 +1036,7 @@ class TCPSessionQualityDetector:
             0.0,
             min(15.0, float(context.parameters.get("tcp_established_contribution", 10))),
         )
-        _raw, profiles = tcp_profiles(context)
+        _raw, profiles = control_filtered_tcp_profiles(context)
         require_established = bool(
             context.parameters.get("tcp_require_established_outbound", False)
         )

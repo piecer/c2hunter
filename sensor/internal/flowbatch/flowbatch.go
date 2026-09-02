@@ -23,6 +23,7 @@ type FlowRecord struct {
 	Direction              string    `json:"direction"`
 	PacketCount            uint64    `json:"packet_count"`
 	TotalBytes             uint64    `json:"total_bytes"`
+	DurationSeconds        float64   `json:"duration_seconds"`
 	TcpFlags               *TcpFlags `json:"tcp_flags,omitempty"`
 	TCPFlagsObserved       bool      `json:"tcp_flags_observed,omitempty"`
 	TCPSYNCount            uint64    `json:"tcp_syn_count,omitempty"`
@@ -105,12 +106,17 @@ func Decode(data []byte) (Batch, error) {
 }
 
 func fromRecord(record flow.Record) FlowRecord {
+	durationSeconds := record.EndTime.Sub(record.StartTime).Seconds()
+	if durationSeconds < 0 {
+		durationSeconds = 0
+	}
 	out := FlowRecord{
 		SensorID: record.Key.SensorID, Timestamp: record.StartTime,
 		SourceIP: record.Key.SourceIP.String(), DestinationIP: record.Key.DestinationIP.String(),
 		SourcePort: record.Key.SourcePort, DestinationPort: record.Key.DestinationPort,
 		Protocol: protocolName(record.Key.Protocol), Direction: record.Key.Direction.String(),
 		PacketCount: record.PacketCount, TotalBytes: record.TotalBytes,
+		DurationSeconds:  durationSeconds,
 		TCPFlagsObserved: record.TCPFlagsObserved,
 		TCPSYNCount:      record.TCPFlags.SYN,
 		TCPACKCount:      record.TCPFlags.ACK,

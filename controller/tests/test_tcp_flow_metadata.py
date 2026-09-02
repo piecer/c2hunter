@@ -35,6 +35,68 @@ def test_flow_record_accepts_consistent_tcp_metadata() -> None:
     assert parsed.bidirectional is True
 
 
+def test_flow_record_normalizes_tcp_flag_names_and_preserves_duration() -> None:
+    parsed = FlowRecord.model_validate(
+        tcp_record(
+            packet_count=3,
+            tcp_flags={" SYN ": 2, "ACK": 1},
+            duration_seconds=6.4,
+        )
+    )
+
+    assert parsed.tcp_flags == {"syn": 2, "ack": 1}
+    assert parsed.duration_seconds == 6.4
+
+    sensor_aggregate = FlowRecord.model_validate(
+        tcp_record(
+            tcp_flags={
+                "NS": 1,
+                "rst_ratio": 0.5,
+                "syn_ack_ratio": 2.0,
+                "connection_count": 2,
+            }
+        )
+    )
+    assert set(sensor_aggregate.tcp_flags or {}) == {
+        "ns",
+        "rst_ratio",
+        "syn_ack_ratio",
+        "connection_count",
+    }
+
+
+def test_flow_record_rejects_duplicate_tcp_flag_names() -> None:
+    with pytest.raises(ValidationError, match="duplicate TCP flag"):
+        FlowRecord.model_validate(tcp_record(tcp_flags={"SYN": 1, "syn": 1}))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"duration_seconds": float("inf")},
+        {"duration_seconds": 1e308},
+        {"tcp_flags": {"syn": float("inf")}},
+    ],
+)
+def test_flow_record_rejects_non_finite_or_unbounded_numeric_metadata(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        FlowRecord.model_validate(tcp_record(**overrides))
+
+
+@pytest.mark.parametrize("count", [2**64 - 2, 2**64 - 1])
+def test_flow_record_preserves_uint64_tcp_flag_boundaries(count: int) -> None:
+    parsed = FlowRecord.model_validate(tcp_record(tcp_flags={"syn": count}))
+
+    assert parsed.tcp_flags == {"syn": count}
+
+
+def test_flow_record_rejects_oversized_integer_as_validation_error() -> None:
+    with pytest.raises(ValidationError, match="exceeds uint64"):
+        FlowRecord.model_validate(tcp_record(tcp_flags={"syn": 10**1_000}))
+
+
 def test_tcp_session_gating_defaults_are_safe_and_configurable() -> None:
     defaults = AnalysisParameters()
     configured = AnalysisParameters(

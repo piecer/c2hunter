@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
 
 from c2hunter_analysis.detectors import (
+    DEFAULT_DETECTORS,
+    TCP_CONTROL_SUPPRESSION_DETECTOR_VERSION,
     CommonDestinationDetector,
     TCPSessionQualityDetector,
     run_detectors,
@@ -38,6 +40,8 @@ def tcp_flow(
     ack_only: int = 0,
     bidirectional: bool = False,
     payload: bool = False,
+    packets: int | None = None,
+    flags: dict[str, int] | None = None,
 ) -> Flow:
     if direction == "OUTBOUND":
         source_ip, destination_ip = host, CANDIDATE
@@ -52,7 +56,7 @@ def tcp_flow(
         destination_port=destination_port,
         protocol="TCP",
         direction=direction,
-        packet_count=max(1, syn_only + syn_ack + ack_only + rst),
+        packet_count=packets or max(1, syn_only + syn_ack + ack_only + rst),
         total_bytes=60,
         payload_hash="a" * 64 if payload else None,
         tcp_flags_observed=True,
@@ -63,6 +67,7 @@ def tcp_flow(
         tcp_syn_ack_count=syn_ack,
         tcp_ack_only_count=ack_only,
         bidirectional=bidirectional,
+        tcp_flags=flags,
     )
 
 
@@ -164,6 +169,100 @@ def test_outbound_syn_start_is_kept_and_receives_context_bonus() -> None:
     assert session[0].metrics["outbound_initiated_connections"] == 3
     assert session[0].metrics["established_connections"] == 0
     assert any(item.type == "TCP_SESSION_QUALITY" for item in candidate.evidence)
+
+
+def test_outbound_control_flood_is_removed_from_deterministic_candidates() -> None:
+    flows = [
+        tcp_flow(
+            index / 10,
+            f"10.0.0.{(index % 3) + 1}",
+            direction="OUTBOUND",
+            source_port=52000 + index,
+            destination_port=443,
+            syn=20,
+            syn_only=20,
+            packets=20,
+            flags={"syn": 20, "fin": 20},
+        )
+        for index in range(6)
+    ]
+
+    analysis = context(flows, minimum_distinct_clients=3)
+
+    assert CommonDestinationDetector().analyze(analysis) == []
+    assert run_detectors(analysis) == []
+    assert CommonDestinationDetector().version == "1.1.0"
+
+    gating_disabled = context(
+        flows,
+        minimum_distinct_clients=3,
+        tcp_session_gating_enabled=False,
+    )
+    assert CommonDestinationDetector().analyze(gating_disabled) == []
+    assert run_detectors(gating_disabled) == []
+
+
+def test_control_suppression_versions_every_affected_detector() -> None:
+    affected = {
+        "common_destination",
+        "non_well_known_port",
+        "periodic_beacon",
+        "single_host_composite_beacon",
+        "synchronized_communication",
+        "command_attack_correlation",
+        "persistence_rarity",
+        "protocol_similarity",
+        "ml_population_anomaly",
+        "multi_sensor_context",
+        "tcp_session_quality",
+    }
+    versions = {detector.name: detector.version for detector in DEFAULT_DETECTORS}
+
+    assert {versions[name] for name in affected} == {TCP_CONTROL_SUPPRESSION_DETECTOR_VERSION}
+    assert versions["analyst_payload_signature"] == "1.0.0"
+
+
+def test_control_flood_suppression_preserves_udp_rows_for_same_peer() -> None:
+    flood = [
+        tcp_flow(
+            index / 10,
+            f"10.0.0.{(index % 3) + 1}",
+            direction="OUTBOUND",
+            source_port=53000 + index,
+            destination_port=443,
+            syn=20,
+            syn_only=20,
+            packets=20,
+            flags={"syn": 20},
+        )
+        for index in range(6)
+    ]
+    udp = [
+        Flow(
+            sensor_id="sensor-a",
+            timestamp=START + timedelta(seconds=10 + index),
+            source_ip=f"10.0.0.{index}",
+            destination_ip=CANDIDATE,
+            source_port=54000 + index,
+            destination_port=8443,
+            protocol="UDP",
+            direction="OUTBOUND",
+            packet_count=1,
+            total_bytes=128,
+            payload_hash="udp-c2",
+        )
+        for index in range(1, 4)
+    ]
+
+    evidence = CommonDestinationDetector().analyze(
+        context([*flood, *udp], minimum_distinct_clients=3)
+    )
+
+    assert len(evidence) == 1
+    assert evidence[0].metrics["sample_count"] == len(udp)
+    assert evidence[0].version == "1.1.0"
+    combined = run_detectors(context([*flood, *udp], minimum_distinct_clients=3))
+    assert not any(item.type == "TCP_SESSION_QUALITY" for item in combined)
 
 
 def test_completed_handshake_receives_full_session_quality_bonus() -> None:

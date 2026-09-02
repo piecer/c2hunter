@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from .domain import AnalysisContext, Flow
+from .traffic_suppression import outbound_control_flood_flow_ids
 
 TCPConnectionKey = tuple[str, str, str, int | None, int | None]
 FlowRow = tuple[str, Flow]
@@ -165,8 +166,13 @@ class TCPConnectionProfile:
 
 def tcp_profiles(
     context: AnalysisContext,
+    rows_by_candidate: Mapping[str, list[FlowRow]] | None = None,
 ) -> tuple[dict[str, list[FlowRow]], dict[str, dict[TCPConnectionKey, TCPConnectionProfile]]]:
-    raw = _raw_groups(context)
+    raw = (
+        {candidate: list(rows) for candidate, rows in rows_by_candidate.items()}
+        if rows_by_candidate is not None
+        else _raw_groups(context)
+    )
     result: dict[str, dict[TCPConnectionKey, TCPConnectionProfile]] = {}
     for candidate, rows in raw.items():
         connections: dict[TCPConnectionKey, TCPConnectionProfile] = {}
@@ -205,8 +211,27 @@ def scan_suppressed_keys(
     return probes
 
 
+def _without_outbound_control_floods(
+    context: AnalysisContext, raw: Mapping[str, list[FlowRow]]
+) -> dict[str, list[FlowRow]]:
+    retained: dict[str, list[FlowRow]] = {}
+    for candidate, rows in raw.items():
+        suppressed = outbound_control_flood_flow_ids(context, (flow for _host, flow in rows))
+        selected = [row for row in rows if id(row[1]) not in suppressed]
+        if selected:
+            retained[candidate] = selected
+    return retained
+
+
+def control_filtered_tcp_profiles(
+    context: AnalysisContext,
+) -> tuple[dict[str, list[FlowRow]], dict[str, dict[TCPConnectionKey, TCPConnectionProfile]]]:
+    raw = _without_outbound_control_floods(context, _raw_groups(context))
+    return tcp_profiles(context, raw)
+
+
 def qualified_candidate_groups(context: AnalysisContext) -> dict[str, list[FlowRow]]:
-    raw, profiles = tcp_profiles(context)
+    raw, profiles = control_filtered_tcp_profiles(context)
     if not bool(context.parameters.get("tcp_session_gating_enabled", True)):
         return raw
     allow_legacy = bool(context.parameters.get("tcp_allow_legacy_without_flags", True))
@@ -248,9 +273,14 @@ def qualified_candidate_groups(context: AnalysisContext) -> dict[str, list[FlowR
 
 
 def qualified_tcp_flow_ids(context: AnalysisContext) -> set[int]:
+    raw, profiles = control_filtered_tcp_profiles(context)
     if not bool(context.parameters.get("tcp_session_gating_enabled", True)):
-        return {id(flow) for flow in context.scoped_flows() if flow.protocol.upper() == "TCP"}
-    raw, profiles = tcp_profiles(context)
+        return {
+            id(flow)
+            for rows in raw.values()
+            for _host, flow in rows
+            if flow.protocol.upper() == "TCP"
+        }
     allow_legacy = bool(context.parameters.get("tcp_allow_legacy_without_flags", True))
     require_established = bool(context.parameters.get("tcp_require_established_outbound", False))
     qualified: set[int] = set()

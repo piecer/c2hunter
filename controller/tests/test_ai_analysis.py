@@ -267,6 +267,104 @@ def test_service_analyzes_prefilter_candidate_without_mutating_deterministic_can
     assert assessment["external_ip"] == "203.0.113.77"
 
 
+def test_service_does_not_recommend_outbound_control_flood_target() -> None:
+    repository = MemoryRepository()
+    job = completed_job()
+    attack_target = "203.0.113.200"
+    c2_peer = "203.0.113.77"
+    aggressive = [
+        {
+            "sensor_id": "sensor-a",
+            "timestamp": f"2026-08-09T00:00:00.{index}00000+00:00",
+            "source_ip": "10.0.0.2",
+            "destination_ip": attack_target,
+            "source_port": 50000 + index,
+            "destination_port": 443,
+            "protocol": "TCP",
+            "direction": "OUTBOUND",
+            "packet_count": 20,
+            "total_bytes": 1_200,
+            "tcp_flags": {"syn": 20, "fin": 20},
+        }
+        for index in range(6)
+    ]
+    plausible_c2 = [
+        {
+            "sensor_id": "sensor-a",
+            "timestamp": f"2026-08-09T00:0{index}:00+00:00",
+            "source_ip": "10.0.0.3",
+            "destination_ip": c2_peer,
+            "source_port": 51000,
+            "destination_port": 8443,
+            "protocol": "TCP",
+            "direction": "OUTBOUND",
+            "packet_count": 1,
+            "total_bytes": 128,
+            "payload_hash": "stable-c2-payload",
+            "tcp_flags": {"ack": 1},
+        }
+        for index in range(6)
+    ]
+    job.update(
+        {
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "flow_records": [*aggressive, *plausible_c2],
+        }
+    )
+    repository.jobs["job-1"] = job
+
+    run, _ = AIAnalysisService(repository, FakeGateway()).create_and_execute(
+        analysis_job_id="job-1",
+        idempotency_key="suppress-control-flood",
+        candidate_limit=5,
+        created_by="analyst",
+    )
+
+    assert [item["candidate_ip"] for item in run["candidate_snapshots"]] == [c2_peer]
+
+
+def test_control_flood_suppression_does_not_hide_deterministic_candidate() -> None:
+    repository = MemoryRepository()
+    job = completed_job()
+    attack_target = "203.0.113.200"
+    job.update(
+        {
+            "sensor_ids": ["sensor-a"],
+            "internal_networks": ["10.0.0.0/8"],
+            "flow_records": [
+                {
+                    "sensor_id": "sensor-a",
+                    "timestamp": f"2026-08-09T00:00:00.{index}00000+00:00",
+                    "source_ip": "10.0.0.2",
+                    "destination_ip": attack_target,
+                    "source_port": 50000 + index,
+                    "destination_port": 443,
+                    "protocol": "TCP",
+                    "direction": "OUTBOUND",
+                    "packet_count": 20,
+                    "total_bytes": 1_200,
+                    "tcp_flags": {"syn": 20, "fin": 20},
+                }
+                for index in range(6)
+            ],
+        }
+    )
+    repository.jobs["job-1"] = job
+    deterministic = {**candidate(), "candidate_ip": attack_target}
+    repository.save_candidates("job-1", [deterministic])
+
+    run, _ = AIAnalysisService(repository, FakeGateway()).create_and_execute(
+        analysis_job_id="job-1",
+        idempotency_key="preserve-deterministic-control-flood",
+        candidate_limit=5,
+        created_by="analyst",
+    )
+
+    assert [item["candidate_ip"] for item in run["candidate_snapshots"]] == [attack_target]
+    assert run["candidate_snapshots"][0]["score"] == deterministic["score"]
+
+
 def test_fake_gateway_returns_schema_valid_output_with_supplied_evidence_ids() -> None:
     bundle = build_evidence_bundle(candidate())
 

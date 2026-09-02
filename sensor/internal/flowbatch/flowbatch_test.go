@@ -39,6 +39,9 @@ func TestNewProducesStableContentAddressedIDAndControllerSchema(t *testing.T) {
 	if got.SensorID != "sensor-a" || got.Timestamp != record.StartTime || got.Protocol != "TCP" || got.PayloadHash != "payload" || got.LastPayloadHash != "last-payload" || got.PayloadSampleHex != "626f74" || got.TLSFingerprint != "tls" || got.Domain != "c2.example" {
 		t.Fatalf("flow = %+v", got)
 	}
+	if got.DurationSeconds != 1 {
+		t.Fatalf("duration_seconds = %v, want 1", got.DurationSeconds)
+	}
 	if got.PayloadLength == nil || got.PayloadEntropy == nil || got.PayloadPrintableRatio == nil {
 		t.Fatalf("optional payload features were omitted: %+v", got)
 	}
