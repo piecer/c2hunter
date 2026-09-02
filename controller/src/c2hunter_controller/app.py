@@ -585,6 +585,16 @@ def _dashboard_snapshot(
         for candidate in candidate_set
         if not candidate.get("excluded", False)
     ]
+    threat_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.get("candidate_kind", "C2") != "COMMUNICATION_STATUS"
+    ]
+    communication_status_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.get("candidate_kind") == "COMMUNICATION_STATUS"
+    ]
 
     active_statuses = {
         "WAITING_FOR_SENSOR",
@@ -633,7 +643,8 @@ def _dashboard_snapshot(
     )
     severity_counts = {
         severity: sum(
-            str(candidate.get("severity", "LOW")).upper() == severity for candidate in candidates
+            str(candidate.get("severity", "LOW")).upper() == severity
+            for candidate in threat_candidates
         )
         for severity in ("CRITICAL", "HIGH", "MEDIUM", "LOW")
     }
@@ -641,7 +652,7 @@ def _dashboard_snapshot(
     hour_start = generated_at.replace(minute=0, second=0, microsecond=0)
     trend_hours = [hour_start - timedelta(hours=offset) for offset in range(23, -1, -1)]
     trend_counts = {hour: 0 for hour in trend_hours}
-    for candidate in candidates:
+    for candidate in threat_candidates:
         first_seen = _utc_datetime(candidate.get("first_seen"))
         if first_seen is None or first_seen < trend_hours[0] or first_seen > generated_at:
             continue
@@ -649,11 +660,11 @@ def _dashboard_snapshot(
         if bucket in trend_counts:
             trend_counts[bucket] += 1
 
-    workflow_counts = _candidate_workflow_counts(candidates)
+    workflow_counts = _candidate_workflow_counts(threat_candidates)
     priority_candidates = sorted(
         (
             candidate
-            for candidate in candidates
+            for candidate in threat_candidates
             if _candidate_workflow_status(candidate)
             in {"NEEDS_REVIEW", "IN_REVIEW", "ACTION_REQUIRED", "ACTION_IN_PROGRESS"}
         ),
@@ -758,7 +769,8 @@ def _dashboard_snapshot(
             ),
         },
         "candidates": {
-            "total": len(candidates),
+            "total": len(threat_candidates),
+            "communication_status": len(communication_status_candidates),
             "critical": severity_counts["CRITICAL"],
             "high": severity_counts["HIGH"],
             "medium": severity_counts["MEDIUM"],
@@ -766,7 +778,7 @@ def _dashboard_snapshot(
             "new_24h": sum(
                 (_utc_datetime(candidate.get("first_seen")) or datetime.min.replace(tzinfo=UTC))
                 >= window_start
-                for candidate in candidates
+                for candidate in threat_candidates
             ),
             **workflow_counts,
         },
@@ -778,6 +790,7 @@ def _dashboard_snapshot(
                 "id": candidate["id"],
                 "job_id": candidate["job_id"],
                 "candidate_ip": candidate["candidate_ip"],
+                "candidate_kind": candidate.get("candidate_kind", "C2"),
                 "score": candidate.get("score", 0),
                 "severity": candidate.get("severity", "LOW"),
                 "last_seen": candidate.get("last_seen"),
@@ -2160,6 +2173,8 @@ def create_app(
         policy: dict[str, Any],
         publisher: MispPublisher | None,
     ) -> None:
+        if candidate.get("candidate_kind") == "COMMUNICATION_STATUS":
+            return
         if not policy.get("immediate_action_auto_register") or publisher is None:
             return
         event_id = str(policy.get("immediate_action_event_id", ""))
@@ -2475,7 +2490,12 @@ def create_app(
     def schedule_candidate_enrichment(job_id: str, candidates: list[dict[str, Any]]) -> None:
         policy = integration_settings()
         publisher = misp_for(policy)
-        for candidate in candidates:
+        threat_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.get("candidate_kind", "C2") != "COMMUNICATION_STATUS"
+        ]
+        for candidate in threat_candidates:
             register_candidate_for_management(repo, job_id, candidate, policy, publisher)
         if threat_intel_for(policy) is None and publisher is None:
             return
@@ -2485,7 +2505,9 @@ def create_app(
             or int(policy.get("candidate_auto_enrichment_limit", 0)) == 0
         ):
             return
-        ordered = sorted(candidates, key=lambda item: int(item.get("score", 0)), reverse=True)
+        ordered = sorted(
+            threat_candidates, key=lambda item: int(item.get("score", 0)), reverse=True
+        )
         selected = (
             ordered
             if immediate_enabled

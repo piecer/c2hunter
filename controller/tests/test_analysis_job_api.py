@@ -446,3 +446,84 @@ def test_detector_weight_preset_update_and_default_switch_are_atomic() -> None:
     assert switch.result().status_code == 200
     presets = client.get("/api/v1/detector-weight-presets").json()["items"]
     assert [preset["id"] for preset in presets if preset["is_default"]] == ["preset-second"]
+
+
+def test_periodic_syn_attempt_candidate_survives_persistence_and_api_projection() -> None:
+    client = api()
+    request = payload(
+        key="periodic-syn-attempt",
+        flows=[
+            {
+                "sensor_id": "s1",
+                "timestamp": START.isoformat(),
+                "source_ip": "10.0.0.1",
+                "destination_ip": "203.0.113.40",
+                "source_port": 50000,
+                "destination_port": 443,
+                "protocol": "TCP",
+                "direction": "OUTBOUND",
+                "packet_count": 4,
+                "total_bytes": 240,
+                "duration_seconds": 12,
+                "tcp_flags": {"syn": 4},
+                "tcp_flags_observed": True,
+                "tcp_syn_count": 4,
+                "tcp_syn_only_count": 4,
+                "tcp_syn_only_observations": [
+                    {"offset_us": 0, "sequence": 12345},
+                    {"offset_us": 2_000_000, "sequence": 12345},
+                    {"offset_us": 6_000_000, "sequence": 12345},
+                    {"offset_us": 12_000_000, "sequence": 12345},
+                ],
+                "packet_sizes": [60],
+            }
+        ],
+    )
+
+    created = client.post("/api/v1/analysis-jobs", json=request)
+
+    assert created.status_code == 201
+    job_id = created.json()["id"]
+    listed = client.get(f"/api/v1/analysis-jobs/{job_id}/candidates").json()
+    assert listed["total"] == 1
+    assert listed["items"][0]["candidate_kind"] == "COMMUNICATION_STATUS"
+    candidate_id = listed["items"][0]["id"]
+    detail = client.get(f"/api/v1/analysis-jobs/{job_id}/candidates/{candidate_id}").json()
+    assert detail["candidate_kind"] == "COMMUNICATION_STATUS"
+    assert detail["score"] == 0
+    assert detail["evidence"][0]["type"] == "TCP_COMMUNICATION_ATTEMPT_PATTERN"
+
+
+def test_oversized_syn_observation_timeline_is_rejected_before_job_creation() -> None:
+    repository = MemoryRepository()
+    client = api(repository)
+    request = payload(
+        key="oversized-syn-timeline",
+        flows=[
+            {
+                "sensor_id": "s1",
+                "timestamp": START.isoformat(),
+                "source_ip": "10.0.0.1",
+                "destination_ip": "203.0.113.40",
+                "source_port": 50000,
+                "destination_port": 443,
+                "protocol": "TCP",
+                "direction": "OUTBOUND",
+                "packet_count": 17,
+                "total_bytes": 1020,
+                "duration_seconds": 16,
+                "tcp_flags": {"syn": 17},
+                "tcp_flags_observed": True,
+                "tcp_syn_count": 17,
+                "tcp_syn_only_count": 17,
+                "tcp_syn_only_observations": [
+                    {"offset_us": index * 1_000_000, "sequence": 12345} for index in range(17)
+                ],
+            }
+        ],
+    )
+
+    response = client.post("/api/v1/analysis-jobs", json=request)
+
+    assert response.status_code == 422
+    assert repository.list_jobs() == []

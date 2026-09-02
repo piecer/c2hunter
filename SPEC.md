@@ -528,6 +528,10 @@ CANCELLED
     "high_volume_penalty": 30,
     "tcp_session_gating_enabled": true,
     "tcp_require_established_outbound": false,
+    "tcp_syn_retry_detection_enabled": true,
+    "tcp_syn_retry_min_intervals": 3,
+    "tcp_syn_retry_min_interval_ms": 500,
+    "tcp_syn_retry_max_interval_ms": 120000,
     "detector_weights": {
       "common_destination": 1.0,
       "periodic_beacon": 1.5,
@@ -922,6 +926,7 @@ Dashboard에는 다음 정보를 표시한다.
 * 현재 캡처 중인 작업
 * 최근 완료된 분석
 * High/Critical C2 후보 수
+* C2 위협 총계·심각도·review queue와 분리된 `COMMUNICATION_STATUS` 운영 관측 수
 * 센서별 패킷 수 및 드롭률
 * 최근 24시간 C2 후보 추이
 

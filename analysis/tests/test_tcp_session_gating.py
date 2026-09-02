@@ -191,7 +191,7 @@ def test_outbound_control_flood_is_removed_from_deterministic_candidates() -> No
 
     assert CommonDestinationDetector().analyze(analysis) == []
     assert run_detectors(analysis) == []
-    assert CommonDestinationDetector().version == "1.1.0"
+    assert CommonDestinationDetector().version == "1.2.0"
 
     gating_disabled = context(
         flows,
@@ -260,7 +260,7 @@ def test_control_flood_suppression_preserves_udp_rows_for_same_peer() -> None:
 
     assert len(evidence) == 1
     assert evidence[0].metrics["sample_count"] == len(udp)
-    assert evidence[0].version == "1.1.0"
+    assert evidence[0].version == "1.2.0"
     combined = run_detectors(context([*flood, *udp], minimum_distinct_clients=3))
     assert not any(item.type == "TCP_SESSION_QUALITY" for item in combined)
 

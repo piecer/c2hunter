@@ -12,7 +12,12 @@ from c2hunter_analysis.custom import (
     normalize_custom_detector_directory,
 )
 from c2hunter_analysis.detectors import DEFAULT_DETECTORS, run_detectors
-from c2hunter_analysis.domain import AllowlistEntry, AnalysisContext, Flow
+from c2hunter_analysis.domain import (
+    AllowlistEntry,
+    AnalysisContext,
+    Flow,
+    normalize_tcp_syn_observations,
+)
 from c2hunter_analysis.scoring import score_candidates
 
 from .schemas import AnalysisJobCreate, FlowRecord
@@ -216,6 +221,9 @@ def evaluate_candidates(
         if isinstance(record["timestamp"], str):
             record["timestamp"] = datetime.fromisoformat(record["timestamp"])
         record["packet_sizes"] = tuple(record.get("packet_sizes", ()))
+        record["tcp_syn_only_observations"] = normalize_tcp_syn_observations(
+            record.get("tcp_syn_only_observations")
+        )
         record.pop("raw_packet_hex", None)
         record.pop("payload_sample_hex", None)
         flows.append(Flow(**record))
@@ -277,7 +285,11 @@ def calculate(
 ) -> list[dict[str, Any]]:
     scored = evaluate_candidates(job, allowlist)
     minimum_score = int(job["analysis"]["minimum_candidate_score"])
-    retained = [candidate for candidate in scored if candidate.score >= minimum_score]
+    retained = [
+        candidate
+        for candidate in scored
+        if candidate.score >= minimum_score or candidate.candidate_kind == "COMMUNICATION_STATUS"
+    ]
     traffic = summarize_candidate_traffic(
         job["flow_records"], {candidate.candidate_ip for candidate in retained}
     )

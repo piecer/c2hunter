@@ -19,7 +19,16 @@ CAPS = {
     "NON_WELL_KNOWN_PORT": 25,
     "ML_POPULATION_ANOMALY": 5,
     "TCP_SESSION_QUALITY": 15,
+    "TCP_COMMUNICATION_ATTEMPT_PATTERN": 0,
+    "TCP_COMMUNICATION_ATTEMPT_ANALYSIS_INCOMPLETE": 0,
 }
+
+OPERATIONAL_EVIDENCE_TYPES = frozenset(
+    {
+        "TCP_COMMUNICATION_ATTEMPT_PATTERN",
+        "TCP_COMMUNICATION_ATTEMPT_ANALYSIS_INCOMPLETE",
+    }
+)
 
 DETECTOR_NAMES = (
     "common_destination",
@@ -70,12 +79,14 @@ def score_candidates(
     instant = now or datetime.now(UTC)
     candidates: list[Candidate] = []
     for candidate_ip, items in grouped.items():
-        if any(entry.matches(candidate_ip, items, instant) for entry in allowlist):
+        scoring_items = [item for item in items if item.type not in OPERATIONAL_EVIDENCE_TYPES]
+        allowlist_items = scoring_items or items
+        if any(entry.matches(candidate_ip, allowlist_items, instant) for entry in allowlist):
             continue
         by_type: dict[str, float] = defaultdict(float)
         weighted_by_type: dict[str, float] = defaultdict(float)
         weights_by_type: dict[str, dict[str, float]] = defaultdict(dict)
-        for item in items:
+        for item in scoring_items:
             contribution = max(0, item.contribution)
             weight = max(
                 0.0,
@@ -87,6 +98,7 @@ def score_candidates(
         score = sum(min(CAPS.get(kind, 0), value) for kind, value in by_type.items())
         hosts = sorted({host for item in items for host in item.hosts})
         sensors = sorted({sensor for item in items for sensor in item.sensors})
+        scoring_hosts = {host for item in scoring_items for host in item.hosts}
         adjustments: list[ScoreAdjustment] = []
         for kind in sorted(by_type):
             cap = CAPS.get(kind, 0)
@@ -108,19 +120,22 @@ def score_candidates(
             )
         exact_analyst_match = any(
             item.type == "ANALYST_PAYLOAD_SIGNATURE" and item.metrics.get("match_mode") == "EXACT"
-            for item in items
+            for item in scoring_items
         )
-        if len(hosts) == 1 and not exact_analyst_match:
-            points = -10 if any(item.type == "SINGLE_HOST_BEACON" for item in items) else -20
+        if scoring_items and len(scoring_hosts) == 1 and not exact_analyst_match:
+            points = (
+                -10 if any(item.type == "SINGLE_HOST_BEACON" for item in scoring_items) else -20
+            )
             adjustments.append(ScoreAdjustment("SINGLE_HOST", points, "단일 내부 호스트 관찰"))
         sample_count = max(
-            (int(item.metrics.get("sample_count", minimum_samples)) for item in items), default=0
+            (int(item.metrics.get("sample_count", minimum_samples)) for item in scoring_items),
+            default=0,
         )
-        if sample_count < minimum_samples and not exact_analyst_match:
+        if scoring_items and sample_count < minimum_samples and not exact_analyst_match:
             adjustments.append(ScoreAdjustment("LOW_SAMPLE", -20, "분석 표본 부족"))
-        if any(item.metrics.get("public_dns_ntp") for item in items):
+        if any(item.metrics.get("public_dns_ntp") for item in scoring_items):
             adjustments.append(ScoreAdjustment("PUBLIC_DNS_NTP", -30, "공용 DNS/NTP 정책 일치"))
-        if any(item.metrics.get("cdn_cloud") for item in items):
+        if any(item.metrics.get("cdn_cloud") for item in scoring_items):
             adjustments.append(ScoreAdjustment("CDN_CLOUD", -20, "CDN/cloud 정책 일치"))
         profile = (traffic_profiles or {}).get(candidate_ip, {})
         total_bytes = max(0, int(profile.get("total_bytes", 0) or 0))
@@ -130,7 +145,7 @@ def score_candidates(
             volume_reasons.append(f"bytes {total_bytes:,} >= {high_volume_bytes_threshold:,}")
         if high_volume_packet_threshold > 0 and total_packets >= high_volume_packet_threshold:
             volume_reasons.append(f"packets {total_packets:,} >= {high_volume_packet_threshold:,}")
-        if volume_reasons and high_volume_penalty > 0 and not exact_analyst_match:
+        if scoring_items and volume_reasons and high_volume_penalty > 0 and not exact_analyst_match:
             adjustments.append(
                 ScoreAdjustment(
                     "HIGH_VOLUME",
@@ -158,7 +173,8 @@ def score_candidates(
             )
         adjusted_score = score + sum(item.points for item in adjustments)
         if (
-            tcp_session_reasons
+            scoring_items
+            and tcp_session_reasons
             and not exact_analyst_match
             and adjusted_score > high_volume_tcp_session_score_cap
         ):
@@ -172,6 +188,7 @@ def score_candidates(
             )
         final = max(0, min(100, round(score + sum(item.points for item in adjustments))))
         times = [time for item in items for time in (item.first_seen, item.last_seen) if time]
+        candidate_kind = "COMMUNICATION_STATUS" if not scoring_items else "C2"
         candidates.append(
             Candidate(
                 candidate_ip,
@@ -183,6 +200,7 @@ def score_candidates(
                 tuple(sensors),
                 min(times) if times else None,
                 max(times) if times else None,
+                candidate_kind,
             )
         )
     return sorted(candidates, key=lambda item: (-item.score, item.candidate_ip))

@@ -10,7 +10,12 @@ from c2hunter_analysis.custom import (
     normalize_custom_detector_directory,
 )
 from c2hunter_analysis.detectors import DEFAULT_DETECTORS, run_detectors
-from c2hunter_analysis.domain import AllowlistEntry, AnalysisContext, Flow
+from c2hunter_analysis.domain import (
+    AllowlistEntry,
+    AnalysisContext,
+    Flow,
+    normalize_tcp_syn_observations,
+)
 from c2hunter_analysis.scoring import score_candidates
 
 
@@ -27,6 +32,9 @@ def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(timestamp, str):
             record["timestamp"] = datetime.fromisoformat(timestamp)
         record["packet_sizes"] = tuple(record.get("packet_sizes", ()))
+        record["tcp_syn_only_observations"] = normalize_tcp_syn_observations(
+            record.get("tcp_syn_only_observations")
+        )
         record.pop("raw_packet_hex", None)
         record.pop("payload_sample_hex", None)
         flows.append(Flow(**record))
@@ -93,6 +101,7 @@ def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
             _json_value(asdict(candidate))
             for candidate in candidates
             if candidate.score >= minimum_score
+            or candidate.candidate_kind == "COMMUNICATION_STATUS"
         ]
     }
 

@@ -4,14 +4,14 @@ import hashlib
 import json
 import math
 import uuid
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal, Protocol
 
 from c2hunter_analysis.ai_candidates import generate_high_recall_candidates
-from c2hunter_analysis.domain import AnalysisContext, Flow
+from c2hunter_analysis.domain import AnalysisContext, Flow, normalize_tcp_syn_observations
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .ai_feedback import REVIEW_PRIORITY_VERSION, calculate_review_priority
@@ -99,6 +99,7 @@ class EvidenceCandidate(BaseModel):
 
     candidate_id: str
     external_ip: str
+    candidate_kind: Literal["C2", "COMMUNICATION_STATUS"] = "C2"
     existing_c2hunter_score: float = Field(ge=0, le=100)
     prefilter_score: float = Field(default=0, ge=0, le=100)
     prefilter_score_version: str | None = None
@@ -139,7 +140,7 @@ class ProtocolContext(BaseModel):
     domains: list[str] = Field(default_factory=list, max_length=100)
     tls_fingerprints: list[str] = Field(default_factory=list, max_length=100)
     certificate_fingerprints: list[str] = Field(default_factory=list, max_length=100)
-    tcp_flags: dict[str, int] = Field(default_factory=dict)
+    tcp_flags: dict[str, int | float] = Field(default_factory=dict)
 
 
 class BundleMetadata(BaseModel):
@@ -313,17 +314,28 @@ def _flow_summary(flows: list[dict[str, Any]]) -> FlowSummary:
 
 
 def _protocol_context(flows: list[dict[str, Any]]) -> ProtocolContext:
-    tcp_flags: Counter[str] = Counter()
+    tcp_flag_counts: Counter[str] = Counter()
+    tcp_flag_ratio_totals: dict[str, float] = defaultdict(float)
+    tcp_flag_ratio_counts: Counter[str] = Counter()
     for flow in flows:
         flags = flow.get("tcp_flags")
         if isinstance(flags, dict):
             for name, count in flags.items():
                 if isinstance(count, int | float) and not isinstance(count, bool):
-                    tcp_flags[str(name)] += max(0, int(count))
+                    normalized_name = str(name)
+                    if normalized_name in {"rst_ratio", "syn_ack_ratio"}:
+                        tcp_flag_ratio_totals[normalized_name] += max(0.0, float(count))
+                        tcp_flag_ratio_counts[normalized_name] += 1
+                    else:
+                        tcp_flag_counts[normalized_name] += max(0, int(count))
 
     def values(field: str) -> list[str]:
         return sorted({str(flow[field])[:512] for flow in flows if flow.get(field)})[:100]
 
+    tcp_flags: dict[str, int | float] = dict(tcp_flag_counts)
+    tcp_flags.update(
+        {name: total / tcp_flag_ratio_counts[name] for name, total in tcp_flag_ratio_totals.items()}
+    )
     return ProtocolContext(
         domains=values("domain"),
         tls_fingerprints=values("tls_fingerprint"),
@@ -423,10 +435,14 @@ def build_evidence_bundle(
         for flow in flows
         if external_ip in {str(flow.get("source_ip", "")), str(flow.get("destination_ip", ""))}
     ]
+    candidate_kind = str(candidate.get("candidate_kind") or "C2")
+    if candidate_kind not in {"C2", "COMMUNICATION_STATUS"}:
+        candidate_kind = "C2"
     bundle = CandidateEvidenceBundle(
         candidate=EvidenceCandidate(
             candidate_id=str(candidate.get("id", "")),
             external_ip=str(candidate.get("candidate_ip", "")),
+            candidate_kind=candidate_kind,  # type: ignore[arg-type]
             existing_c2hunter_score=float(candidate.get("score", 0)),
             prefilter_score=float(candidate.get("prefilter_score", 0)),
             prefilter_score_version=candidate.get("prefilter_score_version"),
@@ -454,6 +470,13 @@ def validate_assessment_evidence(
 ) -> None:
     if assessment.candidate.external_ip != bundle.candidate.external_ip:
         raise AIAnalysisError("assessment candidate does not match evidence bundle")
+    if (
+        bundle.candidate.candidate_kind == "COMMUNICATION_STATUS"
+        and assessment.candidate.verdict in {"SUSPICIOUS", "LIKELY_C2"}
+    ):
+        raise AIAnalysisError(
+            "operational communication status cannot support a C2-positive verdict"
+        )
     supplied = {item.evidence_id for item in bundle.evidence}
     referenced: set[str] = set()
     for supporting_factor in assessment.supporting_factors:
@@ -504,6 +527,20 @@ def _analysis_context_from_job(job: dict[str, Any]) -> AnalysisContext | None:
                     duration_seconds=float(stored.get("duration_seconds") or 0),
                     last_payload_hash=stored.get("last_payload_hash"),
                     tcp_flags=stored.get("tcp_flags"),
+                    tcp_flags_observed=bool(stored.get("tcp_flags_observed", False)),
+                    tcp_syn_count=int(stored.get("tcp_syn_count") or 0),
+                    tcp_ack_count=int(stored.get("tcp_ack_count") or 0),
+                    tcp_rst_count=int(stored.get("tcp_rst_count") or 0),
+                    tcp_syn_only_count=int(stored.get("tcp_syn_only_count") or 0),
+                    tcp_syn_ack_count=int(stored.get("tcp_syn_ack_count") or 0),
+                    tcp_ack_only_count=int(stored.get("tcp_ack_only_count") or 0),
+                    tcp_syn_only_observations=normalize_tcp_syn_observations(
+                        stored.get("tcp_syn_only_observations")
+                    ),
+                    tcp_syn_only_observations_truncated=bool(
+                        stored.get("tcp_syn_only_observations_truncated", False)
+                    ),
+                    bidirectional=bool(stored.get("bidirectional", False)),
                 )
             )
         except (KeyError, TypeError, ValueError):
@@ -524,6 +561,7 @@ def _analysis_context_from_job(job: dict[str, Any]) -> AnalysisContext | None:
                 ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"),
             )
         ),
+        parameters=dict(job.get("analysis") or {}),
     )
 
 
@@ -578,6 +616,7 @@ def _candidate_snapshot(candidate: dict[str, Any]) -> dict[str, Any]:
         for key in (
             "id",
             "candidate_ip",
+            "candidate_kind",
             "score",
             "prefilter_score",
             "prefilter_score_version",
@@ -726,13 +765,13 @@ class AIAnalysisService:
             "provider": self.gateway.provider,
             "model_name": self.gateway.model,
             "prompt_name": str(getattr(self.gateway, "prompt_name", "candidate_system")),
-            "prompt_version": str(getattr(self.gateway, "prompt_version", "1.0")),
+            "prompt_version": str(getattr(self.gateway, "prompt_version", "1.1")),
             "prompt_hash": str(
                 getattr(
                     self.gateway,
                     "prompt_hash",
                     hashlib.sha256(
-                        b"C2Hunter defensive candidate assessment prompt v1.0"
+                        b"C2Hunter defensive candidate assessment prompt v1.1"
                     ).hexdigest(),
                 )
             ),

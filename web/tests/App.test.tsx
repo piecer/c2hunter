@@ -10,7 +10,7 @@ const responses: Record<string, unknown> = {
     generated_at: '2026-07-20T10:10:00Z',
     fleet: { total: 3, online: 2, offline: 1, degraded: 0, dropped_packets: 6 },
     analyses: { total: 4, active: 1, completed_24h: 2, failed_24h: 1, partially_completed_24h: 1, by_status: { WAITING_FOR_SENSOR: 0, CAPTURING: 0, UPLOADING: 0, INGESTING: 0, ANALYZING: 1 } },
-    candidates: { total: 5, critical: 1, high: 1, medium: 2, low: 1, new_24h: 3, needs_review: 2, in_review: 1, action_required: 1, done: 1 },
+    candidates: { total: 5, communication_status: 2, critical: 1, high: 1, medium: 2, low: 1, new_24h: 3, needs_review: 2, in_review: 1, action_required: 1, done: 1 },
     candidate_trend: [{ hour: '07:00', count: 0 }, { hour: '08:00', count: 1 }, { hour: '09:00', count: 0 }, { hour: '10:00', count: 2 }],
     priority_candidates: [
       { id: 'candidate-new', job_id: 'job-1', candidate_ip: '203.0.113.20', score: 65, severity: 'MEDIUM', last_seen: '2026-07-20T10:09:00Z', evidence_count: 1 },
@@ -83,6 +83,8 @@ describe('C2Hunter UI', () => {
     renderAt('/');
     expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeInTheDocument();
     expect(await screen.findByText('온라인 센서')).toBeInTheDocument();
+    const communicationMetric = screen.getByText('통신 상태', { selector: '.metric span' }).closest('article') as HTMLElement;
+    expect(within(communicationMetric).getByText('2', { selector: 'strong' })).toBeInTheDocument();
     expect(screen.getByText('조치 필요', { selector: '.metric span' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '지금 확인할 항목' })).toBeInTheDocument();
     const priorityHeading = screen.getByRole('heading', { name: '분석 및 조치 필요 후보' });
@@ -344,6 +346,52 @@ describe('C2Hunter UI', () => {
     expect(await within(region).findByText('SUSPICIOUS')).toBeInTheDocument();
     expect(within(region).getByText('신뢰도 75%')).toBeInTheDocument();
     expect(within(region).getByText('E-C2H-candidate-1-01')).toBeInTheDocument();
+  });
+
+  it('labels periodic SYN retry communication status candidates', async () => {
+    renderAt('/candidates/connection-status-1', async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/api/v1/candidates/connection-status-1') return new Response(JSON.stringify({
+        id: 'connection-status-1', job_id: 'job-1', candidate_ip: '203.0.113.40',
+        candidate_kind: 'COMMUNICATION_STATUS', score: 0, severity: 'LOW',
+        hosts: ['10.0.0.1'], sensors: ['sensor-a'], evidence: [{
+          type: 'TCP_COMMUNICATION_ATTEMPT_PATTERN', detector: 'tcp_communication_attempt', version: '1.0.0', contribution: 0,
+          description: 'Periodic outbound SYN retransmissions had no observed completion',
+          metrics: { outcome: 'NO_COMPLETION_OBSERVED', retry_intervals_ms: [2000, 4000, 6000], syn_transmission_count: 4 },
+        }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404, headers: { 'content-type': 'application/json' } });
+    });
+
+    expect(await screen.findByRole('heading', { name: '203.0.113.40' })).toBeInTheDocument();
+    expect(screen.getByText('통신 상태 후보')).toBeInTheDocument();
+    expect(screen.getByText('TCP 통신 재시도 패턴')).toBeInTheDocument();
+    expect(screen.getByText('세션 성립 미관찰')).toBeInTheDocument();
+  });
+
+  it('labels communication status candidates in analysis and triage lists', async () => {
+    const statusCandidate = {
+      id: 'connection-status-1', job_id: 'job-1', candidate_ip: '203.0.113.40',
+      candidate_kind: 'COMMUNICATION_STATUS', score: 0, severity: 'LOW',
+      hosts: ['10.0.0.1'], sensors: ['sensor-a'],
+      evidence: [{ type: 'TCP_COMMUNICATION_ATTEMPT_PATTERN', contribution: 0 }],
+    };
+    const handler = async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === '/api/v1/analysis-jobs/job-1/candidates?page_size=200') {
+        return new Response(JSON.stringify({ items: [statusCandidate] }), { status: 200 });
+      }
+      if (path.startsWith('/api/v1/candidates?')) {
+        return new Response(JSON.stringify({ items: [statusCandidate], page: 1, total_pages: 1 }), { status: 200 });
+      }
+      return new Response(JSON.stringify(responses[path] ?? { items: [] }), { status: 200 });
+    };
+    const analysis = renderAt('/analyses/job-1', handler);
+
+    expect(await screen.findByText('통신 상태 후보')).toBeInTheDocument();
+    analysis.unmount();
+    renderAt('/candidates', handler);
+    expect(await screen.findByText('통신 상태 후보')).toBeInTheDocument();
   });
 
   it('presents nested capture and detection configuration without exposed raw JSON', async () => {

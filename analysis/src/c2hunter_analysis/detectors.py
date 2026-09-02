@@ -4,19 +4,25 @@ import math
 import statistics
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 
 from .domain import AnalysisContext, Detector, Evidence, Flow
 from .payload_features import simhash_hamming_distance
 from .tcp_sessions import (
+    MAX_SYN_RETRY_EPISODES_PER_CONNECTION,
+    MAX_SYN_RETRY_EVIDENCE_PER_ANALYSIS,
+    MAX_SYN_RETRY_EVIDENCE_PER_CANDIDATE,
+    MAX_SYN_RETRY_OBSERVATIONS_PER_CONNECTION,
+    MAX_SYN_RETRY_RESPONSE_ROWS,
+    bounded_syn_retry_selections,
     control_filtered_tcp_profiles,
     qualified_candidate_groups,
     qualified_tcp_flow_ids,
     scan_suppressed_keys,
 )
 
-TCP_CONTROL_SUPPRESSION_DETECTOR_VERSION = "1.1.0"
+TCP_CONTROL_SUPPRESSION_DETECTOR_VERSION = "1.2.0"
 _TCP_CONTROL_SUPPRESSION_DETECTORS = frozenset(
     {
         "common_destination",
@@ -1019,6 +1025,120 @@ class MultiSensorDetector:
 
 
 @dataclass(frozen=True)
+class TCPCommunicationAttemptDetector:
+    """Classify periodic outbound SYN retries without scoring them as C2."""
+
+    name: str = "tcp_communication_attempt"
+    version: str = "1.1.0"
+
+    def analyze(self, context: AnalysisContext) -> list[Evidence]:
+        result: list[Evidence] = []
+        for selection in bounded_syn_retry_selections(context):
+            candidate = selection.candidate
+            key = selection.key
+            profile = selection.profile
+            if selection.incomplete_reason:
+                result.append(
+                    _base_evidence(
+                        candidate,
+                        "TCP_COMMUNICATION_ATTEMPT_ANALYSIS_INCOMPLETE",
+                        self.name,
+                        0,
+                        profile.rows[:1],
+                        {
+                            "reason": selection.incomplete_reason,
+                            "observations_examined": profile.syn_retry_observations_examined,
+                            "observation_limit": MAX_SYN_RETRY_OBSERVATIONS_PER_CONNECTION,
+                            "episodes_examined": profile.syn_retry_episodes_examined,
+                            "episode_limit": MAX_SYN_RETRY_EPISODES_PER_CONNECTION,
+                            "candidate_evidence_limit": MAX_SYN_RETRY_EVIDENCE_PER_CANDIDATE,
+                            "analysis_evidence_limit": MAX_SYN_RETRY_EVIDENCE_PER_ANALYSIS,
+                            "internal_host": key[2],
+                            "internal_port": key[3],
+                            "service_port": key[4],
+                            "sample_count": 1,
+                        },
+                        "SYN 재시도 분석 예산을 초과하여 기존 C2 입력을 보존함",
+                        confidence=0.0,
+                        warnings=("retry_analysis_incomplete",),
+                    )
+                )
+                continue
+            episode = selection.episode
+            if episode is None:
+                continue
+            outcome = profile.syn_retry_outcome(context, episode)
+            metrics = {
+                "semantics": "SYN_TRANSMISSION_OBSERVATIONS",
+                "outcome": outcome,
+                "syn_transmission_count": len(episode.intervals_ms) + 1,
+                "distinct_initial_sequence_count": 1,
+                "retransmission_count": len(episode.intervals_ms),
+                "retry_intervals_ms": list(episode.intervals_ms[:15]),
+                "retry_intervals_truncated": len(episode.intervals_ms) > 15,
+                "response_rows_truncated": profile.syn_retry_response_rows_truncated,
+                "response_timing_approximate": profile.syn_retry_response_timing_approximate,
+                "response_row_limit": MAX_SYN_RETRY_RESPONSE_ROWS,
+                "base_interval_ms": min(episode.intervals_ms),
+                "timing_complete": True,
+                "timing_resolution_us": 1,
+                "internal_host": key[2],
+                "internal_port": key[3],
+                "service_port": key[4],
+                "sample_count": 1,
+            }
+            warnings: tuple[str, ...]
+            if outcome == "NO_COMPLETION_OBSERVED":
+                confidence = 0.65
+                warnings = (
+                    "no_response_is_not_host_unavailable",
+                    "capture_loss_or_asymmetry_possible",
+                )
+                description = "주기적 outbound SYN 재전송에서 세션 성립이 관찰되지 않음"
+            elif outcome == "REFUSED_OR_RESET_OBSERVED":
+                confidence = 0.95
+                warnings = ()
+                description = "주기적 outbound SYN 재전송 후 TCP RST 응답이 관찰됨"
+            elif outcome == "ESTABLISHED_OBSERVED":
+                confidence = 0.95
+                warnings = ()
+                description = "주기적 outbound SYN 재전송 후 TCP 세션 성립이 관찰됨"
+            elif outcome == "LOCAL_ACK_OBSERVED":
+                confidence = 0.7
+                warnings = ("peer_response_not_observed",)
+                description = "주기적 outbound SYN 재전송 후 local ACK가 관찰됨"
+            else:
+                confidence = 0.8
+                warnings = ("handshake_completion_not_observed",)
+                description = "주기적 outbound SYN 재전송 후 peer 응답이 관찰됨"
+            if profile.syn_retry_response_rows_truncated:
+                confidence = min(confidence, 0.5)
+                warnings = (*warnings, "response_correlation_truncated")
+            if profile.syn_retry_response_timing_approximate:
+                confidence = min(confidence, 0.7)
+                warnings = (*warnings, "aggregate_response_timing_approximate")
+            evidence = _base_evidence(
+                candidate,
+                "TCP_COMMUNICATION_ATTEMPT_PATTERN",
+                self.name,
+                0,
+                [(key[2], flow) for flow in episode.rows],
+                metrics,
+                description,
+                confidence=confidence,
+                warnings=warnings,
+            )
+            result.append(
+                replace(
+                    evidence,
+                    first_seen=episode.first_seen,
+                    last_seen=episode.last_seen,
+                )
+            )
+        return result
+
+
+@dataclass(frozen=True)
 class TCPSessionQualityDetector:
     """Add connection-state context only to candidates supported by another detector."""
 
@@ -1109,6 +1229,7 @@ DEFAULT_DETECTORS: tuple[Detector, ...] = (
     ProtocolSimilarityDetector(),
     MultiSensorDetector(),
     PopulationAnomalyDetector(),
+    TCPCommunicationAttemptDetector(),
     TCPSessionQualityDetector(),
 )
 
@@ -1119,10 +1240,13 @@ def run_detectors(
     primary: list[Evidence] = []
     tcp_enrichment: list[Evidence] = []
     anomaly: list[Evidence] = []
+    operational: list[Evidence] = []
     for detector in detectors:
         produced = detector.analyze(context)
         if detector.name == "ml_population_anomaly":
             anomaly.extend(produced)
+        elif detector.name == "tcp_communication_attempt":
+            operational.extend(produced)
         elif detector.name == "tcp_session_quality":
             tcp_enrichment.extend(produced)
         else:
@@ -1139,4 +1263,4 @@ def run_detectors(
         anomaly = [
             evidence for evidence in anomaly if evidence.candidate_ip in supported_candidates
         ]
-    return primary + tcp_enrichment + anomaly
+    return primary + tcp_enrichment + anomaly + operational

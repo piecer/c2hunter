@@ -2,6 +2,7 @@ package flow
 
 import (
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
@@ -112,6 +113,67 @@ func TestAggregatorMarksReverseFlowsBidirectional(t *testing.T) {
 		if !r.Bidirectional {
 			t.Fatalf("not marked bidirectional: %+v", r)
 		}
+	}
+}
+
+func TestAggregatorRetainsBoundedOutboundSYNObservations(t *testing.T) {
+	a := NewAggregator("sensor-a", "job-1", time.Minute)
+	start := time.Unix(100, 0).UTC()
+	for _, offset := range []time.Duration{0, 2 * time.Second, 6 * time.Second, 12 * time.Second} {
+		pkt := flowPacket(start.Add(offset), "10.0.0.1", "203.0.113.8", 50000, 443, "")
+		pkt.TCPFlags = packet.TCPFlags{SYN: true}
+		pkt.TCPSequence = 12345
+		a.Add(pkt)
+	}
+
+	records := a.Flush()
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
+	}
+	want := []TCPSYNOnlyObservation{{0, 12345}, {2_000_000, 12345}, {6_000_000, 12345}, {12_000_000, 12345}}
+	if !slices.Equal(records[0].TCPSYNOnlyObservations, want) {
+		t.Fatalf("SYN observations = %v, want %v", records[0].TCPSYNOnlyObservations, want)
+	}
+}
+
+func TestAggregatorBoundsSYNObservationsAndIgnoresSYNACK(t *testing.T) {
+	a := NewAggregator("sensor-a", "job-1", time.Minute)
+	start := time.Unix(100, 0).UTC()
+	for index := 0; index < maxTCPSYNOnlyObservations+5; index++ {
+		pkt := flowPacket(start.Add(time.Duration(index)*time.Second), "10.0.0.1", "203.0.113.8", 50000, 443, "")
+		pkt.TCPFlags = packet.TCPFlags{SYN: true}
+		a.Add(pkt)
+	}
+	synAck := flowPacket(start.Add(30*time.Second), "10.0.0.1", "203.0.113.8", 50000, 443, "")
+	synAck.TCPFlags = packet.TCPFlags{SYN: true, ACK: true}
+	a.Add(synAck)
+
+	record := a.Flush()[0]
+	if len(record.TCPSYNOnlyObservations) != maxTCPSYNOnlyObservations || !record.TCPSYNOnlyObservationsTruncated {
+		t.Fatalf("SYN observations = %d truncated=%v", len(record.TCPSYNOnlyObservations), record.TCPSYNOnlyObservationsTruncated)
+	}
+}
+
+func TestAggregatorMarksOutOfOrderSYNObservationIncomplete(t *testing.T) {
+	a := NewAggregator("sensor-a", "job-1", time.Minute)
+	start := time.Unix(100, 0).UTC()
+	for _, offset := range []time.Duration{0, 2 * time.Second, 4 * time.Second, time.Second} {
+		pkt := flowPacket(start.Add(offset), "10.0.0.1", "203.0.113.8", 50000, 443, "")
+		pkt.TCPFlags = packet.TCPFlags{SYN: true}
+		a.Add(pkt)
+	}
+
+	record := a.Flush()[0]
+	got := record.TCPSYNOnlyObservations
+	want := []TCPSYNOnlyObservation{{0, 0}, {2_000_000, 0}, {4_000_000, 0}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("SYN observations = %v, want %v", got, want)
+	}
+	if !record.TCPSYNOnlyObservationsTruncated {
+		t.Fatal("out-of-order observation must mark timing incomplete")
+	}
+	if wantEnd := start.Add(4 * time.Second); !record.EndTime.Equal(wantEnd) {
+		t.Fatalf("end time = %v, want latest timestamp %v", record.EndTime, wantEnd)
 	}
 }
 
