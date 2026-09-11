@@ -297,6 +297,7 @@ class CaptureParameters(BaseModel):
 
 class AnalysisParameters(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    module: Literal["c2", "network_anomaly"] = "c2"
     profile: str = Field(default="ddos_botnet", min_length=1, max_length=100)
     minimum_distinct_clients: int = Field(default=3, ge=2, le=100000)
     minimum_candidate_score: int = Field(default=0, ge=0, le=100)
@@ -377,6 +378,16 @@ class TCPSYNOnlyObservation(BaseModel):
     sequence: int = Field(ge=0, le=2**32 - 1)
 
 
+class ICMPQuotedFlow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_ip: str = Field(min_length=1, max_length=45)
+    destination_ip: str = Field(min_length=1, max_length=45)
+    source_port: int = Field(ge=0, le=65535, strict=True)
+    destination_port: int = Field(ge=0, le=65535, strict=True)
+    protocol: Literal["TCP", "UDP"]
+
+
 class FlowRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
     sensor_id: str
@@ -455,6 +466,17 @@ class FlowRecord(BaseModel):
     )
     tcp_syn_only_observations_truncated: bool = False
     bidirectional: bool = False
+    tcp_sequence: int | None = Field(default=None, ge=0, le=2**32 - 1)
+    tcp_acknowledgment: int | None = Field(default=None, ge=0, le=2**32 - 1)
+    tcp_window: int | None = Field(default=None, ge=0, le=65535)
+    transport_payload_length: int | None = Field(default=None, ge=0)
+    ip_ttl: int | None = Field(default=None, ge=0, le=255)
+    capture_interface_id: int | None = Field(default=None, ge=0)
+    packet_evidence_complete: bool = False
+    icmp_type: int | None = Field(default=None, ge=0, le=255, strict=True)
+    icmp_code: int | None = Field(default=None, ge=0, le=255, strict=True)
+    icmp_error: bool = Field(default=False, strict=True)
+    icmp_quoted_flow: ICMPQuotedFlow | None = None
 
     raw_packet_hex: str | None = Field(default=None, pattern=r"^(?:[0-9a-fA-F]{2})+$")
 

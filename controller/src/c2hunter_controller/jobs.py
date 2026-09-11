@@ -226,6 +226,21 @@ def evaluate_candidates(
         )
         record.pop("raw_packet_hex", None)
         record.pop("payload_sample_hex", None)
+        # Packet-local network evidence is not part of C2 scoring's Flow domain.
+        for field in (
+            "tcp_sequence",
+            "tcp_acknowledgment",
+            "tcp_window",
+            "transport_payload_length",
+            "ip_ttl",
+            "capture_interface_id",
+            "packet_evidence_complete",
+            "icmp_type",
+            "icmp_code",
+            "icmp_error",
+            "icmp_quoted_flow",
+        ):
+            record.pop(field, None)
         flows.append(Flow(**record))
     parameters = dict(job["analysis"])
     parameters["payload_signatures"] = list(job.get("payload_signatures", ()))

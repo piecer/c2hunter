@@ -2626,7 +2626,11 @@ def create_app(
             work_queue.ack_result(receipt)
             return
         if result.get("status") == "COMPLETED":
-            candidates = list(result.get("result", {}).get("candidates", []))
+            if job.get("analysis", {}).get("module") == "network_anomaly":
+                job["network_anomaly"] = result["result"]["network_anomaly"]
+                candidates = []
+            else:
+                candidates = list(result.get("result", {}).get("candidates", []))
             for candidate in candidates:
                 candidate.setdefault("id", str(uuid.uuid4()))
             repo.save_candidates(job["id"], candidates)
@@ -2723,7 +2727,13 @@ def create_app(
             (JobState.ANALYZING, "detectors started"),
         ):
             machine.transition(job, state, reason)
-        candidates = calculate(job, job.get("allowlist", []))
+        if job.get("analysis", {}).get("module") == "network_anomaly":
+            from c2hunter_analysis.network_anomaly import analyze_network_anomalies
+
+            job["network_anomaly"] = analyze_network_anomalies(job.get("flow_records", []))
+            candidates = []
+        else:
+            candidates = calculate(job, job.get("allowlist", []))
         repo.save_candidates(job["id"], candidates)
         schedule_candidate_enrichment(str(job["id"]), candidates)
         job["candidate_count"] = len(candidates)
@@ -2771,6 +2781,7 @@ def create_app(
         request: Request,
         name: str = Query(min_length=1, max_length=200),
         filename: str = Query(min_length=1, max_length=255),
+        analysis_module: Literal["c2", "network_anomaly"] = Query(default="c2"),
         internal_networks: str = Query(default="10.0.0.0/8", min_length=1, max_length=10000),
         description: str = Query(default="", max_length=5000),
         idempotency_key: str | None = Query(default=None, min_length=1, max_length=200),
@@ -2861,6 +2872,7 @@ def create_app(
                 internal_networks=cidrs,
                 max_packets=config.pcap_upload_max_packets,
                 retain_packet_bytes=False,
+                retain_network_evidence=analysis_module == "network_anomaly",
             )
         except PcapParseError as exc:
             status = 413 if exc.code == "PCAP_PACKET_LIMIT_EXCEEDED" else 422
@@ -2884,6 +2896,7 @@ def create_app(
                 },
                 "analysis": {
                     "profile": "ddos_botnet",
+                    "module": analysis_module,
                     "minimum_candidate_score": minimum_candidate_score,
                     "minimum_distinct_clients": minimum_distinct_clients,
                     "periodicity_min_samples": periodicity_min_samples,
