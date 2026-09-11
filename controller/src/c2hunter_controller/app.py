@@ -894,6 +894,7 @@ def create_app(
     ai_task_queue: AIAnalysisTaskQueue | None = None,
     pcap_export_dependencies: PcapExportDependencies | None = None,
     local_analysis_worker_health_path: Path | None = None,
+    local_ai_worker_enabled: bool = False,
 ) -> FastAPI:
     config = settings or Settings()
     pcap_export_slots = threading.BoundedSemaphore(config.pcap_export_max_concurrent)
@@ -1019,8 +1020,15 @@ def create_app(
         else None
     )
     ai_service = AIAnalysisService(repo, gateway) if gateway is not None else None
+    from .ai_queueing import MemoryAIAnalysisTaskQueue
+    from .local_ai_runtime import LocalAIRuntime, LocalAITaskQueue
+
     if ai_task_queue is not None:
         ai_tasks = ai_task_queue
+    elif local_ai_worker_enabled and ai_service is not None:
+        if config.redis_url != "memory://":
+            raise ValueError("local AI worker requires memory queue configuration")
+        ai_tasks = LocalAITaskQueue()
     elif ai_service is not None and config.redis_url == "memory://":
         ai_tasks = InlineAIAnalysisTaskQueue(ai_service.execute)
     elif ai_service is not None:
@@ -1040,6 +1048,13 @@ def create_app(
     app.state.misp_client = misp
     app.state.ai_analysis_service = ai_service
     app.state.ai_analysis_queue = ai_tasks
+    if local_ai_worker_enabled:
+        if ai_service is None or not isinstance(ai_tasks, MemoryAIAnalysisTaskQueue):
+            raise ValueError("local AI worker requires enabled AI and a memory task queue")
+        local_ai_runtime = LocalAIRuntime(ai_tasks, ai_service)
+        app.state.local_ai_runtime = local_ai_runtime
+        app.router.add_event_handler("startup", local_ai_runtime.start)
+        app.router.add_event_handler("shutdown", local_ai_runtime.stop)
 
     def environment_integration_settings() -> dict[str, Any]:
         return {
@@ -3037,6 +3052,35 @@ def create_app(
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
         return _public_job(job)
 
+    @app.get("/api/v1/ai-capabilities")
+    def ai_capabilities() -> dict[str, Any]:
+        endpoint = urlsplit(config.ai_model_base_url)
+        supported = callable(getattr(gateway, "interpret_network_cancellable", None))
+        enabled = config.ai_analysis_enabled and ai_service is not None and ai_tasks is not None
+        available = False
+        if enabled and supported:
+            try:
+                ready = getattr(gateway, "ready", None)
+                available = (
+                    callable(ready) and bool(ready()) and ai_tasks is not None and ai_tasks.ready()
+                )
+            except Exception:
+                available = False
+        reason = (
+            None
+            if available
+            else ("AI_ANALYSIS_DISABLED" if not enabled else "AI_MODEL_UNAVAILABLE")
+        )
+        return {
+            "network_interpretation": supported,
+            "available": available,
+            "provider": config.ai_model_provider,
+            "model_name": config.ai_model_name,
+            "destination": f"{endpoint.scheme}://{endpoint.netloc}" if supported else None,
+            "remote": config.ai_model_endpoint_is_remote,
+            "reason": reason,
+        }
+
     @app.post("/api/v1/analysis-jobs/{job_id}/ai-runs", status_code=201)
     def create_ai_analysis_run(
         job_id: str,
@@ -3046,6 +3090,13 @@ def create_app(
     ) -> dict[str, Any]:
         if not config.ai_analysis_enabled or ai_service is None or ai_tasks is None:
             raise ApiError(503, "AI_ANALYSIS_DISABLED", "AI 분석 기능이 비활성화되어 있습니다")
+        if payload.analysis_kind == "NETWORK_ANOMALY":
+            if config.ai_model_endpoint_is_remote and not payload.allow_remote:
+                raise ApiError(409, "AI_REMOTE_CONSENT_REQUIRED", "Remote model consent required")
+            if not ai_capabilities()["available"]:
+                raise ApiError(
+                    503, "AI_MODEL_UNAVAILABLE", "Network interpretation model unavailable"
+                )
         principal = getattr(request.state, "principal", None)
         created_by = str(getattr(principal, "subject", "anonymous"))
         try:
@@ -3054,6 +3105,8 @@ def create_app(
                 idempotency_key=payload.idempotency_key,
                 candidate_limit=payload.candidate_limit,
                 created_by=created_by,
+                analysis_kind=payload.analysis_kind,
+                language=payload.language,
             )
         except AIAnalysisError as exc:
             message = str(exc)
@@ -3066,6 +3119,11 @@ def create_app(
             started = perf_counter()
             try:
                 ai_tasks.enqueue(run["id"])
+            except OverflowError as exc:
+                if not local_ai_worker_enabled:
+                    raise
+                ai_service.cancel(run["id"], "local AI queue capacity exceeded")
+                raise ApiError(503, "AI_QUEUE_FULL", "Local AI queue capacity exceeded") from exc
             except Exception as exc:
                 reason = type(exc).__name__
                 safe_ai_metric(lambda: ai_enqueue_failures.labels(reason=reason).inc())

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import ReportLanguageScope from './ReportLanguage';
 import { useReportLanguage } from './reportLanguageContext';
 import { choose, factLabel, translateProse, warningLabel } from './reportTranslations';
@@ -36,8 +36,8 @@ function CompactEvidence({ value }: { value: unknown }) {
   };
   return <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', minWidth: 100, maxWidth: 280, maxHeight: 280, overflow: 'auto', fontSize: '0.75rem' }}>{typeof value === 'object' ? format(value) : String(value)}</pre>;
 }
-export default function NetworkAnomalyPanel({ report }: { report?: NetworkAnomalyReport }) {
-  return <ReportLanguageScope><ReportContent report={report}/></ReportLanguageScope>;
+export default function NetworkAnomalyPanel({ report, children }: { report?: NetworkAnomalyReport; children?: ReactNode }) {
+  return <ReportLanguageScope><ReportContent report={report}/>{children}</ReportLanguageScope>;
 }
 function ReportContent({ report }: { report?: NetworkAnomalyReport }) {
   const language = useReportLanguage();
