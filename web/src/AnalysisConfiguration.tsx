@@ -119,7 +119,7 @@ export default function AnalysisConfiguration({ analysis = {}, capture = {}, det
       <StructuredFields data={capture}/>
     </section>
 
-    <section className="panel detector-settings" aria-label="탐지 설정 요약">
+    {analysis.module === 'network_anomaly' ? <section className="panel"><h2>Network observation settings</h2><p>Unweighted TCP / UDP / ICMP observations. Counts and timing measurements are not C2 scores. Stored C2 defaults are not used by this module.</p></section> : <section className="panel detector-settings" aria-label="탐지 설정 요약">
       <div className="section-heading"><div><p className="eyebrow">DETECTION POLICY</p><h2>탐지 설정</h2></div></div>
       {Object.keys(analysis).length ? <>
         <div className="config-summary-grid">
@@ -144,7 +144,7 @@ export default function AnalysisConfiguration({ analysis = {}, capture = {}, det
 
         {Object.keys(unknownAnalysis).length > 0 && <section className="advanced-settings"><h3>추가 정책</h3><StructuredFields data={unknownAnalysis}/></section>}
       </> : <div className="empty-state compact"><strong>기록된 탐지 설정이 없습니다</strong><span>이 분석은 Controller 기본 탐지 정책을 사용합니다.</span></div>}
-    </section>
+    </section>}
 
     <details className="raw-config-details">
       <summary>원본 설정 보기</summary>
