@@ -17,7 +17,30 @@ def scenarios():
     data = frame(flags=24, seq=101, payload=b'abc')
     ack = frame(flags=16, seq=500, ack=101, reverse=True)
     udp = frame(protocol=17, payload=b'query')
+    # Real parser records with deliberately absent optional metadata model older
+    # evidence records; reports themselves always come from the actual analyzer.
+    missing_metadata = records(frame(), frame(), frame(flags=18, seq=500, ack=101, reverse=True))
+    for record in missing_metadata:
+        record.pop('ip_ttl', None)
+    import struct
+    from ipaddress import IPv6Address
+    from test_network_anomaly import internet_checksum
+
+    def ipv6_udp(hop_limit):
+        src, dst = IPv6Address('2001:db8::1').packed, IPv6Address('2001:db8::2').packed
+        payload = b'query'
+        udp6 = struct.pack('!HHHH', 50000, 443, 8 + len(payload), 0) + payload
+        pseudo = src + dst + struct.pack('!I3xB', len(udp6), 17)
+        checksum = internet_checksum(pseudo + udp6)
+        udp6 = udp6[:6] + struct.pack('!H', checksum or 65535) + udp6[8:]
+        ip6 = struct.pack('!IHBB16s16s', 6 << 28, len(udp6), 17, hop_limit, src, dst)
+        return bytes.fromhex('00112233445566778899aabb86dd') + ip6 + udp6
+
     return {
+        'supporting': analyze_network_report(records(frame(), frame(flags=18, seq=500, ack=101, reverse=True), data, frame(flags=16, seq=501, ack=104, reverse=True), frame(flags=24, seq=104, payload=b'def'), frame(flags=24, seq=104, payload=b'def'), frame(flags=16, seq=501, ack=107, reverse=True))),
+        'ambiguous_rtt': analyze_network_report(records(data, data, frame(flags=16, seq=500, ack=104, reverse=True))),
+        'missing_metadata': analyze_network_report(missing_metadata),
+        'ipv6_hop_limit': analyze_network_report(records(ipv6_udp(64), ipv6_udp(63), ipv6_udp(0))),
         'normal': analyze_network_report(records(frame(), frame(flags=18, seq=500, ack=101, reverse=True))),
         'syn_reset': analyze_network_report(records(frame(), frame(), frame(flags=20, ack=101, reverse=True))),
         'data_ack': analyze_network_report(records(data, data, ack, ack)),
