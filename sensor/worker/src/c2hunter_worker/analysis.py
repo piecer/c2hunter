@@ -23,6 +23,15 @@ _DETECTOR_REGISTRY = DetectorRegistryCache(DEFAULT_DETECTORS)
 
 
 def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("analysis", {}).get("module") == "network_anomaly":
+        from c2hunter_analysis.network_anomaly import analyze_network_anomalies
+
+        return {
+            "candidates": [],
+            "network_anomaly": analyze_network_anomalies(
+                payload.get("flow_records", [])
+            ),
+        }
     flows: list[Flow] = []
     for stored in payload.get("flow_records", []):
         record = dict(stored)
@@ -37,6 +46,21 @@ def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
         )
         record.pop("raw_packet_hex", None)
         record.pop("payload_sample_hex", None)
+        # Packet-local network evidence is not part of C2 scoring's Flow domain.
+        for field in (
+            "tcp_sequence",
+            "tcp_acknowledgment",
+            "tcp_window",
+            "transport_payload_length",
+            "ip_ttl",
+            "capture_interface_id",
+            "packet_evidence_complete",
+            "icmp_type",
+            "icmp_code",
+            "icmp_error",
+            "icmp_quoted_flow",
+        ):
+            record.pop(field, None)
         flows.append(Flow(**record))
 
     analysis = dict(payload.get("analysis", {}))

@@ -182,6 +182,7 @@ def parse_pcap(
     retain_payload_sample_bytes: int = 0,
     allow_no_supported_packets: bool = False,
     truncate_at_max_packets: bool = False,
+    retain_network_evidence: bool = False,
 ) -> PcapParseResult:
     """Parse bounded PCAP/PCAPNG bytes into the existing flow-analysis contract."""
     if max_packets < 1:
@@ -217,6 +218,7 @@ def parse_pcap(
             retain_packet_bytes,
             retain_packet_bytes_as_bytes,
             retain_payload_sample_bytes,
+            retain_network_evidence,
         )
         if decoded is not None:
             records.append(decoded)
@@ -481,6 +483,7 @@ def _decode_packet(
     retain_packet_bytes: bool,
     retain_packet_bytes_as_bytes: bool,
     retain_payload_sample_bytes: int,
+    retain_network_evidence: bool = False,
 ) -> dict[str, Any] | None:
     network = _network_packet(captured.data, captured.link_type)
     if network is None:
@@ -515,6 +518,14 @@ def _decode_packet(
     }
     tcp_flags = decoded.pop("tcp_flags", None)
     tcp_sequence = decoded.pop("tcp_sequence", None)
+    if retain_network_evidence:
+        record.update(decoded.pop("packet_evidence", {}))
+        record["tcp_sequence"] = tcp_sequence
+        record["capture_interface_id"] = captured.interface_id
+        record["packet_evidence_complete"] = bool(
+            record.get("packet_evidence_complete")
+            and len(captured.data) == captured.original_length
+        )
     if features is not None:
         record.update(features.as_dict())
     if tcp_flags:
@@ -636,6 +647,12 @@ def _decode_ipv4(packet: bytes) -> dict[str, Any] | None:
     if tcp_flags:
         result["tcp_flags"] = tcp_flags
     result["tcp_sequence"] = tcp_sequence
+    result["packet_evidence"] = _packet_evidence(
+        protocol_number,
+        transport,
+        len(packet) >= total_length and not (int.from_bytes(packet[6:8], "big") & 0x3FFF),
+        packet[8],
+    )
     return result
 
 
@@ -647,6 +664,7 @@ def _decode_ipv6(packet: bytes) -> dict[str, Any] | None:
     next_header = packet[6]
     offset = 40
     first_fragment = True
+    fragmented = False
     for _ in range(8):
         if next_header in {0, 43, 60}:
             if offset + 2 > end:
@@ -654,6 +672,7 @@ def _decode_ipv6(packet: bytes) -> dict[str, Any] | None:
             length = (packet[offset + 1] + 1) * 8
             following = packet[offset]
         elif next_header == 44:
+            fragmented = True
             if offset + 8 > end:
                 return None
             following = packet[offset]
@@ -684,7 +703,63 @@ def _decode_ipv6(packet: bytes) -> dict[str, Any] | None:
     if tcp_flags:
         result["tcp_flags"] = tcp_flags
     result["tcp_sequence"] = tcp_sequence
+    result["packet_evidence"] = _packet_evidence(
+        next_header,
+        packet[offset:end],
+        bool(payload_length) and len(packet) >= 40 + payload_length and not fragmented,
+        packet[7],
+    )
     return result
+
+
+def _packet_evidence(protocol: int, transport: bytes, complete: bool, ttl: int) -> dict[str, Any]:
+    evidence: dict[str, Any] = {"ip_ttl": ttl, "packet_evidence_complete": complete}
+    if protocol == 6:
+        header = (transport[12] >> 4) * 4 if len(transport) >= 20 else 0
+        valid = 20 <= header <= len(transport)
+        evidence["packet_evidence_complete"] = complete and valid
+        if valid:
+            evidence["tcp_acknowledgment"] = int.from_bytes(transport[8:12], "big")
+            evidence["tcp_window"] = int.from_bytes(transport[14:16], "big")
+            evidence["transport_payload_length"] = len(transport) - header
+    elif protocol == 17:
+        length = int.from_bytes(transport[4:6], "big") if len(transport) >= 8 else 0
+        evidence["packet_evidence_complete"] = complete and 8 <= length <= len(transport)
+        evidence["transport_payload_length"] = max(0, length - 8)
+    elif protocol in {1, 58}:
+        evidence["packet_evidence_complete"] = complete and len(transport) >= 8
+        if len(transport) >= 8:
+            evidence["icmp_type"], evidence["icmp_code"] = transport[0], transport[1]
+            error_types = {3, 4, 5, 11, 12} if protocol == 1 else {1, 2, 3, 4}
+            evidence["icmp_error"] = transport[0] in error_types
+            if evidence["icmp_error"]:
+                evidence["icmp_quoted_flow"] = _quoted_flow(transport[8:])
+    return evidence
+
+
+def _quoted_flow(packet: bytes) -> dict[str, Any] | None:
+    """Decode only quoted addresses/ports; ICMP commonly quotes just eight L4 bytes."""
+    if len(packet) >= 20 and packet[0] >> 4 == 4:
+        offset = (packet[0] & 15) * 4
+        if offset < 20 or int.from_bytes(packet[6:8], "big") & 0x1FFF:
+            return None
+        protocol = packet[9]
+        source, destination = packet[12:16], packet[16:20]
+    elif len(packet) >= 40 and packet[0] >> 4 == 6:
+        offset, protocol = 40, packet[6]
+        source, destination = packet[8:24], packet[24:40]
+    else:
+        return None
+    if protocol not in {6, 17} or len(packet) < offset + 4:
+        return None
+    sport, dport = struct.unpack_from("!HH", packet, offset)
+    return {
+        "source_ip": str(ip_address(source)),
+        "destination_ip": str(ip_address(destination)),
+        "source_port": sport,
+        "destination_port": dport,
+        "protocol": "TCP" if protocol == 6 else "UDP",
+    }
 
 
 def _transport(
