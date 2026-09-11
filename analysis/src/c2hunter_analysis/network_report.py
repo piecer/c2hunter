@@ -13,6 +13,14 @@ from heapq import heappop, heappush
 from ipaddress import ip_address
 from typing import Literal, TypedDict
 
+from .network_measurements import (
+    Hypothesis,
+    Measurements,
+    SupportingMeasurements,
+    describe,
+    hypothesis,
+)
+
 Record = Mapping[str, object]
 MAX_TRACKED_FLOWS = 8192
 MAX_FLOW_CORRELATIONS = 4096
@@ -49,9 +57,12 @@ class Example(TypedDict):
     endpoint_b: Endpoint
     event_count: int
     facts: dict[str, int]
+    measurements: Measurements
 
 
 class Issue(TypedDict):
+    suspected_cause: Hypothesis
+    detailed_analysis: list[str]
     id: str
     pattern: Pattern
     title: str
@@ -70,6 +81,7 @@ class Issue(TypedDict):
 
 
 class Summary(TypedDict):
+    suspected_cause: Hypothesis | None
     verdict: Verdict
     narrative: str
     scanned_records: int
@@ -89,6 +101,7 @@ class Summary(TypedDict):
 
 
 class Report(TypedDict):
+    measurement_version: Literal["network-supporting-measurements-v1"]
     version: Literal["network-pattern-report-v1"]
     summary: Summary
     issues: list[Issue]
@@ -115,11 +128,26 @@ class TCPDirection:
     starts: list[tuple[int, DataKey]] = field(default_factory=list)
     ends: list[tuple[int, DataKey]] = field(default_factory=list)
     last_ack: tuple[int, int, int] | None = None
+    sent_times: dict[DataKey, float] = field(default_factory=dict)
+    highest_end: int = 0
+    rtt_ambiguous: bool = False
 
-    def acknowledge(self, ack: int) -> bool:
+    def acknowledge(self, ack: int, time: float, measurements: SupportingMeasurements) -> bool:
+        covered = 0
+        start = 0.0
+        end = 0
         while self.ends and self.ends[0][0] <= ack:
-            _, identity = heappop(self.ends)
+            end, identity = heappop(self.ends)
+            start = self.sent_times.pop(identity)
+            covered += 1
             self.outstanding.discard(identity)
+        if covered:
+            if self.rtt_ambiguous:
+                measurements.excluded["ambiguous"] += 1
+            elif covered != 1 or end != ack:
+                measurements.excluded["nonexact_ack"] += 1
+            else:
+                measurements.sample(start, time, "data_ack", False)
         while self.starts and self.starts[0][1] not in self.outstanding:
             heappop(self.starts)
         return bool(self.starts and -self.starts[0][0] >= ack)
@@ -143,7 +171,8 @@ class Flow:
         default_factory=lambda: (TCPDirection(), TCPDirection())
     )
     udp: set[tuple[int, int, str]] = field(default_factory=set)
-    syn: dict[tuple[int, int], float] = field(default_factory=dict)
+    syn: dict[tuple[int, int], tuple[float, bool]] = field(default_factory=dict)
+    measurements: SupportingMeasurements = field(default_factory=SupportingMeasurements)
     last_time: float | None = None
     clock_invalid: bool = False
     observations: dict[tuple[Pattern, EndpointKey], Observation] = field(default_factory=dict)
@@ -281,6 +310,7 @@ def _details(
                     "endpoint_a": {"ip": flow_key[3][0], "port": flow_key[3][1]},
                     "endpoint_b": {"ip": flow_key[4][0], "port": flow_key[4][1]},
                     "event_count": observation.count,
+                    "measurements": flows[flow_key].measurements.publish(flow_key[2]),
                     "facts": {
                         name: value
                         for name, value in zip(_FACT_FIELDS, observation.facts, strict=True)
@@ -291,6 +321,10 @@ def _details(
         issues.append(
             {
                 "id": f"pattern-{index + 1}",
+                "suspected_cause": hypothesis(key[3]),
+                "detailed_analysis": [
+                    line for example in examples for line in describe(example["measurements"])
+                ],
                 "pattern": key[3],
                 "title": _TITLES[key[3]],
                 "severity": "observation",
@@ -334,13 +368,17 @@ def _scan_tcp(record: Record, flow: Flow, direction: int, key: FlowKey, time: fl
         identity = direction, seq
         if identity in flow.syn:
             flow.observe("syn_retransmissions", dest, time, record)
+            flow.syn[identity] = flow.syn[identity][0], True
         else:
             flow.clear_tcp()
-            flow.syn[identity] = time
+            flow.syn[identity] = time, False
     if flags.get("ack") and (flags.get("syn") or flags.get("rst")):
         match = flow.syn.pop((1 - direction, (ack - 1) % 2**32), None)
-        if match is not None and flags.get("rst"):
-            flow.observe("matched_resets", source, time, record)
+        if match is not None:
+            if flags.get("rst"):
+                flow.observe("matched_resets", source, time, record)
+            else:
+                flow.measurements.sample(match[0], time, "syn_ack", match[1])
     own, reverse = flow.tcp[direction], flow.tcp[1 - direction]
     length, window, digest = (
         record.get("transport_payload_length"),
@@ -350,7 +388,7 @@ def _scan_tcp(record: Record, flow: Flow, direction: int, key: FlowKey, time: fl
     control = any(flags.get(f) for f in ("syn", "fin", "rst", "urg"))
     if type(length) is int and type(window) is int:
         if flags.get("ack") and not control:
-            outstanding = reverse.acknowledge(ack)
+            outstanding = reverse.acknowledge(ack, time, flow.measurements)
             signature = seq, ack, window
             if length == 0 and window > 0 and outstanding and own.last_ack == signature:
                 flow.observe("duplicate_acks", source, time, record)
@@ -360,9 +398,15 @@ def _scan_tcp(record: Record, flow: Flow, direction: int, key: FlowKey, time: fl
         if length > 0 and not control and isinstance(digest, str) and digest:
             data_key = seq, length, digest
             if data_key in own.seen:
+                own.rtt_ambiguous = True
                 flow.observe("data_retransmissions", dest, time, record)
             else:
                 flow.reserve()
+                # Conservative O(1) Karn guard: sequence regression, overlap,
+                # reuse and wrap poison this direction until the epoch resets.
+                own.rtt_ambiguous |= seq < own.highest_end or seq + length >= 2**32
+                own.highest_end = max(own.highest_end, seq + length)
+                own.sent_times[data_key] = time
                 own.seen.add(data_key)
                 own.outstanding.add(data_key)
                 heappush(own.starts, (-seq, data_key))
@@ -487,6 +531,7 @@ def analyze_network_report(
         if not _complete(record, key[2]):
             incomplete += 1
             warnings.add("INCOMPLETE_PACKET_EVIDENCE")
+            flow.measurements.gap("INCOMPLETE_PACKET_EVIDENCE")
             flow.clear_correlations()
             continue
         if flow.last_time is not None and time < flow.last_time:
@@ -494,12 +539,14 @@ def analyze_network_report(
         if flow.clock_invalid:
             incomplete += 1
             warnings.add("NON_MONOTONIC_TIMESTAMPS")
+            flow.measurements.gap("NON_MONOTONIC_TIMESTAMPS")
             flow.clear_correlations()
             continue
         if flow.last_time is not None and time - flow.last_time > 60:
             flow.clear_correlations()
         flow.last_time = time
         evaluated += 1
+        flow.measurements.directions[direction].add(time, record.get("ip_ttl"))
         if key[2] == "TCP":
             try:
                 _scan_tcp(record, flow, direction, key, time)
@@ -554,6 +601,7 @@ def analyze_network_report(
                     warnings.add("INCOMPLETE_ICMP_QUOTE")
             target.observe("icmp_errors", peer, time, record)
         if flow.limited:
+            flow.measurements.gap("CORRELATION_LIMIT_REACHED")
             flow.clear_correlations()
             evaluated -= 1
             incomplete += 1
@@ -595,8 +643,10 @@ def analyze_network_report(
         narrative += " Coverage is incomplete; additional patterns may be unobservable."
     return {
         "version": "network-pattern-report-v1",
+        "measurement_version": "network-supporting-measurements-v1",
         "summary": {
             "verdict": verdict,
+            "suspected_cause": issues[0]["suspected_cause"] if issues else None,
             "narrative": narrative,
             "scanned_records": scanned,
             "skipped_records": skipped,
@@ -620,5 +670,9 @@ def analyze_network_report(
             "Single-vantage observations do not prove loss, asymmetric routing or root cause.",
             "Duplicate capture can mimic TCP retransmissions and UDP duplicate candidates.",
             "RTT and interarrival dispersion are not classified without a configured baseline.",
+            "Capture-local RTT includes peer ACK delay; it is not one-way latency.",
+            "Interarrival dispersion is not proof of network jitter or congestion.",
+            "Outer TTL/hop-limit variation does not prove path changes or exact hop counts.",
+            "Measurements describe bounded representative flows, not pooled issue populations.",
         ],
     }

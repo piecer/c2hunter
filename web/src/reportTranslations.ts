@@ -73,9 +73,14 @@ const prose: Record<string, string> = Object.fromEntries([
   ['Duplicate capture can mimic retransmissions.', '중복 캡처가 재전송처럼 보일 수 있습니다.'],
   ['Observed RTT includes peer response delay; not host end-to-end RTT.', '관찰된 RTT에는 상대의 응답 지연이 포함되며 호스트 간 종단 RTT가 아닙니다.'],
   ['Interarrival variation is not one-way jitter.', '패킷 도착 간격의 변동은 단방향 지터가 아닙니다.'],
+  ['Capture-local RTT includes peer ACK delay; it is not one-way latency.', '캡처 지점의 RTT에는 상대 ACK 지연이 포함되며 단방향 지연이 아닙니다.'],
+  ['Interarrival dispersion is not proof of network jitter or congestion.', '도착 간격 산포는 네트워크 지터나 혼잡의 증거가 아닙니다.'],
+  ['Outer TTL/hop-limit variation does not prove path changes or exact hop counts.', '외부 TTL/홉 제한 변화는 경로 변경이나 정확한 홉 수를 입증하지 않습니다.'],
+  ['Measurements describe bounded representative flows, not pooled issue populations.', '측정값은 한도 내의 대표 흐름을 설명하며 문제 그룹 전체를 합산한 값이 아닙니다.'],
   ['UDP duplicates are candidates, not transport retransmissions.', 'UDP 중복은 후보이며 전송 계층의 재전송이 아닙니다.'],
 ]);
 export const factLabels: Record<string, string> = {
+  rtt_sources: 'RTT 표본 출처', syn_ack: 'SYN/ACK 표본', data_ack: '데이터/ACK 표본', rtt_excluded: '제외된 RTT 후보 일치', ambiguous: '모호함 / 재전송', nonpositive_time: '0 이하 시간', nonexact_ack: '정확히 일치하지 않는 ACK', coverage_complete: '분석 범위 완전 여부', status: '상태', reasons: '측정 사유', changes: '변화 횟수', missing: '누락 수',
   tcp_sequence: 'TCP 순서 번호', tcp_acknowledgment: 'TCP 확인 번호', tcp_window: 'TCP 윈도 크기', transport_payload_length: '전송 페이로드 길이', icmp_type: 'ICMP 유형', icmp_code: 'ICMP 코드',
   matched_resets: 'SYN 시도와 일치하는 연결 초기화', syn_retransmissions: 'SYN 재전송', data_retransmissions: '데이터 재전송', duplicate_acks: '중복 ACK', observed_rtt_ms: '관찰된 RTT (ms)', interarrival_variation_ms: '도착 간격 변동 (ms)', udp_duplicate_candidates: 'UDP 중복 후보', icmp_errors: 'ICMP 오류',
   scanned_records: '검사한 레코드', skipped_records: '건너뛴 레코드', flow_count: '흐름 수', truncated: '일부 생략됨',

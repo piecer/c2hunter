@@ -13,7 +13,7 @@ type NetworkFlow = {
   confidence?: unknown; findings?: unknown; evidence?: unknown;
 };
 export type NetworkAnomalyReport = {
-  version: string; summary: Record<string, unknown>; flows: NetworkFlow[];
+  version: string; measurement_version?: string; summary: Record<string, unknown>; flows: NetworkFlow[];
   warnings: string[]; limitations: string[]; issues?: PatternIssue[];
 };
 const endpoint = (value: Endpoint) => `${value.ip.includes(':') ? `[${value.ip}]` : value.ip}${value.port === null ? '' : `:${value.port}`}`;
