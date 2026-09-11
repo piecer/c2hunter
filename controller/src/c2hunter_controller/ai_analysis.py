@@ -957,17 +957,19 @@ class AIAnalysisService:
             if latest is not None and latest.get("status") == AIAnalysisState.CANCELLED:
                 return latest
             return self._transition(run, AIAnalysisState.CANCELLED, "model request cancelled")
-        except TimeoutError as exc:
+        except TimeoutError:
             run["error_code"] = "MODEL_TIMEOUT"
-            run["error_message"] = str(exc)[:500]
+            run["error_message"] = "Model request timed out."
             return self._transition(run, AIAnalysisState.FAILED, "model timeout")
-        except (AIAnalysisError, ValidationError, TypeError, ValueError) as exc:
+        except (AIAnalysisError, ValidationError, TypeError, ValueError):
             run["error_code"] = "MODEL_OUTPUT_INVALID"
-            run["error_message"] = str(exc)[:1000]
+            # Exception text can contain rejected provider values (including credentials).
+            # Persist only stable public diagnostics for both network and C2 runs.
+            run["error_message"] = "Model output failed validation."
             return self._transition(run, AIAnalysisState.FAILED, "model output rejected")
-        except Exception as exc:
+        except Exception:
             run["error_code"] = "AI_ANALYSIS_FAILED"
-            run["error_message"] = str(exc)[:1000]
+            run["error_message"] = "AI analysis failed."
             return self._transition(run, AIAnalysisState.FAILED, "AI analysis failed")
 
     def create_and_execute(self, **kwargs: Any) -> tuple[dict[str, Any], bool]:

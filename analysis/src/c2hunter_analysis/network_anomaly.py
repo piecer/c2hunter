@@ -181,6 +181,7 @@ def analyze_network_anomalies(
             state["last_time"][direction] = None
             state["data"] = [{}, {}]
             state["syn"].clear()
+            state["udp"].clear()
             state["last_ack"] = [None, None]
             continue
         if any(t is not None and time < t for t in state["last_time"]):
