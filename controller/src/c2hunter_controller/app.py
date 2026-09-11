@@ -13,6 +13,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from time import perf_counter, sleep
 from typing import Annotated, Any, Literal, cast
 from urllib.parse import urlsplit
@@ -892,6 +893,7 @@ def create_app(
     ai_gateway: ModelGateway | None = None,
     ai_task_queue: AIAnalysisTaskQueue | None = None,
     pcap_export_dependencies: PcapExportDependencies | None = None,
+    local_analysis_worker_health_path: Path | None = None,
 ) -> FastAPI:
     config = settings or Settings()
     pcap_export_slots = threading.BoundedSemaphore(config.pcap_export_max_concurrent)
@@ -2691,10 +2693,28 @@ def create_app(
             except Exception:
                 result_stop.wait(1)
 
+    from .local_analysis_runtime import LocalAnalysisRuntime
+
+    local_runtime = None
+    if local_analysis_worker_health_path is not None:
+        if not isinstance(work_queue, MemoryControllerQueue):
+            raise ValueError("local analysis worker requires the explicit memory queue")
+        local_runtime = LocalAnalysisRuntime(
+            work_queue,
+            repo,
+            process_due_live_jobs_once,
+            persist_claimed_result,
+            local_analysis_worker_health_path,
+            enqueue_worker_job,
+        )
+        app.state.local_analysis_runtime = local_runtime
+        app.router.add_event_handler("startup", local_runtime.start)
+        app.router.add_event_handler("shutdown", local_runtime.stop)
+
     @app.on_event("startup")
     def start_result_consumer() -> None:
         nonlocal result_consumer_thread
-        if config.environment != "test":
+        if local_runtime is None and config.environment != "test":
             result_consumer_thread = threading.Thread(target=consume_results, daemon=True)
             result_consumer_thread.start()
 
