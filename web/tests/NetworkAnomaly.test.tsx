@@ -80,6 +80,15 @@ it('uploads network evidence without C2 query settings even when C2 inputs are i
   expect([...query!.keys()].sort()).toEqual(['analysis_module', 'description', 'filename', 'idempotency_key', 'internal_networks', 'name']);
 });
 
+it('explains the workflow without inventing network stage percentages', async () => {
+  localStorage.setItem('c2hunter-token', 'token');
+  vi.stubGlobal('fetch', vi.fn(async input => new Response(JSON.stringify(String(input) === '/api/v1/analysis-jobs/running-network' ? { id: 'running-network', name: 'Running network', status: 'ANALYZING', analysis: { module: 'network_anomaly' } } : { items: [] }))));
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/running-network']}><App/></MemoryRouter></QueryClientProvider>);
+  expect(await screen.findByRole('heading', { name: 'Running network' })).toBeVisible();
+  expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+  expect(screen.getByText(/Pattern scan → detailed analysis/)).toBeVisible();
+});
+
 it('shows independent bidirectional network observations instead of C2 controls', async () => {
   localStorage.setItem('c2hunter-token', 'token');
   vi.stubGlobal('fetch', vi.fn(async input => new Response(JSON.stringify(
@@ -90,6 +99,9 @@ it('shows independent bidirectional network observations instead of C2 controls'
     } : { items: [] }
   ))));
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/network-job']}><App/></MemoryRouter></QueryClientProvider>);
+  expect(await screen.findByRole('heading', { name: 'Legacy report' })).toBeVisible();
+  expect(screen.queryByRole('table', { name: 'Bidirectional network flows' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Show legacy flow observations' }));
   expect(await screen.findByRole('table', { name: 'Bidirectional network flows' })).toBeInTheDocument();
   expect(screen.getByText('10.0.0.1:50000')).toBeInTheDocument();
   expect(screen.getByText('SYN retries')).toBeInTheDocument();

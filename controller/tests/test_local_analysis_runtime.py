@@ -53,7 +53,11 @@ def test_live_job_is_processed_by_owned_worker(tmp_path, monkeypatch):
         assert result["status"] == "COMPLETED", result
         assert result["dataset_id"]
         assert result["network_anomaly"]["summary"]["scanned_records"] == 1
-        assert result["network_anomaly"]["flows"]
+        assert result["network_anomaly"]["version"] == "network-pattern-report-v1"
+        assert result["network_anomaly"]["summary"]["flow_count"] == 1
+        assert result["network_anomaly"]["summary"]["verdict"] == "insufficient_evidence"
+        assert result["network_anomaly"]["flows"] == []
+        assert result["network_anomaly"]["issues"] == []
         assert len(repo.get_job(job["id"])["flow_records"]) == 1
     assert not app.state.local_analysis_runtime.thread.is_alive()
 

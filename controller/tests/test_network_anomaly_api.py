@@ -78,7 +78,10 @@ def test_pcap_upload_runs_network_module_and_persists_independent_report():
     assert job["analysis"]["module"] == "network_anomaly"
     assert job["status"] == "COMPLETED"
     assert job["candidate_count"] == 0
-    assert job["network_anomaly"]["flows"]
+    assert job["network_anomaly"]["version"] == "network-pattern-report-v1"
+    assert job["network_anomaly"]["summary"]["flow_count"] > 0
+    assert isinstance(job["network_anomaly"]["issues"], list)
+    assert job["network_anomaly"]["flows"] == []
     stored = client.get(f"/api/v1/analysis-jobs/{job['id']}").json()
     assert stored["network_anomaly"] == job["network_anomaly"]
     assert "flow_records" not in stored
@@ -118,13 +121,15 @@ def test_icmp_upload_preserves_quoted_network_evidence():
     )
     assert response.status_code == 201, response.text
     report = response.json()["network_anomaly"]
-    assert any(flow["metrics"]["icmp_errors"] > 0 for flow in report["flows"])
+    assert report["version"] == "network-pattern-report-v1"
+    assert any(issue["pattern"] == "icmp_errors" for issue in report["issues"])
     stored = client.get(f"/api/v1/analysis-jobs/{response.json()['id']}").json()
     assert stored["network_anomaly"] == report
-    details = [
-        detail for flow in report["flows"] for detail in flow["metrics"]["icmp_error_details"]
-    ]
-    assert any(detail["quoted_flow"]["destination_port"] == 443 for detail in details)
+    issue = next(issue for issue in report["issues"] if issue["pattern"] == "icmp_errors")
+    assert issue["scope"]["peer"]["port"] == 443
+    assert issue["event_count"] == 1
+    assert issue["examples"][0]["facts"]["icmp_type"] == 3
+    assert issue["examples"][0]["facts"]["icmp_code"] == 1
 
 
 @pytest.mark.parametrize("worker", [False, True])
@@ -163,17 +168,12 @@ def test_historical_unknown_interface_preserves_counts(monkeypatch, worker, know
     assert report["summary"]["scanned_records"] == len(records)
     assert report["summary"]["skipped_records"] == 0
     assert report["summary"]["flow_count"] == (12 if known_interfaces else 4)
-    assert {flow["interface_id"] for flow in report["flows"]} == (
-        {None, 0, 1} if known_interfaces else {None}
-    )
-    for flow in report["flows"]:
-        assert flow["observed_directions"] == {
-            "a_to_b": {"packets": 7, "bytes": 420},
-            "b_to_a": {"packets": 0, "bytes": 0},
-        }
-        assert "INCOMPLETE_PACKET_EVIDENCE" in flow["warnings"]
-        assert flow["metrics"]["observed_rtt_ms"]["count"] == 0
-        assert flow["metrics"]["data_retransmissions"] == 0
+    assert report["version"] == "network-pattern-report-v1"
+    assert report["flows"] == []
+    assert report["issues"] == []
+    assert report["summary"]["incomplete_records"] == len(records)
+    assert report["summary"]["verdict"] == "insufficient_evidence"
+    assert "INCOMPLETE_PACKET_EVIDENCE" in report["warnings"]
 
 
 def test_network_worker_result_uses_existing_queue_and_metadata(monkeypatch):
@@ -204,7 +204,10 @@ def test_network_worker_result_uses_existing_queue_and_metadata(monkeypatch):
     assert queue.jobs == [{"id": job["id"]}]
     result = execute_analysis(repo.get_job(job["id"]))
     assert result["candidates"] == []
-    assert result["network_anomaly"]["flows"]
+    assert result["network_anomaly"]["version"] == "network-pattern-report-v1"
+    assert result["network_anomaly"]["summary"]["flow_count"] > 0
+    assert isinstance(result["network_anomaly"]["issues"], list)
+    assert result["network_anomaly"]["flows"] == []
     queue.results.append(
         {"receipt": "network-result", "job_id": job["id"], "status": "COMPLETED", "result": result}
     )
