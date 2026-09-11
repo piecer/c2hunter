@@ -2748,9 +2748,9 @@ def create_app(
         ):
             machine.transition(job, state, reason)
         if job.get("analysis", {}).get("module") == "network_anomaly":
-            from c2hunter_analysis.network_anomaly import analyze_network_anomalies
+            from c2hunter_analysis.network_report import analyze_network_report
 
-            job["network_anomaly"] = analyze_network_anomalies(job.get("flow_records", []))
+            job["network_anomaly"] = analyze_network_report(job.get("flow_records", []))
             candidates = []
         else:
             candidates = calculate(job, job.get("allowlist", []))

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { StructuredValue } from './AnalysisConfiguration';
+import NetworkPatternReport, { type PatternIssue } from './NetworkPatternReport';
 
 type Endpoint = { ip: string; port: number | null };
 type NetworkFlow = {
@@ -11,7 +12,7 @@ type NetworkFlow = {
 };
 export type NetworkAnomalyReport = {
   version: string; summary: Record<string, unknown>; flows: NetworkFlow[];
-  warnings: string[]; limitations: string[];
+  warnings: string[]; limitations: string[]; issues?: PatternIssue[];
 };
 const endpoint = (value: Endpoint) => `${value.ip.includes(':') ? `[${value.ip}]` : value.ip}${value.port === null ? '' : `:${value.port}`}`;
 const metrics = [
@@ -26,6 +27,13 @@ function CompactEvidence({ value }: { value: unknown }) {
 }
 
 export default function NetworkAnomalyPanel({ report }: { report?: NetworkAnomalyReport }) {
+  const [legacy, setLegacy] = useState<NetworkAnomalyReport>();
+  if (!report) return <section className="panel"><h2>Overall network report</h2><p role="status">No network report is available yet. Check job status and errors.</p></section>;
+  if (report.version === 'network-pattern-report-v1') return <NetworkPatternReport report={report}/>;
+  return <section className="panel"><h2>Legacy report</h2><p>An overall verdict is unavailable for this saved report. Re-run analysis to produce a pattern-first report.</p><button className="secondary" aria-expanded={legacy === report} onClick={() => setLegacy(legacy === report ? undefined : report)}>{legacy === report ? 'Hide' : 'Show'} legacy flow observations</button>{legacy === report && <LegacyNetworkObservations report={report}/>}</section>;
+}
+
+function LegacyNetworkObservations({ report }: { report: NetworkAnomalyReport }) {
   const [page, setPage] = useState(0);
   if (!report) return <section className="panel"><h2>Network observations</h2><p role="status">No network report is available yet. Check job status and errors.</p></section>;
   const pages = Math.max(1, Math.ceil(report.flows.length / 25));
