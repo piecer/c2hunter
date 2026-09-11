@@ -1,7 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { expect, it, vi } from 'vitest';
+import { beforeEach, expect, it, vi } from 'vitest';
+
+beforeEach(() => localStorage.setItem('c2hunter-report-language', 'en'));
 import userEvent from '@testing-library/user-event';
 import App from '../src/App';
 
@@ -106,7 +108,7 @@ it('shows independent bidirectional network observations instead of C2 controls'
   expect(screen.getByText('10.0.0.1:50000')).toBeInTheDocument();
   expect(screen.getByText('SYN retries')).toBeInTheDocument();
   expect(screen.getByRole('table', { name: 'Bidirectional network flows' }).querySelector('.structured-fields')).toBeNull();
-  expect(screen.getByText('INCOMPLETE_PACKET_EVIDENCE')).toBeInTheDocument();
+  expect(screen.getByText(/INCOMPLETE_PACKET_EVIDENCE/)).toBeInTheDocument();
   expect(screen.queryByText('Candidates', { selector: 'span', exact: true })).not.toBeInTheDocument();
   expect(screen.getByText('Observed bidirectional flows')).toBeInTheDocument();
   expect(screen.queryByText('최소 후보 점수')).not.toBeInTheDocument();

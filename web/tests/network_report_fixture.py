@@ -29,4 +29,28 @@ def scenarios():
 
 
 if __name__ == '__main__':
-    print(json.dumps(scenarios(), sort_keys=True, indent=2))
+    if '--legacy' in sys.argv or '--legacy-limited' in sys.argv:
+        from c2hunter_analysis.network_anomaly import analyze_network_anomalies
+        packets = (
+            [frame(protocol=17, payload=str(index).encode()) for index in range(257)]
+            if '--legacy-limited' in sys.argv else [frame(), frame()]
+        )
+        print(json.dumps(analyze_network_anomalies(records(*packets)), sort_keys=True))
+    elif '--contract' in sys.argv:
+        import ast
+        from c2hunter_analysis import network_report
+        tree = ast.parse(Path(network_report.__file__).read_text())
+        warning_codes = sorted({
+            node.args[0].value for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'add' and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == 'warnings' and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        })
+        print(json.dumps({'diagnostics': network_report._DIAGNOSTICS,
+                          'patterns': sorted(network_report._TITLES),
+                          'facts': network_report._FACT_FIELDS,
+                          'warnings': warning_codes}, sort_keys=True))
+    else:
+        print(json.dumps(scenarios(), sort_keys=True, indent=2))

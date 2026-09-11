@@ -1,5 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
-import { expect, it } from 'vitest';
+import { beforeEach, expect, it } from 'vitest';
+
+beforeEach(() => localStorage.setItem('c2hunter-report-language', 'en'));
 import NetworkAnomalyPanel from '../src/NetworkAnomalyPanel';
 
 const report = {
