@@ -243,6 +243,7 @@ class ModelGateway(Protocol):
 
 
 class AIRepository(Protocol):
+    def list_jobs(self) -> list[dict[str, Any]]: ...
     def get_job(self, job_id: str) -> dict[str, Any] | None: ...
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]: ...
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]: ...
@@ -736,6 +737,8 @@ class AIAnalysisService:
         idempotency_key: str,
         candidate_limit: int,
         created_by: str,
+        analysis_kind: str = "C2",
+        language: str = "ko",
     ) -> tuple[dict[str, Any], bool]:
         job = self.repository.get_job(analysis_job_id)
         if job is None:
@@ -744,13 +747,25 @@ class AIAnalysisService:
             raise AIAnalysisError("analysis job must be completed before AI analysis")
         if not 1 <= candidate_limit <= 5:
             raise AIAnalysisError("candidate_limit must be between 1 and 5")
-        candidates = _ranked_candidate_snapshots(
-            job,
-            self.repository.get_candidates(analysis_job_id),
-            candidate_limit,
-        )
-        if not candidates:
-            raise AIAnalysisError("analysis job has no candidates")
+        if analysis_kind not in {"C2", "NETWORK_ANOMALY"} or language not in {"ko", "en"}:
+            raise AIAnalysisError("invalid analysis kind or language")
+        network_input = None
+        if analysis_kind == "NETWORK_ANOMALY":
+            from .network_ai import build_network_input
+
+            try:
+                network_input = build_network_input(job.get("network_anomaly"), language)
+            except ValueError as exc:
+                raise AIAnalysisError(str(exc)) from exc
+            candidates = []
+        else:
+            candidates = _ranked_candidate_snapshots(
+                job,
+                self.repository.get_candidates(analysis_job_id),
+                candidate_limit,
+            )
+            if not candidates:
+                raise AIAnalysisError("analysis job has no candidates")
         created_at = _now()
         run = {
             "id": str(uuid.uuid4()),
@@ -788,7 +803,27 @@ class AIAnalysisService:
                 }
             ],
         }
-        return self.repository.create_ai_run(run)
+        if network_input is not None:
+            from .network_ai import NETWORK_PROMPT_HASH
+
+            run.update(
+                {
+                    "analysis_kind": analysis_kind,
+                    "language": language,
+                    "network_input": network_input,
+                    "prompt_name": "network_pattern_system",
+                    "prompt_version": "1.0",
+                    "prompt_hash": NETWORK_PROMPT_HASH,
+                    "input_schema_version": "network-ai-input-v1",
+                    "output_schema_version": "network-interpretation-v1",
+                }
+            )
+        stored, created = self.repository.create_ai_run(run)
+        if stored.get("analysis_kind", "C2") != analysis_kind or (
+            analysis_kind == "NETWORK_ANOMALY" and stored.get("language") != language
+        ):
+            raise AIAnalysisError("idempotency key already used for a different analysis request")
+        return stored, created
 
     def _transition(
         self, run: dict[str, Any], target: AIAnalysisState, reason: str
@@ -820,6 +855,27 @@ class AIAnalysisService:
         if AIAnalysisState(run["status"]) in TERMINAL_STATES:
             return run
         try:
+            if run.get("analysis_kind") == "NETWORK_ANOMALY":
+                from .network_ai import validate_network_interpretation
+
+                run = self._transition(run, AIAnalysisState.PREPARING, "loading network snapshot")
+                interpret = getattr(self.gateway, "interpret_network_cancellable", None)
+                if not callable(interpret):
+                    raise AIAnalysisError("network model provider unavailable")
+                run = self._transition(run, AIAnalysisState.ANALYZING, "calling network model")
+                response = interpret(
+                    run["network_input"],
+                    should_cancel=lambda: (
+                        (latest := self.repository.get_ai_run(run_id)) is not None
+                        and latest.get("status") == AIAnalysisState.CANCELLED
+                    ),
+                )
+                run = self._transition(run, AIAnalysisState.VALIDATING, "validating network output")
+                interpretation = validate_network_interpretation(response, run["network_input"])
+                run["network_interpretation"] = interpretation.model_dump(mode="json")
+                return self._transition(
+                    run, AIAnalysisState.COMPLETED, "network interpretation validated"
+                )
             run = self._transition(run, AIAnalysisState.PREPARING, "building evidence bundles")
             snapshots = run.get("candidate_snapshots")
             candidate_source = (

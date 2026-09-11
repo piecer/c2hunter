@@ -2,6 +2,7 @@ import { Fragment, FormEvent, ReactNode, useEffect, useRef, useState } from 'rea
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { api } from './api';
+import NetworkAIInterpretation from './NetworkAIInterpretation';
 import NetworkAnomalyPanel, { type NetworkAnomalyReport } from './NetworkAnomalyPanel';
 import AnalysisConfiguration, { StructuredValue } from './AnalysisConfiguration';
 import { runPcapExportLifecycle, type PcapExportLifecycleResult } from './pcapExportLifecycle';
@@ -634,7 +635,7 @@ function JobDetail() {
         {!terminal && <button className="danger" disabled={cancel.isPending} onClick={() => cancel.mutate()}>{cancel.isPending ? 'Cancelling…' : 'Cancel analysis'}</button>}
         {cancel.error && <p role="alert" className="error-text">{cancel.error.message}</p>}{notice && <p role="status">{notice}</p>}
       </section>
-      {j.analysis?.module === 'network_anomaly' ? <NetworkAnomalyPanel report={j.network_anomaly}/> : <AIAnalysisPanel job={j}/>}
+      {j.analysis?.module === 'network_anomaly' ? <NetworkAnomalyPanel report={j.network_anomaly}><NetworkAIInterpretation key={j.id} jobId={j.id} completed={j.status === 'COMPLETED' && Boolean(j.network_anomaly)}/></NetworkAnomalyPanel> : <AIAnalysisPanel job={j}/>}
       <section className="grid compact">
         <article className="panel"><h2>Source and parsing</h2><dl><dt>Type</dt><dd>{j.source_type === 'PCAP_UPLOAD' ? 'PCAP upload' : j.mode ?? 'Sensor capture'}</dd><dt>File</dt><dd>{source?.filename ?? 'Sensor dataset'}</dd><dt>Format</dt><dd>{source?.capture_format ?? 'Not reported'}</dd><dt>Size</dt><dd>{formatBytes(source?.size_bytes)}</dd><dt>Captured packets</dt><dd>{formatValue(source?.captured_packet_count)}</dd><dt>Parsed packets</dt><dd>{formatValue(source?.parsed_packet_count)}</dd><dt>Skipped packets</dt><dd>{formatValue(source?.skipped_packet_count)}</dd><dt>Link types</dt><dd>{formatValue(source?.link_types)}</dd><dt>SHA-256</dt><dd className="hash-value">{source?.sha256 ?? 'Not applicable'}</dd></dl></article>
         <article className="panel"><h2>Observation timeline</h2><dl><dt>Observed from</dt><dd>{fmt(j.start_time)}</dd><dt>Observed to</dt><dd>{fmt(j.end_time)}</dd><dt>Created</dt><dd>{fmt(j.created_at)}</dd><dt>Updated</dt><dd>{fmt(j.updated_at)}</dd><dt>Completed</dt><dd>{fmt(j.completed_at)}</dd><dt>Parent analysis</dt><dd>{j.parent_job_id ? <Link to={`/analyses/${j.parent_job_id}`}>{j.parent_job_id}</Link> : 'None'}</dd></dl></article>

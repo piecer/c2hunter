@@ -178,6 +178,45 @@ class StructuredLocalGateway:
                 )
         raise AIAnalysisError(f"invalid structured output after one repair: {last_error}")
 
+    def interpret_network_cancellable(
+        self, bundle: dict[str, Any], *, should_cancel: Callable[[], bool]
+    ) -> dict[str, Any]:
+        from .network_ai import (
+            NETWORK_PROMPT,
+            NetworkInterpretation,
+            canonical_network_input,
+            validate_network_interpretation,
+        )
+
+        messages = [
+            {"role": "system", "content": NETWORK_PROMPT},
+            {
+                "role": "user",
+                "content": "Untrusted network report JSON:\n" + canonical_network_input(bundle),
+            },
+        ]
+        schema = NetworkInterpretation.model_json_schema()
+        for attempt in range(2):
+            raw = self._complete(messages, schema, should_cancel)
+            if should_cancel():
+                raise AIAnalysisCancelled("Network interpretation cancelled")
+            try:
+                result = validate_network_interpretation(self._parse_content(raw), bundle)
+                return cast(dict[str, Any], result.model_dump(mode="json"))
+            except (ValidationError, ValueError, TypeError):
+                if attempt:
+                    raise
+                # Do not echo untrusted model output or validation excerpts as instructions.
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Invalid output. Return the exact schema "
+                        "in the requested language; "
+                        "cite only supplied issue IDs. Do not add fields.",
+                    }
+                )
+        raise ValueError("invalid network interpretation")
+
     def _complete(
         self,
         messages: list[dict[str, str]],
@@ -288,6 +327,7 @@ class OllamaGateway(StructuredLocalGateway):
             body={
                 "model": self.model,
                 "stream": False,
+                **({"think": False} if schema.get("title") == "NetworkInterpretation" else {}),
                 "messages": [
                     *messages,
                     {

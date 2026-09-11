@@ -1067,6 +1067,9 @@ class AIAnalysisRunCreate(BaseModel):
 
     idempotency_key: str = Field(min_length=1, max_length=200)
     candidate_limit: int = Field(default=5, ge=1, le=5)
+    analysis_kind: Literal["C2", "NETWORK_ANOMALY"] = "C2"
+    language: Literal["ko", "en"] = "ko"
+    allow_remote: bool = Field(default=False, strict=True)
 
 
 class AIAnalysisRunCancel(BaseModel):
