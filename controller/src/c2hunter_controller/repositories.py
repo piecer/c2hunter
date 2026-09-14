@@ -3853,6 +3853,12 @@ class SQLiteRepository(
 ):
     """외부 서비스 없이 계약 테스트 가능한 SQLite adapter. 같은 경계로 PostgreSQL 교체 가능."""
 
+    @property
+    def local_runtime_database_path(self) -> Path:
+        if self._path == ":memory:" or self._path.startswith("file:"):
+            raise ValueError("local runtime ownership requires a file-backed SQLite database")
+        return Path(self._path).resolve()
+
     def __init__(
         self,
         path: str | Path,

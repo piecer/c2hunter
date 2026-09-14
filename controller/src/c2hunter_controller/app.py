@@ -219,7 +219,7 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in job.items()
-        if key not in {"flow_records", "payload_signatures"}
+        if key not in {"flow_records", "payload_signatures", "volatile_capture"}
     }
 
 
@@ -2143,6 +2143,8 @@ def create_app(
         work_queue.enqueue(envelope)
 
     def begin_live_capture(job: dict[str, Any]) -> dict[str, Any]:
+        if local_analysis_worker_health_path is not None and isinstance(flows, MemoryFlowStore):
+            job["volatile_capture"] = {"owner": "local-analysis-v1", "store": flows.continuity_id}
         machine.transition(job, JobState.WAITING_FOR_SENSOR, "sensor selection validated")
         machine.transition(job, JobState.CAPTURING, "waiting for live capture range")
         return repo.save_job_metadata(job)
@@ -2716,6 +2718,43 @@ def create_app(
     if local_analysis_worker_health_path is not None:
         if not isinstance(work_queue, MemoryControllerQueue):
             raise ValueError("local analysis worker requires the explicit memory queue")
+
+        from .repositories import SQLiteRepository
+
+        ownership_path = None
+        if isinstance(flows, MemoryFlowStore):
+            if not isinstance(repo, SQLiteRepository):
+                raise ValueError(
+                    "local memory runtime requires an owned file-backed SQLite database"
+                )
+            ownership_path = repo.local_runtime_database_path
+
+        def recover_volatile_captures() -> None:
+            if not isinstance(flows, MemoryFlowStore):
+                return
+            # No inference from empty records/counts: only this runtime's explicit
+            # persisted source marker authorizes a restart-loss transition.
+            active = repo.list_active_live_jobs()
+            for job in active:
+                marker = job.get("volatile_capture", {})
+                if marker.get("owner") != "local-analysis-v1":
+                    raise RuntimeError(
+                        "local memory runtime cannot establish ownership of an active LIVE job; "
+                        "finish or cancel legacy/foreign captures before startup"
+                    )
+            for job in active:
+                marker = job["volatile_capture"]
+                if marker.get("store") == flows.continuity_id:
+                    continue
+                reason = (
+                    "Controller restart interrupted LIVE capture before its dataset was saved; "
+                    "accepted in-memory flow batches may have been lost. Start a new capture."
+                )
+                machine.transition(job, JobState.FAILED, reason)
+                job["error_code"] = "LIVE_CAPTURE_RESTART_INCOMPLETE"
+                job["error"] = reason
+                repo.save_job_metadata(job)
+
         local_runtime = LocalAnalysisRuntime(
             work_queue,
             repo,
@@ -2723,6 +2762,8 @@ def create_app(
             persist_claimed_result,
             local_analysis_worker_health_path,
             enqueue_worker_job,
+            prepare=recover_volatile_captures,
+            ownership_path=ownership_path,
         )
         app.state.local_analysis_runtime = local_runtime
         app.router.add_event_handler("startup", local_runtime.start)
@@ -3038,7 +3079,7 @@ def create_app(
             summary = {
                 key: value
                 for key, value in item.items()
-                if key not in {"flow_records", "transitions"}
+                if key not in {"flow_records", "transitions", "volatile_capture"}
             }
             candidate_count = item.get("candidate_count")
             if candidate_count is None:

@@ -31,6 +31,7 @@ class MemoryFlowStore:
     """Explicit test/compatibility adapter."""
 
     def __init__(self) -> None:
+        self.continuity_id = str(uuid.uuid4())
         self._records: list[dict[str, Any]] = []
         self._batches: dict[tuple[str, str], int] = {}
         self._lock = threading.RLock()
