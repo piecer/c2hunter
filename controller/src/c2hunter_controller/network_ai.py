@@ -6,6 +6,7 @@ import hashlib
 import json
 from typing import Annotated, Any, Literal, TypedDict
 
+from c2hunter_analysis.network_measurements import QualityReason, QualityStatus, qualify_samples
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MAX_NETWORK_INPUT_BYTES = 24000
@@ -20,6 +21,15 @@ NETWORK_PROMPT = "\n".join(
         "Observed RTT is capture-local SYN/SYN+ACK or exact data/ACK timing, not one-way "
         "latency or host end-to-end RTT. Preserve sample counts, min/max/mean/stddev, "
         "sources, ambiguity exclusions and coverage. Missing or null stays unknown, not zero.",
+        "Measurement coverage_complete describes tracking/gaps, not sample adequacy. "
+        "Use metric_quality only when supplied; absent qualification is not provided, never "
+        "sufficient. Its statuses mean zero, one, or at least two observed samples, not "
+        "confidence: representativeness is not established at any count. A single sample "
+        "cannot establish dispersion or stability, even if a legacy raw stddev is zero. "
+        "Keep handshake-only RTT separate from data/ACK evidence. RTT directions are not "
+        "tracked: bidirectional packets do not establish bidirectional RTT samples. "
+        "Exclusions, clock gaps and caps mean selection bias possible, not a measured loss rate. "
+        "Do not invent a measurement observation window from issue first_seen/last_seen.",
         "Interarrival stddev is same-direction packet-spacing dispersion, not network jitter. "
         "TTL ranges and changes describe observed TTL/hop-limit only; never infer exact hops, "
         "route changes, path asymmetry or causal attribution from them.",
@@ -106,7 +116,9 @@ class MeasurementStats(ClosedModel):
             raise ValueError("observed statistics require measurements")
         elif not self.min <= self.mean <= self.max:
             raise ValueError("inconsistent measurement range")
-        if (self.stddev is None) != (self.count < 2):
+        # Some saved reports encoded the algebraic singleton dispersion as zero.
+        # Preserve that raw fact without treating it as evidence of stability.
+        if (self.stddev is None) != (self.count < 2) and not (self.count == 1 and self.stddev == 0):
             raise ValueError("dispersion requires at least two samples")
         return self
 
@@ -151,7 +163,24 @@ class DirectionTTL(ClosedModel):
     b_to_a: TTLObservation
 
 
+class MetricQuality(ClosedModel):
+    status: QualityStatus
+    reasons: list[QualityReason] = Field(max_length=5)
+
+
+class DirectionQuality(ClosedModel):
+    a_to_b: MetricQuality
+    b_to_a: MetricQuality
+
+
+class MeasurementQuality(ClosedModel):
+    observed_rtt_ms: MetricQuality
+    interarrival_variation_ms: DirectionQuality
+    ttl_observed: DirectionQuality
+
+
 class SupportingMeasurements(ClosedModel):
+    metric_quality: MeasurementQuality | None = None
     observed_rtt_ms: MeasurementStats
     rtt_sources: RTTSourceCounts
     rtt_excluded: RTTExcludedCounts
@@ -175,6 +204,40 @@ class SupportingMeasurements(ClosedModel):
     def consistent_sources(self) -> SupportingMeasurements:
         if self.observed_rtt_ms.count != self.rtt_sources.syn_ack + self.rtt_sources.data_ack:
             raise ValueError("RTT source counts must match samples")
+        if "metric_quality" in self.model_fields_set:
+            if self.metric_quality is None:
+                raise ValueError("present metric quality cannot be null")
+            selected = bool(
+                set(self.reasons)
+                & {
+                    "INCOMPLETE_PACKET_EVIDENCE",
+                    "NON_MONOTONIC_TIMESTAMPS",
+                    "CORRELATION_LIMIT_REACHED",
+                }
+            )
+            expected = {
+                "observed_rtt_ms": qualify_samples(
+                    self.observed_rtt_ms.count,
+                    rtt=True,
+                    handshake_only=bool(self.rtt_sources.syn_ack and not self.rtt_sources.data_ack),
+                    selected=selected or any(self.rtt_excluded.model_dump().values()),
+                ),
+                "interarrival_variation_ms": {
+                    d: qualify_samples(
+                        getattr(self.interarrival_variation_ms, d).count, selected=selected
+                    )
+                    for d in ("a_to_b", "b_to_a")
+                },
+                "ttl_observed": {
+                    d: qualify_samples(
+                        getattr(self.ttl_observed, d).count,
+                        selected=selected or bool(getattr(self.ttl_observed, d).missing),
+                    )
+                    for d in ("a_to_b", "b_to_a")
+                },
+            }
+            if self.metric_quality.model_dump() != expected:
+                raise ValueError("metric quality must match observed evidence")
         return self
 
 
@@ -385,7 +448,9 @@ def build_network_input(report: Any, language: str = "ko") -> dict[str, Any]:
             for example in examples[:2]:
                 if isinstance(example, dict) and "measurements" in example:
                     measurement = SupportingMeasurements.model_validate(example["measurements"])
-                    details.setdefault("observed_measurements", []).append(measurement.model_dump())
+                    details.setdefault("observed_measurements", []).append(
+                        measurement.model_dump(exclude_unset=True)
+                    )
                 facts = example.get("facts", {}) if isinstance(example, dict) else {}
                 if isinstance(facts, dict):
                     details["observed_facts"].append(

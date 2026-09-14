@@ -32,6 +32,52 @@ def measured_report():
     return report
 
 
+def test_legacy_single_sample_zero_dispersion_is_preserved_not_promoted():
+    report = measured_report()
+    m = report["issues"][0]["examples"][0]["measurements"]
+    m["observed_rtt_ms"] = {"count": 1, "min": 10, "max": 10, "mean": 10, "stddev": 0}
+    m["rtt_sources"] = {"syn_ack": 1, "data_ack": 0}
+    assert build_network_input(report)["issues"][0]["observed_measurements"] == [m]
+    assert "metric_quality" not in m
+
+
+def test_real_quality_preserved_without_upgrading_legacy(monkeypatch):
+    from test_network_input_budget import rich_report
+
+    report = rich_report(monkeypatch, peers=1)
+    m = report["issues"][0]["examples"][0]["measurements"]
+    original = deepcopy(report)
+    assert build_network_input(report)["issues"][0]["observed_measurements"] == [m]
+    assert report == original
+    assert "sample adequacy" in NETWORK_PROMPT
+    assert "representativeness" in NETWORK_PROMPT
+    del m["metric_quality"]
+    assert build_network_input(report)["issues"][0]["observed_measurements"] == [m]
+
+
+@pytest.mark.parametrize("mutation", ["unknown", "extra", "count", "reason", "null", "missing"])
+def test_quality_is_closed_and_must_match_actual_counts(monkeypatch, mutation):
+    from test_network_input_budget import rich_report
+
+    report = rich_report(monkeypatch, peers=20)
+    m = report["issues"][-1]["examples"][0]["measurements"]
+    q = m["metric_quality"]["observed_rtt_ms"]
+    if mutation == "unknown":
+        q["status"] = "sufficient"
+    elif mutation == "extra":
+        q["confidence"] = "normal"
+    elif mutation == "count":
+        q["status"] = "observed_samples"
+    elif mutation == "reason":
+        q["reasons"] = []
+    elif mutation == "null":
+        m["metric_quality"] = None
+    else:
+        del m["metric_quality"]["ttl_observed"]
+    with pytest.raises(ValueError):
+        build_network_input(report)
+
+
 def test_typed_measurements_preserved_and_prompt_describes_only_observations():
     bundle = build_network_input(measured_report())
     assert bundle["issues"][0]["observed_measurements"] == [measurements()]

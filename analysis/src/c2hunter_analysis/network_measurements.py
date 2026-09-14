@@ -23,7 +23,63 @@ class TTL(TypedDict):
     missing: int
 
 
+QualityStatus = Literal["unavailable", "limited_samples", "observed_samples"]
+QualityReason = Literal[
+    "NO_SAMPLES",
+    "SINGLE_SAMPLE",
+    "HANDSHAKE_ONLY",
+    "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+    "SELECTION_BIAS_POSSIBLE",
+]
+
+
+class MetricQuality(TypedDict):
+    status: QualityStatus
+    reasons: list[QualityReason]
+
+
+class DirectionQuality(TypedDict):
+    a_to_b: MetricQuality
+    b_to_a: MetricQuality
+
+
+class MeasurementQuality(TypedDict):
+    observed_rtt_ms: MetricQuality
+    interarrival_variation_ms: DirectionQuality
+    ttl_observed: DirectionQuality
+
+
+def qualify_samples(
+    count: int, *, rtt: bool = False, handshake_only: bool = False, selected: bool = False
+) -> MetricQuality:
+    """Mathematical availability only, never statistical confidence or normality.
+
+    Counts remain in the associated metric; no duplicate counters or sample storage.
+    RTT direction is not tracked, so bidirectional RTT adequacy is never inferred.
+    """
+    reasons: list[QualityReason] = []
+    if count == 0:
+        reasons.append("NO_SAMPLES")
+    elif count == 1:
+        reasons.append("SINGLE_SAMPLE")
+    if handshake_only:
+        reasons.append("HANDSHAKE_ONLY")
+    if rtt:
+        reasons.append("BIDIRECTIONAL_RTT_NOT_ESTABLISHED")
+    if selected:
+        reasons.append("SELECTION_BIAS_POSSIBLE")
+    return {
+        "status": "unavailable"
+        if count == 0
+        else "limited_samples"
+        if count == 1
+        else "observed_samples",
+        "reasons": reasons,
+    }
+
+
 class Measurements(TypedDict):
+    metric_quality: MeasurementQuality
     observed_rtt_ms: Stats
     rtt_sources: dict[str, int]
     rtt_excluded: dict[str, int]
@@ -142,7 +198,31 @@ class SupportingMeasurements:
             reasons.add("NO_UNAMBIGUOUS_RTT")
         names = ("a_to_b", "b_to_a")
         observed = self.rtt.count or any(d.ttl_count or d.spacing.count for d in self.directions)
+        selected = bool(self.reasons)
+        quality: MeasurementQuality = {
+            "observed_rtt_ms": qualify_samples(
+                self.rtt.count,
+                rtt=True,
+                handshake_only=bool(self.sources["syn_ack"] and not self.sources["data_ack"]),
+                selected=selected or any(self.excluded.values()),
+            ),
+            "interarrival_variation_ms": {
+                "a_to_b": qualify_samples(self.directions[0].spacing.count, selected=selected),
+                "b_to_a": qualify_samples(self.directions[1].spacing.count, selected=selected),
+            },
+            "ttl_observed": {
+                "a_to_b": qualify_samples(
+                    self.directions[0].ttl_count,
+                    selected=selected or bool(self.directions[0].ttl_missing),
+                ),
+                "b_to_a": qualify_samples(
+                    self.directions[1].ttl_count,
+                    selected=selected or bool(self.directions[1].ttl_missing),
+                ),
+            },
+        }
         return {
+            "metric_quality": quality,
             "observed_rtt_ms": self.rtt.publish(),
             "rtt_sources": self.sources.copy(),
             "rtt_excluded": self.excluded.copy(),
@@ -199,13 +279,17 @@ def describe(m: Measurements) -> list[str]:
         f"Representative flow capture-local RTT (ms): {m['observed_rtt_ms']}; "
         f"sources {m['rtt_sources']}; excluded matches {m['rtt_excluded']}. "
         "Not one-way latency; includes peer ACK delay.",
-        f"Same-direction interarrival dispersion (ms): {m['interarrival_variation_ms']}. "
+        "Same-direction interarrival dispersion (ms) is recorded in the measurement fields. "
         "Application pacing and capture effects can explain variation; "
         "this is not network jitter proof.",
-        f"Outer IPv4 TTL / IPv6 hop-limit: {m['ttl_observed']}. "
+        "Outer IPv4 TTL / IPv6 hop-limit ranges and changes "
+        "are recorded in the measurement fields. "
         "Variation can motivate checking path changes or sender defaults, "
         "but proves neither a route change nor exact hops or asymmetry.",
         f"Measurement coverage complete: {m['coverage_complete']}; reasons: {m['reasons']}. "
+        "This is tracking/gap coverage, not sample adequacy; "
+        "representativeness is not established. "
+        "A single sample cannot establish dispersion or stability. "
         "No baseline is configured: RTT/spacing alone cannot establish congestion or queueing; "
         "compare baseline and peer captures before attributing the pattern.",
     ]
