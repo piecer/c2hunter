@@ -116,7 +116,7 @@ it('bounds new reports to eight groups and three lazily mounted examples with on
   const { container, rerender } = render(<NetworkAnomalyPanel report={report}/>);
   expect(screen.getAllByRole('article')).toHaveLength(8);
   expect(screen.queryByRole('region', { name: 'Supporting measurements' })).not.toBeInTheDocument();
-  for (const button of screen.getAllByRole('button')) {
+  for (const button of screen.getAllByRole('button', { name: /representative evidence/ })) {
     fireEvent.click(button);
     expect(screen.getAllByRole('region', { name: 'Representative flow evidence' })).toHaveLength(1);
     expect(screen.getAllByRole('region', { name: 'Supporting measurements' })).toHaveLength(3);

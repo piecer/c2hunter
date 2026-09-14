@@ -59,6 +59,22 @@ if __name__ == '__main__':
             if '--legacy-limited' in sys.argv else [frame(), frame()]
         )
         print(json.dumps(analyze_network_anomalies(records(*packets)), sort_keys=True))
+    elif '--pagination' in sys.argv:
+        from c2hunter_analysis.pcap import parse_pcap
+        from test_network_anomaly import capture
+
+        def grouped_report(size):
+            # Genuine repeated-SYN PCAP bytes at distinct observation points.
+            evidence = []
+            for index in range(size):
+                evidence.extend(parse_pcap(
+                    capture(frame(), frame()), sensor_id=f'page-sensor-{index:02d}',
+                    internal_networks=['10.0.0.0/8'], retain_packet_bytes=False,
+                    retain_network_evidence=True,
+                ).records)
+            return analyze_network_report(evidence)
+
+        print(json.dumps({str(size): grouped_report(size) for size in (0, 8, 9, 20, 23)}, sort_keys=True))
     elif '--contract' in sys.argv:
         import ast
         from c2hunter_analysis import network_report

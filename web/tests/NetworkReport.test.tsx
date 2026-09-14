@@ -42,10 +42,10 @@ it.each([
 it('bounds large reports and clears previous and stale expanded evidence', () => {
   const large = { ...report, summary: { ...report.summary, issue_count: 1000, displayed_issue_count: 1000, omitted_issue_count: 2, truncated: true }, issues: Array.from({ length: 1000 }, (_, i) => ({ ...report.issues[0], id: String(i), examples: Array.from({ length: 100 }, () => report.issues[0].examples[0]) })) };
   const { container, rerender } = render(<NetworkAnomalyPanel report={large}/>);
-  expect(screen.getByText(/992 additional groups omitted/)).toBeVisible();
+  expect(screen.getByText(/992 retained groups not shown on this page/)).toBeVisible();
   expect(screen.getByText(/Report truncated/)).toBeVisible();
-  expect(screen.getAllByRole('button')).toHaveLength(8);
-  for (const button of screen.getAllByRole('button')) {
+  expect(screen.getAllByRole('button', { name: /representative evidence/ })).toHaveLength(8);
+  for (const button of screen.getAllByRole('button', { name: /representative evidence/ })) {
     fireEvent.click(button);
     expect(screen.getAllByRole('region', { name: 'Representative flow evidence' })).toHaveLength(1);
     expect(container.querySelectorAll('*').length).toBeLessThan(500);

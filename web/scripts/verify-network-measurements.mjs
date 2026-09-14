@@ -1,4 +1,4 @@
-/* global localStorage, innerWidth -- callbacks execute in Chromium */
+/* global localStorage, innerWidth, document -- callbacks execute in Chromium */
 // Offline real-browser verification of built UI + actual producer reports.
 // npm run build
 // C2HUNTER_BROWSER_EXECUTABLE=/path/to/installed/chrome node scripts/verify-network-measurements.mjs /absolute/evidence-directory
@@ -15,6 +15,7 @@ const output = resolve(argv[2] ?? '../artifacts/network-measurements-browser');
 mkdirSync(output, { recursive: true });
 const python = env.C2HUNTER_TEST_PYTHON ?? (existsSync('../.venv/bin/python') ? resolve('../.venv/bin/python') : 'python3');
 const fixtures = JSON.parse(execFileSync(python, ['tests/network_report_fixture.py'], { encoding: 'utf8' }));
+const paginationFixtures = JSON.parse(execFileSync(python, ['tests/network_report_fixture.py', '--pagination'], { encoding: 'utf8' }));
 const browser = await chromium.launch({ executablePath: env.C2HUNTER_BROWSER_EXECUTABLE || undefined });
 const results = [];
 try {
@@ -29,6 +30,7 @@ try {
         const page = await context.newPage();
         const errors = [];
         const requests = [];
+        let activeReport = fixtures.supporting;
         page.on('pageerror', error => errors.push(error.message));
         await page.route('**/*', async route => {
           const request = route.request();
@@ -36,7 +38,7 @@ try {
           const url = new URL(request.url());
           if (url.origin !== 'http://offline-measurements.test') return route.abort();
           if (url.pathname.startsWith('/api/')) {
-            const body = url.pathname === '/api/v1/analysis-jobs/measurements' ? { id: 'measurements', name: 'Measurement fixture', status: 'COMPLETED', analysis: { module: 'network_anomaly' }, network_anomaly: fixtures.supporting } : { items: [] };
+            const body = url.pathname === '/api/v1/analysis-jobs/measurements' ? { id: 'measurements', name: 'Measurement fixture', status: 'COMPLETED', analysis: { module: 'network_anomaly' }, network_anomaly: activeReport } : { items: [] };
             return route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
           }
           const asset = url.pathname.startsWith('/assets/') ? resolve('dist', `.${url.pathname}`) : resolve('dist/index.html');
@@ -63,10 +65,60 @@ try {
         writeFileSync(resolve(output, `${name}.aria.txt`), snapshot);
         await page.keyboard.press('Enter');
         assert.equal(await detail.count(), 0);
+        // Reuse the intercepted built-app harness, not a deployed controller.
+        activeReport = paginationFixtures['23'];
+        assert.equal(activeReport.issues.length, 20);
+        assert.equal(activeReport.summary.omitted_issue_count, 3);
+        await page.reload();
+        const report = page.locator('.network-report');
+        const previous = report.getByRole('button', { name: language === 'en' ? 'Previous groups' : '이전 그룹', exact: true });
+        const next = report.getByRole('button', { name: language === 'en' ? 'Next groups' : '다음 그룹', exact: true });
+        await next.waitFor();
+        assert(await previous.isDisabled());
+        let peakReportDOM = 0;
+        let peakDocumentDOM = 0;
+        const evidenceName = language === 'en' ? 'Representative flow evidence' : '대표 흐름 증거';
+        for (let current = 0; current < 3; current++) {
+          assert.equal(await report.getByRole('article').count(), current === 2 ? 4 : 8);
+          assert.equal(await report.getByRole('region', { name: evidenceName, exact: true }).count(), 0);
+          for (let index = 0; index < (current === 2 ? 4 : 8); index++) {
+            const evidenceButton = report.getByRole('article').nth(index).getByRole('button');
+            await evidenceButton.focus();
+            await page.keyboard.press(index % 2 ? 'Space' : 'Enter');
+            assert.equal(await report.getByRole('region', { name: evidenceName, exact: true }).count(), 1);
+            assert(await evidenceButton.evaluate(element => document.activeElement === element && document.getElementById(element.getAttribute('aria-controls')) !== null));
+            peakReportDOM = Math.max(peakReportDOM, await report.locator('*').count());
+            peakDocumentDOM = Math.max(peakDocumentDOM, await page.locator('*').count());
+            assert(peakReportDOM < 500);
+          }
+          if (current < 2) {
+            await next.focus();
+            await page.keyboard.press('Enter');
+            assert(await report.getByRole('status').evaluate(element => document.activeElement === element));
+          }
+        }
+        assert((await report.innerText()).includes(activeReport.issues.at(-1).scope.sensor_id));
+        assert(await next.isDisabled());
+        assert(!(await previous.isDisabled()));
+        const paginationSnapshot = await report.ariaSnapshot();
+        assert(paginationSnapshot.includes(language === 'en' ? 'Page 3 of 3' : '3페이지 중 3페이지'));
+        await page.screenshot({ path: resolve(output, `pagination-${language}-${width}.png`), fullPage: true });
+        writeFileSync(resolve(output, `pagination-${language}-${width}.aria.txt`), paginationSnapshot);
+        for (let current = 1; current >= 0; current--) {
+          await previous.focus();
+          await page.keyboard.press('Space');
+          assert(await report.getByRole('status').evaluate(element => document.activeElement === element));
+          assert.equal(await report.getByRole('region', { name: evidenceName, exact: true }).count(), 0);
+        }
+        assert(await previous.isDisabled());
+        assert(!(await next.isDisabled()));
+        // Tab skips the disabled previous control; next and evidence remain native.
+        await page.keyboard.press('Tab');
+        assert(await next.evaluate(element => document.activeElement === element));
         assert.deepEqual(errors, []);
         assert(requests.every(request => request.method === 'GET'));
         // Existing saved-AI status/audit reads are permitted; no inference is submitted.
-        results.push({ language, width, geometry, errors, requests, noAutomaticAIInference: true, keyboardExpansionAndCollapse: true });
+        results.push({ language, width, geometry, errors, requests, noAutomaticAIInference: true, keyboardExpansionAndCollapse: true, pagination: { producerGroups: 23, retainedGroups: 20, producerOmitted: 3, visitedGroups: 20, lastPageAccessible: true, keyboardForwardAndBack: true, peakReportDOM, peakDocumentDOM } });
       } finally { await context.close(); }
     }
   }
