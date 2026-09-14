@@ -131,6 +131,8 @@ from .repositories import (
 from .schemas import (
     AIAnalysisRunCancel,
     AIAnalysisRunCreate,
+    AIAnalysisRunListResponse,
+    AIAnalysisRunResponse,
     AIArtifactReview,
     AIFeedbackCreate,
     AnalysisJobCreate,
@@ -3081,7 +3083,12 @@ def create_app(
             "reason": reason,
         }
 
-    @app.post("/api/v1/analysis-jobs/{job_id}/ai-runs", status_code=201)
+    @app.post(
+        "/api/v1/analysis-jobs/{job_id}/ai-runs",
+        status_code=201,
+        response_model=AIAnalysisRunResponse,
+        response_model_exclude_unset=True,
+    )
     def create_ai_analysis_run(
         job_id: str,
         payload: AIAnalysisRunCreate,
@@ -3161,7 +3168,11 @@ def create_app(
         )
         return {**run, "candidate_count": len(run.get("candidate_ids", []))}
 
-    @app.get("/api/v1/analysis-jobs/{job_id}/ai-runs")
+    @app.get(
+        "/api/v1/analysis-jobs/{job_id}/ai-runs",
+        response_model=AIAnalysisRunListResponse,
+        response_model_exclude_unset=True,
+    )
     def list_ai_analysis_runs(
         job_id: str,
         page: int = Query(1, ge=1),
@@ -3175,7 +3186,11 @@ def create_app(
         ]
         return _page(runs, page, page_size)
 
-    @app.get("/api/v1/ai-runs/{run_id}")
+    @app.get(
+        "/api/v1/ai-runs/{run_id}",
+        response_model=AIAnalysisRunResponse,
+        response_model_exclude_unset=True,
+    )
     def get_ai_analysis_run(run_id: str) -> dict[str, Any]:
         run = repo.get_ai_run(run_id)
         if run is None:
@@ -3347,7 +3362,11 @@ def create_app(
     ) -> dict[str, Any]:
         return review_ai_artifact(artifact_id, payload, request, "REJECTED")
 
-    @app.post("/api/v1/ai-runs/{run_id}/cancel")
+    @app.post(
+        "/api/v1/ai-runs/{run_id}/cancel",
+        response_model=AIAnalysisRunResponse,
+        response_model_exclude_unset=True,
+    )
     def cancel_ai_analysis_run(
         run_id: str, payload: AIAnalysisRunCancel, request: Request
     ) -> dict[str, Any]:

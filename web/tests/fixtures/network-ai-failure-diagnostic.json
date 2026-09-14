@@ -1,0 +1,8 @@
+{
+  "stage": "MODEL_OUTPUT",
+  "type": "SCHEMA",
+  "attempt_count": 2,
+  "repair_count": 1,
+  "output_bytes": 2,
+  "provider_finish_reason": "stop"
+}

@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from .ai_feedback import REVIEW_PRIORITY_VERSION, calculate_review_priority
 from .ai_gateway import AIAnalysisCancelled
+from .network_ai import NetworkOutputError
 
 
 class AIAnalysisError(ValueError):
@@ -755,8 +756,8 @@ class AIAnalysisService:
 
             try:
                 network_input = build_network_input(job.get("network_anomaly"), language)
-            except ValueError as exc:
-                raise AIAnalysisError(str(exc)) from exc
+            except (ValueError, TypeError):
+                raise AIAnalysisError("Network report input failed validation.") from None
             candidates = []
         else:
             candidates = _ranked_candidate_snapshots(
@@ -961,7 +962,13 @@ class AIAnalysisService:
             run["error_code"] = "MODEL_TIMEOUT"
             run["error_message"] = "Model request timed out."
             return self._transition(run, AIAnalysisState.FAILED, "model timeout")
-        except (AIAnalysisError, ValidationError, TypeError, ValueError):
+        except (AIAnalysisError, ValidationError, TypeError, ValueError) as exc:
+            if run.get("analysis_kind") == "NETWORK_ANOMALY" and isinstance(
+                exc, NetworkOutputError
+            ):
+                run["failure_diagnostic"] = exc.diagnostic.model_dump(
+                    mode="json", exclude_none=True
+                )
             run["error_code"] = "MODEL_OUTPUT_INVALID"
             # Exception text can contain rejected provider values (including credentials).
             # Persist only stable public diagnostics for both network and C2 runs.

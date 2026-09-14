@@ -66,3 +66,63 @@ terminal Run의 취소 요청은 상태를 바꾸지 않는 idempotent 응답이
 - `AI_RUN_NOT_FOUND` (404)
 - `AI_ASSESSMENT_NOT_FOUND` (404)
 - Run 내부 `error_code`: `MODEL_TIMEOUT`, `MODEL_OUTPUT_INVALID`
+
+### Network interpretation failure diagnostics (Step 4)
+
+New `NETWORK_ANOMALY` runs rejected by `StructuredLocalGateway` after one repair
+retain `MODEL_OUTPUT_INVALID` and the fixed message `Model output failed validation.`
+They may additionally expose this closed, typed optional field on create/get/list/cancel
+run responses (including OpenAPI). Existing run metadata remains extensible and is not
+silently dropped. Old runs and gateways without diagnostic support omit this field;
+absence does not identify the cause of a historical failure.
+
+```json
+{
+  "failure_diagnostic": {
+    "stage": "MODEL_OUTPUT",
+    "type": "SCHEMA",
+    "attempt_count": 2,
+    "repair_count": 1,
+    "output_bytes": 2,
+    "provider_finish_reason": "stop"
+  }
+}
+```
+
+This example is produced by the deterministic test transport returning `{}` twice.
+`type` is one of `JSON_PARSE`, `SCHEMA`, `INVALID_CITATION`, `LANGUAGE`. Citation
+validation rejects unknown or duplicate issue IDs. Language validation checks the
+response's `ko`/`en` language tag against the requested tag, not natural-language
+identification of every prose field. The same authoritative validator runs inside
+the gateway repair boundary and again before service publication; the latter never
+invokes the model.
+
+Counts describe completed output attempts (1–2) and repairs (0–1), with
+`repair_count = attempt_count - 1`. `output_bytes` is the last rejected response's
+UTF-8 length (replacement encoding for invalid Unicode surrogates), not raw text,
+tokens, aggregate bytes or input length. The provider reason is included only when
+actually present in Ollama `done_reason` or OpenAI-compatible
+`choices[0].finish_reason`, and only for `stop`, `length`, `load`, `unload`,
+`tool_calls`, `content_filter`; unknown/missing values are omitted. A finish reason
+does not by itself prove why validation failed. No raw output, rejected field value,
+dynamic key, Pydantic location or exception text is persisted, logged or added to
+the network repair prompt. Repair receives the allowlisted category and fixed
+instructions only, in addition to the original bounded input and schema.
+
+There are at most **two completed model-output attempts**: initial generation plus
+one repair. Existing transport retries remain bounded separately: `retries` 0–3
+allows up to `retries + 1` HTTP attempts per generation, hence at most eight HTTP
+attempts if both generations follow three failed transports. Invalid output itself
+is never transport-retried; there is no outer service repair loop. A timeout may
+have reached the provider, so these client-side bounds cannot guarantee how many
+inferences a provider processed. Timeout, cancellation and unexpected transport
+failure retain `MODEL_TIMEOUT`, `CANCELLED`, or `AI_ANALYSIS_FAILED`, respectively;
+they do not acquire a misleading model-output diagnostic, even after a rejected
+first output. Repaired successes publish only validated interpretation, without a
+failure diagnostic. The deterministic report is unchanged in every case.
+
+Invalid source projection is rejected before run creation/model I/O with
+`AI_RUN_NOT_ALLOWED` and fixed `Network report input failed validation.` text; it
+is not classified as model output. This feature does not diagnose or claim to fix
+the earlier real Ollama failure. Deterministic fake-transport gateway/service/API/
+SQLite-reopen tests establish these contracts; no live model execution is required.

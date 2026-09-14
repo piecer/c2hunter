@@ -10,6 +10,8 @@ from typing import Any, Literal
 from c2hunter_analysis.scoring import DEFAULT_DETECTOR_WEIGHTS, MAX_DETECTOR_WEIGHT
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .network_ai import NetworkFailureDiagnostic
+
 
 class Direction(StrEnum):
     INBOUND = "INBOUND"
@@ -1060,6 +1062,22 @@ class CandidateListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class AIAnalysisRunResponse(BaseModel):
+    # Existing runs have an extensible metadata envelope. Preserve those fields;
+    # only the new diagnostic is a closed, strict public contract.
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    status: str
+    failure_diagnostic: NetworkFailureDiagnostic | None = None
+
+
+class AIAnalysisRunListResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    items: list[AIAnalysisRunResponse]
 
 
 class AIAnalysisRunCreate(BaseModel):

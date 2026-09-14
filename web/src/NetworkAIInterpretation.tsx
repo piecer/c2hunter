@@ -5,7 +5,8 @@ import { useReportLanguage } from './reportLanguageContext';
 import { choose } from './reportTranslations';
 
 type Interpretation = { schema_version: 'network-interpretation-v1'; kind: 'MODEL_INTERPRETATION'; language: 'ko' | 'en'; summary: string; possible_causes: { hypothesis: string; issue_ids: string[]; uncertainty: string }[]; prioritized_checks: { priority: string; check: string; issue_ids: string[] }[]; correlations: { interpretation: string; issue_ids: string[] }[]; limitations: string[] };
-type Run = { id: string; analysis_kind: string; status: string; language: 'ko' | 'en'; created_at?: string; completed_at?: string; provider?: string; model_name?: string; progress_percent?: number; error_code?: string; error_message?: string; network_interpretation?: Interpretation };
+type FailureDiagnostic = { stage: 'MODEL_OUTPUT'; type: 'JSON_PARSE' | 'SCHEMA' | 'INVALID_CITATION' | 'LANGUAGE'; attempt_count: number; repair_count: number; output_bytes: number; provider_finish_reason?: 'stop' | 'length' | 'load' | 'unload' | 'tool_calls' | 'content_filter' | null };
+type Run = { id: string; analysis_kind: string; status: string; language: 'ko' | 'en'; created_at?: string; completed_at?: string; provider?: string; model_name?: string; progress_percent?: number; error_code?: string; error_message?: string; failure_diagnostic?: FailureDiagnostic | null; network_interpretation?: Interpretation };
 const activeStatuses = new Set(['QUEUED', 'PREPARING', 'ANALYZING', 'VALIDATING']);
 const boundedText = (value: unknown) => typeof value === 'string' ? (value.length > 2000 ? `${value.slice(0, 2000)}…` : value) : '';
 const boundedItems = <T,>(value: T[]) => Array.isArray(value) ? value.slice(0, 20) : [];
@@ -40,6 +41,14 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
     onSuccess: async () => { await Promise.all([client.invalidateQueries({ queryKey: ['ai-run', current?.id] }), client.invalidateQueries({ queryKey: ['ai-runs', jobId] })]); },
   });
   const result = current?.status === 'COMPLETED' && current.network_interpretation?.schema_version === 'network-interpretation-v1' && current.network_interpretation.kind === 'MODEL_INTERPRETATION' ? current.network_interpretation : undefined;
+  // Lookup only static labels; never echo unknown diagnostic values from older/newer servers.
+  const failureLabels = new Map<string, string>([
+    ['JSON_PARSE', t('Invalid JSON response', 'JSON 응답 해석 실패')],
+    ['SCHEMA', t('Response schema mismatch', '응답 구조 검증 실패')],
+    ['INVALID_CITATION', t('Invalid issue references', '이슈 참조 검증 실패')],
+    ['LANGUAGE', t('Requested language mismatch', '요청 언어 불일치')],
+  ]);
+  const failureLabel = current?.status === 'FAILED' && current.error_code === 'MODEL_OUTPUT_INVALID' && current.failure_diagnostic?.stage === 'MODEL_OUTPUT' ? failureLabels.get(current.failure_diagnostic.type) : undefined;
   return <section className="panel" aria-labelledby="ai-network-heading">
     <div className="header-actions"><div><p className="eyebrow">{t('BOUNDED REPORT EVIDENCE', '제한된 보고서 증거')}</p><h2 id="ai-network-heading">{t('AI interpretation', 'AI 해석')}</h2></div><div className="ai-run-controls"><button type="button" disabled={!canStart || start.isPending} onClick={() => { if (canStart) start.mutate(); }}>{start.isPending ? t('Starting…', '시작 중…') : t('AI interpretation', 'AI 해석')}</button></div></div>
     <p>{t('Observed facts are in the deterministic report above. AI offers possible causes and next checks, not proven root causes or attack classifications.', '관찰된 사실은 위의 결정론적 보고서에 있습니다. AI는 가능한 원인과 다음 확인 사항을 제안하며 근본 원인이나 공격 여부를 확정하지 않습니다.')}</p>
@@ -58,6 +67,7 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
       {typeof current.progress_percent === 'number' && Number.isFinite(current.progress_percent) && <progress aria-label={t('AI interpretation progress', 'AI 해석 진행률')} max="100" value={Math.max(0, Math.min(100, current.progress_percent))}/>}
       {active && <button type="button" className="secondary" disabled={cancel.isPending || run.isError} onClick={() => cancel.mutate()}>{cancel.isPending ? t('Requesting cancellation…', '취소 요청 중…') : t('Cancel AI run', 'AI 실행 취소')}</button>}
       {current.error_code && <p role="alert" className="error-text">{boundedText(current.error_code)}: {boundedText(current.error_message)}</p>}
+      {failureLabel && <p className="error-text">{failureLabel}</p>}
       {current.status === 'COMPLETED' && !result && <p role="alert">{t('No validated interpretation is available for this run.', '이 실행의 검증된 해석 결과가 없습니다.')}</p>}
     </>}
     {cancel.error && <p role="alert" className="error-text">{t('Cancellation failed', '취소 실패')}: {boundedText(cancel.error.message)}</p>}
