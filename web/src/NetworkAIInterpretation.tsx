@@ -1,3 +1,4 @@
+import { useReportDetail } from './reportDetailContext';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from './api';
@@ -13,6 +14,10 @@ const boundedItems = <T,>(value: T[]) => Array.isArray(value) ? value.slice(0, 2
 type Capabilities = { network_interpretation: boolean; available: boolean; provider: string; model_name: string; destination: string | null; remote: boolean; reason: string | null };
 export default function NetworkAIInterpretation({ jobId, completed }: { jobId: string; completed: boolean }) {
   const language = useReportLanguage();
+  const detail = useReportDetail();
+  const [expanded, setOpen] = useState(false);
+  const open = expanded && (!detail || detail.owner === 'ai');
+  const [fullOwner, setFullOwner] = useState<string>();
   const t = (en: string, ko: string) => choose(language, en, ko);
   const client = useQueryClient();
   const capabilities = useQuery<Capabilities, Error>({ queryKey: ['ai-capabilities'], queryFn: () => api.get('/ai-capabilities'), retry: false });
@@ -41,6 +46,14 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
     onSuccess: async () => { await Promise.all([client.invalidateQueries({ queryKey: ['ai-run', current?.id] }), client.invalidateQueries({ queryKey: ['ai-runs', jobId] })]); },
   });
   const result = current?.status === 'COMPLETED' && current.network_interpretation?.schema_version === 'network-interpretation-v1' && current.network_interpretation.kind === 'MODEL_INTERPRETATION' ? current.network_interpretation : undefined;
+  // List GET and detail GET can carry identical saved output as different objects.
+  // Preserve expansion across that handoff, but never revive changed output.
+  const resultKey = JSON.stringify([current?.id, result]);
+  const [resultOwner, setResultOwner] = useState(resultKey);
+  if (resultOwner !== resultKey) {
+    setResultOwner(resultKey);
+    setFullOwner(undefined);
+  }
   // Lookup only static labels; never echo unknown diagnostic values from older/newer servers.
   const failureLabels = new Map<string, string>([
     ['JSON_PARSE', t('Invalid JSON response', 'JSON 응답 해석 실패')],
@@ -50,11 +63,14 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
   ]);
   const failureLabel = current?.status === 'FAILED' && current.error_code === 'MODEL_OUTPUT_INVALID' && current.failure_diagnostic?.stage === 'MODEL_OUTPUT' ? failureLabels.get(current.failure_diagnostic.type) : undefined;
   return <section className="panel" aria-labelledby="ai-network-heading">
-    <div className="header-actions"><div><p className="eyebrow">{t('BOUNDED REPORT EVIDENCE', '제한된 보고서 증거')}</p><h2 id="ai-network-heading">{t('AI interpretation', 'AI 해석')}</h2></div><div className="ai-run-controls"><button type="button" disabled={!canStart || start.isPending} onClick={() => { if (canStart) start.mutate(); }}>{start.isPending ? t('Starting…', '시작 중…') : t('AI interpretation', 'AI 해석')}</button></div></div>
+    <h2 id="ai-network-heading">{t('AI interpretation', 'AI 해석')}</h2>
+    <button type="button" className="secondary" aria-expanded={open} onClick={() => { setOpen(!open); detail?.claim('ai'); setFullOwner(undefined); }}>{open ? t('Close AI interpretation', 'AI 해석 닫기') : t('Open AI interpretation', 'AI 해석 열기')}</button>
+    {open && <><div className="header-actions"><div><p className="eyebrow">{t('BOUNDED REPORT EVIDENCE', '제한된 보고서 증거')}</p></div><div className="ai-run-controls"><button type="button" disabled={!canStart || start.isPending} onClick={() => { if (canStart) start.mutate(); }}>{start.isPending ? t('Starting…', '시작 중…') : t('AI interpretation', 'AI 해석')}</button></div></div>
     <p>{t('Observed facts are in the deterministic report above. AI offers possible causes and next checks, not proven root causes or attack classifications.', '관찰된 사실은 위의 결정론적 보고서에 있습니다. AI는 가능한 원인과 다음 확인 사항을 제안하며 근본 원인이나 공격 여부를 확정하지 않습니다.')}</p>
     <p className="muted">{t('Manual only. The server sends a bounded report context to the configured model, not raw packets or payload. No inference runs on page load or language change.', '수동 실행 전용입니다. 서버는 원시 패킷이나 페이로드 대신 제한된 보고서 문맥을 설정된 모델에 보냅니다. 페이지 로드나 언어 변경으로 AI가 실행되지 않습니다.')}</p>
     {config && <p>{t('Provider / model / destination', '제공자 / 모델 / 전송 대상')}: {config.provider} · {config.model_name} · {config.destination ?? t('Not reported', '보고되지 않음')}</p>}
     {config?.remote && <label className="check"><input type="checkbox" checked={allowRemote} disabled={!config.destination || start.isPending} onChange={event => setConsentedDestination(event.target.checked ? config.destination : null)}/>{t('I consent to sending bounded report evidence to this remote model destination.', '이 원격 모델 대상에 제한된 보고서 증거를 전송하는 데 동의합니다.')}</label>}
+    </>}
     {!completed && <p className="muted">{t('A completed job with a saved network report is required.', '저장된 네트워크 보고서가 있는 완료된 작업에서만 실행할 수 있습니다.')}</p>}
     {capabilities.isLoading && <p role="status">{t('Checking AI availability…', 'AI 사용 가능 여부 확인 중…')}</p>}
     {(capabilities.isError || (config && (!config.available || !config.network_interpretation))) && <p role="alert" className="error-text">{t('AI interpretation is unavailable', 'AI 해석을 사용할 수 없습니다')}: {capabilities.error?.message ?? config?.reason ?? t('Not enabled', '비활성화됨')}</p>}
@@ -71,20 +87,23 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
       {current.status === 'COMPLETED' && !result && <p role="alert">{t('No validated interpretation is available for this run.', '이 실행의 검증된 해석 결과가 없습니다.')}</p>}
     </>}
     {cancel.error && <p role="alert" className="error-text">{t('Cancellation failed', '취소 실패')}: {boundedText(cancel.error.message)}</p>}
-    {result && <article className="ai-assessment" style={{ overflowWrap: 'anywhere', maxHeight: 800, overflow: 'auto' }}>
+    {open && result && <><p className="muted">{t('AI-generated interpretation — analyst review required; not a confirmed diagnosis.', 'AI 생성 해석 — 분석가 검토 필요; 확정 진단이 아닙니다.')}</p>
+      {fullOwner !== resultKey && <p lang={result.language}>{typeof result.summary === 'string' && result.summary.length <= 240 ? result.summary : t('Long AI summary: open the full text to preserve all qualifications.', '긴 AI 요약: 조건과 한계를 포함한 전체 원문을 펼쳐 확인하세요.')}</p>}
+      <button type="button" className="secondary" aria-expanded={fullOwner === resultKey} onClick={() => setFullOwner(fullOwner === resultKey ? undefined : resultKey)}>{t('View full AI text', 'AI 원문 전체 보기')}</button>
+    {fullOwner === resultKey && <article aria-label={t('Full AI interpretation', 'AI 해석 전체 원문')} className="ai-assessment" style={{ overflowWrap: 'anywhere', maxHeight: 800, overflow: 'auto' }}>
       <h3>{t('AI-generated interpretation — analyst review required', 'AI 생성 해석 — 분석가 검토 필요')}</h3>
       <p className="muted">{t('Saved run provider / model', '저장된 실행 제공자 / 모델')}: {boundedText(current?.provider) || t('Not reported', '보고되지 않음')} · {boundedText(current?.model_name) || t('Not reported', '보고되지 않음')}</p>
       <p className="muted">{t('Generated language', '생성 언어')}: {result.language === 'ko' ? '한국어' : 'English'} · {t('Completed at', '완료 시각')}: {boundedText(current?.completed_at) || t('Not reported', '보고되지 않음')}</p>
       <p className="muted">{t('Existing AI output is not automatically translated. Changing report language changes labels only; use the manual button for a new interpretation.', '기존 AI 출력은 자동 번역되지 않습니다. 보고서 언어 변경은 항목명만 바꾸며 새 해석은 버튼으로 직접 요청하세요.')}</p>
       <p lang={result.language}>{boundedText(result.summary)}</p>
       <h4>{t('Possible causes (AI hypotheses)', '가능한 원인 (AI 가설)')}</h4>
-      {boundedItems(result.possible_causes).map((cause, index) => <div key={index}><p lang={result.language}>{boundedText(cause?.hypothesis)}</p><strong>{t('Confidence / uncertainty', '신뢰도 / 불확실성')}</strong><p lang={result.language}>{boundedText(cause?.uncertainty)}</p><p>{t('Issue references', '이슈 참조')}: {boundedItems(cause?.issue_ids).map((id, i) => <code key={i}>{boundedText(id)} </code>)}</p></div>)}
+      {boundedItems(result.possible_causes).map((cause, index) => <div key={index}><p lang={result.language}>{boundedText(cause?.hypothesis)}</p><strong>{t('Confidence / uncertainty', '신뢰도 / 불확실성')}</strong><p lang={result.language}>{boundedText(cause?.uncertainty)}</p><p>{t('Issue references', '이슈 참조')}: <code>{boundedItems(cause?.issue_ids).map(id => boundedText(id)).join(' ')}</code></p></div>)}
       <h4>{t('Prioritized next checks', '우선순위별 다음 확인 사항')}</h4>
-      <ol>{boundedItems(result.prioritized_checks).map((check, index) => <li key={index}><strong>{boundedText(check?.priority)}</strong><p lang={result.language}>{boundedText(check?.check)}</p>{boundedItems(check?.issue_ids).map((id, i) => <code key={i}>{boundedText(id)} </code>)}</li>)}</ol>
+      <ol>{boundedItems(result.prioritized_checks).map((check, index) => <li key={index}><strong>{boundedText(check?.priority)}</strong><p lang={result.language}>{boundedText(check?.check)}</p><code>{boundedItems(check?.issue_ids).map(id => boundedText(id)).join(' ')}</code></li>)}</ol>
       <h4>{t('Possible correlations', '가능한 연관성')}</h4>
-      {boundedItems(result.correlations).map((correlation, index) => <div key={index}><p lang={result.language}>{boundedText(correlation?.interpretation)}</p>{boundedItems(correlation?.issue_ids).map((id, i) => <code key={i}>{boundedText(id)} </code>)}</div>)}
+      {boundedItems(result.correlations).map((correlation, index) => <div key={index}><p lang={result.language}>{boundedText(correlation?.interpretation)}</p><code>{boundedItems(correlation?.issue_ids).map(id => boundedText(id)).join(' ')}</code></div>)}
       <h4>{t('Limitations', '한계')}</h4><ul>{boundedItems(result.limitations).map((text, index) => <li lang={result.language} key={index}>{boundedText(text)}</li>)}</ul>
       <p className="muted">{t('Display is bounded to 20 entries per section and 2,000 characters per field; longer content is abbreviated.', '화면에는 섹션당 최대 20개 항목, 필드당 2,000자만 표시하며 긴 내용은 축약됩니다.')}</p>
-    </article>}
+    </article>}</>}
   </section>;
 }

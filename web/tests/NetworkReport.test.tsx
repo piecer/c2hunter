@@ -1,3 +1,4 @@
+import { openGroups, openCoverage } from './reportDisclosure';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, expect, it } from 'vitest';
 
@@ -16,11 +17,12 @@ it('presents one overall verdict and grouped scope, with only real examples expa
   expect(screen.getByRole('heading', { name: 'Anomaly observed' })).toBeVisible();
   expect(screen.getByText(/24 affected flows/)).toBeVisible();
   expect(screen.getByText(/48 events/)).toBeVisible();
-  expect(screen.getByText(/Capture loss cannot be excluded/)).toBeVisible();
-  expect(screen.getByText(/Compare a second observation point/)).toBeVisible();
   expect(screen.queryByText(/10.0.0.1/)).not.toBeInTheDocument();
   expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  openGroups();
   fireEvent.click(screen.getByRole('button', { name: /Show representative evidence/ }));
+  expect(screen.getByText(/Capture loss cannot be excluded/)).toBeVisible();
+  expect(screen.getByText(/Compare a second observation point/)).toBeVisible();
   expect(screen.getByText(/10.0.0.1:50000/)).toBeVisible();
   expect(screen.getByText(/23.*examples omitted/)).toBeVisible();
   expect(container.querySelectorAll('*').length).toBeLessThan(500);
@@ -42,6 +44,7 @@ it.each([
 it('bounds large reports and clears previous and stale expanded evidence', () => {
   const large = { ...report, summary: { ...report.summary, issue_count: 1000, displayed_issue_count: 1000, omitted_issue_count: 2, truncated: true }, issues: Array.from({ length: 1000 }, (_, i) => ({ ...report.issues[0], id: String(i), examples: Array.from({ length: 100 }, () => report.issues[0].examples[0]) })) };
   const { container, rerender } = render(<NetworkAnomalyPanel report={large}/>);
+  openGroups();
   expect(screen.getByText(/992 retained groups not shown on this page/)).toBeVisible();
   expect(screen.getByText(/Report truncated/)).toBeVisible();
   expect(screen.getAllByRole('button', { name: /representative evidence/ })).toHaveLength(8);
@@ -57,6 +60,7 @@ it('bounds large reports and clears previous and stale expanded evidence', () =>
 it('shows bounded numeric producer facts without interpreting missing values as zero', () => {
   const facts = { tcp_sequence: 101, tcp_acknowledgment: 0, tcp_window: 8192, transport_payload_length: 3, icmp_type: 3, icmp_code: 1 };
   render(<NetworkAnomalyPanel report={{ ...report, issues: [{ ...report.issues[0], examples: [{ ...report.issues[0].examples[0], facts }] }] }}/>);
+  openGroups();
   fireEvent.click(screen.getByRole('button', { name: /Show representative evidence/ }));
   for (const [key, value] of Object.entries(facts)) expect(screen.getByText(`${key}: ${value}`)).toBeVisible();
 });
@@ -66,12 +70,14 @@ it('preserves positive findings while prominently labeling producer resource-lim
   expect(screen.getByRole('heading', { name: 'Anomaly observed' })).toBeVisible();
   expect(screen.getByText(/25 records.*tracking/i)).toBeVisible();
   expect(screen.getByText(/Counts are lower bounds/i)).toBeVisible();
+  openCoverage();
   expect(screen.getByText(/FLOW_TRACKING_LIMIT_REACHED/)).toBeVisible();
   expect(screen.getByText(/CORRELATION_LIMIT_REACHED/)).toBeVisible();
 });
 
 it('explicitly discloses unsupported legacy latency and measurement features', () => {
   render(<NetworkAnomalyPanel report={report}/>);
+  openCoverage();
   expect(screen.getByText(/RTT\/latency, interarrival dispersion and TTL measurements are not computed by this pattern-first producer/)).toBeVisible();
 });
 

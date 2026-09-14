@@ -108,7 +108,23 @@ it('explains the workflow without inventing network stage percentages', async ()
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/running-network']}><App/></MemoryRouter></QueryClientProvider>);
   expect(await screen.findByRole('heading', { name: 'Running network' })).toBeVisible();
   expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
-  expect(screen.getByText(/Pattern scan → detailed analysis/)).toBeVisible();
+  expect(screen.getByText('ANALYZING')).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Cancel analysis' })).toBeVisible();
+  expect(screen.queryByText(/Pattern scan → detailed analysis/)).not.toBeInTheDocument();
+});
+
+it.each(['ANALYZING', 'WAITING_CAPTURE'])('retains supplied progress, warnings and cancellation errors for %s', async status => {
+  localStorage.setItem('c2hunter-token', 'token');
+  vi.stubGlobal('fetch', vi.fn(async (input, init) => init?.method === 'POST'
+    ? Response.json({ detail: 'Cancellation unavailable' }, { status: 409 })
+    : Response.json(String(input) === '/api/v1/analysis-jobs/pending-network' ? { id: 'pending-network', name: 'Pending network', status, progress_percent: 37, warnings: ['Capture still pending'], analysis: { module: 'network_anomaly' } } : { items: [] })));
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/pending-network']}><App/></MemoryRouter></QueryClientProvider>);
+  await screen.findByRole('heading', { name: 'Pending network' });
+  expect(screen.getByRole('progressbar')).toHaveAttribute('value', '37');
+  expect(screen.getByText(status)).toBeVisible();
+  expect(screen.getByText('Capture still pending')).toBeVisible();
+  await userEvent.click(screen.getByRole('button', { name: 'Cancel analysis' }));
+  expect(await screen.findByText('Request failed (409)')).toHaveAttribute('role', 'alert');
 });
 
 it('shows independent bidirectional network observations instead of C2 controls', async () => {
@@ -130,6 +146,7 @@ it('shows independent bidirectional network observations instead of C2 controls'
   expect(screen.getByRole('table', { name: 'Bidirectional network flows' }).querySelector('.structured-fields')).toBeNull();
   expect(screen.getByText(/INCOMPLETE_PACKET_EVIDENCE/)).toBeInTheDocument();
   expect(screen.queryByText('Candidates', { selector: 'span', exact: true })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: '작업 상세 / Job details' }));
   expect(screen.getByText('Observed bidirectional flows')).toBeInTheDocument();
   expect(screen.queryByText('최소 후보 점수')).not.toBeInTheDocument();
   expect(screen.queryByText('Run AI analysis')).not.toBeInTheDocument();

@@ -1,3 +1,4 @@
+import { openAI } from './reportDisclosure';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -30,7 +31,7 @@ function Navigation() {
 }
 const clients: QueryClient[] = [];
 afterEach(() => { clients.splice(0).forEach(client => client.clear()); vi.useRealTimers(); });
-function setup(options: {
+async function setup(options: {
   capabilities?: Record<string, unknown>;
   run?: Record<string, unknown>;
   readRun?: () => Response | Promise<Response>;
@@ -58,12 +59,14 @@ function setup(options: {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   clients.push(client);
   const view = render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/analyses/first']}><Navigation/><App/></MemoryRouter></QueryClientProvider>);
+  await openAI();
+  if (options.run?.status === 'COMPLETED' && (options.run.network_interpretation as { schema_version?: string; kind?: string } | undefined)?.schema_version === 'network-interpretation-v1' && (options.run.network_interpretation as { kind?: string }).kind === 'MODEL_INTERPRETATION') fireEvent.click(await screen.findByRole('button', { name: 'AI 원문 전체 보기' }));
   return { ...view, client, requests, posts: () => requests.filter(request => request.method === 'POST') };
 }
 
 it('shares one persisted language across the actual producer report and AI while preserving citations and source observations', async () => {
   const original = JSON.stringify(report);
-  const { posts, unmount } = setup({ run: completed });
+  const { posts, unmount } = await setup({ run: completed });
   expect(await screen.findByText(completed.network_interpretation.summary)).toHaveAttribute('lang', 'en');
   expect(screen.getByRole('heading', { name: '이상 징후 관찰됨' })).toBeVisible();
   const ai = screen.getByRole('heading', { name: 'AI 생성 해석 — 분석가 검토 필요' }).closest('article')!;
@@ -81,7 +84,7 @@ it('shares one persisted language across the actual producer report and AI while
 });
 
 it('does not substitute configured model provenance when the saved run omitted it', async () => {
-  setup({ run: { ...completed, provider: undefined, model_name: undefined } });
+  await setup({ run: { ...completed, provider: undefined, model_name: undefined } });
   const heading = await screen.findByRole('heading', { name: 'AI 생성 해석 — 분석가 검토 필요' });
   const ai = within(heading.closest('article')!);
   expect(ai.getByText('저장된 실행 제공자 / 모델: 보고되지 않음 · 보고되지 않음')).toBeVisible();
@@ -98,17 +101,17 @@ it('bounds literal issue references in every AI section without interpreting mar
     prioritized_checks: [{ ...source.prioritized_checks[0], issue_ids: refs }],
     correlations: [{ ...source.correlations[0], issue_ids: refs }],
   } };
-  setup({ run });
+  await setup({ run });
   const heading = await screen.findByRole('heading', { name: 'AI 생성 해석 — 분석가 검토 필요' });
   const article = heading.closest('article')!;
-  expect(within(article).getAllByText(refs[0])).toHaveLength(3);
-  expect(within(article).getAllByText('citation-19')).toHaveLength(3);
+  expect(within(article).getAllByText(text => text.startsWith(refs[0]))).toHaveLength(3);
+  expect(within(article).getAllByText(/citation-19$/)).toHaveLength(3);
   expect(within(article).queryByText('citation-20')).not.toBeInTheDocument();
   expect(article.querySelector('a')).toBeNull();
 });
 
 it('requires a saved report even when the job status is completed', async () => {
-  const { client, posts } = setup({ savedReport: false });
+  const { client, posts } = await setup({ savedReport: false });
   await screen.findByText(/아직 네트워크 보고서가 없습니다/);
   await waitFor(() => expect(client.isFetching()).toBe(0));
   const start = screen.getByRole('button', { name: 'AI 해석' });
@@ -122,7 +125,7 @@ it.each([
   { ...capability, network_interpretation: false },
   { ...capability, remote: true, destination: null },
 ])('fails closed for unsupported, disabled, or undisclosed remote capabilities: %j', async capabilities => {
-  const { client, posts } = setup({ capabilities });
+  const { client, posts } = await setup({ capabilities });
   await screen.findByRole('button', { name: 'AI 해석' });
   await waitFor(() => expect(client.isFetching()).toBe(0));
   const start = screen.getByRole('button', { name: 'AI 해석' });
@@ -132,7 +135,7 @@ it.each([
 });
 
 it('invalidates remote consent when the disclosed destination changes', async () => {
-  const { client, posts } = setup({ capabilities: { ...capability, remote: true } });
+  const { client, posts } = await setup({ capabilities: { ...capability, remote: true } });
   fireEvent.click(await screen.findByRole('checkbox', { name: /원격 모델/ }));
   await waitFor(() => expect(screen.getByRole('button', { name: 'AI 해석' })).toBeEnabled());
   act(() => { client.setQueryData(['ai-capabilities'], { ...capability, remote: true, destination: 'https://different.invalid' }); });
@@ -146,7 +149,7 @@ it.each([
   { ...completed.network_interpretation, schema_version: 'future-schema' },
   { ...completed.network_interpretation, kind: 'UNVALIDATED' },
 ])('does not present missing or unvalidated completed output as AI findings: %j', async network_interpretation => {
-  const { client, posts } = setup({ run: { ...completed, network_interpretation } });
+  const { client, posts } = await setup({ run: { ...completed, network_interpretation } });
   await screen.findByText('이 실행의 검증된 해석 결과가 없습니다.');
   await waitFor(() => expect(client.isFetching()).toBe(0));
   expect(screen.queryByText(completed.network_interpretation.summary)).not.toBeInTheDocument();
@@ -155,7 +158,7 @@ it.each([
 });
 
 it('does not carry a submitted AI run or its polling into a different job route', async () => {
-  const { client, requests } = setup();
+  const { client, requests } = await setup();
   await waitFor(() => expect(screen.getByRole('button', { name: 'AI 해석' })).toBeEnabled());
   fireEvent.click(screen.getByRole('button', { name: 'AI 해석' }));
   await screen.findByRole('button', { name: 'AI 실행 취소' });
@@ -167,6 +170,7 @@ it('does not carry a submitted AI run or its polling into a different job route'
   fireEvent.click(screen.getByRole('button', { name: 'Open second job' }));
   await act(async () => { await vi.advanceTimersByTimeAsync(100); });
   expect(screen.getByRole('heading', { name: 'second network job' })).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: 'AI 해석 열기' }));
   expect(screen.getByRole('button', { name: 'AI 해석' })).toBeEnabled();
   expect(screen.queryByRole('button', { name: 'AI 실행 취소' })).not.toBeInTheDocument();
   const reads = requests.filter(request => request.url === '/api/v1/ai-runs/audit-run').length;
@@ -177,7 +181,7 @@ it('does not carry a submitted AI run or its polling into a different job route'
 it('ignores late submission completion after navigating to another job', async () => {
   let resolveSubmission!: (response: Response) => void;
   const pending = new Promise<Response>(resolve => { resolveSubmission = resolve; });
-  const { posts, client } = setup({ submit: () => pending });
+  const { posts, client } = await setup({ submit: () => pending });
   await waitFor(() => expect(screen.getByRole('button', { name: 'AI 해석' })).toBeEnabled());
   fireEvent.click(screen.getByRole('button', { name: 'AI 해석' }));
   await waitFor(() => expect(posts()).toHaveLength(1));
@@ -191,7 +195,7 @@ it('ignores late submission completion after navigating to another job', async (
 });
 
 it('removes active polling timers on unmount without sending cancellation or another request', async () => {
-  const { client, unmount, requests, posts } = setup({ run: queued });
+  const { client, unmount, requests, posts } = await setup({ run: queued });
   await screen.findByRole('button', { name: 'AI 실행 취소' });
   await waitFor(() => expect(client.isFetching()).toBe(0));
   // Install fake clock, then explicitly refetch to schedule polling on this clock.
@@ -209,7 +213,7 @@ it('removes active polling timers on unmount without sending cancellation or ano
 
 it('stops polling after a failed status read and never treats that failure as completion', async () => {
   let reads = 0;
-  const { client, requests, posts } = setup({ run: queued, readRun: () => ++reads === 1 ? Response.json(queued) : Response.json({ error: { code: 'UNAVAILABLE', message: 'Status temporarily unavailable' } }, { status: 503 }) });
+  const { client, requests, posts } = await setup({ run: queued, readRun: () => ++reads === 1 ? Response.json(queued) : Response.json({ error: { code: 'UNAVAILABLE', message: 'Status temporarily unavailable' } }, { status: 503 }) });
   await screen.findByRole('button', { name: 'AI 실행 취소' });
   await waitFor(() => expect(client.isFetching()).toBe(0));
   vi.useFakeTimers();

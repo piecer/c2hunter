@@ -1,3 +1,4 @@
+import { openAI } from './reportDisclosure';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import App from '../src/App';
@@ -16,7 +17,7 @@ it('shares the report language with the adjacent AI interpretation controls', ()
   expect(screen.getByText('AI context: en')).toBeVisible();
 });
 
-function setup({ status = 'COMPLETED', remote = false, available = true, savedRun, runResponse, failPath, failMethod }: { status?: string; remote?: boolean; available?: boolean; savedRun?: Record<string, unknown>; runResponse?: () => Record<string, unknown>; failPath?: string; failMethod?: string } = {}) {
+async function setup({ status = 'COMPLETED', remote = false, available = true, savedRun, runResponse, failPath, failMethod, reveal = true }: { status?: string; remote?: boolean; available?: boolean; savedRun?: Record<string, unknown>; runResponse?: () => Record<string, unknown>; failPath?: string; failMethod?: string; reveal?: boolean } = {}) {
   localStorage.setItem('c2hunter-token', 'test-token');
   localStorage.setItem('c2hunter-report-language', 'ko');
   const posts: Array<{ url: string; body: Record<string, unknown> }> = [];
@@ -36,17 +37,18 @@ function setup({ status = 'COMPLETED', remote = false, available = true, savedRu
   vi.stubGlobal('fetch', fetcher);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/analyses/network']}><App/></MemoryRouter></QueryClientProvider>);
+  if (reveal) await openAI();
   return { posts, fetcher, client };
 }
 it.each(['ANALYZING', 'PARTIALLY_COMPLETED', 'FAILED'])('does not start inference for %s jobs', async status => {
-  const { posts, client } = setup({ status });
+  const { posts, client } = await setup({ status });
   await screen.findByRole('button', { name: 'AI 해석' });
   await waitFor(() => expect(client.isFetching()).toBe(0));
   expect(screen.getByRole('button', { name: 'AI 해석' })).toBeDisabled();
   expect(posts).toEqual([]);
 });
 it('requires explicit consent after disclosure of the remote destination', async () => {
-  const { posts } = setup({ remote: true });
+  const { posts } = await setup({ remote: true });
   expect(await screen.findByText(/http:\/\/model.internal:11434/)).toBeVisible();
   expect(screen.getByRole('button', { name: 'AI 해석' })).toBeDisabled();
   fireEvent.click(screen.getByRole('checkbox', { name: /원격 모델/ }));
@@ -55,7 +57,7 @@ it('requires explicit consent after disclosure of the remote destination', async
   expect(posts[0].body.allow_remote).toBe(true);
 });
 it('truthfully explains disabled or unavailable AI without generating a result', async () => {
-  const { posts } = setup({ available: false });
+  const { posts } = await setup({ available: false });
   expect(await screen.findByText(/AI_MODEL_UNAVAILABLE/)).toBeVisible();
   expect(screen.getByRole('button', { name: 'AI 해석' })).toBeDisabled();
   expect(posts).toEqual([]);
@@ -67,22 +69,36 @@ it.each([
   ['INVALID_CITATION', '이슈 참조 검증 실패', 'Invalid issue references'],
   ['LANGUAGE', '요청 언어 불일치', 'Requested language mismatch'],
 ])('renders safe bilingual %s failure category without inference', async (type, ko, en) => {
-  const { posts } = setup({ savedRun: { ...queued, status: 'FAILED', error_code: 'MODEL_OUTPUT_INVALID', error_message: 'Model output failed validation.', failure_diagnostic: { ...failureDiagnostic, type } } });
+  const { posts } = await setup({ savedRun: { ...queued, status: 'FAILED', error_code: 'MODEL_OUTPUT_INVALID', error_message: 'Model output failed validation.', failure_diagnostic: { ...failureDiagnostic, type } } });
   expect(await screen.findByText(ko)).toBeVisible();
   fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'en' } });
   expect(screen.getByText(en)).toBeVisible();
   expect(posts).toEqual([]);
 });
 it('does not render arbitrary diagnostic values', async () => {
-  setup({ savedRun: { ...queued, status: 'FAILED', error_code: 'MODEL_OUTPUT_INVALID', failure_diagnostic: { type: 'SECRET_TYPE', extra: 'SECRET_EXTRA' } } });
+  await setup({ savedRun: { ...queued, status: 'FAILED', error_code: 'MODEL_OUTPUT_INVALID', failure_diagnostic: { type: 'SECRET_TYPE', extra: 'SECRET_EXTRA' } } });
   await screen.findByText(/MODEL_OUTPUT_INVALID/);
   expect(screen.queryByText(/SECRET_/)).not.toBeInTheDocument();
 });
 const interpreted = { ...queued, status: 'COMPLETED', network_interpretation: { schema_version: 'network-interpretation-v1', kind: 'MODEL_INTERPRETATION', language: 'en', summary: 'Review capture visibility.', possible_causes: [{ hypothesis: 'Capture loss is possible.', issue_ids: ['issue-1'], uncertainty: 'Single vantage cannot confirm loss.' }], prioritized_checks: [{ priority: 'HIGH', check: 'Compare receiver capture.', issue_ids: ['issue-1'] }], correlations: [], limitations: ['No root cause proven.'] } };
+it('keeps AI optional and never clips a qualified summary into a stronger claim', async () => {
+  const summary = 'A pattern was observed. ' + 'Review evidence carefully. '.repeat(20) + 'No attack classification is established.';
+  const { posts, client } = await setup({ reveal: false, savedRun: { ...interpreted, network_interpretation: { ...interpreted.network_interpretation, summary } } });
+  await waitFor(() => expect(client.isFetching()).toBe(0));
+  expect(screen.queryByText(summary)).not.toBeInTheDocument();
+  expect(screen.queryByText('Capture loss is possible.')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'AI 해석 열기' }));
+  expect(screen.queryByText(summary)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'AI 원문 전체 보기' }));
+  expect(screen.getByText(summary)).toBeVisible();
+  expect(posts).toEqual([]);
+});
+
 it('loads saved interpretation through run GET and changes labels without translating or reinvoking', async () => {
-  const { posts, fetcher } = setup({ savedRun: interpreted });
+  const { posts, fetcher } = await setup({ savedRun: interpreted });
   expect(await screen.findByText('Review capture visibility.')).toBeVisible();
   expect(fetcher.mock.calls.some(([url]) => String(url).endsWith('/ai-runs/run-1'))).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'AI 원문 전체 보기' }));
   expect(screen.getByText('Capture loss is possible.')).toBeVisible();
   expect(screen.getByText('Single vantage cannot confirm loss.')).toBeVisible();
   fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'en' } });
@@ -93,52 +109,54 @@ it('loads saved interpretation through run GET and changes labels without transl
 });
 it('polls the saved queued run to validated completion without starting inference', async () => {
   let reads = 0;
-  const { posts } = setup({ savedRun: queued, runResponse: () => ++reads > 1 ? interpreted : queued });
+  const { posts } = await setup({ savedRun: queued, runResponse: () => ++reads > 1 ? interpreted : queued });
   expect(await screen.findByRole('button', { name: 'AI 실행 취소' })).toBeVisible();
   expect(screen.getByRole('button', { name: 'AI 해석' })).toBeDisabled();
   expect(await screen.findByText('Review capture visibility.', {}, { timeout: 3500 })).toBeVisible();
   expect(posts).toEqual([]);
 });
 it('cancels using the existing AI run endpoint and rereads persisted state', async () => {
-  const { posts, fetcher } = setup({ savedRun: queued });
+  const { posts, fetcher } = await setup({ savedRun: queued });
   fireEvent.click(await screen.findByRole('button', { name: 'AI 실행 취소' }));
   await waitFor(() => expect(posts[0]?.url).toBe('/api/v1/ai-runs/run-1/cancel'));
   await waitFor(() => expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith('/ai-runs/run-1')).length).toBeGreaterThan(1));
 });
 it.each(['/ai-capabilities', '/network/ai-runs', '/ai-runs/run-1'])('shows truthful read failures for %s', async failPath => {
-  const { posts } = setup({ savedRun: queued, failPath });
+  const { posts } = await setup({ savedRun: queued, failPath });
   expect(await screen.findByText(/Service unavailable/)).toBeVisible();
   expect(screen.getByRole('button', { name: 'AI 해석' })).toBeDisabled();
   expect(posts).toEqual([]);
 });
 it('keeps saved model provenance separate from the currently configured destination', async () => {
-  setup({ savedRun: { ...interpreted, provider: 'saved-provider', model_name: 'saved-model', completed_at: '2026-09-11T00:01:00Z' } });
+  await setup({ savedRun: { ...interpreted, provider: 'saved-provider', model_name: 'saved-model', completed_at: '2026-09-11T00:01:00Z' } });
+  fireEvent.click(await screen.findByRole('button', { name: 'AI 원문 전체 보기' }));
   expect(await screen.findByText(/saved-provider · saved-model/)).toBeVisible();
   expect(screen.getByText(/2026-09-11T00:01:00Z/)).toBeVisible();
 });
 it('bounds untrusted model prose and renders markup as plain text', async () => {
-  const { posts } = setup({ savedRun: { ...interpreted, network_interpretation: { ...interpreted.network_interpretation, summary: '<img src=x onerror=alert(1)>', limitations: Array.from({ length: 25 }, (_, i) => `limit-${i}:` + 'x'.repeat(3000)) } } });
+  const { posts } = await setup({ savedRun: { ...interpreted, network_interpretation: { ...interpreted.network_interpretation, summary: '<img src=x onerror=alert(1)>', limitations: Array.from({ length: 25 }, (_, i) => `limit-${i}:` + 'x'.repeat(3000)) } } });
   expect(await screen.findByText('<img src=x onerror=alert(1)>')).toBeVisible();
+  fireEvent.click(await screen.findByRole('button', { name: 'AI 원문 전체 보기' }));
   expect(document.querySelector('.ai-assessment img')).toBeNull();
   expect(screen.queryByText(/^limit-20:/)).not.toBeInTheDocument();
   expect(screen.getByText(/^limit-0:/).textContent?.length).toBe(2001);
   expect(posts).toEqual([]);
 });
 it.each(['FAILED', 'CANCELLED'])('does not display model output from a %s run', async status => {
-  const { client } = setup({ savedRun: { ...interpreted, status, error_code: status === 'FAILED' ? 'MODEL_TIMEOUT' : undefined } });
+  const { client } = await setup({ savedRun: { ...interpreted, status, error_code: status === 'FAILED' ? 'MODEL_TIMEOUT' : undefined } });
   await screen.findByRole('button', { name: 'AI 해석' });
   await waitFor(() => expect(client.isFetching()).toBe(0));
   expect(screen.queryByText('Review capture visibility.')).not.toBeInTheDocument();
 });
 it('shows inference submission errors without implying a generated result', async () => {
-  setup({ failPath: '/network/ai-runs', failMethod: 'POST' });
+  await setup({ failPath: '/network/ai-runs', failMethod: 'POST' });
   await waitFor(() => expect(screen.getByRole('button', { name: 'AI 해석' })).toBeEnabled());
   fireEvent.click(screen.getByRole('button', { name: 'AI 해석' }));
   expect(await screen.findByText(/Service unavailable/)).toBeVisible();
   expect(screen.queryByRole('heading', { name: /AI 생성 해석/ })).not.toBeInTheDocument();
 });
 it.each(['ko', 'en'])('manually submits selected %s language via existing AI runs without sending report data', async language => {
-  const { posts } = setup();
+  const { posts } = await setup();
   await waitFor(() => expect(screen.getByRole('button', { name: 'AI 해석' })).toBeEnabled());
   expect(posts).toEqual([]);
   fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: language } });

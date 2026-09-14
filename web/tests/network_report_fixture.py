@@ -175,6 +175,45 @@ if __name__ == "__main__":
             else [frame(), frame()]
         )
         print(json.dumps(analyze_network_anomalies(records(*packets)), sort_keys=True))
+    elif "--glance" in sys.argv:
+        import struct
+        from c2hunter_analysis.pcap import parse_pcap
+        from test_network_anomaly import capture, internet_checksum
+
+        def source_port(packet, port):
+            # Rewrite actual IPv4/TCP bytes, then repair the pseudo-header checksum.
+            packet = bytearray(packet)
+            reverse = packet[26:30] == bytes((203, 0, 113, 1))
+            offset = 36 if reverse else 34
+            packet[offset:offset + 2] = struct.pack("!H", port)
+            packet[50:52] = b"\x00\x00"
+            pseudo = packet[26:34] + struct.pack("!BBH", 0, 6, len(packet) - 34)
+            packet[50:52] = struct.pack("!H", internet_checksum(bytes(pseudo + packet[34:])))
+            return bytes(packet)
+
+        evidence = []
+        for group in range(20):
+            packets = []
+            for port in (50000, 50001, 50002):
+                data = frame(flags=24, seq=101, payload=b"abc")
+                packets.extend(source_port(packet, port) for packet in (
+                    frame(), frame(flags=18, seq=500, ack=101, reverse=True),
+                    data, frame(flags=16, seq=501, ack=104, reverse=True),
+                    frame(flags=24, seq=104, payload=b"def"),
+                    frame(flags=24, seq=104, payload=b"def"),
+                    frame(flags=16, seq=501, ack=107, reverse=True),
+                ))
+            evidence.extend(parse_pcap(capture(*packets), sensor_id=f"glance-{group:02d}",
+                internal_networks=["10.0.0.0/8"], retain_packet_bytes=False,
+                retain_network_evidence=True).records)
+        many = analyze_network_report(evidence)
+        assert len(many["issues"]) == 20
+        assert all(len(issue["examples"]) == 3 for issue in many["issues"])
+        udp = frame(protocol=17, payload=b"query")
+        data = frame(flags=24, seq=101, payload=b"abc")
+        mixed = analyze_network_report(records(frame(), frame(), data, data, udp, udp,
+            frame(protocol=1, reverse=True, payload=udp[14:42])))
+        print(json.dumps({"many": many, "mixed": mixed}, sort_keys=True))
     elif "--pagination" in sys.argv:
         from c2hunter_analysis.pcap import parse_pcap
         from test_network_anomaly import capture

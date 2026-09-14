@@ -1,3 +1,4 @@
+import { openGroups, openEvidence, openCoverage } from './reportDisclosure';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
@@ -55,14 +56,24 @@ it.each(Object.entries(fixtures))('localizes real producer %s without changing o
   const original = JSON.stringify(report);
   const { container } = render(<NetworkAnomalyPanel report={report}/>);
   expect(screen.getByText('전체 네트워크 보고서')).toBeVisible();
-  for (const button of screen.queryAllByRole('button', { hidden: true }).filter(button => button.hasAttribute('aria-expanded'))) fireEvent.click(button);
-  const prose = [report.summary.narrative, ...report.limitations, ...(report.issues ?? []).flatMap(i => [...i.evidence, ...i.uncertainty, ...i.next_checks])];
-  for (const text of prose) expect(container.textContent).not.toContain(text);
+  openGroups();
+  openCoverage();
+  const coverage = [report.summary.narrative, ...report.limitations];
+  for (const text of coverage) expect(container.textContent).not.toContain(text);
   expect(container.textContent).not.toContain('원문');
-  expect(JSON.stringify(report)).toBe(original);
   fireEvent.change(screen.getByRole('combobox'), { target: { value: 'en' } });
+  for (const text of coverage) expect(container.textContent).toContain(text);
+  for (const [index, issue] of (report.issues ?? []).entries()) {
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'ko' } });
+    openEvidence(index);
+    const prose = [...issue.evidence, ...issue.uncertainty, ...issue.next_checks];
+    for (const text of prose) expect(container.textContent).not.toContain(text);
+    expect(container.textContent).not.toContain('원문');
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'en' } });
+    for (const text of prose) expect(container.textContent).toContain(text);
+  }
   expect(screen.getByText('OVERALL NETWORK REPORT')).toBeVisible();
-  for (const text of prose) expect(container.textContent).toContain(text);
+  expect(JSON.stringify(report)).toBe(original);
 });
 it.each(['en', 'ko', 'invalid', 'EN', ''])('validates stored preference %s', value => {
   localStorage.setItem('c2hunter-report-language', value);
@@ -80,7 +91,7 @@ it('works when storage reads and writes throw', () => {
 it('retains expansion, literal evidence and saved preference through both language changes and remount', () => {
   const report = fixtures.syn_reset;
   const { unmount } = render(<NetworkAnomalyPanel report={report}/>);
-  fireEvent.click(screen.getAllByRole('button')[0]);
+  openEvidence();
   const region = screen.getByRole('region', { name: '대표 흐름 증거' });
   const rawEndpoint = report.issues![0].examples[0].endpoint_a.ip;
   expect(region).toHaveTextContent(rawEndpoint);
@@ -98,6 +109,7 @@ it('retains expansion, literal evidence and saved preference through both langua
 it.each(Object.entries(warnings))('localizes coverage warning %s while retaining its code', (code, [en, ko]) => {
   const report = { ...fixtures.syn_reset, warnings: [code] };
   render(<NetworkAnomalyPanel report={report}/>);
+  openCoverage();
   expect(screen.getByText(`${ko} (${code})`)).toBeVisible();
   fireEvent.change(screen.getByRole('combobox'), { target: { value: 'en' } });
   expect(screen.getByText(`${en} (${code})`)).toBeVisible();
@@ -108,6 +120,7 @@ it('fails closed for unknown codes without hiding their original spelling', () =
   report.issues![0].pattern = 'future_pattern';
   render(<NetworkAnomalyPanel report={report}/>);
   expect(screen.getByRole('heading', { name: '데이터 부족' })).toBeVisible();
+  openCoverage();
   expect(screen.getByText(/원문: FUTURE_WARNING/)).toBeVisible();
   expect(screen.getByText('원문: future_pattern')).toBeVisible();
 });
@@ -116,7 +129,8 @@ it('preserves unknown producer prose and fact keys as visibly untranslated raw t
   report.issues![0].evidence.push('<unknown> future evidence');
   report.issues![0].examples[0].facts = { future_fact: 123 };
   render(<NetworkAnomalyPanel report={report}/>);
+  openEvidence();
   expect(screen.getByText('원문: <unknown> future evidence')).toBeVisible();
-  fireEvent.click(screen.getAllByRole('button')[0]);
+  openEvidence();
   expect(screen.getByText('원문: future_fact: 123')).toBeVisible();
 });
