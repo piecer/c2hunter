@@ -1,3 +1,4 @@
+import { openGroups } from './reportDisclosure';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fireEvent, render, screen, within } from '@testing-library/react';
@@ -28,16 +29,19 @@ it('resets page and detail for replacement reports even with identical counts an
   const replacement = structuredClone(original);
   replacement.issues![0].first_seen = '2026-09-14T00:00:00Z';
   const { rerender } = render(<NetworkAnomalyPanel report={original}/>);
+  openGroups();
   fireEvent.click(screen.getByRole('button', { name: 'Next groups' }));
   fireEvent.click(screen.getAllByRole('button', { name: /Show representative evidence/ })[0]);
   fireEvent.change(screen.getByRole('combobox'), { target: { value: 'ko' } });
   rerender(<NetworkAnomalyPanel report={replacement}/>);
+  openGroups();
   expect(screen.getByRole('status')).toHaveTextContent('3페이지 중 1페이지');
   expect(screen.getByRole('button', { name: '이전 그룹' })).toBeDisabled();
   expect(screen.queryByRole('region', { name: '대표 흐름 증거' })).not.toBeInTheDocument();
   expect(screen.getByRole('combobox')).toHaveValue('ko');
   // A → B → A must not resurrect A's old page or detail owner.
   rerender(<NetworkAnomalyPanel report={original}/>);
+  openGroups();
   expect(screen.getByRole('status')).toHaveTextContent('3페이지 중 1페이지');
   expect(screen.queryByRole('region', { name: '대표 흐름 증거' })).not.toBeInTheDocument();
 });
@@ -49,11 +53,13 @@ it('resets when the actual job route changes even if cached jobs share the ident
   const fetch = vi.fn<typeof globalThis.fetch>(async () => new Response(JSON.stringify({ items: [] })));
   vi.stubGlobal('fetch', fetch);
   render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/analyses/page-a']}><Link to="/analyses/page-b">Other job</Link><App/></MemoryRouter></QueryClientProvider>);
+  openGroups();
   fireEvent.click(screen.getByRole('button', { name: 'Next groups' }));
   fireEvent.click(screen.getAllByRole('button', { name: /Show representative evidence/ })[0]);
   fireEvent.change(screen.getByRole('combobox', { name: '보고서 언어 / Report language' }), { target: { value: 'ko' } });
   fireEvent.click(screen.getByRole('link', { name: 'Other job' }));
   expect(await screen.findByRole('heading', { name: 'page-b' })).toBeVisible();
+  openGroups();
   expect(within(screen.getByRole('navigation', { name: '문제 그룹 페이지' })).getByRole('status')).toHaveTextContent('3페이지 중 1페이지');
   expect(screen.queryByRole('region', { name: '대표 흐름 증거' })).not.toBeInTheDocument();
   expect(screen.getByRole('combobox', { name: '보고서 언어 / Report language' })).toHaveValue('ko');
@@ -62,6 +68,7 @@ it('resets when the actual job route changes even if cached jobs share the ident
 
 it.each([0, 8])('does not offer unnecessary pagination for %i retained groups', n => {
   render(<NetworkAnomalyPanel report={fixtures[n]}/>);
+  openGroups();
   expect(screen.queryByRole('navigation', { name: 'Issue group pages' })).not.toBeInTheDocument();
   expect(screen.queryAllByRole('article')).toHaveLength(n);
   if (!n) expect(screen.getByText(/No grouped observations retained/)).toBeVisible();
@@ -69,15 +76,16 @@ it.each([0, 8])('does not offer unnecessary pagination for %i retained groups', 
 
 it('keeps producer-discarded groups separate from retained groups on other pages in both languages', () => {
   render(<NetworkAnomalyPanel report={fixtures[23]}/>);
-  expect(screen.getByText(/3 groups omitted by producer/)).toHaveTextContent('12 retained groups not shown on this page');
+  openGroups();
+  expect(screen.getByText(/shown on this page/)).toHaveTextContent('12 retained groups not shown on this page');
   expect(screen.getByText(/Report truncated:/)).toBeVisible();
   fireEvent.click(screen.getByRole('button', { name: 'Next groups' }));
   fireEvent.click(screen.getByRole('button', { name: 'Next groups' }));
-  expect(screen.getByText(/3 groups omitted by producer/)).toHaveTextContent('4 shown on this page');
-  expect(screen.getByText(/3 groups omitted by producer/)).toHaveTextContent('16 retained groups not shown on this page');
+  expect(screen.getByText(/shown on this page/)).toHaveTextContent('4 shown on this page');
+  expect(screen.getByText(/shown on this page/)).toHaveTextContent('16 retained groups not shown on this page');
   fireEvent.change(screen.getByRole('combobox'), { target: { value: 'ko' } });
   expect(screen.getByRole('status')).toHaveTextContent('3페이지 중 3페이지');
-  expect(screen.getByText(/3 개 그룹 분석기에서 생략/)).toHaveTextContent('16 개 보존된 그룹 현재 페이지에 표시되지 않음');
+  expect(screen.getByText(/개 현재 페이지에 표시/)).toHaveTextContent('16 개 보존된 그룹 현재 페이지에 표시되지 않음');
   expect(screen.getByRole('button', { name: '다음 그룹' })).toBeDisabled();
   fireEvent.click(screen.getByRole('button', { name: '이전 그룹' }));
   expect(screen.getByRole('status')).toHaveTextContent('3페이지 중 2페이지');
@@ -86,8 +94,11 @@ it('keeps producer-discarded groups separate from retained groups on other pages
 it('supports Tab, Enter and Space with focus on page status and only live aria-controls targets', async () => {
   const user = userEvent.setup();
   render(<NetworkAnomalyPanel report={fixtures[9]}/>);
+  openGroups();
   await user.tab();
   expect(screen.getByRole('combobox')).toHaveFocus();
+  await user.tab(); // Coverage disclosure
+  await user.tab(); // All groups disclosure
   await user.tab();
   expect(screen.getByRole('button', { name: 'Next groups' })).toHaveFocus();
   await user.keyboard('{Enter}');
@@ -111,6 +122,7 @@ it('supports Tab, Enter and Space with focus on page status and only live aria-c
 
 it('restores focus to grouped observations when replacement removes the focused last-page article', () => {
   const { rerender } = render(<NetworkAnomalyPanel report={fixtures[20]}/>);
+  openGroups();
   fireEvent.click(screen.getByRole('button', { name: 'Next groups' }));
   const evidence = screen.getAllByRole('button', { name: /Show representative evidence/ })[0];
   evidence.focus();
@@ -121,6 +133,7 @@ it('restores focus to grouped observations when replacement removes the focused 
 
 it('keeps focus safe when a report replacement removes pagination entirely', () => {
   const { rerender } = render(<NetworkAnomalyPanel report={fixtures[20]}/>);
+  openGroups();
   fireEvent.click(screen.getByRole('button', { name: 'Next groups' }));
   expect(screen.getByRole('status')).toHaveFocus();
   rerender(<NetworkAnomalyPanel report={fixtures[0]}/>);
@@ -128,6 +141,7 @@ it('keeps focus safe when a report replacement removes pagination entirely', () 
   expect(screen.queryByRole('navigation', { name: 'Issue group pages' })).not.toBeInTheDocument();
   expect(screen.queryAllByRole('article')).toHaveLength(0);
   rerender(<NetworkAnomalyPanel report={fixtures[20]}/>);
+  openGroups();
   expect(screen.getByRole('status')).toHaveTextContent('Page 1 of 3');
 });
 
@@ -135,6 +149,7 @@ it.each([9, 20])('makes every retained group in a %i-group report reachable forw
   const user = userEvent.setup();
   const report = fixtures[n];
   const { container } = render(<NetworkAnomalyPanel report={report}/>);
+  openGroups();
   const previous = screen.getByRole('button', { name: 'Previous groups' });
   const next = screen.getByRole('button', { name: 'Next groups' });
   expect(previous).toBeDisabled();

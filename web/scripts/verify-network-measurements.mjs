@@ -16,12 +16,13 @@ mkdirSync(output, { recursive: true });
 const python = env.C2HUNTER_TEST_PYTHON ?? (existsSync('../.venv/bin/python') ? resolve('../.venv/bin/python') : 'python3');
 const fixtures = JSON.parse(execFileSync(python, ['tests/network_report_fixture.py'], { encoding: 'utf8' }));
 const paginationFixtures = JSON.parse(execFileSync(python, ['tests/network_report_fixture.py', '--pagination'], { encoding: 'utf8' }));
+const glanceFixtures = JSON.parse(execFileSync(python, ['tests/network_report_fixture.py', '--glance'], { encoding: 'utf8' }));
 const browser = await chromium.launch({ executablePath: env.C2HUNTER_BROWSER_EXECUTABLE || undefined });
 const results = [];
 try {
   for (const language of ['en', 'ko']) {
     for (const width of [1280, 390]) {
-      const context = await browser.newContext({ viewport: { width, height: 900 } });
+      const context = await browser.newContext({ viewport: { width, height: 844 } });
       try {
         await context.addInitScript(({ language }) => {
           localStorage.setItem('c2hunter-token', 'offline-browser-fixture');
@@ -46,8 +47,72 @@ try {
           return route.fulfill({ contentType: asset.endsWith('.js') ? 'text/javascript' : asset.endsWith('.css') ? 'text/css' : 'text/html', body: readFileSync(asset) });
         });
         await page.goto('http://offline-measurements.test/analyses/measurements');
-        const cause = page.getByRole('heading', { name: language === 'en' ? 'Possible cause — hypothesis' : '가능한 원인 — 가설', exact: true });
+        const cause = page.getByRole('heading', { name: language === 'en' ? 'Leading possible cause — hypothesis' : '주요 가능한 원인 — 가설', exact: true });
         await cause.waitFor();
+        assert.equal(await page.locator('main.content > section.panel:empty').count(), 0, 'completed report must not mount an empty status panel');
+        const menu = page.getByRole('button', { name: '메뉴 / Menu', exact: true });
+        const primary = page.getByRole('navigation', { name: 'Primary', exact: true });
+        if (width === 390) {
+          assert(await menu.isVisible());
+          assert.equal(await menu.getAttribute('aria-expanded'), 'false');
+          assert(!(await primary.isVisible()));
+          await menu.focus();
+          await page.keyboard.press('Enter');
+          assert.equal(await menu.getAttribute('aria-expanded'), 'true');
+          assert.equal(await primary.getByRole('link').count(), 12);
+          await page.keyboard.press('Tab');
+          assert(await primary.getByRole('link', { name: 'Dashboard', exact: true }).evaluate(element => document.activeElement === element));
+          await page.keyboard.press('Escape');
+          assert.equal(await menu.getAttribute('aria-expanded'), 'false');
+          assert(await menu.evaluate(element => document.activeElement === element));
+          await page.keyboard.press('Space');
+          assert(await page.getByRole('button', { name: 'Sign out', exact: true }).isVisible());
+          await primary.getByRole('link', { name: 'Analysis history', exact: true }).focus();
+          await page.keyboard.press('Enter');
+          assert.equal(await menu.getAttribute('aria-expanded'), 'false');
+          assert(await menu.evaluate(element => document.activeElement === element));
+          await page.goto('http://offline-measurements.test/analyses/measurements');
+          await cause.waitFor();
+        } else {
+          assert(!(await menu.isVisible()));
+          assert(await primary.isVisible());
+          assert.equal(await primary.getByRole('link').count(), 12);
+        }
+        const allGroups = page.getByRole('button', { name: language === 'en' ? 'View all anomaly items' : '전체 이상 항목 보기', exact: true });
+        const firstViews = [];
+        for (const [scenario, candidate] of Object.entries({ ...fixtures, mixed: glanceFixtures.mixed, many: glanceFixtures.many })) {
+          activeReport = candidate;
+          await page.reload();
+          const glance = page.getByRole('region', { name: language === 'en' ? 'At a glance' : '한눈에 보기', exact: true });
+          await glance.waitFor();
+          assert.equal(await page.locator('.network-report article').count(), 0);
+          assert.equal(await glance.getByTestId('top-observation').count(), Math.min(3, candidate.issues.length));
+          assert.equal(await page.getByRole('region', { name: language === 'en' ? 'Supporting measurements' : '보조 측정값' }).count(), 0);
+          assert(!(await page.locator('body').innerText()).includes('Pattern scan →'));
+          if (!candidate.summary.coverage_complete) assert((await glance.innerText()).includes(language === 'en' ? 'Incomplete or unknown coverage' : '분석 범위가 불완전'));
+          const documentDOM = await page.locator('*').count();
+          assert(documentDOM < 500);
+          const viewportRects = {};
+          for (const [key, locator] of Object.entries({ verdict: glance.getByTestId('network-verdict'), firstKeypoint: glance.getByTestId('top-observation').first(), nextCheck: glance.locator('p').filter({ has: page.getByText(language === 'en' ? 'Priority next check' : '우선 확인 사항', { exact: true }) }) })) {
+            if (!await locator.count()) continue;
+            const rect = await locator.boundingBox();
+            viewportRects[key] = rect;
+          }
+          if (['supporting', 'mixed'].includes(scenario)) {
+            assert.deepEqual(Object.keys(viewportRects), ['verdict', 'firstKeypoint', 'nextCheck']);
+            assert(await page.locator('body').evaluate(element => element.scrollWidth <= innerWidth), 'no horizontal overflow');
+            await page.screenshot({ path: resolve(output, `viewport-${scenario}-${language}-${width}.png`) });
+            for (const [key, rect] of Object.entries(viewportRects)) assert(rect && rect.y >= 0 && rect.y + rect.height <= 844, `${language}/${width}/${scenario}/${key}: ${JSON.stringify(rect)}`);
+          }
+          firstViews.push({ scenario, documentDOM, viewportRects, verdict: await glance.getByTestId('network-verdict').innerText() });
+          if (['mixed', 'normal', 'incomplete', 'many'].includes(scenario)) {
+            await page.screenshot({ path: resolve(output, `summary-${scenario}-${language}-${width}.png`), fullPage: false });
+            writeFileSync(resolve(output, `summary-${scenario}-${language}-${width}.aria.txt`), await glance.ariaSnapshot());
+          }
+        }
+        activeReport = fixtures.supporting;
+        await page.reload();
+        await allGroups.click();
         const detailName = language === 'en' ? 'Supporting measurements' : '보조 측정값';
         assert.equal(await page.getByRole('region', { name: detailName }).count(), 0);
         const button = page.getByRole('button', { name: language === 'en' ? /Show representative evidence/ : /보기 대표 증거/ });
@@ -73,6 +138,7 @@ try {
         const report = page.locator('.network-report');
         const previous = report.getByRole('button', { name: language === 'en' ? 'Previous groups' : '이전 그룹', exact: true });
         const next = report.getByRole('button', { name: language === 'en' ? 'Next groups' : '다음 그룹', exact: true });
+        await allGroups.click();
         await next.waitFor();
         assert(await previous.isDisabled());
         let peakReportDOM = 0;
@@ -90,6 +156,7 @@ try {
             peakReportDOM = Math.max(peakReportDOM, await report.locator('*').count());
             peakDocumentDOM = Math.max(peakDocumentDOM, await page.locator('*').count());
             assert(peakReportDOM < 500);
+            assert(peakDocumentDOM < 500);
           }
           if (current < 2) {
             await next.focus();
@@ -115,10 +182,27 @@ try {
         // Tab skips the disabled previous control; next and evidence remain native.
         await page.keyboard.press('Tab');
         assert(await next.evaluate(element => document.activeElement === element));
+        activeReport = glanceFixtures.many;
+        await page.reload();
+        await allGroups.click();
+        let threeExamplePeak = 0;
+        for (let current = 0; current < 3; current++) {
+          const articles = report.getByRole('article');
+          for (let index = 0; index < await articles.count(); index++) {
+            const evidence = articles.nth(index).getByRole('button');
+            await evidence.focus();
+            await page.keyboard.press(index % 2 ? 'Space' : 'Enter');
+            assert.equal(await page.getByRole('region', { name: detailName, exact: true }).count(), 3);
+            threeExamplePeak = Math.max(threeExamplePeak, await page.locator('*').count());
+            assert(threeExamplePeak < 500);
+          }
+          if (current < 2) await next.click();
+        }
+        await page.screenshot({ path: resolve(output, `three-examples-${language}-${width}.png`), fullPage: true });
         assert.deepEqual(errors, []);
         assert(requests.every(request => request.method === 'GET'));
         // Existing saved-AI status/audit reads are permitted; no inference is submitted.
-        results.push({ language, width, geometry, errors, requests, noAutomaticAIInference: true, keyboardExpansionAndCollapse: true, pagination: { producerGroups: 23, retainedGroups: 20, producerOmitted: 3, visitedGroups: 20, lastPageAccessible: true, keyboardForwardAndBack: true, peakReportDOM, peakDocumentDOM } });
+        results.push({ language, width, firstViews, threeExamplePeak, geometry, errors, requests, noAutomaticAIInference: true, keyboardExpansionAndCollapse: true, pagination: { producerGroups: 23, retainedGroups: 20, producerOmitted: 3, visitedGroups: 20, lastPageAccessible: true, keyboardForwardAndBack: true, peakReportDOM, peakDocumentDOM } });
       } finally { await context.close(); }
     }
   }

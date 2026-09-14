@@ -1,3 +1,4 @@
+import { openGroups } from './reportDisclosure';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -25,10 +26,11 @@ it.each(Object.entries(fixtures))('renders the actual producer scenario %s witho
   const verdicts: Record<string, string> = { anomaly_observed: 'Anomaly observed', no_clear_anomaly: 'No clear anomaly observed', insufficient_evidence: 'Insufficient data' };
   expect(screen.getByRole('heading', { name: verdicts[String(report.summary.verdict)] })).toBeVisible();
   expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  openGroups();
   for (const [index, issue] of (report.issues ?? []).entries()) {
     const article = within(screen.getAllByRole('article')[index]);
-    for (const text of [...issue.evidence, ...issue.uncertainty, ...issue.next_checks]) expect(article.getByText(text)).toBeVisible();
     fireEvent.click(article.getByRole('button'));
+    for (const text of [...issue.evidence, ...issue.uncertainty, ...issue.next_checks]) expect(article.getByText(text)).toBeVisible();
     expect(article.getByRole('region', { name: 'Representative flow evidence' })).toBeVisible();
   }
 });
@@ -38,5 +40,8 @@ it('uses summary flow count rather than the empty compatibility flows array in t
   vi.stubGlobal('fetch', vi.fn(async input => new Response(JSON.stringify(String(input) === '/api/v1/analysis-jobs/producer-network' ? { id: 'producer-network', name: 'Producer report', status: 'COMPLETED', analysis: { module: 'network_anomaly' }, network_anomaly: fixtures.syn_reset } : { items: [] }))));
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/producer-network']}><App/></MemoryRouter></QueryClientProvider>);
   expect(await screen.findByRole('heading', { name: 'Anomaly observed' })).toBeVisible();
+  expect(screen.queryByText(/Pattern scan →/)).not.toBeInTheDocument();
+  expect(screen.queryByText('Observed bidirectional flows')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: '작업 상세 / Job details' }));
   expect(screen.getByText('Observed bidirectional flows').closest('article')).toHaveTextContent('1Observed bidirectional flows');
 });

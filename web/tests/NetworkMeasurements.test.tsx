@@ -1,3 +1,4 @@
+import { openGroups, openEvidence, openCoverage } from './reportDisclosure';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -45,12 +46,13 @@ beforeEach(() => localStorage.setItem('c2hunter-report-language', 'en'));
 
 it('shows a distinct low-confidence cause hypothesis and lazy supporting measurements from the actual producer', () => {
   render(<NetworkAnomalyPanel report={fixtures.syn_reset}/>);
+  openGroups();
   const article = within(screen.getAllByRole('article')[0]);
+  openEvidence();
   expect(article.getByRole('heading', { name: 'Possible cause — hypothesis' })).toBeVisible();
   expect(article.getByText(/Low causal confidence/)).toBeVisible();
   expect(screen.queryByText(/measurements are not computed/)).not.toBeInTheDocument();
-  expect(screen.queryByRole('region', { name: 'Supporting measurements' })).not.toBeInTheDocument();
-  fireEvent.click(article.getByRole('button'));
+  expect(article.getByRole('region', { name: 'Supporting measurements' })).toBeVisible();
   expect(article.getByRole('region', { name: 'Supporting measurements' })).toBeVisible();
   expect(article.getByText(/Interarrival dispersion \(ms\)/)).toBeVisible();
   expect(article.getByText(/IPv4 TTL \/ IPv6 Hop Limit/)).toBeVisible();
@@ -79,7 +81,8 @@ it('displays real eligible RTT, exclusion counts and directional dispersion with
   const fetcher = vi.fn();
   vi.stubGlobal('fetch', fetcher);
   render(<NetworkAnomalyPanel report={fixtures.supporting}/>);
-  fireEvent.click(screen.getByRole('button'));
+  openGroups();
+  openEvidence();
   const detail = screen.getByRole('region', { name: 'Supporting measurements' });
   expect(detail).toHaveTextContent('Observed RTT (ms) — Samples: 2 · mean / min / max: 100 / 100 / 100 · dispersion (population stddev): 0');
   expect(detail).toHaveTextContent('Eligible RTT samples: SYN/ACK 1 · Data/ACK 1. Excluded candidate matches: ambiguous / retransmitted 1');
@@ -90,7 +93,8 @@ it('displays real eligible RTT, exclusion counts and directional dispersion with
 
 it('distinguishes absent RTT from zero when the actual producer excludes retransmitted candidates', () => {
   render(<NetworkAnomalyPanel report={fixtures.ambiguous_rtt}/>);
-  fireEvent.click(screen.getByRole('button'));
+  openGroups();
+  openEvidence();
   const detail = screen.getByRole('region', { name: 'Supporting measurements' });
   expect(detail).toHaveTextContent('Observed RTT (ms) — Samples: 0 · mean / min / max: Unknown / Unknown / Unknown');
   expect(detail).toHaveTextContent('ambiguous / retransmitted 1');
@@ -99,7 +103,8 @@ it('distinguishes absent RTT from zero when the actual producer excludes retrans
 
 it('explains missing metadata rather than displaying invented zero TTL values', () => {
   render(<NetworkAnomalyPanel report={fixtures.missing_metadata}/>);
-  fireEvent.click(screen.getByRole('button'));
+  openGroups();
+  openEvidence();
   const detail = screen.getByRole('region', { name: 'Supporting measurements' });
   expect(detail).toHaveTextContent('A → B: Samples 0 · min / max Unknown / Unknown · changes 0 · missing 2');
   expect(detail).toHaveTextContent('TTL / Hop Limit metadata is missing. (MISSING_TTL)');
@@ -110,7 +115,8 @@ it('explains missing metadata rather than displaying invented zero TTL values', 
 
 it('labels actual IPv6 hop limits and preserves measured zero and variation without route claims', () => {
   render(<NetworkAnomalyPanel report={fixtures.ipv6_hop_limit}/>);
-  fireEvent.click(screen.getByRole('button'));
+  openGroups();
+  openEvidence();
   const detail = screen.getByRole('region', { name: 'Supporting measurements' });
   expect(detail).toHaveTextContent('IPv4 TTL / IPv6 Hop Limit');
   expect(detail).toHaveTextContent('A → B: Samples 3 · min / max 0 / 64 · changes 2 · missing 0');
@@ -122,6 +128,7 @@ it('labels actual IPv6 hop limits and preserves measured zero and variation with
 
 it.each(['normal', 'missing', 'incomplete'])('does not invent a cause or metric panel for the actual %s control', name => {
   render(<NetworkAnomalyPanel report={fixtures[name]}/>);
+  openGroups();
   expect(screen.queryByRole('heading', { name: 'Possible cause — hypothesis' })).not.toBeInTheDocument();
   expect(screen.queryByRole('region', { name: 'Supporting measurements' })).not.toBeInTheDocument();
 });
@@ -130,13 +137,14 @@ it('does not upgrade old saved reports and clears new measurements on report rep
   const old = structuredClone(fixtures.supporting);
   delete old.measurement_version;
   const { rerender } = render(<NetworkAnomalyPanel report={fixtures.supporting}/>);
-  fireEvent.click(screen.getByRole('button'));
+  openEvidence();
   expect(screen.getByRole('region', { name: 'Supporting measurements' })).toBeVisible();
   rerender(<NetworkAnomalyPanel report={old}/>);
+  openCoverage();
   expect(screen.getByText(/measurements are not computed/)).toBeVisible();
   expect(screen.queryByRole('region', { name: 'Supporting measurements' })).not.toBeInTheDocument();
   expect(screen.queryByRole('heading', { name: 'Possible cause — hypothesis' })).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button'));
+  openEvidence();
   expect(screen.getByText('tcp_sequence: 104')).toBeVisible();
   expect(screen.queryByRole('region', { name: 'Supporting measurements' })).not.toBeInTheDocument();
 });
@@ -146,6 +154,7 @@ it('bounds new reports to eight groups and three lazily mounted examples with on
   const issue = base.issues![0];
   const report = { ...base, issues: Array.from({ length: 1000 }, () => ({ ...issue, examples: Array.from({ length: 100 }, () => issue.examples[0]) })) };
   const { container, rerender } = render(<NetworkAnomalyPanel report={report}/>);
+  openGroups();
   expect(screen.getAllByRole('article')).toHaveLength(8);
   expect(screen.queryByRole('region', { name: 'Supporting measurements' })).not.toBeInTheDocument();
   for (const button of screen.getAllByRole('button', { name: /representative evidence/ })) {
@@ -164,10 +173,12 @@ it('fails closed for unsupported cause codes and suppresses untrusted cause and 
   report.issues![0].detailed_analysis = ['POISON'];
   report.issues![0].examples[0].measurements = { reasons: ['POISON'], observed_rtt_ms: { count: 0, mean: 123, min: 123, max: 123 } };
   const { container } = render(<NetworkAnomalyPanel report={report}/>);
+  openGroups();
   const article = within(screen.getByRole('article'));
+  openEvidence();
   expect(article.getByText(/no supported cause hypothesis/)).toBeVisible();
   expect(article.queryByText(/Low causal confidence/)).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button'));
+  openEvidence();
   expect(container).not.toHaveTextContent('POISON');
   expect(screen.getByRole('region', { name: 'Supporting measurements' })).not.toHaveTextContent('123');
 });
