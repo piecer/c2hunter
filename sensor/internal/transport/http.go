@@ -188,6 +188,10 @@ func nullableMACAddress(mac string) any {
 }
 
 func (h *HTTP) Heartbeat(ctx context.Context, heartbeat telemetry.Heartbeat) error {
+	interfaces := heartbeat.Interfaces
+	if interfaces == nil {
+		interfaces = []telemetry.InterfaceStatus{}
+	}
 	activeJobs := heartbeat.ActiveJobs
 	if activeJobs == nil {
 		activeJobs = []string{}
@@ -207,7 +211,7 @@ func (h *HTTP) Heartbeat(ctx context.Context, heartbeat telemetry.Heartbeat) err
 		"reported_at": heartbeat.CurrentTime, "status": heartbeat.Status.String(), "cpu_percent": heartbeat.CPUPercent,
 		"memory_percent": float64(0), "disk_percent": float64(0), "active_job_ids": activeJobs,
 		"received_packets": heartbeat.ReceivedPackets, "dropped_packets": heartbeat.DroppedPackets,
-		"pending_bytes": heartbeat.PendingBytes, "pcap_dropped_packets": heartbeat.PCAPDroppedPackets, "last_error": nil, "interfaces": heartbeat.Interfaces,
+		"pending_bytes": heartbeat.PendingBytes, "pcap_dropped_packets": heartbeat.PCAPDroppedPackets, "last_error": nil, "interfaces": interfaces,
 		"completed_capture_jobs": completedJobs,
 	}
 	if len(discoveredInterfaces) > 0 {
