@@ -35,14 +35,48 @@ and last worker error. Coordinator failures are logged and exposed at
 ## Operational limits and restart procedure
 
 This mode is for one local controller process, not multiple Uvicorn workers or a
-production durable queue. SQLite is authoritative for **already saved job
-snapshots**, not for pending raw batches in `MemoryFlowStore`. Before restart,
-wait for all CAPTURING/UPLOADING jobs to save their datasets; verify saved flow
-counts and create a SQLite backup using the backup API. Do not restart while an
-unsnapshotted capture requires volatile flows. Capture/sensor configuration is not
-changed by this option.
+production durable queue. With `MemoryFlowStore`, it requires a dedicated,
+file-backed SQLite repository on a POSIX single host. Startup takes a nonblocking
+exclusive `flock` on the database inode before capture recovery or coordinator
+admission; another local runtime using the same database fails startup even with
+a different health-file path. The descriptor is released on startup failure or
+owned coordinator shutdown. No lock file or raw-batch storage is introduced.
+Do not replace the database inode while running. Noncooperating controllers,
+mixed local/production deployments sharing this database, network filesystems,
+and non-POSIX hosts are unsupported; this is not distributed ownership fencing.
+
+New LIVE captures in this opt-in memory mode persist an internal source/ownership
+marker plus the flow-store instance's continuity ID. Before startup can finalize
+captures, marked CAPTURING/UPLOADING jobs from a different store instance become
+terminal FAILED with `error_code=LIVE_CAPTURE_RESTART_INCOMPLETE` and a fixed safe
+error explaining that accepted in-memory batches may have been lost. The normal
+detail/list API exposes this reason; the detail UI displays an English/Korean
+warning, including that zero counts do not prove absence of traffic. Sensor IDs,
+existing raw/snapshot records, and capture configuration are not rewritten.
+Late sensor completion heartbeats, raw batches, and due-capture processing cannot
+revive a terminal job. Raw batches remain sensor-scoped and may still return 202.
+
+Recovery does not infer loss from an empty dataset: a new empty capture and an
+app recreated around the **same** memory store remain valid. Saved ANALYZING
+snapshots follow the existing validated recovery path; terminal jobs are untouched.
+Non-memory flow sources and the default app factory do not run this sweep.
+An unmarked legacy or foreign active LIVE job makes local-memory startup fail
+closed **without changing any active job**: ownership/source continuity cannot
+be proven. Before upgrading/enabling this mode, finish such captures with their
+original source still available, or explicitly cancel them through the existing
+API. Do not invent ownership markers for old captures. This migration refusal is
+deliberate; legacy captures cannot safely be automatically classified as lost.
+
+SQLite remains authoritative only for **already saved job snapshots**, not raw
+batches accepted with HTTP 202. Before restart, wait for CAPTURING/UPLOADING jobs
+to save their datasets, verify saved flow counts, and use the SQLite backup API.
+If an unsnapshotted capture is interrupted, start a new capture; this change makes
+possible loss explicit, it does not provide raw-batch durability or replay.
 
 Regression coverage: `controller/tests/test_local_analysis_runtime.py` exercises
 LIVE ingestion to real worker result publication, SQLite startup recovery,
 invalid payload refusal, detector failure, pre-start cancellation, cancellation
 during execution, API responsiveness and owned-thread shutdown.
+`controller/tests/test_live_restart_incomplete.py` additionally exercises actual
+parser-produced flow ingestion (202), fresh SQLite connection and empty-memory
+startup for both LIVE modules/states, terminal callbacks, and ownership refusal.

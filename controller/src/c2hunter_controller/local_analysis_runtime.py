@@ -13,7 +13,7 @@ from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any
+from typing import Any, BinaryIO
 
 from .queueing import MemoryControllerQueue
 from .repositories import Repository
@@ -48,6 +48,8 @@ class LocalAnalysisRuntime:
         publish: Callable[[dict[str, Any]], None],
         health_path: Path,
         enqueue: Callable[[dict[str, Any]], None],
+        prepare: Callable[[], None] | None = None,
+        ownership_path: Path | None = None,
     ) -> None:
         # Optional worker package is required only when this POC mode is requested.
         from c2hunter_worker.analysis import (  # type: ignore[import-not-found,import-untyped]
@@ -71,16 +73,39 @@ class LocalAnalysisRuntime:
         self.last_error: str | None = None
         self.enqueue = enqueue
         self.recovery_ids: deque[str] = deque()
+        self.prepare = prepare
+        self.ownership_path = ownership_path
+        self.ownership_file: BinaryIO | None = None
 
     async def start(self) -> None:
-        queued = {str(job["id"]) for job in self.queue.jobs}
-        self.recovery_ids = deque(
-            str(job["id"])
-            for job in self.repository.list_jobs()
-            if job.get("status") == "ANALYZING" and str(job["id"]) not in queued
-        )
-        self.thread.start()
-        self.task = asyncio.create_task(self.run(), name="local-analysis-coordinator")
+        if self.ownership_path is not None:
+            # Single-host, cooperating local runtimes only. Lock the database
+            # inode itself so differing health paths cannot bypass ownership.
+            import fcntl
+
+            owned = self.ownership_path.open("rb")
+            try:
+                fcntl.flock(owned.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                owned.close()
+                raise RuntimeError("local runtime database is already owned") from error
+            self.ownership_file = owned
+        try:
+            if self.prepare is not None:
+                self.prepare()
+            queued = {str(job["id"]) for job in self.queue.jobs}
+            self.recovery_ids = deque(
+                str(job["id"])
+                for job in self.repository.list_jobs()
+                if job.get("status") == "ANALYZING" and str(job["id"]) not in queued
+            )
+            self.thread.start()
+            self.task = asyncio.create_task(self.run(), name="local-analysis-coordinator")
+        except BaseException:
+            if self.ownership_file is not None:
+                self.ownership_file.close()
+                self.ownership_file = None
+            raise
 
     async def run(self) -> None:
         while not self.stopped.is_set():
@@ -150,3 +175,6 @@ class LocalAnalysisRuntime:
         await asyncio.to_thread(self.thread.join, 2)
         if self.thread.is_alive():
             logger.warning("local worker still computing at shutdown; publication deferred")
+        if self.ownership_file is not None:
+            self.ownership_file.close()
+            self.ownership_file = None

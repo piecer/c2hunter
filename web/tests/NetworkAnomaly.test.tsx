@@ -7,6 +7,26 @@ beforeEach(() => localStorage.setItem('c2hunter-report-language', 'en'));
 import userEvent from '@testing-library/user-event';
 import App from '../src/App';
 
+it.each(['network_anomaly', 'c2'])('explains restart-incomplete capture safely for %s', async module => {
+  localStorage.setItem('c2hunter-token', 'token');
+  vi.stubGlobal('fetch', vi.fn(async input => new Response(JSON.stringify(
+    String(input) === '/api/v1/analysis-jobs/interrupted' ? {
+      id: 'interrupted', name: 'Interrupted capture', status: 'FAILED',
+      analysis: { module }, error_code: 'LIVE_CAPTURE_RESTART_INCOMPLETE',
+      error: 'untrusted payload must not render',
+    } : { items: [] }
+  ))));
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/interrupted']}><App/></MemoryRouter></QueryClientProvider>);
+  const alert = await screen.findByRole('alert', { name: 'Incomplete LIVE capture' });
+  expect(alert).toHaveTextContent('Controller restart');
+  expect(alert).toHaveTextContent('may have been lost');
+  expect(alert).toHaveTextContent('재시작');
+  expect(alert).toHaveTextContent('유실되었을 수');
+  expect(alert).toHaveTextContent('Start a new capture');
+  expect(screen.queryByText('untrusted payload must not render')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Cancel analysis' })).not.toBeInTheDocument();
+});
+
 it('submits network anomaly from the existing new-analysis form', async () => {
   localStorage.setItem('c2hunter-token', 'token');
   let submitted: Record<string, unknown> | undefined;
