@@ -133,8 +133,10 @@ def test_measurement_projection_budget_and_missing_sample_semantics():
     bundle = build_network_input(report)
     assert len(canonical_network_input(bundle).encode()) <= 24000
     assert len(bundle["issues"]) + bundle["omitted_input_issues"] == 40
-    assert all(len(i["observed_measurements"]) == 2 for i in bundle["issues"])
-    assert bundle["omitted_input_issues"] > 0
+    assert len(bundle["issues"]) == 20
+    assert all(1 <= len(i.get("observed_measurements", [])) <= 2 for i in bundle["issues"])
+    assert bundle["omitted_input_issues"] == 20
+    assert bundle["input_detail_counts"]["omitted"] > 0
 
     report = measured_report()
     m = report["issues"][0]["examples"][0]["measurements"]
