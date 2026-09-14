@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import NetworkMeasurements, { CauseHypothesis } from './NetworkMeasurements';
 import { useReportLanguage } from './reportLanguageContext';
 import { choose, patterns, warnings as warningCodes, rawText, translateProse, patternLabel, warningLabel, factLabel, evidenceText } from './reportTranslations';
@@ -30,9 +30,35 @@ export default function NetworkPatternReport({ report }: { report: PatternReport
   const text = (value: unknown, max = 320) => rawText(language, value, max);
   const number = (value: unknown) => count(value)?.toLocaleString('en-US') ?? t('Unknown', '알 수 없음');
   const endpoint = (value?: Endpoint) => value && typeof value.ip === 'string' ? `${value.ip.includes(':') ? `[${text(value.ip, 80)}]` : text(value.ip, 80)}${value.port == null ? '' : `:${count(value.port) ?? t('unknown', '알 수 없음')}`}` : t('Endpoint not reported', '종단점이 보고되지 않음');
+  const [page, setPage] = useState(0);
+  const pageStatus = useRef<HTMLParagraphElement>(null);
+  const groupsHeading = useRef<HTMLHeadingElement>(null);
+  const retainFocus = useCallback((node: HTMLElement | null) => {
+    if (!node) return;
+    // Ref cleanup runs before removal; do not strand focus in a deleted page.
+    return () => {
+      if (node.contains(document.activeElement)) groupsHeading.current?.focus();
+    };
+  }, []);
   const [expanded, setExpanded] = useState<{ report: PatternReport; index: number }>();
+  const [owner, setOwner] = useState(report);
+  // Identity, not counts/issue IDs: a replacement may have the same groups but
+  // different evidence. Reset before committing children; never revive A on A→B→A.
+  if (owner !== report) {
+    setOwner(report);
+    setPage(0);
+    setExpanded(undefined);
+  }
   const summary = report.summary ?? {};
   const issues = Array.isArray(report.issues) ? report.issues : [];
+  const pages = Math.max(1, Math.ceil(issues.length / 8));
+  const current = Math.min(page, pages - 1);
+  const visibleIssues = issues.slice(current * 8, current * 8 + 8);
+  const changePage = (next: number) => {
+    setPage(next);
+    setExpanded(undefined);
+    pageStatus.current?.focus();
+  };
   const verdict = summary.verdict;
   const measurementsSupported = report.measurement_version === 'network-supporting-measurements-v1';
   const warnings = Array.isArray(report.warnings) ? report.warnings : [];
@@ -52,17 +78,23 @@ export default function NetworkPatternReport({ report }: { report: PatternReport
       <p>{number(summary.scanned_records)} {t('records scanned', '개 레코드 검사')} · {number(summary.evaluated_records)} {t('evaluated', '개 평가')} · {number(summary.skipped_records)} {t('skipped', '개 건너뜀')} · {number(summary.incomplete_records)} {t('incomplete', '개 불완전')}</p>
       {summary.counts_are_lower_bounds === true && <p className="warning">{t('Counts are lower bounds, not complete capture totals.', '수치는 하한값이며 전체 캡처의 총계가 아닙니다.')} {number(summary.tracking_limited_records)} {t('records exceeded tracking limits; retained observations remain valid, but additional anomalies may be missing.', '개 레코드가 추적 한도를 초과했습니다. 보존된 관찰은 유효하지만 추가 이상 징후가 누락되었을 수 있습니다.')}</p>}
       <p>{number(summary.flow_count)} {t('flows scanned', '개 흐름 검사')} · {number(summary.suspect_flow_count)} {t('suspect flows', '개 의심 흐름')} · {number(summary.detailed_flow_count)} {t('representative flows analyzed in detail', '개 대표 흐름 상세 분석')}</p>
-      <p>{number(summary.issue_count)} {t('issue groups', '개 문제 그룹')} · {Math.min(issues.length, 8)} {t('shown', '개 표시')} · {number(summary.omitted_issue_count)} {t('groups omitted by producer', '개 그룹 분석기에서 생략')} · {Math.max(0, issues.length - 8)} {t('additional groups omitted from this view', '개 추가 그룹 이 화면에서 생략')}</p>
+      <p>{number(summary.issue_count)} {t('issue groups', '개 문제 그룹')} · {recognized ? visibleIssues.length : 0} {t('shown on this page', '개 현재 페이지에 표시')} · {number(summary.omitted_issue_count)} {t('groups omitted by producer', '개 그룹 분석기에서 생략')} · {recognized ? issues.length - visibleIssues.length : issues.length} {t('retained groups not shown on this page', '개 보존된 그룹 현재 페이지에 표시되지 않음')}</p>
       {summary.truncated === true && <p className="warning">{t('Report truncated: not all issue groups are included. Detection counts are not a complete list of displayed evidence.', '보고서 일부 생략: 모든 문제 그룹이 포함되지는 않았습니다. 탐지 수치에 해당하는 증거가 전부 표시된 것은 아닙니다.')}</p>}
       <ul>{warnings.slice(0, 8).map((warning, index) => <li key={index}>{warningLabel(language, warning)}</li>)}{warnings.length > 8 && <li>{warnings.length - 8} {t('additional coverage warnings omitted from this view.', '개의 추가 분석 범위 경고가 이 화면에서 생략되었습니다.')}</li>}</ul><Notes values={report.limitations} limit={8}/>
     </section>
-    <h3>{t('Grouped observations', '그룹별 관찰 결과')}</h3>
+    <h3 ref={groupsHeading} tabIndex={-1}>{t('Grouped observations', '그룹별 관찰 결과')}</h3>
     {!issues.length && <p>{t('No grouped observations retained. Consult coverage before interpreting this result.', '보존된 그룹별 관찰 결과가 없습니다. 결과를 해석하기 전에 분석 범위를 확인하세요.')}</p>}
     {!recognized && issues.slice(0, 8).filter(issue => issue && !Object.hasOwn(patterns, issue.pattern)).map((issue, index) => <p key={index}>{patternLabel(language, issue.pattern)}</p>)}
-    {recognized && issues.slice(0, 8).map((issue, index) => {
+    {recognized && issues.length > 8 && <nav ref={retainFocus} aria-label={t('Issue group pages', '문제 그룹 페이지')}>
+      <button type="button" className="secondary" disabled={current === 0} onClick={() => changePage(current - 1)}>{t('Previous groups', '이전 그룹')}</button>
+      <p ref={pageStatus} role="status" aria-live="polite" aria-atomic="true" tabIndex={-1}>{t(`Page ${current + 1} of ${pages}`, `${pages}페이지 중 ${current + 1}페이지`)}</p>
+      <button type="button" className="secondary" disabled={current === pages - 1} onClick={() => changePage(current + 1)}>{t('Next groups', '다음 그룹')}</button>
+    </nav>}
+    {recognized && visibleIssues.map((issue, offset) => {
+      const index = current * 8 + offset;
       const open = expanded?.report === report && expanded.index === index;
       const examples = Array.isArray(issue.examples) ? issue.examples : [];
-      return <article className="panel compact" key={index}>
+      return <article ref={retainFocus} className="panel compact" key={index}>
         <h4>{patternLabel(language, issue.pattern)}</h4>
         <p>{t('Severity', '심각도')}: {issue.severity === 'observation' ? t('Observation', '관찰 사항') : translateProse(language, issue.severity)}</p>
         <p>{number(issue.event_count)} {t('events', '건')} · {number(issue.affected_flow_count)} {t('affected flows', '개 영향받은 흐름')} · {number(issue.affected_host_count)} {t('affected hosts', '개 영향받은 호스트')}</p>
@@ -72,7 +104,7 @@ export default function NetworkPatternReport({ report }: { report: PatternReport
         <h5>{t('Representative proof', '대표 증거')}</h5><Notes values={issue.evidence} issue={issue}/>
         <h5>{t('Uncertainty', '불확실성')}</h5><Notes values={issue.uncertainty}/>
         <h5>{t('Next checks', '다음 확인 사항')}</h5><Notes values={issue.next_checks}/>
-        <button className="secondary" aria-expanded={open} aria-controls={`network-evidence-${index}`} onClick={() => setExpanded(open ? undefined : { report, index })}>{open ? t('Hide', '숨기기') : t('Show', '보기')} {t('representative evidence', '대표 증거')} — {patternLabel(language, issue.pattern)}</button>
+        <button className="secondary" aria-expanded={open} aria-controls={open ? `network-evidence-${index}` : undefined} onClick={() => setExpanded(open ? undefined : { report, index })}>{open ? t('Hide', '숨기기') : t('Show', '보기')} {t('representative evidence', '대표 증거')} — {patternLabel(language, issue.pattern)}</button>
         {open && <section id={`network-evidence-${index}`} aria-label={t('Representative flow evidence', '대표 흐름 증거')}>
           {!examples.length && <p>{t('No representative flow examples were included.', '대표 흐름 예시가 포함되지 않았습니다.')}</p>}
           <ul>{examples.slice(0, 3).map((example, i) => <li key={i}>{endpoint(example.endpoint_a)} ↔ {endpoint(example.endpoint_b)} · {number(example.event_count)} {t('events', '건')}<ul>{Object.entries(example.facts ?? {}).slice(0, 8).map(([key, value]) => <li key={key}>{factLabel(language, key)}: {typeof value === 'number' && Number.isFinite(value) ? String(value) : t('Unknown', '알 수 없음')}</li>)}{Object.keys(example.facts ?? {}).length > 8 && <li>{Object.keys(example.facts ?? {}).length - 8} {t('additional facts omitted from this view.', '개의 추가 사실이 이 화면에서 생략되었습니다.')}</li>}</ul>{measurementsSupported && <NetworkMeasurements value={example.measurements}/>}</li>)}</ul>
