@@ -1,14 +1,46 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { factLabels } from '../src/reportTranslations';
+import NetworkMeasurements from '../src/NetworkMeasurements';
+import { ReportLanguageContext } from '../src/reportLanguageContext';
 import NetworkAnomalyPanel, { type NetworkAnomalyReport } from '../src/NetworkAnomalyPanel';
 
 const python = process.env.C2HUNTER_TEST_PYTHON ?? (existsSync('../.venv/bin/python') ? resolve('../.venv/bin/python') : 'python3');
 const generate = () => execFileSync(python, ['tests/network_report_fixture.py'], { encoding: 'utf8' });
 const fixtures = JSON.parse(generate()) as Record<string, NetworkAnomalyReport>;
+const qualityBytes = readFileSync('tests/fixtures/network-measurement-quality.json', 'utf8');
+const qualityCases = JSON.parse(qualityBytes) as Record<string, { measurement: Record<string, unknown>; projected: unknown; accepted: boolean }>;
+it('freezes exact actual producer and AI projection bytes', () => {
+  const output = () => execFileSync(python, ['tests/network_report_fixture.py', '--quality-contract'], { encoding: 'utf8' });
+  expect(output()).toBe(qualityBytes);
+  expect(output()).toBe(qualityBytes);
+});
+it.each(['en', 'ko'] as const)('separates coverage and adequacy for handshake-only evidence in %s', language => {
+  render(<ReportLanguageContext.Provider value={language}><NetworkMeasurements value={qualityCases.handshake_only.measurement}/></ReportLanguageContext.Provider>);
+  const detail = screen.getByRole('region');
+  for (const text of language === 'en' ? ['Measurement coverage: Complete', 'Limited samples', 'Handshake-only RTT', 'Selection bias possible', 'representativeness not established', 'not sample adequacy', 'Bidirectional RTT samples not established'] : ['측정 범위: 완전', '제한된 표본', '핸드셰이크만의 RTT', '선택 편향 가능', '대표성은 확립되지 않음', '표본 적절성을 뜻하지 않습니다', '양방향 RTT 표본은 확립되지 않음']) expect(detail).toHaveTextContent(text);
+});
+it.each(Object.keys(qualityCases))('keeps AI/UI quality acceptance aligned for exact %s bytes', name => {
+  const witness = qualityCases[name];
+  render(<ReportLanguageContext.Provider value="en"><NetworkMeasurements value={witness.measurement}/></ReportLanguageContext.Provider>);
+  const detail = screen.getByRole('region');
+  if (!witness.accepted) {
+    expect(detail).toHaveTextContent('Invalid measurement qualification');
+    expect(detail).not.toHaveTextContent('Limited samples');
+  } else if (name.startsWith('legacy_')) {
+    expect(detail).toHaveTextContent('Sample qualification: Not provided');
+    if (name === 'legacy_singleton_zero') expect(detail).toHaveTextContent('Raw singleton stddev: 0; not meaningful evidence of dispersion or stability');
+  } else {
+    expect(witness.projected).toEqual(witness.measurement);
+    expect(detail).toHaveTextContent('representativeness not established');
+    expect(detail).not.toHaveTextContent('Invalid measurement qualification');
+  }
+  expect(detail).not.toHaveTextContent('POISON');
+});
+
 beforeEach(() => localStorage.setItem('c2hunter-report-language', 'en'));
 
 it('shows a distinct low-confidence cause hypothesis and lazy supporting measurements from the actual producer', () => {

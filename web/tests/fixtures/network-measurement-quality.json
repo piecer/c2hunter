@@ -1,0 +1,3111 @@
+{
+  "ambiguous_rtt": {
+    "accepted": true,
+    "measurement": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 1,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": null
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "SELECTION_BIAS_POSSIBLE"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "NO_UNAMBIGUOUS_RTT"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 1,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    },
+    "projected": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 1,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": null
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "SELECTION_BIAS_POSSIBLE"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "NO_UNAMBIGUOUS_RTT"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 1,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    }
+  },
+  "cap_at": {
+    "accepted": true,
+    "measurement": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 1,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": null
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "NO_UNAMBIGUOUS_RTT",
+        "ONE_DIRECTION_OBSERVED"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 0,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 0,
+          "max": null,
+          "min": null,
+          "missing": 0
+        }
+      }
+    },
+    "projected": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 1,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": null
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "NO_UNAMBIGUOUS_RTT",
+        "ONE_DIRECTION_OBSERVED"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 0,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 0,
+          "max": null,
+          "min": null,
+          "missing": 0
+        }
+      }
+    }
+  },
+  "cap_plus": {
+    "accepted": true,
+    "measurement": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": 0.0
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES",
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "SELECTION_BIAS_POSSIBLE"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES",
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "unavailable"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "CORRELATION_LIMIT_REACHED",
+        "NO_UNAMBIGUOUS_RTT",
+        "ONE_DIRECTION_OBSERVED"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 0,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 0,
+          "max": null,
+          "min": null,
+          "missing": 0
+        }
+      }
+    },
+    "projected": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": 0.0
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES",
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "SELECTION_BIAS_POSSIBLE"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES",
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "unavailable"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "CORRELATION_LIMIT_REACHED",
+        "NO_UNAMBIGUOUS_RTT",
+        "ONE_DIRECTION_OBSERVED"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 0,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 0,
+          "max": null,
+          "min": null,
+          "missing": 0
+        }
+      }
+    }
+  },
+  "clock_gap": {
+    "accepted": true,
+    "measurement": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 200.0,
+          "mean": 150.0,
+          "min": 100.0,
+          "stddev": 50.0
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES",
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "SINGLE_SAMPLE",
+            "HANDSHAKE_ONLY",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "SELECTION_BIAS_POSSIBLE"
+          ],
+          "status": "limited_samples"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "SINGLE_SAMPLE",
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "limited_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 1,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": null
+      },
+      "reasons": [
+        "NON_MONOTONIC_TIMESTAMPS"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 0,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 1,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    },
+    "projected": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 200.0,
+          "mean": 150.0,
+          "min": 100.0,
+          "stddev": 50.0
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES",
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "SINGLE_SAMPLE",
+            "HANDSHAKE_ONLY",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "SELECTION_BIAS_POSSIBLE"
+          ],
+          "status": "limited_samples"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "SINGLE_SAMPLE",
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "limited_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 1,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": null
+      },
+      "reasons": [
+        "NON_MONOTONIC_TIMESTAMPS"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 0,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 1,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    }
+  },
+  "data_ack": {
+    "accepted": true,
+    "measurement": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 1,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": null
+        },
+        "b_to_a": {
+          "count": 1,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [],
+            "status": "observed_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "NO_UNAMBIGUOUS_RTT"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 0,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    },
+    "projected": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 1,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": null
+        },
+        "b_to_a": {
+          "count": 1,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [],
+            "status": "observed_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "NO_UNAMBIGUOUS_RTT"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 0,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    }
+  },
+  "handshake_only": {
+    "accepted": true,
+    "measurement": {
+      "coverage_complete": true,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 200.0,
+          "mean": 150.0,
+          "min": 100.0,
+          "stddev": 50.0
+        },
+        "b_to_a": {
+          "count": 1,
+          "max": 300.0,
+          "mean": 300.0,
+          "min": 300.0,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "SINGLE_SAMPLE",
+            "HANDSHAKE_ONLY",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "SELECTION_BIAS_POSSIBLE"
+          ],
+          "status": "limited_samples"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [],
+            "status": "observed_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 1,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": null
+      },
+      "reasons": [],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    },
+    "projected": {
+      "coverage_complete": true,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 200.0,
+          "mean": 150.0,
+          "min": 100.0,
+          "stddev": 50.0
+        },
+        "b_to_a": {
+          "count": 1,
+          "max": 300.0,
+          "mean": 300.0,
+          "min": 300.0,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "SINGLE_SAMPLE",
+            "HANDSHAKE_ONLY",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "SELECTION_BIAS_POSSIBLE"
+          ],
+          "status": "limited_samples"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [],
+            "status": "observed_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 1,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": null
+      },
+      "reasons": [],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    }
+  },
+  "icmp": {
+    "accepted": true,
+    "measurement": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "NOT_TCP",
+        "ONE_DIRECTION_OBSERVED"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 0,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 1,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 0,
+          "max": null,
+          "min": null,
+          "missing": 0
+        }
+      }
+    },
+    "projected": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "NOT_TCP",
+        "ONE_DIRECTION_OBSERVED"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 0,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 1,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 0,
+          "max": null,
+          "min": null,
+          "missing": 0
+        }
+      }
+    }
+  },
+  "invalid_count": {
+    "accepted": false,
+    "measurement": {
+      "coverage_complete": true,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 200.0,
+          "mean": 150.0,
+          "min": 100.0,
+          "stddev": 50.0
+        },
+        "b_to_a": {
+          "count": 1,
+          "max": 300.0,
+          "mean": 300.0,
+          "min": 300.0,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "SINGLE_SAMPLE",
+            "HANDSHAKE_ONLY",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "SELECTION_BIAS_POSSIBLE"
+          ],
+          "status": "observed_samples"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [],
+            "status": "observed_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 1,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": null
+      },
+      "reasons": [],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    },
+    "projected": null
+  },
+  "invalid_extra": {
+    "accepted": false,
+    "measurement": {
+      "coverage_complete": true,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 200.0,
+          "mean": 150.0,
+          "min": 100.0,
+          "stddev": 50.0
+        },
+        "b_to_a": {
+          "count": 1,
+          "max": 300.0,
+          "mean": 300.0,
+          "min": 300.0,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          }
+        },
+        "observed_rtt_ms": {
+          "confidence": "POISON",
+          "reasons": [
+            "SINGLE_SAMPLE",
+            "HANDSHAKE_ONLY",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "SELECTION_BIAS_POSSIBLE"
+          ],
+          "status": "limited_samples"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [],
+            "status": "observed_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 1,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": null
+      },
+      "reasons": [],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    },
+    "projected": null
+  },
+  "invalid_missing": {
+    "accepted": false,
+    "measurement": {
+      "coverage_complete": true,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 200.0,
+          "mean": 150.0,
+          "min": 100.0,
+          "stddev": 50.0
+        },
+        "b_to_a": {
+          "count": 1,
+          "max": 300.0,
+          "mean": 300.0,
+          "min": 300.0,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "SINGLE_SAMPLE",
+            "HANDSHAKE_ONLY",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "SELECTION_BIAS_POSSIBLE"
+          ],
+          "status": "limited_samples"
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 1,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": null
+      },
+      "reasons": [],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    },
+    "projected": null
+  },
+  "invalid_null": {
+    "accepted": false,
+    "measurement": {
+      "coverage_complete": true,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 200.0,
+          "mean": 150.0,
+          "min": 100.0,
+          "stddev": 50.0
+        },
+        "b_to_a": {
+          "count": 1,
+          "max": 300.0,
+          "mean": 300.0,
+          "min": 300.0,
+          "stddev": null
+        }
+      },
+      "metric_quality": null,
+      "observed_rtt_ms": {
+        "count": 1,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": null
+      },
+      "reasons": [],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    },
+    "projected": null
+  },
+  "invalid_order": {
+    "accepted": false,
+    "measurement": {
+      "coverage_complete": true,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 200.0,
+          "mean": 150.0,
+          "min": 100.0,
+          "stddev": 50.0
+        },
+        "b_to_a": {
+          "count": 1,
+          "max": 300.0,
+          "mean": 300.0,
+          "min": 300.0,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "SELECTION_BIAS_POSSIBLE",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "HANDSHAKE_ONLY",
+            "SINGLE_SAMPLE"
+          ],
+          "status": "limited_samples"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [],
+            "status": "observed_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 1,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": null
+      },
+      "reasons": [],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    },
+    "projected": null
+  },
+  "invalid_reason": {
+    "accepted": false,
+    "measurement": {
+      "coverage_complete": true,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 200.0,
+          "mean": 150.0,
+          "min": 100.0,
+          "stddev": 50.0
+        },
+        "b_to_a": {
+          "count": 1,
+          "max": 300.0,
+          "mean": 300.0,
+          "min": 300.0,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "POISON"
+          ],
+          "status": "limited_samples"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [],
+            "status": "observed_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 1,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": null
+      },
+      "reasons": [],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    },
+    "projected": null
+  },
+  "invalid_selection": {
+    "accepted": false,
+    "measurement": {
+      "coverage_complete": true,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 200.0,
+          "mean": 150.0,
+          "min": 100.0,
+          "stddev": 50.0
+        },
+        "b_to_a": {
+          "count": 1,
+          "max": 300.0,
+          "mean": 300.0,
+          "min": 300.0,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "SINGLE_SAMPLE",
+            "HANDSHAKE_ONLY",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED"
+          ],
+          "status": "limited_samples"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [],
+            "status": "observed_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 1,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": null
+      },
+      "reasons": [],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    },
+    "projected": null
+  },
+  "invalid_status": {
+    "accepted": false,
+    "measurement": {
+      "coverage_complete": true,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 200.0,
+          "mean": 150.0,
+          "min": 100.0,
+          "stddev": 50.0
+        },
+        "b_to_a": {
+          "count": 1,
+          "max": 300.0,
+          "mean": 300.0,
+          "min": 300.0,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "SINGLE_SAMPLE",
+            "HANDSHAKE_ONLY",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "SELECTION_BIAS_POSSIBLE"
+          ],
+          "status": "POISON"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [],
+            "status": "observed_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 1,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": null
+      },
+      "reasons": [],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    },
+    "projected": null
+  },
+  "ipv6_hop_limit": {
+    "accepted": true,
+    "measurement": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": 0.0
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "NOT_TCP",
+        "ONE_DIRECTION_OBSERVED"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 0,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 2,
+          "count": 3,
+          "max": 64,
+          "min": 0,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 0,
+          "max": null,
+          "min": null,
+          "missing": 0
+        }
+      }
+    },
+    "projected": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": 0.0
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "NOT_TCP",
+        "ONE_DIRECTION_OBSERVED"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 0,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 2,
+          "count": 3,
+          "max": 64,
+          "min": 0,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 0,
+          "max": null,
+          "min": null,
+          "missing": 0
+        }
+      }
+    }
+  },
+  "legacy_quality_absent": {
+    "accepted": true,
+    "measurement": {
+      "coverage_complete": true,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 200.0,
+          "mean": 150.0,
+          "min": 100.0,
+          "stddev": 50.0
+        },
+        "b_to_a": {
+          "count": 1,
+          "max": 300.0,
+          "mean": 300.0,
+          "min": 300.0,
+          "stddev": null
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 1,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": null
+      },
+      "reasons": [],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    },
+    "projected": {
+      "coverage_complete": true,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 200.0,
+          "mean": 150.0,
+          "min": 100.0,
+          "stddev": 50.0
+        },
+        "b_to_a": {
+          "count": 1,
+          "max": 300.0,
+          "mean": 300.0,
+          "min": 300.0,
+          "stddev": null
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 1,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": null
+      },
+      "reasons": [],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    }
+  },
+  "legacy_singleton_zero": {
+    "accepted": true,
+    "measurement": {
+      "coverage_complete": true,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 200.0,
+          "mean": 150.0,
+          "min": 100.0,
+          "stddev": 50.0
+        },
+        "b_to_a": {
+          "count": 1,
+          "max": 300.0,
+          "mean": 300.0,
+          "min": 300.0,
+          "stddev": null
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 1,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": 0
+      },
+      "reasons": [],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    },
+    "projected": {
+      "coverage_complete": true,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 2,
+          "max": 200.0,
+          "mean": 150.0,
+          "min": 100.0,
+          "stddev": 50.0
+        },
+        "b_to_a": {
+          "count": 1,
+          "max": 300.0,
+          "mean": 300.0,
+          "min": 300.0,
+          "stddev": null
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 1,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": 0.0
+      },
+      "reasons": [],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    }
+  },
+  "missing_metadata": {
+    "accepted": true,
+    "measurement": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 1,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": null
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "SELECTION_BIAS_POSSIBLE"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [
+              "NO_SAMPLES",
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "unavailable"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES",
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "unavailable"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "MISSING_TTL",
+        "NO_UNAMBIGUOUS_RTT"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 0,
+          "max": null,
+          "min": null,
+          "missing": 2
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 0,
+          "max": null,
+          "min": null,
+          "missing": 1
+        }
+      }
+    },
+    "projected": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 1,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": null
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "SELECTION_BIAS_POSSIBLE"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [
+              "NO_SAMPLES",
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "unavailable"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES",
+              "SELECTION_BIAS_POSSIBLE"
+            ],
+            "status": "unavailable"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "MISSING_TTL",
+        "NO_UNAMBIGUOUS_RTT"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 0,
+          "max": null,
+          "min": null,
+          "missing": 2
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 0,
+          "max": null,
+          "min": null,
+          "missing": 1
+        }
+      }
+    }
+  },
+  "supporting": {
+    "accepted": true,
+    "measurement": {
+      "coverage_complete": true,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 3,
+          "max": 200.0,
+          "mean": 166.666667,
+          "min": 100.0,
+          "stddev": 47.140452
+        },
+        "b_to_a": {
+          "count": 2,
+          "max": 300.0,
+          "mean": 250.0,
+          "min": 200.0,
+          "stddev": 50.0
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [],
+            "status": "observed_samples"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "SELECTION_BIAS_POSSIBLE"
+          ],
+          "status": "observed_samples"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [],
+            "status": "observed_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 2,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": 0.0
+      },
+      "reasons": [],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 1,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 4,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    },
+    "projected": {
+      "coverage_complete": true,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 3,
+          "max": 200.0,
+          "mean": 166.666667,
+          "min": 100.0,
+          "stddev": 47.140452
+        },
+        "b_to_a": {
+          "count": 2,
+          "max": 300.0,
+          "mean": 250.0,
+          "min": 200.0,
+          "stddev": 50.0
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [],
+            "status": "observed_samples"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "SELECTION_BIAS_POSSIBLE"
+          ],
+          "status": "observed_samples"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [],
+            "status": "observed_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 2,
+        "max": 100.0,
+        "mean": 100.0,
+        "min": 100.0,
+        "stddev": 0.0
+      },
+      "reasons": [],
+      "rtt_excluded": {
+        "ambiguous": 1,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 1,
+        "syn_ack": 1
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 4,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 3,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    }
+  },
+  "syn_reset": {
+    "accepted": true,
+    "measurement": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 1,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": null
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "NO_UNAMBIGUOUS_RTT"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 0,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 1,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    },
+    "projected": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 1,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": null
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "NO_UNAMBIGUOUS_RTT"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 0,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 1,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        }
+      }
+    }
+  },
+  "udp": {
+    "accepted": true,
+    "measurement": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 1,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": null
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "NOT_TCP",
+        "ONE_DIRECTION_OBSERVED"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 0,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 0,
+          "max": null,
+          "min": null,
+          "missing": 0
+        }
+      }
+    },
+    "projected": {
+      "coverage_complete": false,
+      "interarrival_variation_ms": {
+        "a_to_b": {
+          "count": 1,
+          "max": 100.0,
+          "mean": 100.0,
+          "min": 100.0,
+          "stddev": null
+        },
+        "b_to_a": {
+          "count": 0,
+          "max": null,
+          "mean": null,
+          "min": null,
+          "stddev": null
+        }
+      },
+      "metric_quality": {
+        "interarrival_variation_ms": {
+          "a_to_b": {
+            "reasons": [
+              "SINGLE_SAMPLE"
+            ],
+            "status": "limited_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        },
+        "observed_rtt_ms": {
+          "reasons": [
+            "NO_SAMPLES",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED"
+          ],
+          "status": "unavailable"
+        },
+        "ttl_observed": {
+          "a_to_b": {
+            "reasons": [],
+            "status": "observed_samples"
+          },
+          "b_to_a": {
+            "reasons": [
+              "NO_SAMPLES"
+            ],
+            "status": "unavailable"
+          }
+        }
+      },
+      "observed_rtt_ms": {
+        "count": 0,
+        "max": null,
+        "mean": null,
+        "min": null,
+        "stddev": null
+      },
+      "reasons": [
+        "NOT_TCP",
+        "ONE_DIRECTION_OBSERVED"
+      ],
+      "rtt_excluded": {
+        "ambiguous": 0,
+        "nonexact_ack": 0,
+        "nonpositive_time": 0
+      },
+      "rtt_sources": {
+        "data_ack": 0,
+        "syn_ack": 0
+      },
+      "status": "observed",
+      "ttl_observed": {
+        "a_to_b": {
+          "changes": 0,
+          "count": 2,
+          "max": 64,
+          "min": 64,
+          "missing": 0
+        },
+        "b_to_a": {
+          "changes": 0,
+          "count": 0,
+          "max": null,
+          "min": null,
+          "missing": 0
+        }
+      }
+    }
+  }
+}

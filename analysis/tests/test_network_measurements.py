@@ -27,6 +27,51 @@ def test_supporting_handshake_rtt_is_not_a_standalone_anomaly():
     assert report(items[:2])["issues"] == []
 
 
+def test_complete_coverage_is_not_sample_adequacy():
+    m = measured(
+        records(
+            frame(),
+            frame(flags=18, seq=500, ack=101, reverse=True),
+            frame(flags=24, seq=101, payload=b"abc"),
+            frame(flags=24, seq=101, payload=b"abc"),
+            frame(flags=16, seq=501, ack=104, reverse=True),
+        )
+    )
+    assert m["coverage_complete"] is True
+    assert m["rtt_sources"] == {"syn_ack": 1, "data_ack": 0}
+    assert m["rtt_excluded"]["ambiguous"] == 1
+    assert m["observed_rtt_ms"]["stddev"] is None
+    q = m["metric_quality"]
+    assert q["observed_rtt_ms"] == {
+        "status": "limited_samples",
+        "reasons": [
+            "SINGLE_SAMPLE",
+            "HANDSHAKE_ONLY",
+            "BIDIRECTIONAL_RTT_NOT_ESTABLISHED",
+            "SELECTION_BIAS_POSSIBLE",
+        ],
+    }
+    assert q["interarrival_variation_ms"]["b_to_a"] == {
+        "status": "limited_samples",
+        "reasons": ["SINGLE_SAMPLE"],
+    }
+    assert q["ttl_observed"]["b_to_a"] == {"status": "observed_samples", "reasons": []}
+
+
+def test_published_analysis_never_equates_coverage_with_adequacy():
+    result = report(
+        records(
+            frame(),
+            frame(flags=18, ack=101, reverse=True),
+            frame(flags=24, seq=101, payload=b"abc"),
+            frame(flags=24, seq=101, payload=b"abc"),
+        )
+    )
+    prose = " ".join(result["issues"][0]["detailed_analysis"])
+    assert "not sample adequacy" in prose
+    assert "representativeness is not established" in prose
+
+
 def test_data_ack_online_statistics_and_karn_exclusions():
     items = records(
         frame(flags=24, seq=100, payload=b"abc"),
