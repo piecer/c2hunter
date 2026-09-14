@@ -45,6 +45,46 @@ class ClosedModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+ProviderFinishReason = Literal["stop", "length", "load", "unload", "tool_calls", "content_filter"]
+
+
+class NetworkFailureDiagnostic(ClosedModel):
+    """Last rejected model output only; never provider text or validation locations."""
+
+    stage: Literal["MODEL_OUTPUT"] = "MODEL_OUTPUT"
+    type: Literal["JSON_PARSE", "SCHEMA", "INVALID_CITATION", "LANGUAGE"]
+    attempt_count: int = Field(ge=1, le=2)
+    repair_count: int = Field(ge=0, le=1)
+    output_bytes: int = Field(ge=0, le=2**63 - 1)
+    provider_finish_reason: ProviderFinishReason | None = None
+
+    @model_validator(mode="after")
+    def consistent_attempts(self) -> NetworkFailureDiagnostic:
+        if self.repair_count != self.attempt_count - 1:
+            raise ValueError("inconsistent network repair counts")
+        return self
+
+
+class NetworkOutputError(ValueError):
+    def __init__(self, diagnostic: NetworkFailureDiagnostic) -> None:
+        super().__init__("Model output failed validation.")
+        self.diagnostic = diagnostic
+
+
+class NetworkSemanticError(ValueError):
+    def __init__(
+        self, category: Literal["INVALID_CITATION", "LANGUAGE"], *, duplicate: bool = False
+    ) -> None:
+        super().__init__(
+            "network interpretation language mismatch"
+            if category == "LANGUAGE"
+            else "duplicate network issue IDs"
+            if duplicate
+            else "unknown network issue IDs"
+        )
+        self.category = category
+
+
 Count = Annotated[int, Field(ge=0, le=2**63 - 1)]
 Milliseconds = Annotated[float, Field(ge=0, allow_inf_nan=False)]
 TTL = Annotated[int, Field(ge=0, le=255)]
@@ -426,7 +466,7 @@ def validate_network_interpretation(
 ) -> NetworkInterpretation:
     result = NetworkInterpretation.model_validate(response)
     if result.language != bundle["language"]:
-        raise ValueError("network interpretation language mismatch")
+        raise NetworkSemanticError("LANGUAGE")
     supplied = {item["id"] for item in bundle["issues"]}
     cited_items: list[PossibleCause | PrioritizedCheck | PatternCorrelation] = [
         *result.possible_causes,
@@ -435,7 +475,7 @@ def validate_network_interpretation(
     ]
     for item in cited_items:
         if set(item.issue_ids) - supplied:
-            raise ValueError("unknown network issue IDs")
+            raise NetworkSemanticError("INVALID_CITATION")
         if len(set(item.issue_ids)) != len(item.issue_ids):
-            raise ValueError("duplicate network issue IDs")
+            raise NetworkSemanticError("INVALID_CITATION", duplicate=True)
     return result

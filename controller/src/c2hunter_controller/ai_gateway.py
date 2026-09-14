@@ -183,7 +183,11 @@ class StructuredLocalGateway:
     ) -> dict[str, Any]:
         from .network_ai import (
             NETWORK_PROMPT,
+            NetworkFailureDiagnostic,
             NetworkInterpretation,
+            NetworkOutputError,
+            NetworkSemanticError,
+            ProviderFinishReason,
             canonical_network_input,
             validate_network_interpretation,
         )
@@ -196,22 +200,51 @@ class StructuredLocalGateway:
             },
         ]
         schema = NetworkInterpretation.model_json_schema()
+        finish_reason: ProviderFinishReason | None = None
+
+        def observe_response(response: dict[str, Any]) -> None:
+            nonlocal finish_reason
+            value = response.get("done_reason") if self.provider == "ollama" else None
+            if self.provider == "openai-compatible":
+                choices = response.get("choices")
+                if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                    value = choices[0].get("finish_reason")
+            finish_reason = (
+                cast(ProviderFinishReason, value)
+                if isinstance(value, str)
+                and value in {"stop", "length", "load", "unload", "tool_calls", "content_filter"}
+                else None
+            )
+
         for attempt in range(2):
-            raw = self._complete(messages, schema, should_cancel)
+            raw = self._complete(messages, schema, should_cancel, on_response=observe_response)
             if should_cancel():
                 raise AIAnalysisCancelled("Network interpretation cancelled")
             try:
                 result = validate_network_interpretation(self._parse_content(raw), bundle)
                 return cast(dict[str, Any], result.model_dump(mode="json"))
-            except (ValidationError, ValueError, TypeError):
+            except (ValidationError, ValueError, TypeError) as exc:
+                diagnostic = NetworkFailureDiagnostic(
+                    type=(
+                        "JSON_PARSE"
+                        if isinstance(exc, json.JSONDecodeError)
+                        else exc.category
+                        if isinstance(exc, NetworkSemanticError)
+                        else "SCHEMA"
+                    ),
+                    attempt_count=attempt + 1,
+                    repair_count=attempt,
+                    output_bytes=len(raw.encode("utf-8", errors="replace")),
+                    provider_finish_reason=finish_reason,
+                )
                 if attempt:
-                    raise
+                    raise NetworkOutputError(diagnostic) from None
                 # Do not echo untrusted model output or validation excerpts as instructions.
                 messages.append(
                     {
                         "role": "user",
-                        "content": "Invalid output. Return the exact schema "
-                        "in the requested language; "
+                        "content": f"Invalid output category: {diagnostic.type}. "
+                        "Return the exact schema in the requested language; "
                         "cite only supplied issue IDs. Do not add fields.",
                     }
                 )
@@ -222,6 +255,8 @@ class StructuredLocalGateway:
         messages: list[dict[str, str]],
         schema: dict[str, Any],
         should_cancel: Callable[[], bool],
+        *,
+        on_response: Callable[[dict[str, Any]], None] | None = None,
     ) -> str:
         last_error: Exception | None = None
         for _attempt in range(self.retries + 1):
@@ -229,6 +264,8 @@ class StructuredLocalGateway:
                 raise AIAnalysisCancelled("AI analysis was cancelled before the model request")
             try:
                 response = self._request_completion(messages, schema, should_cancel)
+                if on_response is not None:
+                    on_response(response)
                 return self._extract_content(response)
             except InterruptedError as exc:
                 raise AIAnalysisCancelled(

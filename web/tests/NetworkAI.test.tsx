@@ -5,6 +5,7 @@ import { vi, expect, it } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import NetworkAnomalyPanel from '../src/NetworkAnomalyPanel';
 import { useReportLanguage } from '../src/reportLanguageContext';
+import failureDiagnostic from './fixtures/network-ai-failure-diagnostic.json';
 
 function LanguageProbe() { return <p>AI context: {useReportLanguage()}</p>; }
 it('shares the report language with the adjacent AI interpretation controls', () => {
@@ -60,6 +61,23 @@ it('truthfully explains disabled or unavailable AI without generating a result',
   expect(posts).toEqual([]);
 });
 const queued = { id: 'run-1', status: 'QUEUED', analysis_kind: 'NETWORK_ANOMALY', language: 'en', created_at: '2026-09-11T00:00:00Z' };
+it.each([
+  ['JSON_PARSE', 'JSON 응답 해석 실패', 'Invalid JSON response'],
+  ['SCHEMA', '응답 구조 검증 실패', 'Response schema mismatch'],
+  ['INVALID_CITATION', '이슈 참조 검증 실패', 'Invalid issue references'],
+  ['LANGUAGE', '요청 언어 불일치', 'Requested language mismatch'],
+])('renders safe bilingual %s failure category without inference', async (type, ko, en) => {
+  const { posts } = setup({ savedRun: { ...queued, status: 'FAILED', error_code: 'MODEL_OUTPUT_INVALID', error_message: 'Model output failed validation.', failure_diagnostic: { ...failureDiagnostic, type } } });
+  expect(await screen.findByText(ko)).toBeVisible();
+  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'en' } });
+  expect(screen.getByText(en)).toBeVisible();
+  expect(posts).toEqual([]);
+});
+it('does not render arbitrary diagnostic values', async () => {
+  setup({ savedRun: { ...queued, status: 'FAILED', error_code: 'MODEL_OUTPUT_INVALID', failure_diagnostic: { type: 'SECRET_TYPE', extra: 'SECRET_EXTRA' } } });
+  await screen.findByText(/MODEL_OUTPUT_INVALID/);
+  expect(screen.queryByText(/SECRET_/)).not.toBeInTheDocument();
+});
 const interpreted = { ...queued, status: 'COMPLETED', network_interpretation: { schema_version: 'network-interpretation-v1', kind: 'MODEL_INTERPRETATION', language: 'en', summary: 'Review capture visibility.', possible_causes: [{ hypothesis: 'Capture loss is possible.', issue_ids: ['issue-1'], uncertainty: 'Single vantage cannot confirm loss.' }], prioritized_checks: [{ priority: 'HIGH', check: 'Compare receiver capture.', issue_ids: ['issue-1'] }], correlations: [], limitations: ['No root cause proven.'] } };
 it('loads saved interpretation through run GET and changes labels without translating or reinvoking', async () => {
   const { posts, fetcher } = setup({ savedRun: interpreted });
