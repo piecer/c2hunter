@@ -144,7 +144,9 @@ def test_local_ai_app_api_consumes_manual_run_without_blocking(tmp_path, outcome
         release.set()
         expected = {"success": "COMPLETED", "error": "FAILED", "cancel": "CANCELLED"}[outcome]
         for _ in range(300):
-            final = client.get("/api/v1/ai-runs/" + run_id).json()
+            response = client.get("/api/v1/ai-runs/" + run_id)
+            assert response.status_code == 200, response.text
+            final = response.json()
             if final["status"] == expected and not app.state.local_ai_runtime.inflight:
                 break
             time.sleep(0.01)

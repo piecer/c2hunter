@@ -35,6 +35,12 @@ addopts = "-ra"
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+extend-exclude = [
+  "src/c2hunter_controller/app_BACKUP_*.py",
+  "src/c2hunter_controller/app_BASE_*.py",
+  "src/c2hunter_controller/app_LOCAL_*.py",
+  "src/c2hunter_controller/app_REMOTE_*.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
@@ -44,3 +50,12 @@ python_version = "3.12"
 strict = true
 mypy_path = ["src", "../analysis/src"]
 packages = ["c2hunter_controller", "c2hunter_analysis"]
+exclude = "src/c2hunter_controller/app_(BACKUP|BASE|LOCAL|REMOTE)_[0-9]+\\.py$"
+
+[tool.coverage.run]
+omit = [
+  "*/c2hunter_controller/app_BACKUP_*.py",
+  "*/c2hunter_controller/app_BASE_*.py",
+  "*/c2hunter_controller/app_LOCAL_*.py",
+  "*/c2hunter_controller/app_REMOTE_*.py",
+]

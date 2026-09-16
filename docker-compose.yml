@@ -9,6 +9,9 @@ services:
     image: redis:7.4.2-alpine3.21@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952
     command: [redis-server, --appendonly, "yes"]
     volumes: [redis-data:/data]
+    networks:
+      default:
+        ipv4_address: 172.30.0.11
     healthcheck: { test: [CMD, redis-cli, ping], interval: 10s, timeout: 3s, retries: 10 }
     restart: unless-stopped
   clickhouse:

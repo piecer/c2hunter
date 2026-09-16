@@ -128,10 +128,17 @@ Controller가 센서에 직접 inbound 접속하지 않는다. 센서가 연 out
   detector에 전달한다. 단일-host 복합 beacon과 analyst signature도 동일 Evidence/score
   계약을 사용한다.
 - 동일 원천 데이터는 변경 불가능한 capture dataset으로 취급하며 재분석은 새 job/run과 파라미터 snapshot을 생성한다.
+- `ddos_attack`은 C2 candidate와 분리된 target 중심 report를 생성한다. TCP/UDP/ICMP flood 형태,
+  victim-side inbound 또는 participant-side outbound 역할, 방어 자원 고갈 목적 가설과 대응 code를
+  bounded하게 산출하며 Candidate/TI/MISP/C2 AI 자동화를 호출하지 않는다.
 
 ### 3.5 Web UI (`web/`)
 
 UI는 REST API만 사용한다. TanStack Query로 서버 상태를 관리하고 하나의 컴포넌트 라이브러리를 일관되게 사용한다. Dashboard, Sensor, 분석 생성/진행, 후보 목록/상세, Flow review와 명시적 Payload 미리보기, C2/BENIGN 라벨, versioned Payload signature 관리, PCAP export, Allowlist 화면을 제공한다. 인증과 권한 판정의 권위는 서버에 있으며 UI 숨김만으로 권한을 구현하지 않는다.
+
+DDoS report는 한 verdict, 공격 유형/관찰 역할/목적 가설, 우선 대응을 먼저 표시하고 측정 사실,
+불확실성, 전체 finding과 coverage를 bounded disclosure로 제공한다. ko/en 번역은 닫힌 local code
+registry를 사용하고 알 수 없는 code는 raw text를 반사하지 않고 fail closed한다.
 
 ### 3.6 저장소
 

@@ -48,6 +48,62 @@ def udp_packet(
     return ethernet + ip_head + udp
 
 
+def tcp_packet(
+    src: str, dst: str, sport: int, dport: int, flags: int, ident: int
+) -> bytes:
+    src_bytes, dst_bytes = (
+        ipaddress.ip_address(src).packed,
+        ipaddress.ip_address(dst).packed,
+    )
+    tcp = struct.pack(
+        "!HHIIHHHH", sport, dport, ident, 0, (5 << 12) | flags, 64240, 0, 0
+    )
+    ip_head = struct.pack(
+        "!BBHHHBBH4s4s",
+        0x45,
+        0,
+        20 + len(tcp),
+        ident & 0xFFFF,
+        0,
+        64,
+        6,
+        0,
+        src_bytes,
+        dst_bytes,
+    )
+    ip_head = ip_head[:10] + struct.pack("!H", checksum(ip_head)) + ip_head[12:]
+    return bytes.fromhex("0200000000020200000000010800") + ip_head + tcp
+
+
+def icmp_echo_packet(src: str, dst: str, ident: int) -> bytes:
+    src_bytes, dst_bytes = (
+        ipaddress.ip_address(src).packed,
+        ipaddress.ip_address(dst).packed,
+    )
+    body = struct.pack("!BBHHH", 8, 0, 0, ident & 0xFFFF, ident & 0xFFFF) + b"echo"
+    body = body[:2] + struct.pack("!H", checksum(body)) + body[4:]
+    ip_head = struct.pack(
+        "!BBHHHBBH4s4s",
+        0x45,
+        0,
+        20 + len(body),
+        ident & 0xFFFF,
+        0,
+        64,
+        1,
+        0,
+        src_bytes,
+        dst_bytes,
+    )
+    ip_head = ip_head[:10] + struct.pack("!H", checksum(ip_head)) + ip_head[12:]
+    return bytes.fromhex("0200000000020200000000010800") + ip_head + body
+
+
+def ddos_source(index: int, *, internal: bool = False) -> str:
+    prefix = "10.9" if internal else "198.18"
+    return f"{prefix}.{index // 250}.{index % 250 + 1}"
+
+
 def write_pcap(path: Path, packets):
     with path.open("wb") as output:
         output.write(struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
@@ -201,6 +257,116 @@ def scenarios(rng: random.Random):
             "failed_sensors": ["sensor-b"],
             "loss_reported": True,
         },
+    )
+    victim, external_target = "10.20.0.10", "203.0.113.200"
+    syn = [
+        (
+            EPOCH + index / 120,
+            tcp_packet(
+                ddos_source(index % 250), victim, 40000 + index % 250, 443, 0x02, index
+            ),
+        )
+        for index in range(1000)
+    ]
+    udp = [
+        (
+            EPOCH + index / 120,
+            udp_packet(
+                ddos_source(index % 250),
+                victim,
+                40000 + index % 250,
+                443,
+                b"u" * 64,
+                index,
+            ),
+        )
+        for index in range(1000)
+    ]
+    reflection = [
+        (
+            EPOCH + index / 120,
+            udp_packet(ddos_source(index % 250), victim, 53, 443, b"r" * 600, index),
+        )
+        for index in range(1000)
+    ]
+    icmp = [
+        (EPOCH + index / 120, icmp_echo_packet(ddos_source(index % 250), victim, index))
+        for index in range(1000)
+    ]
+    outbound_udp = [
+        (
+            EPOCH + index / 120,
+            udp_packet(
+                ddos_source(index % 250, internal=True),
+                external_target,
+                40000 + index % 250,
+                443,
+                b"e" * 64,
+                index,
+            ),
+        )
+        for index in range(1000)
+    ]
+    normal_single_source = [
+        (
+            EPOCH + index / 120,
+            udp_packet("198.18.0.1", victim, 40000, 443, b"n" * 64, index),
+        )
+        for index in range(1000)
+    ]
+    short_burst = [
+        (
+            EPOCH + index / 120,
+            udp_packet(
+                ddos_source(index), victim, 40000 + index, 443, b"s" * 64, index
+            ),
+        )
+        for index in range(100)
+    ]
+    result.update(
+        {
+            "DDOS_SYN": (
+                syn,
+                {"attack_type": "TCP_SYN_FLOOD", "attack_role": "VICTIM_SIDE_INBOUND"},
+            ),
+            "DDOS_UDP": (
+                udp,
+                {"attack_type": "UDP_FLOOD", "attack_role": "VICTIM_SIDE_INBOUND"},
+            ),
+            "DDOS_REFLECTION": (
+                reflection,
+                {
+                    "attack_type": "POSSIBLE_REFLECTION_AMPLIFICATION",
+                    "attack_role": "VICTIM_SIDE_INBOUND",
+                },
+            ),
+            "DDOS_ICMP": (
+                icmp,
+                {
+                    "attack_type": "ICMP_ECHO_FLOOD",
+                    "attack_role": "VICTIM_SIDE_INBOUND",
+                },
+            ),
+            "DDOS_OUTBOUND": (
+                outbound_udp,
+                {
+                    "attack_type": "UDP_FLOOD",
+                    "attack_role": "PARTICIPANT_SIDE_OUTBOUND",
+                },
+            ),
+            "DDOS_MULTI": (
+                syn + udp,
+                {"attack_type": "MULTI_VECTOR", "attack_role": "VICTIM_SIDE_INBOUND"},
+            ),
+            "DDOS_NORMAL": (
+                normal_single_source,
+                {"verdict": "insufficient_evidence", "warning": "DOS_LIKE_TRAFFIC"},
+            ),
+            "DDOS_SHORT": (
+                short_burst,
+                {"verdict": "insufficient_evidence", "warning": "SAMPLE_WINDOW_SHORT"},
+            ),
+        }
     )
     return result
 

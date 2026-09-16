@@ -23,13 +23,28 @@ _DETECTOR_REGISTRY = DetectorRegistryCache(DEFAULT_DETECTORS)
 
 
 def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
-    if payload.get("analysis", {}).get("module") == "network_anomaly":
+    module = payload.get("analysis", {}).get("module", "c2")
+    if module == "network_anomaly":
         from c2hunter_analysis.network_report import analyze_network_report
 
         return {
             "candidates": [],
             "network_anomaly": analyze_network_report(payload.get("flow_records", [])),
         }
+    if module == "ddos_attack":
+        from c2hunter_analysis.ddos_attack import analyze_ddos_attack
+
+        return {
+            "candidates": [],
+            "ddos_attack": analyze_ddos_attack(
+                payload.get("flow_records", []),
+                internal_cidrs=payload.get("internal_networks", ()),
+                parameters=payload.get("analysis", {}),
+                coverage_context=payload.get("ddos_coverage_context", {}),
+            ),
+        }
+    if module != "c2":
+        raise ValueError(f"unsupported analysis module: {module}")
     flows: list[Flow] = []
     for stored in payload.get("flow_records", []):
         record = dict(stored)
@@ -50,6 +65,7 @@ def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
             "tcp_acknowledgment",
             "tcp_window",
             "transport_payload_length",
+            "transport_payload_packet_count",
             "ip_ttl",
             "capture_interface_id",
             "packet_evidence_complete",

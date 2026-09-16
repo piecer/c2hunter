@@ -47,6 +47,11 @@
 | `job_flow_records` | job ID PK, immutable normalized flow-record payload JSONB. job metadata와 물리적으로 분리하며 분석 Worker만 job ID로 로드 |
 | `job_payload_signatures` | job ID PK, 해당 run에 고정한 활성 Payload signature snapshot JSONB. compact job metadata와 분리하며 Worker만 분석 시작 시 로드 |
 
+`analysis.module=ddos_attack` 작업은 job metadata에 bounded `ddos_attack` 상세 report와
+`ddos_attack_summary` 목록 projection을 저장한다. 별도 Candidate row를 만들지 않는다. full report는
+작업 상세 및 inline/PCAP 생성 응답에서 반환하고 목록 응답에서는 제외한다. 재분석은 같은 immutable
+flow payload를 참조하되 새 job과 threshold snapshot을 만든다.
+
 Job 상태 enum은 `CREATED, WAITING_FOR_SENSOR, CAPTURING, UPLOADING, INGESTING, ANALYZING, COMPLETED, PARTIALLY_COMPLETED, FAILED, CANCELLED`다. terminal 상태는 되돌리지 않는다.
 
 이력 화면에서 수정 가능한 값은 `name`과 analyst note뿐이다. source/dataset, capture·analysis snapshot, 시간 범위, 후보와 evidence는 불변이며 탐지 조건 변경은 새 `analysis_runs`를 만드는 reanalysis로 처리한다. 사용자가 terminal job을 명시적으로 삭제하면 해당 job의 후보와 생성 export를 함께 삭제하지만 append-only 삭제 감사 이벤트는 유지한다. 보관 정책에 의한 PCAP 만료는 이 명시적 job 삭제와 달리 후보를 삭제하지 않는다.

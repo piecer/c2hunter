@@ -144,6 +144,7 @@ from .schemas import (
     CandidateUpdate,
     CandidateVerdictCreate,
     CaptureParameters,
+    DDoSAttackReport,
     DevLoginRequest,
     EnrollmentClaim,
     EnrollmentClaimResponse,
@@ -220,6 +221,23 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
         key: value
         for key, value in job.items()
         if key not in {"flow_records", "payload_signatures", "volatile_capture"}
+    }
+
+
+def _validated_ddos_report(value: object) -> dict[str, Any]:
+    report = DDoSAttackReport.model_validate(value)
+    return cast(dict[str, Any], report.model_dump(mode="json", exclude_unset=True))
+
+
+def _ddos_summary(report: dict[str, Any]) -> dict[str, Any]:
+    summary = report["summary"]
+    return {
+        "verdict": report["verdict"],
+        "confidence": report["confidence"],
+        "finding_count": summary["finding_count"],
+        "primary_attack_type": summary["primary_attack_type"],
+        "primary_objective": summary["primary_objective"],
+        "coverage_complete": summary["coverage_complete"],
     }
 
 
@@ -2136,6 +2154,35 @@ def create_app(
         if warning not in warnings:
             warnings.append(warning)
 
+    def attach_ddos_coverage_context(job: dict[str, Any]) -> None:
+        if job.get("analysis", {}).get("module") != "ddos_attack":
+            return
+        raw_source = job.get("source")
+        source: dict[str, Any] = raw_source if isinstance(raw_source, dict) else {}
+        raw_quality = job.get("capture_quality")
+        quality: dict[str, Any] = raw_quality if isinstance(raw_quality, dict) else {}
+        is_uploaded_pcap = "captured_packet_count" in source
+        previous = job.get("ddos_coverage_context", {})
+        job["ddos_coverage_context"] = {
+            "parser_skipped_packet_count": int(source.get("skipped_packet_count", 0) or 0),
+            "sensor_dropped_packet_count": int(quality.get("dropped_packet_count", 0) or 0),
+            "sensor_clock_skew_detected": bool(quality.get("clock_skew_detected", False)),
+            "sensor_capture_quality_unavailable": not is_uploaded_pcap and not quality,
+            "capture_partial": bool(
+                int(job.get("capture_limit", {}).get("discarded_packets", 0) or 0) > 0
+                or job.get("capture_incomplete") is True
+                or job.get("error_code") == "LIVE_CAPTURE_RESTART_INCOMPLETE"
+            ),
+        }
+        # Coverage belongs to the immutable dataset, not the analysis attempt.
+        # Repeated attachment may add truncation but must not erase provenance.
+        context = job["ddos_coverage_context"]
+        for field, value in previous.items():
+            if field == "sensor_capture_quality_unavailable":
+                context[field] = value
+            elif field in context:
+                context[field] = max(context[field], value)
+
     def enqueue_worker_job(job: dict[str, Any]) -> None:
         envelope: dict[str, Any] = {"id": job["id"]}
         if isinstance(work_queue, MemoryControllerQueue):
@@ -2159,6 +2206,7 @@ def create_app(
         job["dataset_id"] = snapshot.dataset_id
         job["flow_records"] = [dict(record) for record in snapshot.records]
         apply_job_packet_limit(job)
+        attach_ddos_coverage_context(job)
         job["flow_count"] = len(job["flow_records"])
         job["packet_count"] = sum(
             int(record.get("packet_count", 1)) for record in job["flow_records"]
@@ -2647,19 +2695,54 @@ def create_app(
             work_queue.ack_result(receipt)
             return
         if result.get("status") == "COMPLETED":
-            if job.get("analysis", {}).get("module") == "network_anomaly":
+            module = job.get("analysis", {}).get("module", "c2")
+            candidates: list[dict[str, Any]]
+            if module == "network_anomaly":
                 job["network_anomaly"] = result["result"]["network_anomaly"]
                 candidates = []
-            else:
+            elif module == "ddos_attack":
+                try:
+                    report = _validated_ddos_report(result["result"]["ddos_attack"])
+                except (KeyError, TypeError, ValueError, ValidationError):
+                    job["error_code"] = "INVALID_DDOS_RESULT"
+                    job["error"] = "worker returned an invalid DDoS report"
+                    machine.transition(job, JobState.FAILED, "invalid DDoS worker result")
+                    repo.save_job_metadata(job)
+                    work_queue.ack_result(receipt)
+                    return
+                job["ddos_attack"] = report
+                job["ddos_attack_summary"] = _ddos_summary(report)
+                candidates = []
+            elif module == "c2":
                 candidates = list(result.get("result", {}).get("candidates", []))
+            else:
+                job["error_code"] = "UNSUPPORTED_ANALYSIS_MODULE"
+                job["error"] = "worker result references an unsupported analysis module"
+                machine.transition(job, JobState.FAILED, "unsupported analysis module result")
+                repo.save_job_metadata(job)
+                work_queue.ack_result(receipt)
+                return
             for candidate in candidates:
                 candidate.setdefault("id", str(uuid.uuid4()))
             repo.save_candidates(job["id"], candidates)
-            schedule_candidate_enrichment(str(job["id"]), candidates)
+            if module == "c2":
+                schedule_candidate_enrichment(str(job["id"]), candidates)
             job["candidate_count"] = len(candidates)
             machine.transition(job, JobState.COMPLETED, "worker result persisted")
         else:
-            job["error"] = str(result.get("error", "worker analysis failed"))
+            worker_errors = {
+                "PAYLOAD_LOAD_FAILED": "worker could not load the analysis payload",
+                "ANALYSIS_EXECUTION_FAILED": "worker analysis failed",
+                "UNSUPPORTED_ANALYSIS_MODULE": (
+                    "worker does not support the requested analysis module"
+                ),
+                "INVALID_JOB_ENVELOPE": "worker job envelope is invalid",
+            }
+            error_code = str(result.get("error_code", "WORKER_EXECUTION_FAILED"))
+            if error_code not in worker_errors:
+                error_code = "WORKER_EXECUTION_FAILED"
+            job["error_code"] = error_code
+            job["error"] = worker_errors.get(error_code, "worker execution failed")
             machine.transition(job, JobState.FAILED, "worker returned an error")
         repo.save_job_metadata(job)
         work_queue.ack_result(receipt)
@@ -2797,6 +2880,7 @@ def create_app(
 
     def execute_analysis(job: dict[str, Any]) -> dict[str, Any]:
         apply_job_packet_limit(job)
+        attach_ddos_coverage_context(job)
         for state, reason in (
             (JobState.WAITING_FOR_SENSOR, "sensors selected"),
             (JobState.CAPTURING, "dataset selected"),
@@ -2805,15 +2889,43 @@ def create_app(
             (JobState.ANALYZING, "detectors started"),
         ):
             machine.transition(job, state, reason)
-        if job.get("analysis", {}).get("module") == "network_anomaly":
+        module = job.get("analysis", {}).get("module", "c2")
+        candidates: list[dict[str, Any]]
+        if module == "network_anomaly":
             from c2hunter_analysis.network_report import analyze_network_report
 
             job["network_anomaly"] = analyze_network_report(job.get("flow_records", []))
             candidates = []
-        else:
+        elif module == "ddos_attack":
+            from c2hunter_analysis.ddos_attack import analyze_ddos_attack
+
+            try:
+                report = analyze_ddos_attack(
+                    job.get("flow_records", []),
+                    internal_cidrs=job.get("internal_networks", ()),
+                    parameters=job.get("analysis", {}),
+                    coverage_context=job.get("ddos_coverage_context", {}),
+                )
+                job["ddos_attack"] = _validated_ddos_report(report)
+            except Exception as exc:
+                job["error"] = "DDoS analyzer returned an invalid result"
+                job["error_code"] = "INVALID_DDOS_RESULT"
+                machine.transition(job, JobState.FAILED, "invalid DDoS analysis result")
+                repo.save_job_metadata(job)
+                raise ApiError(
+                    500,
+                    "INVALID_DDOS_RESULT",
+                    "DDoS 분석 결과가 계약을 충족하지 않습니다",
+                ) from exc
+            job["ddos_attack_summary"] = _ddos_summary(job["ddos_attack"])
+            candidates = []
+        elif module == "c2":
             candidates = calculate(job, job.get("allowlist", []))
+        else:
+            raise ValueError(f"unsupported analysis module: {module}")
         repo.save_candidates(job["id"], candidates)
-        schedule_candidate_enrichment(str(job["id"]), candidates)
+        if module == "c2":
+            schedule_candidate_enrichment(str(job["id"]), candidates)
         job["candidate_count"] = len(candidates)
         job["flow_count"] = len(job.get("flow_records", []))
         job["packet_count"] = sum(
@@ -2859,7 +2971,7 @@ def create_app(
         request: Request,
         name: str = Query(min_length=1, max_length=200),
         filename: str = Query(min_length=1, max_length=255),
-        analysis_module: Literal["c2", "network_anomaly"] = Query(default="c2"),
+        analysis_module: Literal["c2", "network_anomaly", "ddos_attack"] = Query(default="c2"),
         internal_networks: str = Query(default="10.0.0.0/8", min_length=1, max_length=10000),
         description: str = Query(default="", max_length=5000),
         idempotency_key: str | None = Query(default=None, min_length=1, max_length=200),
@@ -2875,6 +2987,21 @@ def create_app(
         ml_anomaly_feature_z_floor: float = Query(default=1.0, ge=0.0, le=10.0),
         ml_anomaly_min_directional_features: int = Query(default=2, ge=1, le=6),
         ml_anomaly_contribution_cap: float = Query(default=5.0, ge=0.0, le=5.0),
+        ddos_min_source_count: int = Query(default=20, ge=2, le=100000),
+        ddos_min_packet_count: int = Query(default=1000, ge=1, le=2**63 - 1),
+        ddos_min_packets_per_second: int = Query(default=100, ge=1, le=10_000_000),
+        ddos_min_bits_per_second: int = Query(default=1_000_000, ge=1, le=10**13),
+        ddos_bucket_seconds: int = Query(default=1, ge=1, le=60),
+        ddos_min_duration_seconds: int = Query(default=3, ge=1, le=3600),
+        ddos_baseline_min_buckets: int = Query(default=20, ge=5, le=3600),
+        ddos_baseline_ratio: float = Query(default=5, ge=1, le=1000),
+        ddos_mad_z_threshold: float = Query(default=6, ge=2, le=100),
+        ddos_protocol_share_threshold: float = Query(default=0.8, ge=0.5, le=1),
+        ddos_tcp_flag_share_threshold: float = Query(default=0.8, ge=0.5, le=1),
+        ddos_response_ratio_max: float = Query(default=0.2, ge=0, le=1),
+        ddos_reflection_port_share_threshold: float = Query(default=0.6, ge=0.5, le=1),
+        ddos_reflection_min_average_packet_bytes: int = Query(default=256, ge=1, le=65535),
+        ddos_overlap_window_seconds: int = Query(default=10, ge=1, le=300),
     ) -> dict[str, Any]:
         try:
             if detector_weights is None:
@@ -2950,7 +3077,7 @@ def create_app(
                 internal_networks=cidrs,
                 max_packets=config.pcap_upload_max_packets,
                 retain_packet_bytes=False,
-                retain_network_evidence=analysis_module == "network_anomaly",
+                retain_network_evidence=analysis_module in {"network_anomaly", "ddos_attack"},
             )
         except PcapParseError as exc:
             status = 413 if exc.code == "PCAP_PACKET_LIMIT_EXCEEDED" else 422
@@ -2987,6 +3114,23 @@ def create_app(
                     "ml_anomaly_feature_z_floor": ml_anomaly_feature_z_floor,
                     "ml_anomaly_min_directional_features": ml_anomaly_min_directional_features,
                     "ml_anomaly_contribution_cap": ml_anomaly_contribution_cap,
+                    "ddos_min_source_count": ddos_min_source_count,
+                    "ddos_min_packet_count": ddos_min_packet_count,
+                    "ddos_min_packets_per_second": ddos_min_packets_per_second,
+                    "ddos_min_bits_per_second": ddos_min_bits_per_second,
+                    "ddos_bucket_seconds": ddos_bucket_seconds,
+                    "ddos_min_duration_seconds": ddos_min_duration_seconds,
+                    "ddos_baseline_min_buckets": ddos_baseline_min_buckets,
+                    "ddos_baseline_ratio": ddos_baseline_ratio,
+                    "ddos_mad_z_threshold": ddos_mad_z_threshold,
+                    "ddos_protocol_share_threshold": ddos_protocol_share_threshold,
+                    "ddos_tcp_flag_share_threshold": ddos_tcp_flag_share_threshold,
+                    "ddos_response_ratio_max": ddos_response_ratio_max,
+                    "ddos_reflection_port_share_threshold": ddos_reflection_port_share_threshold,
+                    "ddos_reflection_min_average_packet_bytes": (
+                        ddos_reflection_min_average_packet_bytes
+                    ),
+                    "ddos_overlap_window_seconds": ddos_overlap_window_seconds,
                 },
                 "internal_networks": cidrs,
                 "flow_records": list(parsed.records),
@@ -3007,6 +3151,7 @@ def create_app(
             "skipped_packet_count": parsed.skipped_packet_count,
             "link_types": list(parsed.link_types),
         }
+        attach_ddos_coverage_context(job)
         job, created = repo.create_job(job)
         if not created:
             return _public_job(job)
@@ -3079,7 +3224,7 @@ def create_app(
             summary = {
                 key: value
                 for key, value in item.items()
-                if key not in {"flow_records", "transitions", "volatile_capture"}
+                if key not in {"flow_records", "transitions", "volatile_capture", "ddos_attack"}
             }
             candidate_count = item.get("candidate_count")
             if candidate_count is None:
@@ -3138,6 +3283,13 @@ def create_app(
     ) -> dict[str, Any]:
         if not config.ai_analysis_enabled or ai_service is None or ai_tasks is None:
             raise ApiError(503, "AI_ANALYSIS_DISABLED", "AI 분석 기능이 비활성화되어 있습니다")
+        source_job = repo.get_job_summary(job_id)
+        if source_job is not None and source_job.get("analysis", {}).get("module") == "ddos_attack":
+            raise ApiError(
+                409,
+                "ANALYSIS_MODULE_NOT_C2",
+                "DDoS 분석 결과는 C2 AI 분석 대상이 아닙니다",
+            )
         if payload.analysis_kind == "NETWORK_ANOMALY":
             if config.ai_model_endpoint_is_remote and not payload.allow_remote:
                 raise ApiError(409, "AI_REMOTE_CONSENT_REQUIRED", "Remote model consent required")
@@ -3794,12 +3946,52 @@ def create_app(
                 "저장된 분석 작업의 capture 설정이 올바르지 않습니다",
             ) from exc
         parameters = dict(source["analysis"])
-        for field in ("minimum_candidate_score", "minimum_distinct_clients"):
-            value = getattr(payload, field)
-            if value is not None:
-                parameters[field] = value
-        if payload.detector_weights is not None:
-            parameters["detector_weights"] = payload.detector_weights
+        module = parameters.get("module", "c2")
+        ddos_fields = (
+            "ddos_bucket_seconds",
+            "ddos_min_duration_seconds",
+            "ddos_min_source_count",
+            "ddos_min_packet_count",
+            "ddos_min_packets_per_second",
+            "ddos_min_bits_per_second",
+            "ddos_baseline_min_buckets",
+            "ddos_baseline_ratio",
+            "ddos_mad_z_threshold",
+            "ddos_protocol_share_threshold",
+            "ddos_tcp_flag_share_threshold",
+            "ddos_response_ratio_max",
+            "ddos_reflection_port_share_threshold",
+            "ddos_reflection_min_average_packet_bytes",
+            "ddos_overlap_window_seconds",
+        )
+        if module == "ddos_attack":
+            if (
+                payload.minimum_candidate_score is not None
+                or payload.minimum_distinct_clients is not None
+                or payload.detector_weights is not None
+            ):
+                raise ApiError(
+                    422,
+                    "INVALID_DDOS_REANALYSIS_PARAMETER",
+                    "DDoS 재분석에는 C2 점수 또는 detector weight를 사용할 수 없습니다",
+                )
+            for field in ddos_fields:
+                value = getattr(payload, field)
+                if value is not None:
+                    parameters[field] = value
+        else:
+            if any(getattr(payload, field) is not None for field in ddos_fields):
+                raise ApiError(
+                    422,
+                    "INVALID_C2_REANALYSIS_PARAMETER",
+                    "DDoS threshold는 DDoS 분석 재실행에서만 사용할 수 있습니다",
+                )
+            for field in ("minimum_candidate_score", "minimum_distinct_clients"):
+                value = getattr(payload, field)
+                if value is not None:
+                    parameters[field] = value
+            if payload.detector_weights is not None:
+                parameters["detector_weights"] = payload.detector_weights
         request = AnalysisJobCreate.model_validate(
             {
                 "name": f"{source['name']}-reanalyze",
@@ -3820,6 +4012,11 @@ def create_app(
         reanalysis_job["source_type"] = source.get("source_type", "SENSOR_CAPTURE")
         if source.get("source"):
             reanalysis_job["source"] = dict(source["source"])
+        if module == "ddos_attack":
+            source_coverage = dict(source)
+            attach_ddos_coverage_context(source_coverage)
+            reanalysis_job["ddos_coverage_context"] = source_coverage["ddos_coverage_context"]
+        attach_ddos_coverage_context(reanalysis_job)
         job, created = repo.create_job(reanalysis_job)
         if not created:
             return _public_job(job)

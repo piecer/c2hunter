@@ -232,6 +232,7 @@ def evaluate_candidates(
             "tcp_acknowledgment",
             "tcp_window",
             "transport_payload_length",
+            "transport_payload_packet_count",
             "ip_ttl",
             "capture_interface_id",
             "packet_evidence_complete",
