@@ -85,11 +85,15 @@ C2Hunter is designed for **defensive analysis**. It does not connect to candidat
 | **Synchronized communication** | Identifies groups of hosts contacting the same destination at similar times. |
 | **Multi-sensor context** | Correlates independent observations collected by distributed Linux sensors. |
 | **Offline PCAP analysis** | Runs PCAP and PCAPNG files through the same normalization, detector, allowlist, and scoring pipeline. |
+| **DDoS attack traffic analysis** | Separately classifies bounded TCP/UDP/ICMP flood shapes, defensive resource-exhaustion objectives, and human-reviewed response options without feeding C2 automation. |
 | **Explainable evidence** | Shows which detectors contributed to a candidate score and why. |
 | **Human-guided detection** | Lets an analyst confirm a C2 flow and create a versioned payload signature for future analyses. |
 | **Local AI analysis** | Optionally explains supporting/counter evidence and drafts Splunk hunting/detection queries and MISP data for analyst review. |
 | **REST API** | Integrates with SIEM, SOAR, scripts, and other defensive workflows. |
 | **Filtered PCAP evidence export** | Exports bounded candidate or applied flow-filter traffic from upload, completed live, and reanalysis sources as valid PCAP/PCAPNG evidence. |
+
+See [DDoS attack traffic analysis](docs/ddos-attack-analysis.md) for classification, uncertainty,
+response, resource bounds, and benchmark contracts.
 
 ---
 

@@ -32,6 +32,7 @@ type Record struct {
 	CaptureJobID                       string
 	StartTime, EndTime                 time.Time
 	PacketCount, TotalBytes            uint64
+	PayloadPacketCount                 uint64
 	MinPacketSize, MaxPacketSize       uint32
 	AvgPacketSize                      float64
 	TCPFlags                           FlagCounts
@@ -121,6 +122,7 @@ func (a *Aggregator) AddWithMetadata(p packet.Packet, protocolMetadata metadata.
 		r.MaxPayloadLength = payloadLen
 	}
 	if len(p.Payload) > 0 {
+		r.PayloadPacketCount++
 		features := payloadfeature.Compute(p.Payload)
 		if r.FirstPayloadHash == "" {
 			r.FirstPayloadHash = features.Hash

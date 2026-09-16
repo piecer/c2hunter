@@ -47,4 +47,7 @@ func TestNewPreservesTCPConnectionMetadata(t *testing.T) {
 		got.TCPSYNOnlyCount != 1 || got.TCPACKOnlyCount != 1 {
 		t.Fatalf("TCP counters = %+v", got)
 	}
+	if got.TransportPayloadPacketCount == nil || *got.TransportPayloadPacketCount != 0 {
+		t.Fatalf("transport payload packet count = %+v", got.TransportPayloadPacketCount)
+	}
 }

@@ -6,6 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from c2hunter_analysis.ddos_attack import analyze_ddos_attack
+from c2hunter_analysis.pcap import parse_pcap
+
 MODULE = Path(__file__).with_name("generate.py")
 spec = importlib.util.spec_from_file_location("traffic_generator", MODULE)
 assert spec is not None and spec.loader is not None  # noqa: S101 -- import loader invariant
@@ -21,7 +24,17 @@ class TrafficGeneratorTest(unittest.TestCase):
         ):
             one = generator.generate_all(Path(first), seed=20260720)
             generator.generate_all(Path(second), seed=20260720)
-            self.assertEqual(set(one), set("ABCDEFG"))
+            ddos_names = {
+                "DDOS_SYN",
+                "DDOS_UDP",
+                "DDOS_REFLECTION",
+                "DDOS_ICMP",
+                "DDOS_OUTBOUND",
+                "DDOS_MULTI",
+                "DDOS_NORMAL",
+                "DDOS_SHORT",
+            }
+            self.assertEqual(set(one), set("ABCDEFG") | ddos_names)
             for name in one:
                 pcap = Path(first, f"scenario-{name.lower()}.pcap")
                 self.assertEqual(pcap.read_bytes()[:4], struct.pack("<I", 0xA1B2C3D4))
@@ -54,6 +67,28 @@ class TrafficGeneratorTest(unittest.TestCase):
             self.assertEqual(
                 json.loads(Path(first, "manifest.json").read_text())["seed"], 20260720
             )
+            for name in sorted(ddos_names):
+                parsed = parse_pcap(
+                    Path(first, f"scenario-{name.lower()}.pcap").read_bytes(),
+                    sensor_id="fixture-sensor",
+                    internal_networks=["10.0.0.0/8"],
+                    retain_network_evidence=True,
+                )
+                report = analyze_ddos_attack(
+                    parsed.records,
+                    internal_cidrs=("10.0.0.0/8",),
+                )
+                oracle = one[name]["oracle"]
+                if "attack_type" in oracle:
+                    finding = next(
+                        item
+                        for item in report["findings"]
+                        if item["attack_type"] == oracle["attack_type"]
+                    )
+                    self.assertEqual(finding["attack_role"], oracle["attack_role"])
+                else:
+                    self.assertEqual(report["verdict"], oracle["verdict"])
+                    self.assertIn(oracle["warning"], report["warnings"])
 
 
 if __name__ == "__main__":

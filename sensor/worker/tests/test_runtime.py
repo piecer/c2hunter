@@ -302,8 +302,14 @@ def test_worker_records_failed_job_without_claiming_success(tmp_path: Path) -> N
     worker.run(stopped)
 
     assert queue.results == [
-        {"job_id": "job-2", "status": "ERROR", "error": "detector failed"}
+        {
+            "job_id": "job-2",
+            "status": "ERROR",
+            "error_code": "ANALYSIS_EXECUTION_FAILED",
+            "error": "worker analysis failed",
+        }
     ]
+    assert "detector failed" not in str(queue.results)
     assert queue.acked == ["claim-2"]
 
 

@@ -75,7 +75,13 @@ class Worker:
     def _execute_job(self, job: dict[str, Any]) -> dict[str, Any]:
         job_id = str(job.get("id", ""))
         if not job_id:
-            return {"job_id": "", "status": "ERROR", "error": "job id is required"}
+            return {
+                "job_id": "",
+                "status": "ERROR",
+                "error_code": "INVALID_JOB_ENVELOPE",
+                "error": "worker job envelope is invalid",
+            }
+        stage = "payload"
         try:
             raw_payload = job.get("payload")
             if isinstance(raw_payload, dict):
@@ -84,10 +90,27 @@ class Worker:
                 payload = self.payload_loader.load(job_id)
             else:
                 raise ValueError("job payload or configured payload loader is required")
+            stage = "analysis"
             result = self.execute(payload)
         except Exception as error:
-            self.last_error = str(error)
-            return {"job_id": job_id, "status": "ERROR", "error": str(error)}
+            if isinstance(error, ValueError) and str(error).startswith(
+                "unsupported analysis module"
+            ):
+                error_code = "UNSUPPORTED_ANALYSIS_MODULE"
+                message = "worker does not support the requested analysis module"
+            elif stage == "payload":
+                error_code = "PAYLOAD_LOAD_FAILED"
+                message = "worker could not load the analysis payload"
+            else:
+                error_code = "ANALYSIS_EXECUTION_FAILED"
+                message = "worker analysis failed"
+            self.last_error = error_code
+            return {
+                "job_id": job_id,
+                "status": "ERROR",
+                "error_code": error_code,
+                "error": message,
+            }
         self.last_error = None
         return {"job_id": job_id, "status": "COMPLETED", "result": result}
 

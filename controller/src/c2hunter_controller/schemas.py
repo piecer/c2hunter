@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 from datetime import UTC, datetime
@@ -299,7 +300,7 @@ class CaptureParameters(BaseModel):
 
 class AnalysisParameters(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    module: Literal["c2", "network_anomaly"] = "c2"
+    module: Literal["c2", "network_anomaly", "ddos_attack"] = "c2"
     profile: str = Field(default="ddos_botnet", min_length=1, max_length=100)
     minimum_distinct_clients: int = Field(default=3, ge=2, le=100000)
     minimum_candidate_score: int = Field(default=0, ge=0, le=100)
@@ -345,6 +346,33 @@ class AnalysisParameters(BaseModel):
     ml_anomaly_feature_z_floor: float = Field(default=1.0, ge=0.0, le=10.0)
     ml_anomaly_min_directional_features: int = Field(default=2, ge=1, le=6)
     ml_anomaly_contribution_cap: float = Field(default=5.0, ge=0.0, le=5.0)
+    ddos_bucket_seconds: int = Field(default=1, ge=1, le=60, strict=True)
+    ddos_min_duration_seconds: int = Field(default=3, ge=1, le=3600, strict=True)
+    ddos_min_source_count: int = Field(default=20, ge=2, le=100000, strict=True)
+    ddos_min_packet_count: int = Field(default=1000, ge=1, le=2**63 - 1, strict=True)
+    ddos_min_packets_per_second: int = Field(default=100, ge=1, le=10_000_000, strict=True)
+    ddos_min_bits_per_second: int = Field(default=1_000_000, ge=1, le=10**13, strict=True)
+    ddos_baseline_min_buckets: int = Field(default=20, ge=5, le=3600, strict=True)
+    ddos_baseline_ratio: float = Field(
+        default=5.0, ge=1.0, le=1000.0, allow_inf_nan=False, strict=True
+    )
+    ddos_mad_z_threshold: float = Field(
+        default=6.0, ge=2.0, le=100.0, allow_inf_nan=False, strict=True
+    )
+    ddos_protocol_share_threshold: float = Field(
+        default=0.80, ge=0.5, le=1.0, allow_inf_nan=False, strict=True
+    )
+    ddos_tcp_flag_share_threshold: float = Field(
+        default=0.80, ge=0.5, le=1.0, allow_inf_nan=False, strict=True
+    )
+    ddos_response_ratio_max: float = Field(
+        default=0.20, ge=0.0, le=1.0, allow_inf_nan=False, strict=True
+    )
+    ddos_reflection_port_share_threshold: float = Field(
+        default=0.60, ge=0.5, le=1.0, allow_inf_nan=False, strict=True
+    )
+    ddos_reflection_min_average_packet_bytes: int = Field(default=256, ge=1, le=65535, strict=True)
+    ddos_overlap_window_seconds: int = Field(default=10, ge=1, le=300, strict=True)
 
     @field_validator("detector_weights", mode="before")
     @classmethod
@@ -371,6 +399,740 @@ class AnalysisParameters(BaseModel):
         if self.tcp_syn_retry_max_interval_ms < self.tcp_syn_retry_min_interval_ms:
             raise ValueError("TCP SYN retry maximum interval must not be below minimum interval")
         return self
+
+
+DDoSAttackType = Literal[
+    "TCP_SYN_FLOOD",
+    "TCP_ACK_FLOOD",
+    "TCP_RST_FLOOD",
+    "UDP_FLOOD",
+    "ICMP_ECHO_FLOOD",
+    "ICMP_FLOOD",
+    "POSSIBLE_REFLECTION_AMPLIFICATION",
+    "MULTI_VECTOR",
+]
+DDoSObjective = Literal[
+    "CONNECTION_STATE_EXHAUSTION",
+    "BANDWIDTH_EXHAUSTION",
+    "PACKET_PROCESSING_EXHAUSTION",
+    "REFLECTED_BANDWIDTH_EXHAUSTION",
+    "MULTI_RESOURCE_EXHAUSTION",
+]
+_DDOS_RECOMMENDATION_CODES = frozenset(
+    {
+        "PRESERVE_CAPTURE_AND_LOGS",
+        "VERIFY_SERVICE_IMPACT",
+        "CONTACT_UPSTREAM_PROVIDER",
+        "MONITOR_RECOVERY_AND_FALSE_POSITIVES",
+        "ENABLE_SYN_PROXY_OR_COOKIES",
+        "APPLY_EDGE_SYN_RATE_LIMIT",
+        "CHECK_SYN_BACKLOG_AND_CONNTRACK",
+        "ENGAGE_SCRUBBING_OR_FLOWSPEC",
+        "FILTER_OR_RATE_LIMIT_UNUSED_UDP_SERVICES",
+        "VALIDATE_REFLECTION_SOURCE_PORTS",
+        "RATE_LIMIT_NONESSENTIAL_ICMP",
+        "PRESERVE_PMTUD_AND_REQUIRED_ICMP",
+        "APPLY_STATEFUL_TCP_VALIDATION",
+        "RATE_LIMIT_INVALID_TCP_FLAGS",
+        "CHECK_MIDDLEBOX_RESET_SOURCES",
+        "ISOLATE_INTERNAL_SOURCES",
+        "APPLY_EGRESS_RATE_LIMIT",
+        "ENFORCE_EGRESS_ANTISPOOFING",
+    }
+)
+_DDOS_COMMON_RECOMMENDATIONS = (
+    "PRESERVE_CAPTURE_AND_LOGS",
+    "VERIFY_SERVICE_IMPACT",
+    "CONTACT_UPSTREAM_PROVIDER",
+    "MONITOR_RECOVERY_AND_FALSE_POSITIVES",
+)
+_DDOS_TYPE_RECOMMENDATIONS: dict[str, tuple[str, ...]] = {
+    "TCP_SYN_FLOOD": (
+        "ENABLE_SYN_PROXY_OR_COOKIES",
+        "APPLY_EDGE_SYN_RATE_LIMIT",
+        "CHECK_SYN_BACKLOG_AND_CONNTRACK",
+    ),
+    "UDP_FLOOD": (
+        "ENGAGE_SCRUBBING_OR_FLOWSPEC",
+        "FILTER_OR_RATE_LIMIT_UNUSED_UDP_SERVICES",
+    ),
+    "POSSIBLE_REFLECTION_AMPLIFICATION": (
+        "ENGAGE_SCRUBBING_OR_FLOWSPEC",
+        "FILTER_OR_RATE_LIMIT_UNUSED_UDP_SERVICES",
+        "VALIDATE_REFLECTION_SOURCE_PORTS",
+    ),
+    "ICMP_ECHO_FLOOD": ("RATE_LIMIT_NONESSENTIAL_ICMP", "PRESERVE_PMTUD_AND_REQUIRED_ICMP"),
+    "ICMP_FLOOD": ("RATE_LIMIT_NONESSENTIAL_ICMP", "PRESERVE_PMTUD_AND_REQUIRED_ICMP"),
+    "TCP_ACK_FLOOD": (
+        "APPLY_STATEFUL_TCP_VALIDATION",
+        "RATE_LIMIT_INVALID_TCP_FLAGS",
+        "CHECK_MIDDLEBOX_RESET_SOURCES",
+    ),
+    "TCP_RST_FLOOD": (
+        "APPLY_STATEFUL_TCP_VALIDATION",
+        "RATE_LIMIT_INVALID_TCP_FLAGS",
+        "CHECK_MIDDLEBOX_RESET_SOURCES",
+    ),
+    "MULTI_VECTOR": ("ENGAGE_SCRUBBING_OR_FLOWSPEC",),
+}
+_DDOS_OUTBOUND_RECOMMENDATIONS = (
+    "ISOLATE_INTERNAL_SOURCES",
+    "APPLY_EGRESS_RATE_LIMIT",
+    "ENFORCE_EGRESS_ANTISPOOFING",
+)
+_DDOS_WARNING_CODES = frozenset(
+    {
+        "INPUT_RECORD_LIMIT_REACHED",
+        "BASELINE_UNAVAILABLE",
+        "SAMPLE_WINDOW_SHORT",
+        "DOS_LIKE_TRAFFIC",
+        "AMBIGUOUS_DIRECTION",
+        "INCOMPLETE_RECORDS",
+        "TARGET_LIMIT_REACHED",
+        "BUCKET_LIMIT_REACHED",
+        "FINDING_LIMIT_REACHED",
+        "DUPLICATE_CAPTURE_NOT_EXCLUDED",
+        "PARSER_SKIPPED_PACKETS",
+        "SENSOR_DROPS_REPORTED",
+        "SENSOR_CLOCK_SKEW",
+        "SENSOR_CAPTURE_QUALITY_UNAVAILABLE",
+        "PARTIAL_CAPTURE",
+    }
+)
+_DDOS_LIMITATION_CODES = frozenset(
+    {
+        "NO_FINDING_DOES_NOT_PROVE_HEALTH",
+        "OBSERVED_SOURCES_ARE_NOT_CONFIRMED_ATTACKERS",
+        "TRAFFIC_SHAPE_DOES_NOT_PROVE_SERVICE_IMPACT",
+        "APPLICATION_LAYER_FLOODS_NOT_CLASSIFIED",
+    }
+)
+_DDOS_UNCERTAINTY_CODES = frozenset(
+    {
+        "BASELINE_UNAVAILABLE",
+        "TCP_RESPONSE_VISIBILITY_UNKNOWN",
+        "TCP_PAYLOAD_VISIBILITY_UNKNOWN",
+        "SUBSTANTIAL_TCP_RESPONSES_OBSERVED",
+        "ACK_TRAFFIC_MAY_BE_LEGITIMATE",
+        "RESETS_MAY_BE_DEFENSIVE_RESPONSES",
+        "AMPLIFICATION_RATIO_UNOBSERVED",
+        "SOURCE_SPOOFING_UNCONFIRMED",
+        "ICMP_TYPE_UNAVAILABLE",
+        "SHARED_TARGET_DOES_NOT_PROVE_SHARED_ACTOR",
+        "BUCKET_LIMIT_REACHED",
+    }
+)
+
+
+class DDoSTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ip: str = Field(min_length=1, max_length=45)
+    port: int | None = Field(ge=0, le=65535)
+
+    @field_validator("ip")
+    @classmethod
+    def valid_ip(cls, value: str) -> str:
+        return str(ip_address(value))
+
+
+class DDoSMetrics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    packet_count: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    byte_count: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    record_count: int | None = Field(default=None, ge=0, le=2_000_000)
+    duration_seconds: float | None = Field(
+        default=None, ge=0, le=315_537_897_600, allow_inf_nan=False
+    )
+    average_packets_per_second: float | None = Field(
+        default=None, ge=0, le=2**53 - 1, allow_inf_nan=False
+    )
+    average_bits_per_second: float | None = Field(
+        default=None, ge=0, le=10**18, allow_inf_nan=False
+    )
+    peak_packets_per_second: float | None = Field(
+        default=None, ge=0, le=2**53 - 1, allow_inf_nan=False
+    )
+    peak_bits_per_second: float | None = Field(default=None, ge=0, le=10**18, allow_inf_nan=False)
+    peak_is_lower_bound: bool | None = None
+    measurement_precision: Literal["PACKET", "AGGREGATED_FLOW", "MIXED"] | None = None
+    baseline_packets_per_second: float | None = Field(
+        default=None, ge=0, le=2**53 - 1, allow_inf_nan=False
+    )
+    baseline_ratio: float | None = Field(default=None, ge=0, le=10**18, allow_inf_nan=False)
+    robust_z_score: float | None = Field(default=None, ge=0, le=10**18, allow_inf_nan=False)
+    distinct_sources: int | None = Field(default=None, ge=0, le=2_000_000)
+    distinct_sensors: int | None = Field(default=None, ge=0, le=2_000_000)
+    direction_source: Literal["OBSERVED", "INTERNAL_CIDR"] | None = None
+    syn_only_ratio: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    ack_only_ratio: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    rst_ratio: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    fin_ratio: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    payload_packet_ratio: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    response_ratio: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    dominant_reflection_source_port: int | None = Field(default=None, ge=0, le=65535)
+    reflection_source_port_ratio: float | None = Field(
+        default=None, ge=0, le=1, allow_inf_nan=False
+    )
+    average_packet_bytes: float | None = Field(
+        default=None, ge=0, le=2**53 - 1, allow_inf_nan=False
+    )
+    amplification_ratio: None = None
+    icmp_type_observed_packets: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    icmp_echo_request_ratio: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    component_types: list[DDoSAttackType] | None = Field(default=None, max_length=8)
+    component_finding_count: int | None = Field(default=None, ge=2, le=4096)
+
+
+class DDoSFinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=r"^ddos-[0-9a-f]{16}$")
+    attack_type: DDoSAttackType
+    attack_role: Literal["VICTIM_SIDE_INBOUND", "PARTICIPANT_SIDE_OUTBOUND"]
+    target: DDoSTarget
+    protocol: Literal["TCP", "UDP", "ICMP", "ICMPV6", "MULTIPLE"]
+    objective: DDoSObjective
+    likelihood: Literal["LIKELY", "POSSIBLE"]
+    severity: Literal["MEDIUM", "HIGH", "CRITICAL"]
+    confidence: Literal["high", "medium", "low"]
+    first_seen: datetime
+    last_seen: datetime
+    metrics: DDoSMetrics
+    evidence_codes: list[str] = Field(max_length=8)
+    uncertainty_codes: list[str] = Field(max_length=8)
+    recommendation_codes: list[str] = Field(max_length=8)
+
+    @model_validator(mode="after")
+    def ordered_time(self) -> DDoSFinding:
+        if self.last_seen < self.first_seen:
+            raise ValueError("DDoS finding last_seen must not precede first_seen")
+        if not set(self.recommendation_codes) <= _DDOS_RECOMMENDATION_CODES:
+            raise ValueError("DDoS finding contains an unknown recommendation code")
+        if not set(self.uncertainty_codes) <= _DDOS_UNCERTAINTY_CODES:
+            raise ValueError("DDoS finding contains an unknown uncertainty code")
+        allowed_evidence = {
+            "VOLUME_GATE_MET",
+            "DISTRIBUTED_SOURCE_GATE_MET",
+            "OVERLAPPING_ATTACK_VECTORS",
+            f"{self.attack_type}_SHAPE",
+        }
+        if not set(self.evidence_codes) <= allowed_evidence:
+            raise ValueError("DDoS finding contains an unknown evidence code")
+        if self.attack_type == "MULTI_VECTOR":
+            required_metrics = {"component_types", "component_finding_count"}
+            required_evidence = {"OVERLAPPING_ATTACK_VECTORS"}
+            expected_protocols = {"MULTIPLE"}
+            component_types = self.metrics.component_types or []
+            if (
+                len(component_types) < 2
+                or len(component_types) != len(set(component_types))
+                or "MULTI_VECTOR" in component_types
+                or (self.metrics.component_finding_count or 0) < len(component_types)
+            ):
+                raise ValueError("DDoS multi-vector components are inconsistent")
+        else:
+            required_metrics = {
+                "packet_count",
+                "byte_count",
+                "record_count",
+                "duration_seconds",
+                "average_packets_per_second",
+                "average_bits_per_second",
+                "peak_packets_per_second",
+                "peak_bits_per_second",
+                "peak_is_lower_bound",
+                "measurement_precision",
+                "baseline_packets_per_second",
+                "baseline_ratio",
+                "robust_z_score",
+                "distinct_sources",
+                "distinct_sensors",
+                "direction_source",
+            }
+            required_evidence = {
+                "VOLUME_GATE_MET",
+                "DISTRIBUTED_SOURCE_GATE_MET",
+                f"{self.attack_type}_SHAPE",
+            }
+            if self.attack_type.startswith("TCP_"):
+                required_metrics |= {
+                    "syn_only_ratio",
+                    "ack_only_ratio",
+                    "rst_ratio",
+                    "fin_ratio",
+                    "payload_packet_ratio",
+                    "response_ratio",
+                }
+                expected_protocols = {"TCP"}
+            elif self.attack_type in {"UDP_FLOOD", "POSSIBLE_REFLECTION_AMPLIFICATION"}:
+                required_metrics |= {
+                    "dominant_reflection_source_port",
+                    "reflection_source_port_ratio",
+                    "average_packet_bytes",
+                    "amplification_ratio",
+                }
+                expected_protocols = {"UDP"}
+            else:
+                required_metrics |= {"icmp_type_observed_packets", "icmp_echo_request_ratio"}
+                expected_protocols = {"ICMP", "ICMPV6"}
+        if self.metrics.model_fields_set != required_metrics:
+            raise ValueError("DDoS finding measured facts do not match its attack type")
+        if set(self.evidence_codes) != required_evidence:
+            raise ValueError("DDoS finding evidence gates are inconsistent")
+        if self.protocol not in expected_protocols:
+            raise ValueError("DDoS finding protocol is inconsistent with attack type")
+        uncertainty = set(self.uncertainty_codes)
+        required_uncertainty = {
+            "TCP_ACK_FLOOD": {"ACK_TRAFFIC_MAY_BE_LEGITIMATE"},
+            "TCP_RST_FLOOD": {"RESETS_MAY_BE_DEFENSIVE_RESPONSES"},
+            "POSSIBLE_REFLECTION_AMPLIFICATION": {
+                "AMPLIFICATION_RATIO_UNOBSERVED",
+                "SOURCE_SPOOFING_UNCONFIRMED",
+            },
+            "MULTI_VECTOR": {"SHARED_TARGET_DOES_NOT_PROVE_SHARED_ACTOR"},
+        }.get(self.attack_type, set())
+        if not required_uncertainty <= uncertainty:
+            raise ValueError("DDoS finding is missing mandatory family uncertainty")
+        if self.attack_type == "MULTI_VECTOR" and uncertainty != required_uncertainty:
+            raise ValueError("DDoS multi-vector uncertainty is inconsistent")
+        if self.attack_type != "MULTI_VECTOR":
+            required_values = (
+                self.metrics.packet_count,
+                self.metrics.byte_count,
+                self.metrics.record_count,
+                self.metrics.duration_seconds,
+                self.metrics.average_packets_per_second,
+                self.metrics.average_bits_per_second,
+                self.metrics.peak_is_lower_bound,
+                self.metrics.measurement_precision,
+                self.metrics.distinct_sources,
+                self.metrics.distinct_sensors,
+                self.metrics.direction_source,
+            )
+            if any(value is None for value in required_values):
+                raise ValueError("DDoS finding is missing required measured facts")
+            baseline_unavailable = (
+                self.metrics.baseline_ratio is None and self.metrics.robust_z_score is None
+            )
+            if ("BASELINE_UNAVAILABLE" in uncertainty) != baseline_unavailable:
+                raise ValueError("DDoS baseline uncertainty is inconsistent")
+            if self.likelihood == "LIKELY" and (
+                baseline_unavailable
+                or {
+                    "TCP_RESPONSE_VISIBILITY_UNKNOWN",
+                    "TCP_PAYLOAD_VISIBILITY_UNKNOWN",
+                    "SUBSTANTIAL_TCP_RESPONSES_OBSERVED",
+                }
+                & uncertainty
+            ):
+                raise ValueError("likely DDoS finding has limiting uncertainty")
+        if self.attack_type.startswith("TCP_") and any(
+            value is None
+            for value in (
+                self.metrics.syn_only_ratio,
+                self.metrics.ack_only_ratio,
+                self.metrics.rst_ratio,
+                self.metrics.fin_ratio,
+                self.metrics.payload_packet_ratio,
+            )
+        ):
+            raise ValueError("DDoS TCP finding is missing required ratios")
+        if self.attack_type == "TCP_SYN_FLOOD" and (
+            (self.metrics.response_ratio is None)
+            != ("TCP_RESPONSE_VISIBILITY_UNKNOWN" in self.uncertainty_codes)
+        ):
+            raise ValueError("DDoS TCP response uncertainty is inconsistent")
+        if self.attack_type in {"UDP_FLOOD", "POSSIBLE_REFLECTION_AMPLIFICATION"} and any(
+            value is None
+            for value in (
+                self.metrics.reflection_source_port_ratio,
+                self.metrics.average_packet_bytes,
+            )
+        ):
+            raise ValueError("DDoS UDP finding is missing required metrics")
+        if self.attack_type in {"ICMP_ECHO_FLOOD", "ICMP_FLOOD"}:
+            if (
+                self.metrics.icmp_type_observed_packets is None
+                or self.metrics.icmp_echo_request_ratio is None
+            ):
+                raise ValueError("DDoS ICMP finding is missing required metrics")
+            partial_types = self.metrics.icmp_type_observed_packets < (
+                self.metrics.packet_count or 0
+            )
+            if ("ICMP_TYPE_UNAVAILABLE" in self.uncertainty_codes) != partial_types:
+                raise ValueError("DDoS ICMP type uncertainty is inconsistent")
+        identity = (
+            f"{self.attack_role}|{self.target.ip}|MULTI_VECTOR|"
+            + "|".join(sorted(self.metrics.component_types or []))
+            if self.attack_type == "MULTI_VECTOR"
+            else (
+                f"{self.attack_role}|{self.target.ip}|{self.target.port}|"
+                f"{self.protocol}|{self.attack_type}"
+            )
+        )
+        expected_id = "ddos-" + hashlib.sha256(identity.encode()).hexdigest()[:16]
+        if self.id != expected_id:
+            raise ValueError("DDoS finding ID is inconsistent")
+        if self.attack_type == "POSSIBLE_REFLECTION_AMPLIFICATION" and (
+            self.attack_role != "VICTIM_SIDE_INBOUND" or self.likelihood != "POSSIBLE"
+        ):
+            raise ValueError("DDoS reflection semantics are inconsistent")
+        expected_severity = (
+            "CRITICAL"
+            if self.attack_type == "MULTI_VECTOR" and self.likelihood == "LIKELY"
+            else "HIGH"
+            if self.attack_type == "MULTI_VECTOR" or self.likelihood == "LIKELY"
+            else "MEDIUM"
+        )
+        if self.severity != expected_severity:
+            raise ValueError("DDoS finding severity is inconsistent")
+        if (
+            self.attack_type == "MULTI_VECTOR"
+            and self.likelihood == "POSSIBLE"
+            and (self.confidence == "high")
+        ):
+            raise ValueError("DDoS multi-vector confidence is inconsistent")
+        if "DISTRIBUTED_SOURCE_GATE_MET" in self.evidence_codes and (
+            self.metrics.distinct_sources is None or self.metrics.distinct_sources < 1
+        ):
+            raise ValueError("DDoS distributed-source evidence is inconsistent")
+        if self.attack_type == "TCP_SYN_FLOOD":
+            expected_objective = "CONNECTION_STATE_EXHAUSTION"
+        elif self.attack_type in {"TCP_ACK_FLOOD", "TCP_RST_FLOOD"}:
+            expected_objective = "PACKET_PROCESSING_EXHAUSTION"
+        elif self.attack_type == "POSSIBLE_REFLECTION_AMPLIFICATION":
+            expected_objective = "REFLECTED_BANDWIDTH_EXHAUSTION"
+        elif self.attack_type == "MULTI_VECTOR":
+            expected_objective = "MULTI_RESOURCE_EXHAUSTION"
+        else:
+            average_bytes = (self.metrics.byte_count or 0) / max(1, self.metrics.packet_count or 0)
+            expected_objective = (
+                "PACKET_PROCESSING_EXHAUSTION" if average_bytes < 128 else "BANDWIDTH_EXHAUSTION"
+            )
+        if self.objective != expected_objective:
+            raise ValueError("DDoS finding objective is inconsistent")
+        expected_recommendations = list(_DDOS_TYPE_RECOMMENDATIONS[self.attack_type])
+        if self.attack_role == "PARTICIPANT_SIDE_OUTBOUND":
+            expected_recommendations.extend(_DDOS_OUTBOUND_RECOMMENDATIONS)
+        expected_recommendations.extend(_DDOS_COMMON_RECOMMENDATIONS)
+        if self.recommendation_codes != list(dict.fromkeys(expected_recommendations))[:8]:
+            raise ValueError("DDoS finding recommendations are inconsistent")
+        for codes in (self.evidence_codes, self.uncertainty_codes, self.recommendation_codes):
+            if len(codes) != len(set(codes)):
+                raise ValueError("DDoS finding code arrays must not contain duplicates")
+        return self
+
+
+class DDoSRecommendation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: str = Field(min_length=1, max_length=100)
+    priority: int = Field(ge=1, le=100)
+    scope: Literal["UPSTREAM", "LOCAL"]
+    rationale_code: str = Field(min_length=1, max_length=128)
+    caveat_code: str = Field(min_length=1, max_length=128)
+    requires_human_approval: Literal[True]
+
+    @model_validator(mode="after")
+    def known_code(self) -> DDoSRecommendation:
+        if self.code not in _DDOS_RECOMMENDATION_CODES:
+            raise ValueError("unknown DDoS recommendation code")
+        if self.rationale_code != f"{self.code}_RATIONALE":
+            raise ValueError("DDoS recommendation rationale does not match its code")
+        if self.caveat_code != f"{self.code}_CAVEAT":
+            raise ValueError("DDoS recommendation caveat does not match its code")
+        expected_scope = (
+            "UPSTREAM"
+            if self.code in {"CONTACT_UPSTREAM_PROVIDER", "ENGAGE_SCRUBBING_OR_FLOWSPEC"}
+            else "LOCAL"
+        )
+        if self.scope != expected_scope:
+            raise ValueError("DDoS recommendation scope does not match its code")
+        return self
+
+
+class DDoSSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scanned_records: int = Field(ge=0, le=2_000_001)
+    evaluated_records: int = Field(ge=0, le=2_000_000)
+    skipped_records: int = Field(ge=0, le=2_000_000)
+    incomplete_records: int = Field(ge=0, le=2_000_000)
+    target_count: int = Field(ge=0, le=4096)
+    finding_count: int = Field(ge=0, le=6144)
+    displayed_finding_count: int = Field(ge=0, le=100)
+    packet_count: int = Field(ge=0, le=2**53 - 1)
+    byte_count: int = Field(ge=0, le=2**53 - 1)
+    first_seen: datetime | None
+    last_seen: datetime | None
+    coverage_complete: bool
+    counts_are_lower_bounds: bool
+    truncated: bool
+    primary_attack_type: DDoSAttackType | None
+    primary_objective: DDoSObjective | None
+
+
+class DDoSAttackReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: Literal["ddos-attack-report-v1"]
+    catalog_version: Literal["ddos-taxonomy-v1"]
+    verdict: Literal[
+        "attack_likely", "suspicious_traffic", "no_clear_attack", "insufficient_evidence"
+    ]
+    confidence: Literal["high", "medium", "low", "unknown"]
+    primary_finding_id: str | None
+    summary: DDoSSummary
+    findings: list[DDoSFinding] = Field(max_length=100)
+    recommendations: list[DDoSRecommendation] = Field(max_length=100)
+    warnings: list[str] = Field(max_length=16)
+    limitations: list[str] = Field(max_length=8)
+    omitted_finding_count: int = Field(ge=0, le=6144)
+
+    @model_validator(mode="before")
+    @classmethod
+    def strict_wire_scalars(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        summary = value.get("summary")
+        integer_summary = {
+            "scanned_records",
+            "evaluated_records",
+            "skipped_records",
+            "incomplete_records",
+            "target_count",
+            "finding_count",
+            "displayed_finding_count",
+            "packet_count",
+            "byte_count",
+        }
+        if isinstance(summary, dict):
+            if any(type(summary.get(name)) is not int for name in integer_summary):
+                raise ValueError("DDoS summary counters must be JSON integers")
+            if any(
+                type(summary.get(name)) is not bool
+                for name in {"coverage_complete", "counts_are_lower_bounds", "truncated"}
+            ):
+                raise ValueError("DDoS summary flags must be JSON booleans")
+        if type(value.get("omitted_finding_count")) is not int:
+            raise ValueError("DDoS omitted finding count must be a JSON integer")
+        integer_metrics = {
+            "packet_count",
+            "byte_count",
+            "record_count",
+            "distinct_sources",
+            "distinct_sensors",
+            "dominant_reflection_source_port",
+            "icmp_type_observed_packets",
+            "component_finding_count",
+        }
+        numeric_metrics = integer_metrics | {
+            "duration_seconds",
+            "average_packets_per_second",
+            "average_bits_per_second",
+            "peak_packets_per_second",
+            "peak_bits_per_second",
+            "baseline_packets_per_second",
+            "baseline_ratio",
+            "robust_z_score",
+            "syn_only_ratio",
+            "ack_only_ratio",
+            "rst_ratio",
+            "fin_ratio",
+            "payload_packet_ratio",
+            "response_ratio",
+            "reflection_source_port_ratio",
+            "average_packet_bytes",
+            "amplification_ratio",
+            "icmp_echo_request_ratio",
+        }
+        findings = value.get("findings")
+        if isinstance(findings, list):
+            for finding in findings:
+                if not isinstance(finding, dict):
+                    continue
+                target = finding.get("target")
+                if isinstance(target, dict) and target.get("port") is not None:
+                    if type(target.get("port")) is not int:
+                        raise ValueError("DDoS target port must be a JSON integer")
+                metrics = finding.get("metrics")
+                if isinstance(metrics, dict):
+                    if any(
+                        name in metrics
+                        and metrics[name] is not None
+                        and type(metrics[name]) is not int
+                        for name in integer_metrics
+                    ):
+                        raise ValueError("DDoS count metrics must be JSON integers")
+                    if any(
+                        name in metrics
+                        and metrics[name] is not None
+                        and type(metrics[name]) not in {int, float}
+                        for name in numeric_metrics
+                    ):
+                        raise ValueError("DDoS numeric metrics must be JSON numbers")
+        recommendations = value.get("recommendations")
+        if isinstance(recommendations, list) and any(
+            isinstance(item, dict) and type(item.get("priority")) is not int
+            for item in recommendations
+        ):
+            raise ValueError("DDoS recommendation priorities must be JSON integers")
+        return value
+
+    @model_validator(mode="after")
+    def internally_consistent(self) -> DDoSAttackReport:
+        if (
+            self.summary.evaluated_records + self.summary.skipped_records
+            > self.summary.scanned_records
+        ):
+            raise ValueError("DDoS scanned record count is inconsistent")
+        if self.summary.finding_count != len(self.findings) + self.omitted_finding_count:
+            raise ValueError("DDoS finding counters are inconsistent")
+        if self.summary.displayed_finding_count != len(self.findings):
+            raise ValueError("DDoS displayed finding count is inconsistent")
+        lower_bound_codes = {
+            "INPUT_RECORD_LIMIT_REACHED",
+            "TARGET_LIMIT_REACHED",
+            "BUCKET_LIMIT_REACHED",
+            "FINDING_LIMIT_REACHED",
+            "PARSER_SKIPPED_PACKETS",
+            "SENSOR_DROPS_REPORTED",
+            "PARTIAL_CAPTURE",
+        }
+        coverage_codes = lower_bound_codes | {
+            "SENSOR_CLOCK_SKEW",
+            "SENSOR_CAPTURE_QUALITY_UNAVAILABLE",
+            "DUPLICATE_CAPTURE_NOT_EXCLUDED",
+        }
+        expected_lower_bound = bool(lower_bound_codes & set(self.warnings)) or (
+            self.summary.skipped_records > 0 or self.summary.incomplete_records > 0
+        )
+        if self.summary.counts_are_lower_bounds != expected_lower_bound:
+            raise ValueError("DDoS lower-bound coverage flag is inconsistent")
+        expected_coverage = (
+            self.summary.evaluated_records > 0
+            and self.summary.skipped_records == 0
+            and self.summary.incomplete_records == 0
+            and not coverage_codes & set(self.warnings)
+        )
+        if self.summary.coverage_complete != expected_coverage:
+            raise ValueError("DDoS complete coverage flag is inconsistent")
+        if self.summary.truncated != (
+            self.omitted_finding_count > 0 or self.summary.counts_are_lower_bounds
+        ):
+            raise ValueError("DDoS truncation flag is inconsistent")
+        ids = {item.id for item in self.findings}
+        if len(ids) != len(self.findings):
+            raise ValueError("DDoS finding IDs must be unique")
+        if self.primary_finding_id is not None and self.primary_finding_id not in ids:
+            raise ValueError("DDoS primary finding is not retained")
+        if bool(self.findings) != bool(self.primary_finding_id):
+            raise ValueError("DDoS primary finding presence is inconsistent")
+        primary = next((item for item in self.findings if item.id == self.primary_finding_id), None)
+        if (primary.attack_type if primary else None) != self.summary.primary_attack_type or (
+            primary.objective if primary else None
+        ) != self.summary.primary_objective:
+            raise ValueError("DDoS primary summary is inconsistent")
+        base_findings = [item for item in self.findings if item.attack_type != "MULTI_VECTOR"]
+        base_targets = {
+            (item.attack_role, item.target.ip, item.target.port, item.protocol)
+            for item in base_findings
+        }
+        if len(base_targets) > self.summary.target_count:
+            raise ValueError("DDoS finding targets exceed the report summary")
+        if (
+            sum(item.metrics.packet_count or 0 for item in base_findings)
+            > self.summary.packet_count
+        ):
+            raise ValueError("DDoS finding packet totals exceed the report summary")
+        if sum(item.metrics.byte_count or 0 for item in base_findings) > self.summary.byte_count:
+            raise ValueError("DDoS finding byte totals exceed the report summary")
+        if self.findings and (
+            self.summary.first_seen is None
+            or self.summary.last_seen is None
+            or any(
+                item.first_seen < self.summary.first_seen or item.last_seen > self.summary.last_seen
+                for item in self.findings
+            )
+        ):
+            raise ValueError("DDoS finding times exceed the report summary")
+        has_likely = any(item.likelihood == "LIKELY" for item in self.findings)
+        evidence_limited = not self.summary.coverage_complete
+        if has_likely and evidence_limited:
+            raise ValueError("likely DDoS findings require complete sufficient evidence")
+        if self.findings:
+            expected_verdict = "attack_likely" if has_likely else "suspicious_traffic"
+        elif (
+            self.summary.coverage_complete
+            and "SAMPLE_WINDOW_SHORT" not in self.warnings
+            and "DOS_LIKE_TRAFFIC" not in self.warnings
+        ):
+            expected_verdict = "no_clear_attack"
+        else:
+            expected_verdict = "insufficient_evidence"
+        if self.verdict != expected_verdict:
+            raise ValueError("DDoS report verdict is inconsistent")
+        for finding in self.findings:
+            sample_limited = finding.attack_type != "MULTI_VECTOR" and (
+                (finding.metrics.record_count or 0) < 100
+                or (finding.metrics.duration_seconds or 0) < 10
+            )
+            if finding.likelihood == "LIKELY" and sample_limited:
+                raise ValueError("likely DDoS finding has insufficient target-local evidence")
+            if evidence_limited or sample_limited:
+                expected = "low"
+            elif finding.likelihood == "LIKELY":
+                expected = "high"
+            elif finding.attack_type == "MULTI_VECTOR":
+                expected = finding.confidence
+            else:
+                expected = "medium"
+            if finding.confidence != expected or (
+                finding.attack_type == "MULTI_VECTOR" and expected not in {"low", "medium", "high"}
+            ):
+                raise ValueError("DDoS finding confidence is inconsistent")
+        expected_confidence = {
+            "attack_likely": "high",
+            "no_clear_attack": "low",
+            "insufficient_evidence": "unknown",
+        }.get(self.verdict)
+        if self.verdict == "suspicious_traffic":
+            expected_confidence = (
+                "low"
+                if not self.summary.coverage_complete
+                or all(finding.confidence == "low" for finding in self.findings)
+                else "medium"
+            )
+        if self.confidence != expected_confidence:
+            raise ValueError("DDoS report confidence is inconsistent")
+        expected_codes = {
+            code for finding in self.findings for code in finding.recommendation_codes
+        }
+        actual_codes = [item.code for item in self.recommendations]
+        if expected_codes != set(actual_codes) or len(actual_codes) != len(set(actual_codes)):
+            raise ValueError("DDoS recommendation relationships are inconsistent")
+        if [item.priority for item in self.recommendations] != list(
+            range(1, len(self.recommendations) + 1)
+        ):
+            raise ValueError("DDoS recommendation priorities must be contiguous")
+        if not set(self.warnings) <= _DDOS_WARNING_CODES:
+            raise ValueError("DDoS report contains an unknown warning code")
+        if len(self.warnings) != len(set(self.warnings)):
+            raise ValueError("DDoS report warnings must not contain duplicates")
+        if set(self.limitations) != _DDOS_LIMITATION_CODES or len(self.limitations) != len(
+            _DDOS_LIMITATION_CODES
+        ):
+            raise ValueError("DDoS report must preserve all mandatory limitations")
+        self._finite(self.model_dump(mode="python"))
+        return self
+
+    @classmethod
+    def _finite(cls, value: object) -> None:
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("DDoS report contains a non-finite number")
+        if isinstance(value, dict):
+            for child in value.values():
+                cls._finite(child)
+        elif isinstance(value, list | tuple):
+            for child in value:
+                cls._finite(child)
 
 
 class TCPSYNOnlyObservation(BaseModel):
@@ -472,6 +1234,7 @@ class FlowRecord(BaseModel):
     tcp_acknowledgment: int | None = Field(default=None, ge=0, le=2**32 - 1)
     tcp_window: int | None = Field(default=None, ge=0, le=65535)
     transport_payload_length: int | None = Field(default=None, ge=0)
+    transport_payload_packet_count: int | None = Field(default=None, ge=0, strict=True)
     ip_ttl: int | None = Field(default=None, ge=0, le=255)
     capture_interface_id: int | None = Field(default=None, ge=0)
     packet_evidence_complete: bool = False
@@ -496,10 +1259,25 @@ class FlowRecord(BaseModel):
             raise ValueError("TCP flag counters require tcp_flags_observed")
         if self.tcp_flags_observed and self.protocol.upper() != "TCP":
             raise ValueError("tcp_flags_observed is valid only for TCP records")
+        if any(counter > self.packet_count for counter in counters):
+            raise ValueError("TCP flag counter exceeds packet_count")
+        if (
+            self.transport_payload_packet_count is not None
+            and self.transport_payload_packet_count > self.packet_count
+        ):
+            raise ValueError("transport payload packet count exceeds packet_count")
         if self.tcp_syn_only_count + self.tcp_syn_ack_count > self.tcp_syn_count:
             raise ValueError("TCP SYN combination counters exceed tcp_syn_count")
         if self.tcp_syn_ack_count + self.tcp_ack_only_count > self.tcp_ack_count:
             raise ValueError("TCP ACK combination counters exceed tcp_ack_count")
+        if (
+            self.tcp_syn_only_count
+            + self.tcp_syn_ack_count
+            + self.tcp_ack_only_count
+            + self.tcp_rst_count
+            > self.packet_count
+        ):
+            raise ValueError("mutually exclusive TCP shape counters exceed packet_count")
         if self.tcp_syn_only_observations is not None:
             if not self.tcp_flags_observed or self.protocol.upper() != "TCP":
                 raise ValueError("TCP SYN observations require observed TCP metadata")
@@ -541,8 +1319,18 @@ class AnalysisJobCreate(BaseModel):
     end_time: datetime
     capture: CaptureParameters
     analysis: AnalysisParameters
-    internal_networks: list[str] = Field(min_length=1)
+    internal_networks: list[str] = Field(min_length=1, max_length=256)
     flow_records: list[FlowRecord] = Field(default_factory=list)
+
+    @field_validator("internal_networks")
+    @classmethod
+    def bounded_internal_networks(cls, values: list[str]) -> list[str]:
+        if any(len(value) > 64 for value in values):
+            raise ValueError("internal network is too long")
+        normalized = [str(ip_network(value, strict=False)) for value in values]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("internal networks must be unique")
+        return normalized
 
     @model_validator(mode="after")
     def valid_range(self) -> AnalysisJobCreate:
@@ -595,6 +1383,35 @@ class ReanalysisRequest(BaseModel):
     minimum_candidate_score: int | None = Field(default=None, ge=0, le=100)
     minimum_distinct_clients: int | None = Field(default=None, ge=2)
     detector_weights: dict[str, float] | None = None
+    ddos_min_source_count: int | None = Field(default=None, ge=2, le=100000, strict=True)
+    ddos_min_packet_count: int | None = Field(default=None, ge=1, le=2**63 - 1, strict=True)
+    ddos_min_packets_per_second: int | None = Field(default=None, ge=1, le=10_000_000, strict=True)
+    ddos_min_bits_per_second: int | None = Field(default=None, ge=1, le=10**13, strict=True)
+    ddos_bucket_seconds: int | None = Field(default=None, ge=1, le=60, strict=True)
+    ddos_min_duration_seconds: int | None = Field(default=None, ge=1, le=3600, strict=True)
+    ddos_baseline_min_buckets: int | None = Field(default=None, ge=5, le=3600, strict=True)
+    ddos_baseline_ratio: float | None = Field(
+        default=None, ge=1, le=1000, allow_inf_nan=False, strict=True
+    )
+    ddos_mad_z_threshold: float | None = Field(
+        default=None, ge=2, le=100, allow_inf_nan=False, strict=True
+    )
+    ddos_protocol_share_threshold: float | None = Field(
+        default=None, ge=0.5, le=1, allow_inf_nan=False, strict=True
+    )
+    ddos_tcp_flag_share_threshold: float | None = Field(
+        default=None, ge=0.5, le=1, allow_inf_nan=False, strict=True
+    )
+    ddos_response_ratio_max: float | None = Field(
+        default=None, ge=0, le=1, allow_inf_nan=False, strict=True
+    )
+    ddos_reflection_port_share_threshold: float | None = Field(
+        default=None, ge=0.5, le=1, allow_inf_nan=False, strict=True
+    )
+    ddos_reflection_min_average_packet_bytes: int | None = Field(
+        default=None, ge=1, le=65535, strict=True
+    )
+    ddos_overlap_window_seconds: int | None = Field(default=None, ge=1, le=300, strict=True)
 
     @field_validator("detector_weights", mode="before")
     @classmethod

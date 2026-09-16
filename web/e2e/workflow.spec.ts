@@ -67,6 +67,7 @@ test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', 
   await expect(page.getByText('현재 5점 · 후보 기준 20점 · 15점 부족')).toBeVisible();
   await expect(page.getByText('주기 통신 가중치 조정으로 후보 기준에 도달합니다.')).toBeVisible();
 
+  await page.getByRole('button', { name: '메뉴 / Menu' }).click();
   await page.getByRole('link', { name: 'Allowlist' }).click();
   await page.getByLabel('Value').fill('203.0.113.10');
   await page.getByLabel('Description').fill('Reviewed trusted infrastructure');
@@ -302,4 +303,29 @@ test('candidate queue exposes workflow status and defaults to latest activity', 
   await expect(summary.getByText('오탐 처리 완료')).toBeVisible();
   await expect(page.getByLabel('Sort candidates')).toHaveValue('-last_seen');
   await expect(page.locator('.workflow-badge', { hasText: '미분석' })).toBeVisible();
+});
+
+test('analyst reviews a bounded bilingual DDoS report without C2 automation', async ({ page }) => {
+  await installApiFixture(page);
+  const requested: string[] = [];
+  page.on('request', request => requested.push(new URL(request.url()).pathname));
+  await page.goto('/login');
+  await page.getByLabel('Username').fill('analyst');
+  await page.getByRole('button', { name: 'Development login' }).click();
+  await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+  await page.goto('/analyses/ddos-job');
+
+  await expect(page.getByRole('heading', { name: '의심스러운 DDoS 형태 관찰' })).toBeVisible();
+  const glance = page.getByRole('region', { name: 'DDoS 한눈에 보기' });
+  await expect(glance.getByRole('heading', { name: 'TCP SYN 플러드' })).toBeVisible();
+  await expect(glance.getByText('연결 상태 자원 고갈')).toBeVisible();
+  await page.getByLabel('보고서 언어 / Report language').selectOption('en');
+  await expect(page.getByRole('heading', { name: 'Suspicious DDoS-shaped traffic observed' })).toBeVisible();
+  await page.getByRole('button', { name: /Show detailed evidence/ }).click();
+  await expect(page.getByText('1,200', { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 420, height: 900 });
+  const report = page.locator('.ddos-report');
+  expect(await report.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(requested).not.toContain('/api/v1/analysis-jobs/ddos-job/candidates');
+  expect(requested).not.toContain('/api/v1/analysis-jobs/ddos-job/ai-runs');
 });

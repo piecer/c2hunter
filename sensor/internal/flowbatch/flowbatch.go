@@ -40,6 +40,7 @@ type FlowRecord struct {
 	PayloadPrefixHash               string                   `json:"payload_prefix_hash,omitempty"`
 	PayloadSampleHex                string                   `json:"payload_sample_hex,omitempty"`
 	PayloadLength                   *uint32                  `json:"payload_length,omitempty"`
+	TransportPayloadPacketCount     *uint64                  `json:"transport_payload_packet_count,omitempty"`
 	PayloadEntropy                  *float64                 `json:"payload_entropy,omitempty"`
 	PayloadPrintableRatio           *float64                 `json:"payload_printable_ratio,omitempty"`
 	PayloadSimHash                  string                   `json:"payload_simhash,omitempty"`
@@ -139,6 +140,7 @@ func fromRecord(record flow.Record) FlowRecord {
 		PayloadFeatureVersion: record.PayloadFeatureVersion,
 	}
 	if record.Key.Protocol == packet.TCP {
+		out.TransportPayloadPacketCount = &record.PayloadPacketCount
 		observations := make([]TCPSYNOnlyObservation, 0, len(record.TCPSYNOnlyObservations))
 		for _, observation := range record.TCPSYNOnlyObservations {
 			observations = append(observations, TCPSYNOnlyObservation{

@@ -119,7 +119,7 @@ export default function AnalysisConfiguration({ analysis = {}, capture = {}, det
       <StructuredFields data={capture}/>
     </section>
 
-    {analysis.module === 'network_anomaly' ? <section className="panel"><h2>Network observation settings</h2><p>Unweighted TCP / UDP / ICMP observations. Counts and timing measurements are not C2 scores. Stored C2 defaults are not used by this module.</p></section> : <section className="panel detector-settings" aria-label="탐지 설정 요약">
+    {analysis.module === 'network_anomaly' ? <section className="panel"><h2>Network observation settings</h2><p>Unweighted TCP / UDP / ICMP observations. Counts and timing measurements are not C2 scores. Stored C2 defaults are not used by this module.</p></section> : analysis.module === 'ddos_attack' ? <section className="panel detector-settings" aria-label="DDoS 분석 설정 요약"><div className="section-heading"><div><p className="eyebrow">DDoS POLICY</p><h2>DDoS 분석 설정</h2></div></div><div className="config-summary-grid"><SummaryItem label="최소 관찰 source">{String(analysis.ddos_min_source_count ?? '서버 기본값')}</SummaryItem><SummaryItem label="최소 패킷">{String(analysis.ddos_min_packet_count ?? '서버 기본값')}</SummaryItem><SummaryItem label="최소 PPS">{String(analysis.ddos_min_packets_per_second ?? '서버 기본값')}</SummaryItem><SummaryItem label="최소 bps">{String(analysis.ddos_min_bits_per_second ?? '서버 기본값')}</SummaryItem></div><p className="muted">DDoS 분류는 확률 점수가 아니며, 관찰량·source 분산·protocol 형태·기준선을 함께 사용합니다.</p></section> : <section className="panel detector-settings" aria-label="탐지 설정 요약">
       <div className="section-heading"><div><p className="eyebrow">DETECTION POLICY</p><h2>탐지 설정</h2></div></div>
       {Object.keys(analysis).length ? <>
         <div className="config-summary-grid">

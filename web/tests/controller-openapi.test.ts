@@ -59,6 +59,27 @@ describe('Controller OpenAPI contract consumed by the web UI', () => {
     ]));
   });
 
+  it('publishes the closed DDoS module and threshold bounds consumed by the web form', () => {
+    const analysis = openapi.components.schemas.AnalysisParameters;
+    const reanalysis = openapi.components.schemas.ReanalysisRequest;
+    const fields = [
+      'ddos_bucket_seconds', 'ddos_min_duration_seconds', 'ddos_min_source_count',
+      'ddos_min_packet_count', 'ddos_min_packets_per_second', 'ddos_min_bits_per_second',
+      'ddos_baseline_min_buckets', 'ddos_baseline_ratio', 'ddos_mad_z_threshold',
+      'ddos_protocol_share_threshold', 'ddos_tcp_flag_share_threshold',
+      'ddos_response_ratio_max', 'ddos_reflection_port_share_threshold',
+      'ddos_reflection_min_average_packet_bytes', 'ddos_overlap_window_seconds',
+    ];
+    expect(analysis.properties.module.enum).toEqual(['c2', 'network_anomaly', 'ddos_attack']);
+    expect(Object.keys(analysis.properties)).toEqual(expect.arrayContaining(fields));
+    expect(Object.keys(reanalysis.properties)).toEqual(expect.arrayContaining(fields));
+    const pcapParameters = openapi.paths['/api/v1/pcap-analysis-jobs'].post.parameters
+      .map((parameter: { name: string }) => parameter.name);
+    expect(pcapParameters).toEqual(expect.arrayContaining(fields));
+    expect(analysis.properties.ddos_min_source_count.minimum).toBe(2);
+    expect(analysis.properties.ddos_min_packets_per_second.maximum).toBe(10_000_000);
+  });
+
   it('requires job context for export and idempotency for reanalysis', () => {
     expect(requestSchema('/api/v1/pcap-exports', 'post').required).toContain('job_id');
     expect(requestSchema('/api/v1/analysis-jobs/{job_id}/reanalyze', 'post').required).toContain('idempotency_key');

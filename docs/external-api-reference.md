@@ -302,6 +302,7 @@ Content-Type: application/vnd.tcpdump.pcap    // raw PCAP data
 |---------|--------|------|
 | `name` | *(필수)* | 분석 표시명 |
 | `filename` | *(필수)* | 파일명 |
+| `analysis_module` | `c2` | `c2`, `network_anomaly`, `ddos_attack` |
 | `internal_networks` | `10.0.0.0/8` | 내부 네트워크 CIDR 목록 (쉼표 분리) |
 | `description` | `""` | 설명 |
 | `idempotency_key` | - | 동일 키 재전송 방지 |
@@ -309,6 +310,27 @@ Content-Type: application/vnd.tcpdump.pcap    // raw PCAP data
 | `minimum_distinct_clients` | `3` | 최소 distinct client 수 |
 | `detector_weights` | - | JSON 문자열 형태가 중 치 |
 | `ml_anomaly_enabled` | `false` | ML 이상탐지 활성화 |
+| `ddos_min_source_count` | `20` | DDoS 분산 source 최소값 |
+| `ddos_min_packet_count` | `1000` | DDoS 최소 packet 수 |
+| `ddos_min_packets_per_second` | `100` | DDoS 최소 PPS |
+| `ddos_min_bits_per_second` | `1000000` | DDoS 최소 bps |
+| `ddos_bucket_seconds` | `1` | packet evidence peak bucket 크기(초) |
+| `ddos_min_duration_seconds` | `3` | target 관찰 최소 지속 시간 |
+| `ddos_baseline_min_buckets` | `20` | baseline 구성 최소 bucket 수 |
+| `ddos_baseline_ratio` | `5.0` | baseline 대비 peak 비율 |
+| `ddos_mad_z_threshold` | `6.0` | robust MAD z-score threshold |
+| `ddos_protocol_share_threshold` | `0.8` | ICMP echo 형태 비율 threshold |
+| `ddos_tcp_flag_share_threshold` | `0.8` | TCP flag 형태 비율 threshold |
+| `ddos_response_ratio_max` | `0.2` | SYN 가설을 강화할 최대 응답 비율 |
+| `ddos_reflection_port_share_threshold` | `0.6` | 알려진 reflection source port packet 비율 |
+| `ddos_reflection_min_average_packet_bytes` | `256` | reflection 가설 최소 평균 packet 크기 |
+| `ddos_overlap_window_seconds` | `10` | multi-vector overlap 허용 구간 |
+
+`ddos_attack` job detail은 `ddos-attack-report-v1` full report를 반환하고 목록은 compact
+`ddos_attack_summary`만 반환한다. DDoS job은 Candidate, TI, MISP 또는 C2 AI run을 생성하지 않는다.
+업로드 parser skip, capture truncation, sensor drop/clock 품질 및 job-scoped sensor 품질 부재는
+각각 closed warning code로 report coverage에 반영되며 불완전한 coverage에서는
+`no_clear_attack` 또는 high-confidence 판정을 반환하지 않는다.
 
 **업로드 제한**: `C2HUNTER_PCAP_UPLOAD_MAX_BYTES` (기본 500MB), `C2HUNTER_PCAP_UPLOAD_MAX_PACKETS` (기본 2,000,000)
 

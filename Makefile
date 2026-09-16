@@ -11,7 +11,7 @@ SENSOR_CORE_COVERAGE_MIN := 80.0
 SENSOR_CORE_PACKAGES := ./internal/direction ./internal/flow ./internal/capture ./internal/metadata ./internal/packet ./internal/spool ./internal/batch ./internal/flowbatch
 COMPOSE := docker compose --env-file .env
 
-.PHONY: setup lint lint-security test test-unit test-integration test-coverage test-e2e test-ai evaluate-ai benchmark-ai benchmark-pcap-export backtest-high-volume build sensor-agent up down generate-test-pcaps benchmark-1m clean
+.PHONY: setup lint lint-security test test-unit test-integration test-coverage test-e2e test-ai evaluate-ai benchmark-ai benchmark-ddos-analysis benchmark-pcap-export backtest-high-volume build sensor-agent up down generate-test-pcaps benchmark-1m clean
 
 setup:
 	@test -f .env || cp .env.example .env
@@ -23,7 +23,8 @@ setup:
 	npm --prefix web ci --ignore-scripts
 
 build:
-	$(VENV)/bin/python -m compileall -q controller/src analysis/src
+	$(VENV)/bin/python -m compileall -q \
+		-x 'app_(BACKUP|BASE|LOCAL|REMOTE)_[0-9]+\.py$$' controller/src analysis/src
 	cd sensor && go build ./...
 	npm --prefix web run build
 	$(MAKE) sensor-agent
@@ -44,7 +45,7 @@ lint:
 	cd sensor && go vet ./...
 	$(RUFF) check controller analysis tools
 	$(RUFF) format --check controller analysis tools
-	$(MYPY) controller/src analysis/src
+	$(MYPY) --exclude 'controller/src/c2hunter_controller/app_(BACKUP|BASE|LOCAL|REMOTE)_[0-9]+\.py$$' controller/src analysis/src
 	npm --prefix web run lint
 	$(MAKE) lint-security
 
@@ -61,6 +62,7 @@ test-unit:
 	PYTHONPATH=sensor/worker/src $(PYTEST) -q sensor/worker/tests
 	$(VENV)/bin/python tools/traffic-generator/test_generate.py
 	$(VENV)/bin/python tools/benchmark/test_benchmark.py
+	$(VENV)/bin/python tools/benchmark/test_ddos_analysis.py
 	PYTHONPATH=controller/src:analysis/src $(VENV)/bin/python tools/benchmark/test_pcap_export_benchmark.py
 	npm --prefix web run test
 
@@ -70,7 +72,7 @@ test-integration:
 
 test-coverage:
 	# Ratchet current package baselines separately so aggregate coverage cannot hide a regression.
-	$(PYTEST) -q controller/tests --cov=c2hunter_controller --cov-report=term --cov-fail-under=80
+	$(PYTEST) -q controller/tests --cov=c2hunter_controller --cov-config=controller/pyproject.toml --cov-report=term --cov-fail-under=80
 	$(PYTEST) -q analysis/tests --cov=c2hunter_analysis --cov-report=term --cov-fail-under=86
 	$(PYTEST) -q analysis/tests --cov=c2hunter_analysis.detectors --cov-report=term --cov-fail-under=90
 	cd sensor && go test -coverprofile=/tmp/c2hunter-sensor-coverage.out ./...
@@ -95,6 +97,11 @@ evaluate-ai:
 benchmark-ai:
 	$(VENV)/bin/python -m c2hunter_controller.ai_evaluation benchmark \
 		--json artifacts/ai-benchmark-report.json --iterations 100
+
+benchmark-ddos-analysis:
+	PYTHONPATH=analysis/src $(VENV)/bin/python tools/benchmark/ddos_analysis.py \
+		--records 1000000 --iterations 3 --json artifacts/ddos-analysis-benchmark.json \
+		--markdown artifacts/ddos-analysis-benchmark.md
 
 backtest-high-volume:
 	$(VENV)/bin/python -m c2hunter_analysis.high_volume_backtest \

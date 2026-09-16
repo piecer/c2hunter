@@ -191,6 +191,17 @@ dependency나 model file 없이 median/MAD 기반 robust z-score를 계산한다
 anomaly-only Candidate까지 생성하려면 `ml_anomaly_allow_standalone=true`를 별도로
 설정해야 하며 hunting/실험 용도로 취급한다.
 
+### 3.9 독립 DDoS 공격 트래픽 분석
+
+`analysis.module=ddos_attack`은 위 C2 detector/score와 별개로 실행한다. target별 절대 traffic량,
+관찰 source 분산, TCP flag 또는 UDP/ICMP 형태, 적격 baseline을 결합해 SYN/ACK/RST, UDP,
+ICMP, possible reflection/amplification 및 multi-vector flood를 분류한다. baseline이 없으면 positive
+finding은 최대 `POSSIBLE`이며 단일-source 고용량 traffic은 DDoS로 확정하지 않는다.
+
+Packet evidence에서만 peak bucket을 계산하고 집계 Flow는 duration 기반 평균률만 제공한다. 결과의
+목적은 공격자 동기가 아니라 connection state, bandwidth, packet processing 등 방어 자원 고갈 가설이다.
+상세 threshold, bounds, 대응 code와 제한은 [DDoS 공격 트래픽 분석](ddos-attack-analysis.md)을 따른다.
+
 ## 4. 점수 모델
 
 기본 양의 contribution 상한:

@@ -5594,17 +5594,20 @@ class SQLiteRepository(
             return deepcopy(run)
 
     def get_ai_run(self, run_id: str) -> dict[str, Any] | None:
-        row = self.connection.execute(
-            "SELECT data FROM ai_analysis_runs WHERE run_id=?", (run_id,)
-        ).fetchone()
-        return json.loads(row[0]) if row else None
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT data FROM ai_analysis_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            return json.loads(row[0]) if row else None
 
     def list_ai_runs(self, job_id: str) -> list[dict[str, Any]]:
-        rows = self.connection.execute(
-            "SELECT data FROM ai_analysis_runs WHERE analysis_job_id=? ORDER BY created_at DESC",
-            (job_id,),
-        ).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT data FROM ai_analysis_runs WHERE analysis_job_id=? "
+                "ORDER BY created_at DESC",
+                (job_id,),
+            ).fetchall()
+            return [json.loads(row[0]) for row in rows]
 
     def save_ai_assessment(self, assessment: dict[str, Any]) -> dict[str, Any]:
         with self._lock:

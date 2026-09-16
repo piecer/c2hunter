@@ -57,6 +57,37 @@ def test_flow_record_accepts_consistent_tcp_metadata() -> None:
     ]
 
 
+def test_flow_record_rejects_mutually_exclusive_tcp_shape_counters() -> None:
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        FlowRecord.model_validate(
+            tcp_record(
+                packet_count=10,
+                tcp_ack_count=10,
+                tcp_ack_only_count=10,
+                tcp_rst_count=10,
+            )
+        )
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        FlowRecord.model_validate(
+            tcp_record(
+                packet_count=10,
+                tcp_syn_count=10,
+                tcp_ack_count=10,
+                tcp_syn_only_count=8,
+                tcp_syn_ack_count=2,
+                tcp_ack_only_count=8,
+                tcp_rst_count=0,
+            )
+        )
+
+
+def test_flow_record_bounds_authoritative_payload_packet_count() -> None:
+    parsed = FlowRecord.model_validate(tcp_record(transport_payload_packet_count=0))
+    assert parsed.transport_payload_packet_count == 0
+    with pytest.raises(ValidationError, match="payload packet count"):
+        FlowRecord.model_validate(tcp_record(packet_count=1, transport_payload_packet_count=2))
+
+
 def test_flow_record_normalizes_tcp_flag_names_and_preserves_duration() -> None:
     parsed = FlowRecord.model_validate(
         tcp_record(
