@@ -687,6 +687,164 @@ def test_default_candidate_list_uses_repository_page_query() -> None:
     assert page_queries == 1
 
 
+def test_default_candidate_list_reports_repeated_ip_once() -> None:
+    repository = MemoryRepository()
+    repository.jobs["job-old"] = {"id": "job-old", "name": "old analysis"}
+    repository.jobs["job-new"] = {"id": "job-new", "name": "new analysis"}
+    repository.save_candidates(
+        "job-old",
+        [
+            {
+                "id": "candidate-old",
+                "candidate_ip": "203.0.113.77",
+                "score": 90,
+                "severity": "CRITICAL",
+                "last_seen": "2026-08-01T00:00:00Z",
+            }
+        ],
+    )
+    repository.save_candidates(
+        "job-new",
+        [
+            {
+                "id": "candidate-new",
+                "candidate_ip": "203.0.113.77",
+                "score": 70,
+                "severity": "HIGH",
+                "last_seen": "2026-08-02T00:00:00Z",
+            }
+        ],
+    )
+    client = TestClient(create_app(Settings(environment="test"), repository))
+
+    response = client.get("/api/v1/candidates?sort=-last_seen")
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert response.json()["items"][0]["id"] == "candidate-new"
+    assert response.json()["items"][0]["occurrence_count"] == 2
+    assert response.json()["items"][0]["duplicate_count"] == 1
+
+
+def test_filtered_candidate_list_collapses_repeated_ip_without_loading_every_job() -> None:
+    repository = MemoryRepository()
+    repository.jobs["job-old"] = {"id": "job-old", "name": "old analysis"}
+    repository.jobs["job-new"] = {"id": "job-new", "name": "new analysis"}
+    repository.save_candidates(
+        "job-old",
+        [
+            {
+                "id": "candidate-old",
+                "candidate_ip": "203.0.113.77",
+                "score": 90,
+                "last_seen": "2026-08-01T00:00:00Z",
+            }
+        ],
+    )
+    repository.save_candidates(
+        "job-new",
+        [
+            {
+                "id": "candidate-new",
+                "candidate_ip": "203.0.113.77",
+                "score": 70,
+                "last_seen": "2026-08-02T00:00:00Z",
+            }
+        ],
+    )
+    repository.list_jobs = Mock(side_effect=AssertionError("must not load every job"))
+    client = TestClient(create_app(Settings(environment="test"), repository))
+
+    response = client.get("/api/v1/candidates?verdict=UNREVIEWED&sort=-last_seen")
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert response.json()["items"][0]["id"] == "candidate-new"
+    assert response.json()["items"][0]["occurrence_count"] == 2
+
+
+def test_candidate_filters_use_latest_occurrence_workflow_for_repeated_ip() -> None:
+    repository = MemoryRepository()
+    repository.jobs["job-old"] = {"id": "job-old", "name": "old analysis"}
+    repository.jobs["job-new"] = {"id": "job-new", "name": "new analysis"}
+    repository.save_candidates(
+        "job-old",
+        [
+            {
+                "id": "candidate-old",
+                "candidate_ip": "203.0.113.77",
+                "score": 90,
+                "last_seen": "2026-08-01T00:00:00Z",
+            }
+        ],
+    )
+    repository.save_candidates(
+        "job-new",
+        [
+            {
+                "id": "candidate-new",
+                "candidate_ip": "203.0.113.77",
+                "score": 70,
+                "last_seen": "2026-08-02T00:00:00Z",
+            }
+        ],
+    )
+    repository.save_candidate_decision(
+        {
+            "id": "decision-old",
+            "candidate_id": "candidate-old",
+            "verdict": "FALSE_POSITIVE",
+            "confidence": "HIGH",
+            "note": "old occurrence only",
+            "created_by": "analyst",
+            "created_at": "2026-08-01T01:00:00+00:00",
+        }
+    )
+    client = TestClient(create_app(Settings(environment="test"), repository))
+
+    unfiltered = client.get("/api/v1/candidates")
+    false_positive = client.get("/api/v1/candidates?verdict=FALSE_POSITIVE")
+    unreviewed = client.get("/api/v1/candidates?verdict=UNREVIEWED")
+
+    assert unfiltered.status_code == 200
+    assert unfiltered.json()["workflow_counts"]["needs_review"] == 1
+    assert unfiltered.json()["workflow_counts"]["false_positive"] == 0
+    assert unfiltered.json()["workflow_counts"]["done"] == 0
+    assert false_positive.status_code == 200
+    assert false_positive.json()["total"] == 0
+    assert unreviewed.status_code == 200
+    assert unreviewed.json()["total"] == 1
+    assert unreviewed.json()["items"][0]["id"] == "candidate-new"
+    assert unreviewed.json()["items"][0]["occurrence_count"] == 2
+    assert unreviewed.json()["workflow_counts"]["needs_review"] == 1
+
+
+def test_analysis_candidate_list_reads_only_selected_workflow_records() -> None:
+    repository = MemoryRepository()
+    repository.jobs["job-1"] = {"id": "job-1", "name": "bounded workflow"}
+    repository.save_candidates(
+        "job-1", [{"id": "candidate-1", "candidate_ip": "203.0.113.44", "score": 90}]
+    )
+    repository.list_candidate_decisions = Mock(
+        side_effect=AssertionError("must not load every decision")
+    )
+    repository.list_candidate_actions = Mock(
+        side_effect=AssertionError("must not load every action")
+    )
+    repository.list_candidate_ti_lookups = Mock(
+        side_effect=AssertionError("must not load every lookup")
+    )
+    repository.list_candidate_misp_actions = Mock(
+        side_effect=AssertionError("must not load every MISP action")
+    )
+    client = TestClient(create_app(Settings(environment="test"), repository))
+
+    response = client.get("/api/v1/analysis-jobs/job-1/candidates")
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["items"]] == ["candidate-1"]
+
+
 def test_candidate_list_filters_response_workflow_independently_from_verdict() -> None:
     client, _, _, _ = _client()
     client.post(

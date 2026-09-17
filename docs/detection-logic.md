@@ -238,6 +238,8 @@ Packet evidence에서만 peak bucket을 계산하고 집계 Flow는 duration 기
 
 기본값은 `score = clamp(0, 100, sum(capped contributions) + sum(adjustments))`로 계산한다. 실행별 detector weight는 type별 기본 cap을 적용한 contribution에 곱하고 최대 `2 × cap`까지 허용하므로, `0.0–1.0` 감쇠뿐 아니라 `1.0–2.0` 증폭도 유효하다. 최종 점수는 항상 100으로 clamp하며 weight와 조정 점수를 run에 snapshot한다.
 
+전체 Candidate 조회는 분석별 원본 Candidate와 근거를 삭제하지 않으면서 동일 `candidate_ip`를 한 행으로 묶는다. 가장 최근 `last_seen` 발생을 대표 행으로 사용하고 `occurrence_count`와 `duplicate_count`로 반복 탐지 횟수를 표시한다. 분석 작업 상세에서는 해당 분석의 원본 Candidate를 그대로 제공하므로 개별 실행의 점수와 근거를 계속 추적할 수 있다.
+
 TCP 대용량 판정은 센서별 내부 endpoint와 외부 후보 endpoint의 동일 양방향 5-tuple을
 기본 60초의 configurable idle timeout으로 sessionize한다. 같은 5-tuple도 idle timeout을 넘겨
 재사용하면 별도 session으로 분리된다. 집계 Flow에 완전한 FIN 정보가 없어 모든 TCP 종료 경계를

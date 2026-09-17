@@ -5930,14 +5930,26 @@ ORDER BY source_kind,source_id
         }
         order_column = columns[field]
         where = " AND ".join(clauses)
+        group_key = "COALESCE(NULLIF(data->>'candidate_ip',''),candidate_id)"
         with self.connection.cursor() as cursor:
             cursor.execute(
-                f"SELECT COUNT(*) FROM candidate_records WHERE {where}",  # noqa: S608 -- code-owned clauses
+                f"SELECT COUNT(DISTINCT {group_key}) FROM candidate_records WHERE {where}",  # noqa: S608 -- code-owned expressions
                 parameters,
             )
             total_row = cursor.fetchone()
-            page_query = f"SELECT job_id,data FROM candidate_records WHERE {where} "  # noqa: S608 -- internal clauses
-            page_query += f"ORDER BY {order_column} {direction},candidate_id ASC LIMIT %s OFFSET %s"  # noqa: S608 -- allowlisted columns
+            page_query = (
+                "WITH filtered AS ("  # noqa: S608 -- clauses and sort columns are code-owned
+                f"SELECT job_id,candidate_id,score,severity,data,{group_key} AS group_key "
+                f"FROM candidate_records WHERE {where}"
+                "), ranked AS ("
+                "SELECT job_id,candidate_id,score,severity,data,"
+                "COUNT(*) OVER (PARTITION BY group_key) AS occurrence_count,"
+                "ROW_NUMBER() OVER (PARTITION BY group_key "
+                "ORDER BY COALESCE(data->>'last_seen','') DESC,candidate_id DESC) AS rank "
+                "FROM filtered) "
+                "SELECT job_id,data,occurrence_count FROM ranked WHERE rank=1 "
+                f"ORDER BY {order_column} {direction},candidate_id ASC LIMIT %s OFFSET %s"
+            )
             cursor.execute(
                 page_query,
                 [*parameters, page_size, (page - 1) * page_size],
@@ -5945,10 +5957,16 @@ ORDER BY source_kind,source_id
             rows = cursor.fetchall()
             self.connection.commit()
         total = int(total_row[0]) if total_row is not None else 0
-        return [
-            (str(row[0]), row[1] if isinstance(row[1], dict) else json.loads(row[1]))
-            for row in rows
-        ], total
+        result: list[tuple[str, dict[str, Any]]] = []
+        for row in rows:
+            candidate = row[1] if isinstance(row[1], dict) else json.loads(row[1])
+            candidate = deepcopy(candidate)
+            occurrence_count = int(row[2])
+            if occurrence_count > 1:
+                candidate["occurrence_count"] = occurrence_count
+                candidate["duplicate_count"] = occurrence_count - 1
+            result.append((str(row[0]), candidate))
+        return result, total
 
     def query_candidate_refs(
         self,
@@ -5983,7 +6001,13 @@ ORDER BY source_kind,source_id
         where = " AND ".join(f"c.{clause}" for clause in clauses)
         query = f"""
             WITH selected AS (
-              SELECT c.candidate_id FROM candidate_records c WHERE {where}
+              SELECT DISTINCT ON (group_key) candidate_id
+              FROM (
+                SELECT c.candidate_id,c.data,
+                  COALESCE(NULLIF(c.data->>'candidate_ip',''),c.candidate_id) AS group_key
+                FROM candidate_records c WHERE {where}
+              ) filtered
+              ORDER BY group_key,COALESCE(data->>'last_seen','') DESC,candidate_id DESC
             ), current_decision AS (
               SELECT DISTINCT ON (o.data->>'candidate_id')
                 o.data->>'candidate_id' AS candidate_id,

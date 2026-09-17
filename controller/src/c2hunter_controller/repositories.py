@@ -3253,6 +3253,27 @@ class MemoryRepository(
             severity=severity,
             include_suppressed=include_suppressed,
         )
+        grouped: dict[str, tuple[str, dict[str, Any], int]] = {}
+        for job_id, candidate in rows:
+            candidate_id = str(candidate["id"])
+            candidate_ip = str(candidate.get("candidate_ip") or "")
+            group_key = candidate_ip or f"candidate:{candidate_id}"
+            existing = grouped.get(group_key)
+            occurrence_count = 1 if existing is None else existing[2] + 1
+            if existing is None or (str(candidate.get("last_seen", "")), candidate_id) > (
+                str(existing[1].get("last_seen", "")),
+                str(existing[1]["id"]),
+            ):
+                grouped[group_key] = (job_id, candidate, occurrence_count)
+            else:
+                grouped[group_key] = (existing[0], existing[1], occurrence_count)
+        rows = []
+        for job_id, candidate, occurrence_count in grouped.values():
+            projected = deepcopy(candidate)
+            if occurrence_count > 1:
+                projected["occurrence_count"] = occurrence_count
+                projected["duplicate_count"] = occurrence_count - 1
+            rows.append((job_id, projected))
         descending = sort.startswith("-")
         field = sort.removeprefix("-")
         if field == "score":
@@ -3290,18 +3311,26 @@ class MemoryRepository(
         severity: str | None,
         include_suppressed: bool,
     ) -> dict[str, int]:
-        candidate_ids = [
-            str(candidate["id"])
-            for candidates in self.candidates.values()
-            for candidate in candidates
-            if int(candidate.get("score", 0)) >= minimum_score
-            and (severity is None or candidate.get("severity") == severity)
-            and (include_suppressed or not candidate.get("excluded", False))
-        ]
+        grouped: dict[str, dict[str, Any]] = {}
+        for _, candidate in self.query_candidates(
+            minimum_score=minimum_score,
+            severity=severity,
+            include_suppressed=include_suppressed,
+        ):
+            candidate_id = str(candidate["id"])
+            group_key = str(candidate.get("candidate_ip") or f"candidate:{candidate_id}")
+            existing = grouped.get(group_key)
+            if existing is None or (str(candidate.get("last_seen", "")), candidate_id) > (
+                str(existing.get("last_seen", "")),
+                str(existing["id"]),
+            ):
+                grouped[group_key] = candidate
+        candidate_ids = [str(candidate["id"]) for candidate in grouped.values()]
+        records = self.list_candidate_workflow_records(candidate_ids)
         return _candidate_workflow_counts_from_records(
             candidate_ids,
-            list(self.candidate_decisions.values()),
-            list(self.candidate_actions.values()),
+            records["decisions"],
+            records["actions"],
         )
 
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -5504,18 +5533,37 @@ class SQLiteRepository(
         }
         order_column = columns[field]
         where = " AND ".join(clauses)
+        group_key = "COALESCE(NULLIF(json_extract(data,'$.candidate_ip'),''),candidate_id)"
         total = int(
             self.connection.execute(
-                f"SELECT COUNT(*) FROM candidate_records WHERE {where}",  # noqa: S608 -- where is built from code-owned clauses
+                f"SELECT COUNT(DISTINCT {group_key}) FROM candidate_records WHERE {where}",  # noqa: S608 -- expressions are code-owned
                 parameters,
             ).fetchone()[0]
         )
         rows = self.connection.execute(
-            f"SELECT job_id,data FROM candidate_records WHERE {where} "  # noqa: S608 -- columns/clauses are allowlisted
+            "WITH filtered AS ("  # noqa: S608 -- columns and clauses are code-owned
+            f"SELECT job_id,candidate_id,score,severity,data,{group_key} AS group_key "
+            f"FROM candidate_records WHERE {where}"
+            "), ranked AS ("
+            "SELECT job_id,candidate_id,score,severity,data,"
+            "COUNT(*) OVER (PARTITION BY group_key) AS occurrence_count,"
+            "ROW_NUMBER() OVER (PARTITION BY group_key "
+            "ORDER BY COALESCE(json_extract(data,'$.last_seen'),'') DESC,"
+            "candidate_id DESC) AS rank "
+            "FROM filtered) "
+            "SELECT job_id,data,occurrence_count FROM ranked WHERE rank=1 "
             f"ORDER BY {order_column} {direction},candidate_id ASC LIMIT ? OFFSET ?",
             [*parameters, page_size, (page - 1) * page_size],
         ).fetchall()
-        return [(str(row[0]), json.loads(row[1])) for row in rows], total
+        result: list[tuple[str, dict[str, Any]]] = []
+        for row in rows:
+            candidate = json.loads(row[1])
+            occurrence_count = int(row[2])
+            if occurrence_count > 1:
+                candidate["occurrence_count"] = occurrence_count
+                candidate["duplicate_count"] = occurrence_count - 1
+            result.append((str(row[0]), candidate))
+        return result, total
 
     def query_candidate_refs(
         self,
@@ -5541,18 +5589,28 @@ class SQLiteRepository(
         severity: str | None,
         include_suppressed: bool,
     ) -> dict[str, int]:
-        candidate_ids = [
-            candidate_id
-            for candidate_id, _ in self.query_candidate_refs(
-                minimum_score=minimum_score,
-                severity=severity,
-                include_suppressed=include_suppressed,
-            )
-        ]
+        clauses, parameters = self._candidate_query_parts(
+            minimum_score, severity, include_suppressed
+        )
+        where = " AND ".join(clauses)
+        group_key = "COALESCE(NULLIF(json_extract(data,'$.candidate_ip'),''),candidate_id)"
+        rows = self.connection.execute(
+            "WITH filtered AS ("  # noqa: S608 -- columns and clauses are code-owned
+            f"SELECT candidate_id,data,{group_key} AS group_key "
+            f"FROM candidate_records WHERE {where}"
+            "), ranked AS ("
+            "SELECT candidate_id,ROW_NUMBER() OVER (PARTITION BY group_key "
+            "ORDER BY COALESCE(json_extract(data,'$.last_seen'),'') DESC,"
+            "candidate_id DESC) AS rank FROM filtered) "
+            "SELECT candidate_id FROM ranked WHERE rank=1",
+            parameters,
+        ).fetchall()
+        candidate_ids = [str(row[0]) for row in rows]
+        records = self.list_candidate_workflow_records(candidate_ids)
         return _candidate_workflow_counts_from_records(
             candidate_ids,
-            self.list_candidate_decisions(),
-            self.list_candidate_actions(),
+            records["decisions"],
+            records["actions"],
         )
 
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:

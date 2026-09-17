@@ -392,6 +392,30 @@ def _candidate_list_projection(candidate: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _collapse_candidate_occurrences(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, tuple[dict[str, Any], int]] = {}
+    for item in items:
+        candidate_id = str(item.get("id", ""))
+        candidate_ip = str(item.get("candidate_ip") or "")
+        group_key = candidate_ip or f"candidate:{candidate_id}"
+        existing = grouped.get(group_key)
+        count = 1 if existing is None else existing[1] + 1
+        if existing is None or (str(item.get("last_seen", "")), candidate_id) > (
+            str(existing[0].get("last_seen", "")),
+            str(existing[0].get("id", "")),
+        ):
+            grouped[group_key] = (item, count)
+        else:
+            grouped[group_key] = (existing[0], count)
+    collapsed: list[dict[str, Any]] = []
+    for item, count in grouped.values():
+        projected = dict(item)
+        projected["occurrence_count"] = count
+        projected["duplicate_count"] = count - 1
+        collapsed.append(projected)
+    return collapsed
+
+
 def _candidate_ti_priority(candidate: dict[str, Any]) -> tuple[int, int, int, int, float, str]:
     assessment = candidate["ti_assessment"]
     return (
@@ -4060,12 +4084,15 @@ def create_app(
         job = repo.get_job_summary(job_id)
         if job is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
-        workflow = _candidate_workflow_index(repo)
+        candidates = repo.get_candidates(job_id)
+        workflow = _candidate_workflow_index_from_records(
+            repo.list_candidate_workflow_records([str(item["id"]) for item in candidates])
+        )
         items = [
             _candidate_list_projection(
                 _public_candidate(_with_candidate_workflow(item, workflow), job)
             )
-            for item in repo.get_candidates(job_id)
+            for item in candidates
             if item["score"] >= minimum_score
             and (
                 include_suppressed or verdict == "FALSE_POSITIVE" or not item.get("excluded", False)
@@ -4089,11 +4116,10 @@ def create_app(
         job = repo.get_job_summary(job_id)
         if job is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
-        candidate = next(
-            (item for item in repo.get_candidates(job_id) if item["id"] == candidate_id), None
-        )
-        if candidate is None:
+        found = repo.get_candidate(candidate_id)
+        if found is None or found[0] != job_id:
             raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
+        candidate = found[1]
         if "traffic_buckets" not in candidate:
             job = repo.get_job(job_id) or job
         workflow = _candidate_workflow_index(repo, candidate_id)
@@ -4169,14 +4195,18 @@ def create_app(
                 "total_pages": max(1, (total + page_size - 1) // page_size),
                 "workflow_counts": workflow_counts,
             }
-        jobs = {str(job["id"]): job for job in repo.list_jobs()}
-        workflow = _candidate_workflow_index(repo)
-        items: list[dict[str, Any]] = []
         candidate_rows = repo.query_candidates(
             minimum_score=minimum_score,
             severity=severity,
             include_suppressed=include_suppressed or verdict == "FALSE_POSITIVE",
         )
+        jobs = repo.get_job_summaries([job_id for job_id, _ in candidate_rows])
+        workflow = _candidate_workflow_index_from_records(
+            repo.list_candidate_workflow_records(
+                [str(candidate["id"]) for _, candidate in candidate_rows]
+            )
+        )
+        items: list[dict[str, Any]] = []
         for job_id, candidate in candidate_rows:
             job = jobs.get(job_id)
             if job is None:
@@ -4186,6 +4216,7 @@ def create_app(
                     _public_candidate(_with_candidate_workflow(candidate, workflow), job)
                 )
             )
+        items = _collapse_candidate_occurrences(items)
         workflow_counts = _candidate_workflow_counts(items)
         if verdict:
             items = [item for item in items if _candidate_verdict(item) == verdict]
@@ -4318,20 +4349,18 @@ def create_app(
     @app.patch("/api/v1/candidates/{candidate_id}")
     def update_candidate(candidate_id: str, payload: CandidateUpdate) -> dict[str, Any]:
         """Update a candidate's metadata (score adjustment or exclusion)."""
-        # Find which job contains this candidate by searching all jobs
-        for job in repo.list_jobs():
-            candidates = repo.get_candidates(str(job["id"]))
-            for candidate in candidates:
-                if candidate.get("id") == candidate_id:
-                    updates: dict[str, Any] = {}
-                    if payload.score_adjustment is not None:
-                        updates["score_adjustment"] = payload.score_adjustment
-                    if payload.exclude_reason is not None:
-                        updates["exclude_reason"] = payload.exclude_reason
-
-                    updated = repo.update_candidate(candidate_id, updates)
-                    if updated is not None:
-                        return _public_candidate(updated, job)
+        found = repo.get_candidate(candidate_id)
+        if found is not None:
+            job_id, _ = found
+            job = repo.get_job_summary(job_id)
+            updates: dict[str, Any] = {}
+            if payload.score_adjustment is not None:
+                updates["score_adjustment"] = payload.score_adjustment
+            if payload.exclude_reason is not None:
+                updates["exclude_reason"] = payload.exclude_reason
+            updated = repo.update_candidate(candidate_id, updates)
+            if updated is not None and job is not None:
+                return _public_candidate(updated, job)
         raise ApiError(404, "CANDIDATE_NOT_FOUND", "후보를 찾을 수 없습니다")
 
     @app.post("/api/v1/candidates/{candidate_id}/verdicts")
