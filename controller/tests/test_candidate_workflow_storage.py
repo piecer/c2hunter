@@ -112,6 +112,61 @@ def test_sqlite_candidate_page_sorts_and_paginates_in_repository(tmp_path: Path)
     assert rows == [("job-1", _candidate("candidate-middle", 50))]
 
 
+@pytest.mark.parametrize("repository_kind", ["memory", "sqlite"])
+def test_candidate_page_collapses_repeated_ip_into_latest_occurrence(
+    tmp_path: Path, repository_kind: str
+) -> None:
+    repository = (
+        MemoryRepository()
+        if repository_kind == "memory"
+        else SQLiteRepository(tmp_path / "repeated-candidates.db")
+    )
+    repeated_ip = "203.0.113.77"
+    repository.save_candidates(
+        "job-old",
+        [
+            {
+                **_candidate("candidate-old", 80),
+                "candidate_ip": repeated_ip,
+                "last_seen": "2026-08-01T00:00:00Z",
+            }
+        ],
+    )
+    repository.save_candidates(
+        "job-new",
+        [
+            {
+                **_candidate("candidate-new", 70),
+                "candidate_ip": repeated_ip,
+                "last_seen": "2026-08-02T00:00:00Z",
+            }
+        ],
+    )
+
+    rows, total = repository.query_candidate_page(
+        minimum_score=0,
+        severity=None,
+        include_suppressed=False,
+        sort="-last_seen",
+        page=1,
+        page_size=50,
+    )
+
+    assert total == 1
+    assert rows == [
+        (
+            "job-new",
+            {
+                **_candidate("candidate-new", 70),
+                "candidate_ip": repeated_ip,
+                "last_seen": "2026-08-02T00:00:00Z",
+                "occurrence_count": 2,
+                "duplicate_count": 1,
+            },
+        )
+    ]
+
+
 def test_sqlite_candidate_workflow_counts_use_latest_decision_and_action(tmp_path: Path) -> None:
     repository = SQLiteRepository(tmp_path / "controller.db")
     repository.save_candidates(
