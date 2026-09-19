@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import ReportLanguageScope from './ReportLanguage';
 import { useReportLanguage } from './reportLanguageContext';
 import {
@@ -377,20 +377,24 @@ function Content({ report, detailOwner, setDetailOwner, ownerPrefix }: {
   </section>;
 }
 
-export default function DDoSAttackPanel({ report, detailOwner, setDetailOwner }: {
+export default function DDoSAttackPanel({ report, detailOwner, setDetailOwner, children }: {
   report: DDoSAttackReport;
   detailOwner?: string;
   setDetailOwner?: (owner: string | undefined) => void;
+  children?: ReactNode;
 }) {
   const [localOwner, setLocalOwner] = useState<string>();
   useEffect(() => {
     (setDetailOwner ?? setLocalOwner)(undefined);
   }, [report, setDetailOwner]);
   const signature = `${report.version}:${report.primary_finding_id ?? 'none'}:${String(report.summary?.finding_count ?? 'unknown')}`;
-  return <ReportLanguageScope><Content
-    report={report}
-    detailOwner={setDetailOwner ? detailOwner : localOwner}
-    setDetailOwner={setDetailOwner ?? setLocalOwner}
-    ownerPrefix={`ddos:${signature}`}
-  /></ReportLanguageScope>;
+  return <ReportLanguageScope><>
+    <Content
+      report={report}
+      detailOwner={setDetailOwner ? detailOwner : localOwner}
+      setDetailOwner={setDetailOwner ?? setLocalOwner}
+      ownerPrefix={`ddos:${signature}`}
+    />
+    {children}
+  </></ReportLanguageScope>;
 }

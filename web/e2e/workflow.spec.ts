@@ -305,7 +305,7 @@ test('candidate queue exposes workflow status and defaults to latest activity', 
   await expect(page.locator('.workflow-badge', { hasText: '미분석' })).toBeVisible();
 });
 
-test('analyst reviews a bounded bilingual DDoS report without C2 automation', async ({ page }) => {
+test('analyst reviews a bounded bilingual DDoS report with isolated AI output', async ({ page }) => {
   await installApiFixture(page);
   const requested: string[] = [];
   page.on('request', request => requested.push(new URL(request.url()).pathname));
@@ -327,5 +327,5 @@ test('analyst reviews a bounded bilingual DDoS report without C2 automation', as
   const report = page.locator('.ddos-report');
   expect(await report.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   expect(requested).not.toContain('/api/v1/analysis-jobs/ddos-job/candidates');
-  expect(requested).not.toContain('/api/v1/analysis-jobs/ddos-job/ai-runs');
+  expect(requested).toContain('/api/v1/analysis-jobs/ddos-job/ai-runs');
 });

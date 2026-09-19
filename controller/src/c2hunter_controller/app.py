@@ -224,6 +224,11 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _public_ai_run(run: dict[str, Any]) -> dict[str, Any]:
+    """Hide the DDoS model input snapshot while preserving the legacy public run contract."""
+    return {key: value for key, value in run.items() if key != "ddos_input"}
+
+
 def _validated_ddos_report(value: object) -> dict[str, Any]:
     report = DDoSAttackReport.model_validate(value)
     return cast(dict[str, Any], report.model_dump(mode="json", exclude_unset=True))
@@ -3267,7 +3272,9 @@ def create_app(
     @app.get("/api/v1/ai-capabilities")
     def ai_capabilities() -> dict[str, Any]:
         endpoint = urlsplit(config.ai_model_base_url)
-        supported = callable(getattr(gateway, "interpret_network_cancellable", None))
+        network_supported = callable(getattr(gateway, "interpret_network_cancellable", None))
+        ddos_supported = callable(getattr(gateway, "interpret_ddos_cancellable", None))
+        supported = network_supported or ddos_supported
         enabled = config.ai_analysis_enabled and ai_service is not None and ai_tasks is not None
         available = False
         if enabled and supported:
@@ -3284,7 +3291,8 @@ def create_app(
             else ("AI_ANALYSIS_DISABLED" if not enabled else "AI_MODEL_UNAVAILABLE")
         )
         return {
-            "network_interpretation": supported,
+            "network_interpretation": network_supported,
+            "ddos_interpretation": ddos_supported,
             "available": available,
             "provider": config.ai_model_provider,
             "model_name": config.ai_model_name,
@@ -3308,19 +3316,42 @@ def create_app(
         if not config.ai_analysis_enabled or ai_service is None or ai_tasks is None:
             raise ApiError(503, "AI_ANALYSIS_DISABLED", "AI 분석 기능이 비활성화되어 있습니다")
         source_job = repo.get_job_summary(job_id)
-        if source_job is not None and source_job.get("analysis", {}).get("module") == "ddos_attack":
+        source_module = (
+            source_job.get("analysis", {}).get("module") if source_job is not None else None
+        )
+        expected_kind = {
+            "c2": "C2",
+            "network_anomaly": "NETWORK_ANOMALY",
+            "ddos_attack": "DDOS_ATTACK",
+        }.get(str(source_module))
+        if expected_kind is not None and payload.analysis_kind != expected_kind:
+            if source_module == "ddos_attack":
+                raise ApiError(
+                    409,
+                    "ANALYSIS_MODULE_NOT_C2",
+                    "DDoS 분석에는 DDOS_ATTACK AI 분석 유형이 필요합니다",
+                )
             raise ApiError(
                 409,
-                "ANALYSIS_MODULE_NOT_C2",
-                "DDoS 분석 결과는 C2 AI 분석 대상이 아닙니다",
+                "ANALYSIS_KIND_MISMATCH",
+                "AI 분석 유형이 원본 분석 모듈과 일치하지 않습니다",
             )
-        if payload.analysis_kind == "NETWORK_ANOMALY":
+        if payload.analysis_kind in {"NETWORK_ANOMALY", "DDOS_ATTACK"}:
             if config.ai_model_endpoint_is_remote and not payload.allow_remote:
                 raise ApiError(409, "AI_REMOTE_CONSENT_REQUIRED", "Remote model consent required")
-            if not ai_capabilities()["available"]:
-                raise ApiError(
-                    503, "AI_MODEL_UNAVAILABLE", "Network interpretation model unavailable"
+            capabilities = ai_capabilities()
+            capability_name = (
+                "network_interpretation"
+                if payload.analysis_kind == "NETWORK_ANOMALY"
+                else "ddos_interpretation"
+            )
+            if not capabilities[capability_name] or not capabilities["available"]:
+                label = (
+                    "Network interpretation"
+                    if payload.analysis_kind == "NETWORK_ANOMALY"
+                    else "DDoS interpretation"
                 )
+                raise ApiError(503, "AI_MODEL_UNAVAILABLE", f"{label} model unavailable")
         principal = getattr(request.state, "principal", None)
         created_by = str(getattr(principal, "subject", "anonymous"))
         try:
@@ -3383,7 +3414,7 @@ def create_app(
                 "status": run["status"],
             },
         )
-        return {**run, "candidate_count": len(run.get("candidate_ids", []))}
+        return _public_ai_run({**run, "candidate_count": len(run.get("candidate_ids", []))})
 
     @app.get(
         "/api/v1/analysis-jobs/{job_id}/ai-runs",
@@ -3398,7 +3429,7 @@ def create_app(
         if repo.get_job_summary(job_id) is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
         runs = [
-            {**run, "candidate_count": len(run.get("candidate_ids", []))}
+            _public_ai_run({**run, "candidate_count": len(run.get("candidate_ids", []))})
             for run in repo.list_ai_runs(job_id)
         ]
         return _page(runs, page, page_size)
@@ -3412,7 +3443,7 @@ def create_app(
         run = repo.get_ai_run(run_id)
         if run is None:
             raise ApiError(404, "AI_RUN_NOT_FOUND", "AI 분석 Run을 찾을 수 없습니다")
-        return {**run, "candidate_count": len(run.get("candidate_ids", []))}
+        return _public_ai_run({**run, "candidate_count": len(run.get("candidate_ids", []))})
 
     @app.get("/api/v1/ai-runs/{run_id}/assessments")
     def list_ai_analysis_assessments(
@@ -3603,7 +3634,7 @@ def create_app(
                 "status": run["status"],
             },
         )
-        return {**run, "candidate_count": len(run.get("candidate_ids", []))}
+        return _public_ai_run({**run, "candidate_count": len(run.get("candidate_ids", []))})
 
     @app.get("/api/v1/analysis-jobs/{job_id}/flows")
     def list_analysis_flows(

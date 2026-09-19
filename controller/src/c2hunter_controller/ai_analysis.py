@@ -8,7 +8,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from c2hunter_analysis.ai_candidates import generate_high_recall_candidates
 from c2hunter_analysis.domain import AnalysisContext, Flow, normalize_tcp_syn_observations
@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from .ai_feedback import REVIEW_PRIORITY_VERSION, calculate_review_priority
 from .ai_gateway import AIAnalysisCancelled
+from .ddos_ai import DDoSOutputError
 from .network_ai import NetworkOutputError
 
 
@@ -748,9 +749,14 @@ class AIAnalysisService:
             raise AIAnalysisError("analysis job must be completed before AI analysis")
         if not 1 <= candidate_limit <= 5:
             raise AIAnalysisError("candidate_limit must be between 1 and 5")
-        if analysis_kind not in {"C2", "NETWORK_ANOMALY"} or language not in {"ko", "en"}:
+        if analysis_kind not in {"C2", "NETWORK_ANOMALY", "DDOS_ATTACK"} or language not in {
+            "ko",
+            "en",
+        }:
             raise AIAnalysisError("invalid analysis kind or language")
         network_input = None
+        ddos_input = None
+        candidates: list[dict[str, Any]]
         if analysis_kind == "NETWORK_ANOMALY":
             from .network_ai import build_network_input
 
@@ -758,6 +764,14 @@ class AIAnalysisService:
                 network_input = build_network_input(job.get("network_anomaly"), language)
             except (ValueError, TypeError):
                 raise AIAnalysisError("Network report input failed validation.") from None
+            candidates = []
+        elif analysis_kind == "DDOS_ATTACK":
+            from .ddos_ai import build_ddos_input
+
+            try:
+                ddos_input = build_ddos_input(job.get("ddos_attack"), language)
+            except (ValueError, TypeError):
+                raise AIAnalysisError("DDoS report input failed validation.") from None
             candidates = []
         else:
             candidates = _ranked_candidate_snapshots(
@@ -819,9 +833,24 @@ class AIAnalysisService:
                     "output_schema_version": "network-interpretation-v1",
                 }
             )
+        if ddos_input is not None:
+            from .ddos_ai import DDOS_PROMPT_HASH
+
+            run.update(
+                {
+                    "analysis_kind": analysis_kind,
+                    "language": language,
+                    "ddos_input": ddos_input,
+                    "prompt_name": "ddos_interpretation_system",
+                    "prompt_version": "1.0",
+                    "prompt_hash": DDOS_PROMPT_HASH,
+                    "input_schema_version": "ddos-ai-input-v1",
+                    "output_schema_version": "ddos-interpretation-v1",
+                }
+            )
         stored, created = self.repository.create_ai_run(run)
         if stored.get("analysis_kind", "C2") != analysis_kind or (
-            analysis_kind == "NETWORK_ANOMALY" and stored.get("language") != language
+            analysis_kind != "C2" and stored.get("language") != language
         ):
             raise AIAnalysisError("idempotency key already used for a different analysis request")
         return stored, created
@@ -872,10 +901,35 @@ class AIAnalysisService:
                     ),
                 )
                 run = self._transition(run, AIAnalysisState.VALIDATING, "validating network output")
-                interpretation = validate_network_interpretation(response, run["network_input"])
-                run["network_interpretation"] = interpretation.model_dump(mode="json")
+                network_interpretation = validate_network_interpretation(
+                    cast(dict[str, Any], response), run["network_input"]
+                )
+                run["network_interpretation"] = network_interpretation.model_dump(mode="json")
                 return self._transition(
                     run, AIAnalysisState.COMPLETED, "network interpretation validated"
+                )
+            if run.get("analysis_kind") == "DDOS_ATTACK":
+                from .ddos_ai import validate_ddos_interpretation
+
+                run = self._transition(run, AIAnalysisState.PREPARING, "loading DDoS snapshot")
+                interpret = getattr(self.gateway, "interpret_ddos_cancellable", None)
+                if not callable(interpret):
+                    raise AIAnalysisError("DDoS model provider unavailable")
+                run = self._transition(run, AIAnalysisState.ANALYZING, "calling DDoS model")
+                response = interpret(
+                    run["ddos_input"],
+                    should_cancel=lambda: (
+                        (latest := self.repository.get_ai_run(run_id)) is not None
+                        and latest.get("status") == AIAnalysisState.CANCELLED
+                    ),
+                )
+                run = self._transition(run, AIAnalysisState.VALIDATING, "validating DDoS output")
+                ddos_interpretation = validate_ddos_interpretation(
+                    cast(dict[str, Any], response), run["ddos_input"]
+                )
+                run["ddos_interpretation"] = ddos_interpretation.model_dump(mode="json")
+                return self._transition(
+                    run, AIAnalysisState.COMPLETED, "DDoS interpretation validated"
                 )
             run = self._transition(run, AIAnalysisState.PREPARING, "building evidence bundles")
             snapshots = run.get("candidate_snapshots")
@@ -963,9 +1017,10 @@ class AIAnalysisService:
             run["error_message"] = "Model request timed out."
             return self._transition(run, AIAnalysisState.FAILED, "model timeout")
         except (AIAnalysisError, ValidationError, TypeError, ValueError) as exc:
-            if run.get("analysis_kind") == "NETWORK_ANOMALY" and isinstance(
-                exc, NetworkOutputError
-            ):
+            if (
+                run.get("analysis_kind") == "NETWORK_ANOMALY"
+                and isinstance(exc, NetworkOutputError)
+            ) or (run.get("analysis_kind") == "DDOS_ATTACK" and isinstance(exc, DDoSOutputError)):
                 run["failure_diagnostic"] = exc.diagnostic.model_dump(
                     mode="json", exclude_none=True
                 )

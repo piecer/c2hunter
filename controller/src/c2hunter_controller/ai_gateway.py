@@ -250,6 +250,77 @@ class StructuredLocalGateway:
                 )
         raise ValueError("invalid network interpretation")
 
+    def interpret_ddos_cancellable(
+        self, bundle: dict[str, Any], *, should_cancel: Callable[[], bool]
+    ) -> dict[str, Any]:
+        from .ddos_ai import (
+            DDOS_PROMPT,
+            DDoSInterpretation,
+            DDoSOutputError,
+            DDoSSemanticError,
+            canonical_ddos_input,
+            validate_ddos_interpretation,
+        )
+        from .network_ai import NetworkFailureDiagnostic, ProviderFinishReason
+
+        messages = [
+            {"role": "system", "content": DDOS_PROMPT},
+            {
+                "role": "user",
+                "content": "Bounded deterministic DDoS report JSON:\n"
+                + canonical_ddos_input(bundle),
+            },
+        ]
+        schema = DDoSInterpretation.model_json_schema()
+        finish_reason: ProviderFinishReason | None = None
+
+        def observe_response(response: dict[str, Any]) -> None:
+            nonlocal finish_reason
+            value = response.get("done_reason") if self.provider == "ollama" else None
+            if self.provider == "openai-compatible":
+                choices = response.get("choices")
+                if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                    value = choices[0].get("finish_reason")
+            finish_reason = (
+                cast(ProviderFinishReason, value)
+                if isinstance(value, str)
+                and value in {"stop", "length", "load", "unload", "tool_calls", "content_filter"}
+                else None
+            )
+
+        for attempt in range(2):
+            raw = self._complete(messages, schema, should_cancel, on_response=observe_response)
+            if should_cancel():
+                raise AIAnalysisCancelled("DDoS interpretation cancelled")
+            try:
+                result = validate_ddos_interpretation(self._parse_content(raw), bundle)
+                return cast(dict[str, Any], result.model_dump(mode="json"))
+            except (ValidationError, ValueError, TypeError) as exc:
+                diagnostic = NetworkFailureDiagnostic(
+                    type=(
+                        "JSON_PARSE"
+                        if isinstance(exc, json.JSONDecodeError)
+                        else exc.category
+                        if isinstance(exc, DDoSSemanticError)
+                        else "SCHEMA"
+                    ),
+                    attempt_count=attempt + 1,
+                    repair_count=attempt,
+                    output_bytes=len(raw.encode("utf-8", errors="replace")),
+                    provider_finish_reason=finish_reason,
+                )
+                if attempt:
+                    raise DDoSOutputError(diagnostic) from None
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": f"Invalid output category: {diagnostic.type}. "
+                        "Return the exact schema in the requested language; cite only supplied "
+                        "finding IDs, preserve the deterministic verdict, and do not add fields.",
+                    }
+                )
+        raise ValueError("invalid DDoS interpretation")
+
     def _complete(
         self,
         messages: list[dict[str, str]],

@@ -260,7 +260,24 @@ it('submits the dedicated DDoS module and thresholds from the live analysis form
   expect(JSON.stringify(submitted)).not.toContain('detector_weights');
 });
 
-it('renders the real DDoS report in job detail without requesting C2 candidates or AI', async () => {
+it('shows DDoS findings and verdict in analysis history instead of zero C2 candidates', async () => {
+  localStorage.setItem('c2hunter-token', 'test-token');
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input).startsWith('/api/v1/analysis-jobs?')) return Response.json({ items: [{
+      id: 'ddos-history', name: 'DDoS history', status: 'COMPLETED', analysis: { module: 'ddos_attack' },
+      source_type: 'PCAP_UPLOAD', source: { filename: 'attack.pcap', size_bytes: 2048 },
+      ddos_attack_summary: { verdict: 'suspicious_traffic', confidence: 'medium', finding_count: 3 },
+    }] });
+    return Response.json({ items: [] });
+  }));
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses']}><App/></MemoryRouter></QueryClientProvider>);
+  expect(await screen.findByText('3')).toBeVisible();
+  expect(screen.getByText('DDoS findings')).toBeVisible();
+  expect(screen.getByText('suspicious_traffic · medium confidence')).toBeVisible();
+  expect(screen.queryByText('0 candidates')).not.toBeInTheDocument();
+});
+
+it('renders the real DDoS report with its dedicated AI output and without C2 candidates', async () => {
   localStorage.setItem('c2hunter-token', 'test-token');
   const requests: string[] = [];
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -280,5 +297,5 @@ it('renders the real DDoS report in job detail without requesting C2 candidates 
   expect(screen.queryByRole('region', { name: 'DDoS 발견 근거' })).not.toBeInTheDocument();
   expect(screen.queryByText('AI C2 분석')).not.toBeInTheDocument();
   expect(requests).not.toContain('/api/v1/analysis-jobs/ddos-job/candidates?page_size=200');
-  expect(requests).not.toContain('/api/v1/analysis-jobs/ddos-job/ai-runs');
+  expect(requests).toContain('/api/v1/analysis-jobs/ddos-job/ai-runs');
 });
