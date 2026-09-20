@@ -181,6 +181,9 @@ func (d *packetDecoder) Decode(data []byte, info gopacket.CaptureInfo, iface str
 		p.SourceIP = netip.AddrFrom4([4]byte(d.ip4.SrcIP))
 		p.DestinationIP = netip.AddrFrom4([4]byte(d.ip4.DstIP))
 		p.IPID = d.ip4.Id
+		p.IPIDObserved = true
+		p.HopLimit = d.ip4.TTL
+		p.HopLimitObserved = true
 	} else if decodedLayer(d.decoded, layers.LayerTypeIPv6) {
 		src, ok1 := netip.AddrFromSlice(d.ip6.SrcIP)
 		dst, ok2 := netip.AddrFromSlice(d.ip6.DstIP)
@@ -190,6 +193,8 @@ func (d *packetDecoder) Decode(data []byte, info gopacket.CaptureInfo, iface str
 		p.IPVersion = 6
 		p.SourceIP = src
 		p.DestinationIP = dst
+		p.HopLimit = d.ip6.HopLimit
+		p.HopLimitObserved = true
 	} else {
 		return packet.Packet{}, fmt.Errorf("%w: non-IP packet", ErrUnsupportedPacket)
 	}

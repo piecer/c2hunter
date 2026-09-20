@@ -89,6 +89,24 @@ def limit_flow_records(
         item["packet_count"] = remaining
         total_bytes = _record_bytes(item)
         item["total_bytes"] = total_bytes * remaining // packet_count
+        item["average_packet_size"] = item["total_bytes"] / remaining
+        # A partial aggregated flow cannot identify which packet-level
+        # observations fall inside the retained prefix. Preserve proportional
+        # byte totals, but fail closed on sampled and identity telemetry.
+        item["packet_sizes"] = []
+        item["hop_limit_min"] = None
+        item["hop_limit_max"] = None
+        item["hop_limit_mode"] = None
+        item["hop_limit_distinct_count"] = 0
+        item["ip_id_observed_count"] = 0
+        item["ip_id_zero_count"] = 0
+        item["ip_id_distinct_count"] = 0
+        item["ip_id_monotonic_transitions"] = 0
+        item["ip_id_transition_count"] = 0
+        item["ip_id_values_truncated"] = True
+        item["ip_ttl"] = None
+        item["transport_payload_packet_count"] = None
+        item["packet_evidence_complete"] = False
         # Clear TCP counters when packet boundaries are uncertain.
         tcp_flags = item.get("tcp_flags")
         if isinstance(tcp_flags, dict):

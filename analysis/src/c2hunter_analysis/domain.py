@@ -30,6 +30,17 @@ class Flow:
     certificate_fingerprint: str | None = None
     domain: str | None = None
     packet_sizes: tuple[int, ...] = ()
+    average_packet_size: float | None = None
+    hop_limit_min: int | None = None
+    hop_limit_max: int | None = None
+    hop_limit_mode: int | None = None
+    hop_limit_distinct_count: int = 0
+    ip_id_observed_count: int = 0
+    ip_id_zero_count: int = 0
+    ip_id_distinct_count: int = 0
+    ip_id_values_truncated: bool = False
+    ip_id_monotonic_transitions: int = 0
+    ip_id_transition_count: int = 0
     attack_target_ip: str | None = None
     duration_seconds: float = 0.0
     last_payload_hash: str | None = None

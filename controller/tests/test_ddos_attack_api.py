@@ -108,7 +108,7 @@ def test_inline_ddos_analysis_persists_independent_report_without_candidates() -
     assert job["status"] == "COMPLETED"
     assert job["analysis"]["module"] == "ddos_attack"
     assert job["candidate_count"] == 0
-    assert job["ddos_attack"]["version"] == "ddos-attack-report-v1"
+    assert job["ddos_attack"]["version"] == "ddos-attack-report-v2"
     assert job["ddos_attack"]["findings"][0]["attack_type"] == "TCP_SYN_FLOOD"
     assert job["ddos_attack_summary"] == {
         "verdict": "suspicious_traffic",
@@ -266,7 +266,7 @@ def test_pcap_upload_accepts_ddos_module_and_retains_packet_evidence() -> None:
     assert job["analysis"]["ddos_min_packet_count"] == 6
     assert job["analysis"]["ddos_bucket_seconds"] == 10
     assert job["analysis"]["ddos_overlap_window_seconds"] == 20
-    assert job["ddos_attack"]["version"] == "ddos-attack-report-v1"
+    assert job["ddos_attack"]["version"] == "ddos-attack-report-v2"
     assert job["ddos_attack"]["summary"]["evaluated_records"] > 0
     finding = job["ddos_attack"]["findings"][0]
     assert finding["attack_type"] == "UDP_FLOOD"
@@ -303,7 +303,7 @@ def test_durable_worker_result_is_validated_and_persisted() -> None:
         job["flow_records"] = syn_records()
         result = execute_analysis(job)
         assert result["candidates"] == []
-        assert result["ddos_attack"]["version"] == "ddos-attack-report-v1"
+        assert result["ddos_attack"]["version"] == "ddos-attack-report-v2"
         queue.results.append(
             {
                 "receipt": "ddos-result",
@@ -412,6 +412,7 @@ def test_ddos_report_metrics_are_closed_and_bounded() -> None:
         }
     )
     assert maximum_components.component_finding_count == 4096
+
     large_aggregate_packet = DDoSMetrics.model_validate({"average_packet_bytes": 1_000_000})
     assert large_aggregate_packet.average_packet_bytes == 1_000_000
     report = (
@@ -433,6 +434,15 @@ def test_ddos_report_metrics_are_closed_and_bounded() -> None:
     with pytest.raises(ValidationError):
         DDoSAttackReport.model_validate(missing_facts)
 
+    missing_phase2_metrics = (
+        api()
+        .post("/api/v1/analysis-jobs", json=ddos_payload("missing-phase2-metrics"))
+        .json()["ddos_attack"]
+    )
+    del missing_phase2_metrics["findings"][0]["metrics"]["hop_limit_min"]
+    with pytest.raises(ValidationError, match="Phase 2 identity metrics"):
+        DDoSAttackReport.model_validate(missing_phase2_metrics)
+
     inconsistent = (
         api()
         .post("/api/v1/analysis-jobs", json=ddos_payload("verdict-contract"))
@@ -451,6 +461,77 @@ def test_ddos_report_metrics_are_closed_and_bounded() -> None:
     coerced_count["findings"][0]["metrics"]["packet_count"] = "1200"
     with pytest.raises(ValidationError):
         DDoSAttackReport.model_validate(coerced_count)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("delivery_mechanism", "REFLECTION_AMPLIFICATION"),
+        ("source_population", "REFLECTOR_SET"),
+        ("source_authenticity", "SOURCE_CONSISTENT"),
+    ],
+)
+def test_ddos_report_rejects_semantically_inconsistent_classification(
+    field: str, value: str
+) -> None:
+    report = analyze_ddos_attack(
+        syn_records(),
+        internal_cidrs=("10.0.0.0/8",),
+        parameters=DDOS_PARAMETERS,
+    )
+    finding = report["findings"][0]
+    finding["classification"][field] = value
+
+    with pytest.raises(ValidationError, match="classification"):
+        DDoSAttackReport.model_validate(report)
+
+
+def test_generated_mixed_authenticity_multi_vector_validates_end_to_end() -> None:
+    tcp_records: list[dict[str, object]] = []
+    reflection_records: list[dict[str, object]] = []
+    for row in syn_records():
+        tcp_records.append(
+            {
+                **row,
+                "packet_count": 8,
+                "total_bytes": 480,
+                "tcp_syn_count": 8,
+                "tcp_syn_only_count": 8,
+                "hop_limit_min": 32,
+                "hop_limit_max": 128,
+                "hop_limit_mode": 64,
+                "hop_limit_distinct_count": 5,
+                "ip_id_observed_count": 8,
+                "ip_id_distinct_count": 8,
+                "ip_id_monotonic_transitions": 0,
+                "ip_id_transition_count": 7,
+            }
+        )
+        reflection_records.append(
+            {
+                **row,
+                "protocol": "UDP",
+                "source_port": 53,
+                "destination_port": 53000,
+                "packet_count": 1,
+                "total_bytes": 600,
+                "tcp_flags": None,
+                "tcp_flags_observed": False,
+                "tcp_syn_count": 0,
+                "tcp_syn_only_count": 0,
+            }
+        )
+
+    report = analyze_ddos_attack(
+        [*tcp_records, *reflection_records],
+        internal_cidrs=("10.0.0.0/8",),
+        parameters=DDOS_PARAMETERS,
+    )
+    multi = next(item for item in report["findings"] if item["attack_type"] == "MULTI_VECTOR")
+
+    assert multi["classification"]["source_authenticity"] == "MIXED"
+    assert multi["classification"]["confidence"] == "medium"
+    DDoSAttackReport.model_validate(report)
 
 
 def test_maximum_derived_finding_cardinality_validates_end_to_end(monkeypatch) -> None:

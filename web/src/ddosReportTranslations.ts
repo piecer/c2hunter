@@ -26,6 +26,52 @@ export const roles: Record<string, Localized> = {
   PARTICIPANT_SIDE_OUTBOUND: ['Outbound attack participation observed', '내부 호스트의 외부 공격 참여 트래픽'],
   UNKNOWN: ['Attack role unknown', '공격 역할 불명'],
 };
+export const deliveryMechanisms: Record<string, Localized> = {
+  DIRECT_DISTRIBUTED: ['Direct distributed delivery', '직접 분산 전달'],
+  REFLECTION_AMPLIFICATION: ['Reflection/amplification delivery', '반사·증폭 전달'],
+  MIXED: ['Mixed delivery mechanisms', '복합 전달 방식'],
+  UNKNOWN: ['Delivery mechanism unknown', '전달 방식 불명'],
+};
+export const sourcePopulations: Record<string, Localized> = {
+  BOTNET_LIKE_COORDINATION: ['Botnet-like coordinated sources', 'Botnet 유사 공조 source'],
+  REFLECTOR_SET: ['Observed reflector population', '관찰된 reflector 집합'],
+  DISTRIBUTED_UNATTRIBUTED: ['Distributed sources without attribution', '귀속되지 않은 분산 source'],
+  MIXED: ['Mixed source populations', '복합 source 집단'],
+  UNKNOWN: ['Source population unknown', 'source 집단 불명'],
+};
+export const sourceAuthenticities: Record<string, Localized> = {
+  SOURCE_CONSISTENT: ['Source metadata is internally consistent', 'source 메타데이터 내부 일관성 관찰'],
+  SPOOFING_SUSPECTED: ['Spoofing suspected; not confirmed', 'Spoofing 의심 — 미확인'],
+  SPOOFING_UNCONFIRMED: ['Spoofing not confirmed', 'Spoofing 미확인'],
+  MIXED: ['Mixed source-authenticity signals', '복합 source 진위 신호'],
+  UNKNOWN: ['Source authenticity unknown', 'source 진위 불명'],
+};
+export const classificationConfidences: Record<string, Localized> = {
+  high: ['High classification confidence', '분류 신뢰도 높음'],
+  medium: ['Medium classification confidence', '분류 신뢰도 보통'],
+  low: ['Low classification confidence', '분류 신뢰도 낮음'],
+};
+export const commonPatternTypes: Record<string, Localized> = {
+  DESTINATION_CONVERGENCE: ['Destination convergence', '대상 집중 패턴'],
+  REFLECTION_SERVICE_CONVERGENCE: ['Reflection-service convergence', '반사 서비스 집중 패턴'],
+  PACKET_SIZE_CLUSTER: ['Packet-size cluster', '패킷 크기 군집'],
+  PAYLOAD_PREFIX_CLUSTER: ['Payload-prefix hash cluster', 'Payload prefix hash 군집'],
+  TCP_SYN_FLAG_DOMINANCE: ['SYN flag dominance', 'SYN flag 우세'],
+  TCP_ACK_FLAG_DOMINANCE: ['ACK flag dominance', 'ACK flag 우세'],
+  TCP_RST_FLAG_DOMINANCE: ['RST flag dominance', 'RST flag 우세'],
+  HOP_LIMIT_DIVERSITY: ['Within-flow hop-limit diversity', 'Flow 내부 Hop Limit 다양성'],
+  IP_ID_INCONSISTENCY: ['IP ID sequence inconsistency', 'IP ID 순서 불일치'],
+};
+export const signatureKinds: Record<string, Localized> = {
+  TRAFFIC_SHAPE: ['Traffic-shape candidate', '트래픽 형태 시그니처 후보'],
+  REFLECTION_PROFILE: ['Reflection profile candidate', '반사 프로파일 후보'],
+  SPOOFING_HEURISTIC: ['Spoofing heuristic candidate', 'Spoofing 휴리스틱 후보'],
+};
+export const falsePositiveCodes: Record<string, Localized> = {
+  SOURCE_ADDRESSES_MAY_BE_SPOOFED: ['Observed source addresses may be spoofed.', '관찰된 source 주소가 spoofing되었을 수 있습니다.'],
+  DISTRIBUTED_TRAFFIC_MAY_HAVE_LEGITIMATE_CAUSES: ['Distributed traffic may have legitimate causes.', '분산 트래픽은 정상 원인일 수 있습니다.'],
+  MULTIPATH_OR_NAT_MAY_CHANGE_NETWORK_IDENTITY_FEATURES: ['Multipath routing or NAT may change network-identity features.', '다중 경로 routing 또는 NAT가 네트워크 identity 특성을 바꿀 수 있습니다.'],
+};
 export const recommendations: Record<string, Localized> = {
   PRESERVE_CAPTURE_AND_LOGS: ['Preserve capture and device/service logs', '캡처와 장비·서비스 로그 보존'],
   VERIFY_SERVICE_IMPACT: ['Verify measured service and infrastructure impact', '서비스 및 인프라 영향 실측 확인'],
@@ -96,6 +142,8 @@ export const uncertainties: Record<string, Localized> = {
   RESETS_MAY_BE_DEFENSIVE_RESPONSES: ['RST traffic may be a defensive or service response.', 'RST 트래픽은 방어 장비 또는 서비스 응답일 수 있습니다.'],
   AMPLIFICATION_RATIO_UNOBSERVED: ['No request/response amplification ratio was measured.', '요청·응답 증폭비를 측정하지 못했습니다.'],
   SOURCE_SPOOFING_UNCONFIRMED: ['Source spoofing is not confirmed.', 'source spoofing은 확인되지 않았습니다.'],
+  SOURCE_SPOOFING_NOT_CONFIRMED: ['Network-identity anomalies do not confirm source spoofing.', '네트워크 identity 이상만으로 source spoofing이 확인되지는 않습니다.'],
+  BOTNET_ATTRIBUTION_UNCONFIRMED: ['Botnet-like coordination does not confirm botnet attribution.', 'Botnet 유사 공조만으로 Botnet 귀속이 확인되지는 않습니다.'],
   ICMP_TYPE_UNAVAILABLE: ['ICMP type metadata is unavailable.', 'ICMP type metadata가 없습니다.'],
   SHARED_TARGET_DOES_NOT_PROVE_SHARED_ACTOR: ['A shared target does not prove a shared actor.', '공통 대상이 동일 공격 주체를 입증하지 않습니다.'],
   BUCKET_LIMIT_REACHED: warnings.BUCKET_LIMIT_REACHED,
@@ -118,4 +166,12 @@ export const metricLabels: Record<string, Localized> = {
   dominant_reflection_source_port: ['Dominant reflection source port', '주요 반사 source port'], reflection_source_port_ratio: ['Reflection source-port ratio', '반사 source port 비율'],
   amplification_ratio: ['Measured amplification ratio', '측정 증폭비'], icmp_type_observed_packets: ['Packets with ICMP type', 'ICMP type 관찰 패킷'],
   icmp_echo_request_ratio: ['ICMP echo-request ratio', 'ICMP echo request 비율'], component_types: ['Component attack types', '구성 공격 유형'], component_finding_count: ['Component findings', '구성 발견 항목 수'],
+  hop_limit_min: ['Minimum observed Hop Limit / TTL', '최소 관찰 Hop Limit / TTL'],
+  hop_limit_max: ['Maximum observed Hop Limit / TTL', '최대 관찰 Hop Limit / TTL'],
+  network_identity_observed_records: ['Records with network-identity telemetry', '네트워크 identity telemetry 관찰 레코드'],
+  network_identity_anomaly_records: ['Records with network-identity anomalies', '네트워크 identity 이상 레코드'],
+  ip_id_observed_count: ['Observed IPv4 ID samples', '관찰 IPv4 ID 표본'],
+  ip_id_distinct_count: ['Distinct IPv4 ID values (bounded)', '고유 IPv4 ID 값(상한 적용)'],
+  ip_id_monotonic_ratio: ['IPv4 ID monotonic-transition ratio', 'IPv4 ID 단조 전이 비율'],
+  network_identity_values_truncated: ['Network-identity distinct values truncated', '네트워크 identity 고유값 절단 여부'],
 };

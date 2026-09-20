@@ -40,6 +40,24 @@ func TestAggregatorBuildsKeyAndStatistics(t *testing.T) {
 	}
 }
 
+func TestAggregatorTracksBoundedNetworkIdentityStatistics(t *testing.T) {
+	aggregator := NewAggregator("sensor-a", "job-a", time.Minute)
+	first := flowPacket(time.Unix(1, 0).UTC(), "198.51.100.1", "10.0.0.1", 53, 53000, "x")
+	first.HopLimit, first.HopLimitObserved, first.IPID, first.IPIDObserved = 64, true, 10, true
+	second := flowPacket(time.Unix(2, 0).UTC(), "198.51.100.1", "10.0.0.1", 53, 53000, "x")
+	second.HopLimit, second.HopLimitObserved, second.IPID, second.IPIDObserved = 63, true, 11, true
+	aggregator.Add(first)
+	aggregator.Add(second)
+
+	record := aggregator.Flush()[0]
+	if record.HopLimitMin != 63 || record.HopLimitMax != 64 || record.HopLimitMode != 63 || record.HopLimitDistinctCount != 2 {
+		t.Fatalf("hop limit statistics = %+v", record)
+	}
+	if record.IPIDObservedCount != 2 || record.IPIDDistinctCount != 2 || record.IPIDMonotonicTransitions != 1 || record.IPIDTransitionCount != 1 {
+		t.Fatalf("IP ID statistics = %+v", record)
+	}
+}
+
 func TestAggregatorRejectsNegativeWireLengthWithoutMutatingState(t *testing.T) {
 	a := NewAggregator("sensor-a", "job-1", time.Minute)
 	p := flowPacket(time.Unix(100, 0), "10.0.0.1", "203.0.113.1", 1000, 443, "payload")

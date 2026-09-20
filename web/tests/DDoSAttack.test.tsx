@@ -17,11 +17,28 @@ const contractBytes = readFileSync('tests/fixtures/ddos-report-contract.json', '
 const scenarioBytes = readFileSync('tests/fixtures/ddos-report-scenarios.json', 'utf8');
 const produceScenarios = () => execFileSync(python, ['tests/ddos_report_scenarios.py'], { encoding: 'utf8' });
 const scenarios = JSON.parse(scenarioBytes) as Record<string, DDoSAttackReport>;
+const identityMetricKeys = [
+  'hop_limit_min', 'hop_limit_max', 'network_identity_observed_records',
+  'network_identity_anomaly_records', 'ip_id_observed_count', 'ip_id_distinct_count',
+  'ip_id_monotonic_ratio', 'network_identity_values_truncated',
+];
+const asV1 = (source: DDoSAttackReport): DDoSAttackReport => {
+  const legacy = structuredClone(source);
+  legacy.version = 'ddos-attack-report-v1';
+  legacy.catalog_version = 'ddos-taxonomy-v1';
+  for (const finding of legacy.findings) {
+    delete finding.classification;
+    delete finding.common_patterns;
+    delete finding.signature_candidates;
+    for (const key of identityMetricKeys) delete finding.metrics[key];
+  }
+  return legacy;
+};
 
 it('freezes deterministic bytes from the real DDoS producer', () => {
   expect(produce()).toBe(contractBytes);
   expect(produce()).toBe(contractBytes);
-  expect(report.version).toBe('ddos-attack-report-v1');
+  expect(report.version).toBe('ddos-attack-report-v2');
 });
 
 it('round-trips every attack family role and coverage outcome through the strict UI parser', () => {
@@ -41,6 +58,62 @@ it('round-trips every attack family role and coverage outcome through the strict
   for (const [name, scenario] of Object.entries(scenarios)) {
     const { unmount } = render(<DDoSAttackPanel report={scenario}/>);
     expect(screen.queryByRole('alert'), name).not.toBeInTheDocument();
+    unmount();
+  }
+});
+
+it('accepts a producer-valid mixed-authenticity multi-vector classification', () => {
+  const mixed = structuredClone(scenarios.multi_vector);
+  const finding = mixed.findings.find(item => item.attack_type === 'MULTI_VECTOR')!;
+  finding.classification!.source_authenticity = 'MIXED';
+  finding.classification!.confidence = 'medium';
+  finding.uncertainty_codes.push('SOURCE_SPOOFING_NOT_CONFIRMED');
+
+  render(<DDoSAttackPanel report={mixed}/>);
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+it('keeps accepting stored v1 reports without v2-only fields', () => {
+  render(<DDoSAttackPanel report={asV1(report)}/>);
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  expect(screen.getAllByText('TCP SYN 플러드')).toHaveLength(2);
+});
+
+it('renders v2 delivery source authenticity patterns and review-only signatures', () => {
+  render(<DDoSAttackPanel report={scenarios.possible_reflection}/>);
+  const glance = screen.getByRole('region', { name: 'DDoS 한눈에 보기' });
+  expect(within(glance).getByText(/반사·증폭 전달/)).toBeVisible();
+  expect(within(glance).getByText(/reflector 집합/)).toBeVisible();
+  expect(within(glance).getByText(/Spoofing 미확인/)).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: /상세 근거 보기/ }));
+  const evidence = screen.getByRole('region', { name: 'DDoS 발견 근거' });
+  expect(within(evidence).getByText('공통 패턴')).toBeVisible();
+  expect(within(evidence).getByText(/반사 서비스 집중 패턴/)).toBeVisible();
+  expect(within(evidence).getByText('시그니처 후보')).toBeVisible();
+  expect(within(evidence).getByText(/반사 프로파일 후보/)).toBeVisible();
+  expect(within(evidence).getByText(/후보일 뿐이며 적용 전 검토와 운영자 승인이 필요/)).toBeVisible();
+  expect(within(evidence).getByText(/source spoofing은 확인되지 않았습니다/)).toBeVisible();
+});
+
+it('fails closed on malformed or attribution-overclaiming v2 fields', () => {
+  const mutations: Array<(value: DDoSAttackReport) => void> = [
+    value => { value.findings[0].classification!.source_authenticity = 'SPOOFING_CONFIRMED'; },
+    value => { value.findings[0].classification!.source_population = 'BOTNET_CONFIRMED'; },
+    value => { value.findings[0].classification!.delivery_mechanism = 'REFLECTION_AMPLIFICATION'; },
+    value => { value.findings[0].classification!.source_population = 'REFLECTOR_SET'; },
+    value => { value.findings[0].classification!.source_authenticity = 'SOURCE_CONSISTENT'; },
+    value => { value.findings[0].common_patterns![0].type = 'RAW_PATTERN'; },
+    value => { value.findings[0].signature_candidates![0].kind = 'AUTO_BLOCK_RULE'; },
+    value => { value.findings[0].signature_candidates![0].requires_human_approval = false; },
+    value => { value.findings[0].signature_candidates![0].false_positive_codes = []; },
+  ];
+  for (const mutate of mutations) {
+    const poisoned = structuredClone(report);
+    mutate(poisoned);
+    const { unmount } = render(<DDoSAttackPanel report={poisoned}/>);
+    expect(screen.getByRole('alert')).toHaveTextContent('지원되지 않는 DDoS 보고서');
+    expect(document.body).not.toHaveTextContent('CONFIRMED');
+    expect(document.body).not.toHaveTextContent('AUTO_BLOCK_RULE');
     unmount();
   }
 });

@@ -28,6 +28,27 @@ def tcp_record(**overrides: object) -> dict[str, object]:
     return record
 
 
+def test_flow_record_preserves_bounded_network_identity_statistics() -> None:
+    parsed = FlowRecord.model_validate(
+        tcp_record(
+            average_packet_size=60.0,
+            packet_sizes=[40, 80],
+            hop_limit_min=63,
+            hop_limit_max=64,
+            hop_limit_mode=64,
+            hop_limit_distinct_count=2,
+            ip_id_observed_count=3,
+            ip_id_zero_count=1,
+            ip_id_distinct_count=3,
+            ip_id_monotonic_transitions=1,
+            ip_id_transition_count=2,
+        )
+    )
+    assert parsed.hop_limit_mode == 64
+    assert parsed.ip_id_monotonic_transitions == 1
+    assert parsed.packet_sizes == (40, 80)
+
+
 def test_flow_record_accepts_consistent_tcp_metadata() -> None:
     parsed = FlowRecord.model_validate(
         tcp_record(
@@ -217,6 +238,25 @@ def test_flow_record_rejects_impossible_combination_totals() -> None:
         FlowRecord.model_validate(tcp_record(tcp_syn_count=0))
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {
+            "hop_limit_min": 32,
+            "hop_limit_max": 128,
+            "hop_limit_mode": 64,
+            "hop_limit_distinct_count": 4,
+        },
+        {"ip_id_observed_count": 4},
+    ],
+)
+def test_flow_record_rejects_network_identity_counts_above_packet_count(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError, match="packet count"):
+        FlowRecord.model_validate(tcp_record(**overrides))
+
+
 def test_packet_limit_clears_uncertain_tcp_session_metadata() -> None:
     limited, summary = limit_flow_records(
         [
@@ -241,6 +281,45 @@ def test_packet_limit_clears_uncertain_tcp_session_metadata() -> None:
     assert limited[0]["tcp_syn_only_observations"] == []
     assert limited[0]["tcp_syn_only_observations_truncated"] is True
     assert summary["retained_packets"] == 3
+
+
+def test_packet_limit_clears_partial_flow_network_identity_metadata() -> None:
+    limited, _summary = limit_flow_records(
+        [
+            tcp_record(
+                packet_count=10,
+                total_bytes=1001,
+                packet_sizes=[60, 64, 72],
+                average_packet_size=100.1,
+                hop_limit_min=48,
+                hop_limit_max=64,
+                hop_limit_mode=64,
+                hop_limit_distinct_count=3,
+                ip_id_observed_count=10,
+                ip_id_zero_count=2,
+                ip_id_distinct_count=8,
+                ip_id_monotonic_transitions=7,
+                ip_id_transition_count=9,
+            )
+        ],
+        3,
+    )
+
+    item = limited[0]
+    assert item["total_bytes"] == 300
+    assert item["average_packet_size"] == 100.0
+    assert item["packet_sizes"] == []
+    assert item["hop_limit_min"] is None
+    assert item["hop_limit_max"] is None
+    assert item["hop_limit_mode"] is None
+    assert item["hop_limit_distinct_count"] == 0
+    assert item["ip_id_observed_count"] == 0
+    assert item["ip_id_zero_count"] == 0
+    assert item["ip_id_distinct_count"] == 0
+    assert item["ip_id_monotonic_transitions"] == 0
+    assert item["ip_id_transition_count"] == 0
+    assert item["ip_id_values_truncated"] is True
+    FlowRecord.model_validate(item)
 
 
 @pytest.mark.parametrize(

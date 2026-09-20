@@ -49,6 +49,17 @@ type FlowRecord struct {
 	CertificateFingerprint          string                   `json:"certificate_fingerprint,omitempty"`
 	Domain                          string                   `json:"domain,omitempty"`
 	PacketSizes                     []uint32                 `json:"packet_sizes"`
+	AveragePacketSize               *float64                 `json:"average_packet_size,omitempty"`
+	HopLimitMin                     *uint8                   `json:"hop_limit_min,omitempty"`
+	HopLimitMax                     *uint8                   `json:"hop_limit_max,omitempty"`
+	HopLimitMode                    *uint8                   `json:"hop_limit_mode,omitempty"`
+	HopLimitDistinctCount           uint16                   `json:"hop_limit_distinct_count,omitempty"`
+	IPIDObservedCount               uint64                   `json:"ip_id_observed_count,omitempty"`
+	IPIDZeroCount                   uint64                   `json:"ip_id_zero_count,omitempty"`
+	IPIDDistinctCount               uint16                   `json:"ip_id_distinct_count,omitempty"`
+	IPIDValuesTruncated             bool                     `json:"ip_id_values_truncated,omitempty"`
+	IPIDMonotonicTransitions        uint64                   `json:"ip_id_monotonic_transitions,omitempty"`
+	IPIDTransitionCount             uint64                   `json:"ip_id_transition_count,omitempty"`
 }
 
 type TCPSYNOnlyObservation struct {
@@ -136,8 +147,21 @@ func fromRecord(record flow.Record) FlowRecord {
 		Bidirectional:                   record.Bidirectional,
 		PayloadHash:                     record.FirstPayloadHash, LastPayloadHash: record.LastPayloadHash,
 		PayloadPrefixHash: record.PayloadPrefixHash, PayloadSampleHex: record.PayloadSampleHex,
-		PayloadSimHash:        record.PayloadSimHash,
-		PayloadFeatureVersion: record.PayloadFeatureVersion,
+		PayloadSimHash:           record.PayloadSimHash,
+		PayloadFeatureVersion:    record.PayloadFeatureVersion,
+		HopLimitDistinctCount:    record.HopLimitDistinctCount,
+		IPIDObservedCount:        record.IPIDObservedCount,
+		IPIDZeroCount:            record.IPIDZeroCount,
+		IPIDDistinctCount:        record.IPIDDistinctCount,
+		IPIDValuesTruncated:      record.IPIDValuesTruncated,
+		IPIDMonotonicTransitions: record.IPIDMonotonicTransitions,
+		IPIDTransitionCount:      record.IPIDTransitionCount,
+	}
+	if record.PacketCount > 0 {
+		out.AveragePacketSize = &record.AvgPacketSize
+	}
+	if record.HopLimitObserved {
+		out.HopLimitMin, out.HopLimitMax, out.HopLimitMode = &record.HopLimitMin, &record.HopLimitMax, &record.HopLimitMode
 	}
 	if record.Key.Protocol == packet.TCP {
 		out.TransportPayloadPacketCount = &record.PayloadPacketCount

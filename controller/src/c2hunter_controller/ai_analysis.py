@@ -844,7 +844,7 @@ class AIAnalysisService:
                     "prompt_name": "ddos_interpretation_system",
                     "prompt_version": "1.0",
                     "prompt_hash": DDOS_PROMPT_HASH,
-                    "input_schema_version": "ddos-ai-input-v1",
+                    "input_schema_version": "ddos-ai-input-v2",
                     "output_schema_version": "ddos-interpretation-v1",
                 }
             )

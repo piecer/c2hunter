@@ -6,11 +6,12 @@ import hashlib
 import json
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .network_ai import NetworkFailureDiagnostic
+from .schemas import DDoSClassification, DDoSCommonPattern, DDoSSignatureCandidate
 
-MAX_DDOS_INPUT_BYTES = 32 * 1024
+MAX_DDOS_INPUT_BYTES = 48 * 1024
 DDOS_PROMPT = "\n".join(
     [
         "You interpret a deterministic defensive DDoS traffic-shape report.",
@@ -132,6 +133,14 @@ METRIC_NAMES = {
     "icmp_echo_request_ratio",
     "component_finding_count",
     "component_types",
+    "hop_limit_min",
+    "hop_limit_max",
+    "network_identity_observed_records",
+    "network_identity_anomaly_records",
+    "ip_id_observed_count",
+    "ip_id_distinct_count",
+    "ip_id_monotonic_ratio",
+    "network_identity_values_truncated",
 }
 
 
@@ -166,12 +175,31 @@ def _metric_value(value: Any) -> str | int | float | bool | None | list[str]:
 def build_ddos_input(report: Any, language: str = "ko") -> dict[str, Any]:
     if language not in {"ko", "en"}:
         raise ValueError("language must be ko or en")
-    if not isinstance(report, dict) or report.get("version") != "ddos-attack-report-v1":
+    if not isinstance(report, dict) or report.get("version") not in {
+        "ddos-attack-report-v1",
+        "ddos-attack-report-v2",
+    }:
         raise ValueError("completed DDoS attack report required")
     source = report.get("summary")
     findings = report.get("findings")
     if not isinstance(source, dict) or not isinstance(findings, list):
         raise ValueError("invalid DDoS report")
+    expected_catalog = (
+        "ddos-taxonomy-v2" if report["version"] == "ddos-attack-report-v2" else "ddos-taxonomy-v1"
+    )
+    if report.get("catalog_version") != expected_catalog:
+        raise ValueError("invalid DDoS report version pair")
+    if report["version"] == "ddos-attack-report-v2":
+        for finding in findings:
+            if (
+                not isinstance(finding, dict)
+                or not isinstance(finding.get("classification"), dict)
+                or not isinstance(finding.get("common_patterns"), list)
+                or not finding["common_patterns"]
+                or not isinstance(finding.get("signature_candidates"), list)
+                or not finding["signature_candidates"]
+            ):
+                raise ValueError("invalid DDoS report v2 projection fields")
     if report.get("verdict") not in {
         "attack_likely",
         "suspicious_traffic",
@@ -198,7 +226,7 @@ def build_ddos_input(report: Any, language: str = "ko") -> dict[str, Any]:
             raise ValueError("invalid DDoS report summary code")
         summary[key] = value
     result: dict[str, Any] = {
-        "schema_version": "ddos-ai-input-v1",
+        "schema_version": "ddos-ai-input-v2",
         "language": language,
         "summary": summary,
         "findings": [],
@@ -242,6 +270,27 @@ def build_ddos_input(report: Any, language: str = "ko") -> dict[str, Any]:
         projected_metrics = {
             key: _metric_value(value) for key, value in metrics.items() if key in METRIC_NAMES
         }
+        classification = finding.get("classification")
+        patterns = finding.get("common_patterns", [])
+        signatures = finding.get("signature_candidates", [])
+        if not isinstance(patterns, list) or not isinstance(signatures, list):
+            raise ValueError("invalid DDoS pattern data")
+        try:
+            projected_classification = (
+                DDoSClassification.model_validate(classification).model_dump(mode="json")
+                if classification is not None
+                else None
+            )
+            projected_patterns = [
+                DDoSCommonPattern.model_validate(pattern).model_dump(mode="json")
+                for pattern in patterns[:4]
+            ]
+            projected_signatures = [
+                DDoSSignatureCandidate.model_validate(signature).model_dump(mode="json")
+                for signature in signatures[:4]
+            ]
+        except ValidationError as error:
+            raise ValueError("invalid DDoS classification or pattern data") from error
         result["findings"].append(
             {
                 "id": identity,
@@ -259,6 +308,9 @@ def build_ddos_input(report: Any, language: str = "ko") -> dict[str, Any]:
                 "evidence_codes": _bounded_codes(finding.get("evidence_codes"), 8),
                 "uncertainty_codes": _bounded_codes(finding.get("uncertainty_codes"), 8),
                 "recommendation_codes": _bounded_codes(finding.get("recommendation_codes"), 8),
+                "classification": projected_classification,
+                "common_patterns": projected_patterns,
+                "signature_candidates": projected_signatures,
             }
         )
     if len(canonical_ddos_input(result).encode()) > MAX_DDOS_INPUT_BYTES:

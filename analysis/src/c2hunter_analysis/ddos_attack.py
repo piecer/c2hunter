@@ -17,10 +17,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from ipaddress import IPv4Network, IPv6Network, collapse_addresses, ip_address, ip_network
-from typing import Any
+from typing import Any, cast
 
-REPORT_VERSION = "ddos-attack-report-v1"
-CATALOG_VERSION = "ddos-taxonomy-v1"
+REPORT_VERSION = "ddos-attack-report-v2"
+CATALOG_VERSION = "ddos-taxonomy-v2"
 REFLECTION_PORTS = frozenset({17, 19, 53, 123, 389, 1900, 11211})
 MAX_TARGETS = 4096
 MAX_BUCKETS_PER_TARGET = 3600
@@ -143,6 +143,17 @@ class Observation:
     payload_visible: bool = True
     response_visible: bool = False
     icmp_type: int | None = None
+    packet_sizes: tuple[int, ...] = ()
+    payload_prefix_hash: str | None = None
+    hop_limit_min: int | None = None
+    hop_limit_max: int | None = None
+    hop_limit_mode: int | None = None
+    hop_limit_distinct_count: int = 0
+    ip_id_observed_count: int = 0
+    ip_id_distinct_count: int = 0
+    ip_id_values_truncated: bool = False
+    ip_id_monotonic_transitions: int = 0
+    ip_id_transition_count: int = 0
 
 
 @dataclass
@@ -170,7 +181,20 @@ class Target:
     payload_visible: bool = True
     response_visible: bool = False
     source_ports: Counter[int] = field(default_factory=Counter)
+    source_port_records: Counter[int] = field(default_factory=Counter)
     icmp_types: Counter[int] = field(default_factory=Counter)
+    packet_sizes: Counter[int] = field(default_factory=Counter)
+    packet_size_observed_records: int = 0
+    payload_prefix_hashes: Counter[str] = field(default_factory=Counter)
+    hop_limit_min: int | None = None
+    hop_limit_max: int | None = None
+    identity_anomaly_records: int = 0
+    identity_observed_records: int = 0
+    ip_id_observed_count: int = 0
+    ip_id_distinct_count: int = 0
+    ip_id_monotonic_transitions: int = 0
+    ip_id_transition_count: int = 0
+    identity_values_truncated: bool = False
     buckets: dict[int, tuple[int, int]] = field(default_factory=dict)
     bucket_record_counts: dict[int, int] = field(default_factory=dict)
     bucket_heap: list[int] = field(default_factory=list)
@@ -453,6 +477,62 @@ def _normalize(record: Mapping[str, object], networks: NetworkIndex) -> Observat
         raise InvalidRecord("TCP counter exceeds packet_count")
     if syn_only + syn_ack + ack_only + rst > packets:
         raise InvalidRecord("mutually exclusive TCP counters exceed packet_count")
+    packet_sizes_value = record.get("packet_sizes", ())
+    if not isinstance(packet_sizes_value, list | tuple) or len(packet_sizes_value) > 32:
+        raise InvalidRecord("invalid packet sizes")
+    packet_sizes: list[int] = []
+    for value in packet_sizes_value:
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 65535:
+            raise InvalidRecord("invalid packet size")
+        packet_sizes.append(value)
+    payload_prefix_value = record.get("payload_prefix_hash")
+    if payload_prefix_value is not None and (
+        not isinstance(payload_prefix_value, str)
+        or len(payload_prefix_value) != 64
+        or any(character not in "0123456789abcdef" for character in payload_prefix_value)
+    ):
+        raise InvalidRecord("invalid payload prefix hash")
+
+    def bounded_counter(name: str, maximum: int) -> int:
+        value = _counter(record, name)
+        if value > maximum:
+            raise InvalidRecord(f"invalid {name}")
+        return value
+
+    hop_limit_min: int | None
+    hop_limit_max: int | None
+    hop_limit_mode: int | None
+    hop_values = tuple(
+        record.get(name) for name in ("hop_limit_min", "hop_limit_max", "hop_limit_mode")
+    )
+    if any(value is not None for value in hop_values):
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 255
+            for value in hop_values
+        ):
+            raise InvalidRecord("invalid hop limit statistics")
+        hop_limit_min, hop_limit_max, hop_limit_mode = (
+            cast(int, hop_values[0]),
+            cast(int, hop_values[1]),
+            cast(int, hop_values[2]),
+        )
+        if not hop_limit_min <= hop_limit_mode <= hop_limit_max:
+            raise InvalidRecord("inconsistent hop limit statistics")
+    else:
+        hop_limit_min = hop_limit_max = hop_limit_mode = None
+    hop_limit_distinct_count = bounded_counter("hop_limit_distinct_count", 256)
+    if (hop_limit_min is None) != (hop_limit_distinct_count == 0):
+        raise InvalidRecord("incomplete hop limit statistics")
+    ip_id_observed_count = _counter(record, "ip_id_observed_count")
+    ip_id_distinct_count = bounded_counter("ip_id_distinct_count", 64)
+    ip_id_monotonic_transitions = _counter(record, "ip_id_monotonic_transitions")
+    ip_id_transition_count = _counter(record, "ip_id_transition_count")
+    if (
+        ip_id_distinct_count > ip_id_observed_count
+        or ip_id_monotonic_transitions > ip_id_transition_count
+        or ip_id_transition_count > max(0, ip_id_observed_count - 1)
+    ):
+        raise InvalidRecord("inconsistent IP ID statistics")
     return Observation(
         sensor=str(sensor),
         timestamp=timestamp,
@@ -476,6 +556,17 @@ def _normalize(record: Mapping[str, object], networks: NetworkIndex) -> Observat
         payload_visible=payload_visible,
         response_visible=direction == "BIDIRECTIONAL" and record.get("tcp_flags_observed") is True,
         icmp_type=icmp_type,
+        packet_sizes=tuple(packet_sizes),
+        payload_prefix_hash=payload_prefix_value,
+        hop_limit_min=hop_limit_min,
+        hop_limit_max=hop_limit_max,
+        hop_limit_mode=hop_limit_mode,
+        hop_limit_distinct_count=hop_limit_distinct_count,
+        ip_id_observed_count=ip_id_observed_count,
+        ip_id_distinct_count=ip_id_distinct_count,
+        ip_id_values_truncated=record.get("ip_id_values_truncated") is True,
+        ip_id_monotonic_transitions=ip_id_monotonic_transitions,
+        ip_id_transition_count=ip_id_transition_count,
     )
 
 
@@ -503,8 +594,47 @@ def _add_observation(target: Target, row: Observation, bucket_seconds: int) -> i
     target.response_visible = target.response_visible or row.response_visible
     if row.source_port is not None:
         target.source_ports[row.source_port] += row.packets
+        target.source_port_records[row.source_port] += 1
     if row.icmp_type is not None:
         target.icmp_types[row.icmp_type] += row.packets
+    for packet_size in row.packet_sizes:
+        if packet_size in target.packet_sizes or len(target.packet_sizes) < 64:
+            target.packet_sizes[packet_size] += 1
+    if row.packet_sizes:
+        target.packet_size_observed_records += 1
+    if row.payload_prefix_hash is not None and (
+        row.payload_prefix_hash in target.payload_prefix_hashes
+        or len(target.payload_prefix_hashes) < 64
+    ):
+        target.payload_prefix_hashes[row.payload_prefix_hash] += 1
+    if row.hop_limit_min is not None and row.hop_limit_max is not None:
+        target.identity_observed_records += 1
+        target.hop_limit_min = (
+            min(target.hop_limit_min, row.hop_limit_min)
+            if target.hop_limit_min is not None
+            else row.hop_limit_min
+        )
+        target.hop_limit_max = (
+            max(target.hop_limit_max, row.hop_limit_max)
+            if target.hop_limit_max is not None
+            else row.hop_limit_max
+        )
+    if row.ip_id_observed_count:
+        target.identity_observed_records += int(row.hop_limit_min is None)
+        target.ip_id_observed_count += row.ip_id_observed_count
+        target.ip_id_distinct_count += row.ip_id_distinct_count
+        target.ip_id_monotonic_transitions += row.ip_id_monotonic_transitions
+        target.ip_id_transition_count += row.ip_id_transition_count
+        target.identity_values_truncated = (
+            target.identity_values_truncated or row.ip_id_values_truncated
+        )
+    low_monotonicity = (
+        row.ip_id_transition_count >= 4
+        and row.ip_id_monotonic_transitions / row.ip_id_transition_count < 0.10
+        and row.ip_id_distinct_count >= 4
+    )
+    if row.hop_limit_distinct_count >= 4 or low_monotonicity:
+        target.identity_anomaly_records += 1
     if row.precision != "PACKET":
         return 0
     bucket = int(row.timestamp.timestamp() // bucket_seconds)
@@ -679,6 +809,171 @@ def _recommendation_codes(attack_type: str, role: str) -> list[str]:
     return list(dict.fromkeys(codes))[:8]
 
 
+def _stable_id(prefix: str, *parts: object) -> str:
+    canonical = "|".join(str(part) for part in parts)
+    return prefix + hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def _classification(attack_type: str, target: Target) -> dict[str, str]:
+    identity_anomaly_ratio = target.identity_anomaly_records / max(
+        1, target.identity_observed_records
+    )
+    spoofing_suspected = bool(target.identity_observed_records and identity_anomaly_ratio >= 0.20)
+    if attack_type == "POSSIBLE_REFLECTION_AMPLIFICATION":
+        return {
+            "delivery_mechanism": "REFLECTION_AMPLIFICATION",
+            "source_population": "REFLECTOR_SET",
+            "source_authenticity": (
+                "SPOOFING_SUSPECTED" if spoofing_suspected else "SPOOFING_UNCONFIRMED"
+            ),
+            "confidence": "medium",
+        }
+    if target.role == "PARTICIPANT_SIDE_OUTBOUND":
+        return {
+            "delivery_mechanism": "DIRECT_DISTRIBUTED",
+            "source_population": "BOTNET_LIKE_COORDINATION",
+            "source_authenticity": (
+                "SPOOFING_SUSPECTED" if spoofing_suspected else "SOURCE_CONSISTENT"
+            ),
+            "confidence": "medium",
+        }
+    if spoofing_suspected:
+        return {
+            "delivery_mechanism": "DIRECT_DISTRIBUTED",
+            "source_population": "DISTRIBUTED_UNATTRIBUTED",
+            "source_authenticity": "SPOOFING_SUSPECTED",
+            "confidence": "medium",
+        }
+    return {
+        "delivery_mechanism": "DIRECT_DISTRIBUTED",
+        "source_population": "DISTRIBUTED_UNATTRIBUTED",
+        "source_authenticity": "SPOOFING_UNCONFIRMED",
+        "confidence": "low",
+    }
+
+
+def _common_patterns(target: Target, attack_type: str) -> list[dict[str, object]]:
+    patterns: list[dict[str, object]] = []
+
+    def add(pattern_type: str, support_count: int, values: list[str]) -> None:
+        patterns.append(
+            {
+                "id": _stable_id("ddos-pattern-", target.role, target.ip, pattern_type, *values),
+                "type": pattern_type,
+                "support_count": support_count,
+                "support_ratio": min(1.0, support_count / max(1, target.record_count)),
+                "values": values[:16],
+            }
+        )
+
+    add("DESTINATION_CONVERGENCE", target.record_count, [target.ip, str(target.port)])
+    if attack_type == "POSSIBLE_REFLECTION_AMPLIFICATION":
+        ports = [
+            str(port)
+            for port, _ in sorted(target.source_ports.items(), key=lambda item: (-item[1], item[0]))
+            if port in REFLECTION_PORTS
+        ][:8]
+        if ports:
+            add(
+                "REFLECTION_SERVICE_CONVERGENCE",
+                sum(target.source_port_records[int(p)] for p in ports),
+                ports,
+            )
+    if target.packet_sizes:
+        values = [
+            str(size)
+            for size, _ in sorted(
+                target.packet_sizes.items(), key=lambda item: (-item[1], item[0])
+            )[:8]
+        ]
+        add("PACKET_SIZE_CLUSTER", target.packet_size_observed_records, values)
+    if target.payload_prefix_hashes:
+        values = [
+            value
+            for value, _ in sorted(
+                target.payload_prefix_hashes.items(), key=lambda item: (-item[1], item[0])
+            )[:8]
+        ]
+        add("PAYLOAD_PREFIX_CLUSTER", sum(target.payload_prefix_hashes.values()), values)
+    if attack_type.startswith("TCP_"):
+        add(attack_type.removesuffix("_FLOOD") + "_FLAG_DOMINANCE", target.record_count, [])
+    if target.identity_anomaly_records:
+        if target.hop_limit_min is not None and target.hop_limit_max is not None:
+            add(
+                "HOP_LIMIT_DIVERSITY",
+                target.identity_anomaly_records,
+                [str(target.hop_limit_min), str(target.hop_limit_max)],
+            )
+        if target.ip_id_transition_count:
+            add(
+                "IP_ID_INCONSISTENCY",
+                target.identity_anomaly_records,
+                [
+                    str(target.ip_id_distinct_count),
+                    str(target.ip_id_monotonic_transitions),
+                    str(target.ip_id_transition_count),
+                ],
+            )
+    return patterns[:8]
+
+
+def _signature_candidates(
+    target: Target,
+    attack_type: str,
+    classification: Mapping[str, str],
+) -> list[dict[str, object]]:
+    kind = (
+        "REFLECTION_PROFILE"
+        if attack_type == "POSSIBLE_REFLECTION_AMPLIFICATION"
+        else "TRAFFIC_SHAPE"
+    )
+    source_ports = (
+        sorted(port for port in target.source_ports if port in REFLECTION_PORTS)[:16]
+        if kind == "REFLECTION_PROFILE"
+        else []
+    )
+    packet_sizes = sorted(target.packet_sizes)
+    signature: dict[str, object] = {
+        "id": _stable_id("ddos-sig-", target.role, target.ip, target.port, attack_type, kind),
+        "kind": kind,
+        "protocol": target.protocol,
+        "source_ports": source_ports,
+        "destination_ports": [] if target.port is None else [target.port],
+        "packet_size_range": ([packet_sizes[0], packet_sizes[-1]] if packet_sizes else None),
+        "payload_prefix_hashes": [
+            value
+            for value, _ in sorted(
+                target.payload_prefix_hashes.items(), key=lambda item: (-item[1], item[0])
+            )[:8]
+        ],
+        "tcp_flag_profile": attack_type if attack_type.startswith("TCP_") else None,
+        "confidence": classification["confidence"],
+        "false_positive_codes": [
+            "SOURCE_ADDRESSES_MAY_BE_SPOOFED"
+            if classification["source_authenticity"] == "SPOOFING_SUSPECTED"
+            else "DISTRIBUTED_TRAFFIC_MAY_HAVE_LEGITIMATE_CAUSES"
+        ],
+        "requires_human_approval": True,
+    }
+    signatures: list[dict[str, object]] = [signature]
+    if target.identity_anomaly_records:
+        signatures.append(
+            {
+                **signature,
+                "id": _stable_id(
+                    "ddos-sig-", target.role, target.ip, target.port, "SPOOFING_HEURISTIC"
+                ),
+                "kind": "SPOOFING_HEURISTIC",
+                "source_ports": [],
+                "payload_prefix_hashes": [],
+                "tcp_flag_profile": None,
+                "confidence": "medium",
+                "false_positive_codes": ["MULTIPATH_OR_NAT_MAY_CHANGE_NETWORK_IDENTITY_FEATURES"],
+            }
+        )
+    return signatures[:4]
+
+
 def _finding(target: Target, parameters: Mapping[str, object]) -> dict[str, Any] | None:
     rates = _rates(target, parameters)
     shape = _shape(target, rates, parameters)
@@ -738,8 +1033,25 @@ def _finding(target: Target, parameters: Mapping[str, object]) -> dict[str, Any]
         "direction_source": (
             "OBSERVED" if target.direction_sources == {"OBSERVED"} else "INTERNAL_CIDR"
         ),
+        "hop_limit_min": target.hop_limit_min,
+        "hop_limit_max": target.hop_limit_max,
+        "network_identity_observed_records": target.identity_observed_records,
+        "network_identity_anomaly_records": target.identity_anomaly_records,
+        "ip_id_observed_count": target.ip_id_observed_count,
+        "ip_id_distinct_count": target.ip_id_distinct_count,
+        "ip_id_monotonic_ratio": (
+            target.ip_id_monotonic_transitions / target.ip_id_transition_count
+            if target.ip_id_transition_count
+            else None
+        ),
+        "network_identity_values_truncated": target.identity_values_truncated,
     }
     recommendations = _recommendation_codes(attack_type, target.role)
+    classification = _classification(attack_type, target)
+    if classification["source_population"] == "BOTNET_LIKE_COORDINATION":
+        uncertainty.append("BOTNET_ATTRIBUTION_UNCONFIRMED")
+    if classification["source_authenticity"] == "SPOOFING_SUSPECTED":
+        uncertainty.append("SOURCE_SPOOFING_NOT_CONFIRMED")
     return {
         "id": "ddos-" + hashlib.sha256(identity.encode()).hexdigest()[:16],
         "attack_type": attack_type,
@@ -760,6 +1072,9 @@ def _finding(target: Target, parameters: Mapping[str, object]) -> dict[str, Any]
         ],
         "uncertainty_codes": list(dict.fromkeys(uncertainty))[:8],
         "recommendation_codes": recommendations,
+        "classification": classification,
+        "common_patterns": _common_patterns(target, attack_type),
+        "signature_candidates": _signature_candidates(target, attack_type, classification),
     }
 
 
@@ -814,6 +1129,39 @@ def _multi_vector(
         identity = f"{role}|{target_ip}|MULTI_VECTOR|{'|'.join(sorted(types))}"
         recommendations = _recommendation_codes("MULTI_VECTOR", role)
         all_likely = all(item["likelihood"] == "LIKELY" for item in selected)
+        dimensions = {
+            name: {item["classification"][name] for item in selected}
+            for name in ("delivery_mechanism", "source_population", "source_authenticity")
+        }
+        multi_classification = {
+            name: next(iter(values)) if len(values) == 1 else "MIXED"
+            for name, values in dimensions.items()
+        }
+        multi_classification["confidence"] = (
+            "low"
+            if any(item["classification"]["confidence"] == "low" for item in selected)
+            else "medium"
+        )
+        multi_uncertainty = ["SHARED_TARGET_DOES_NOT_PROVE_SHARED_ACTOR"]
+        if multi_classification["source_population"] == "BOTNET_LIKE_COORDINATION":
+            multi_uncertainty.append("BOTNET_ATTRIBUTION_UNCONFIRMED")
+        if any(
+            item["classification"]["source_authenticity"] == "SPOOFING_SUSPECTED"
+            for item in selected
+        ):
+            multi_uncertainty.append("SOURCE_SPOOFING_NOT_CONFIRMED")
+        common_patterns = list(
+            {
+                pattern["id"]: pattern for item in selected for pattern in item["common_patterns"]
+            }.values()
+        )[:8]
+        signature_candidates = list(
+            {
+                signature["id"]: signature
+                for item in selected
+                for signature in item["signature_candidates"]
+            }.values()
+        )[:4]
         result.append(
             {
                 "id": "ddos-" + hashlib.sha256(identity.encode()).hexdigest()[:16],
@@ -838,8 +1186,11 @@ def _multi_vector(
                     "component_finding_count": len(selected),
                 },
                 "evidence_codes": ["OVERLAPPING_ATTACK_VECTORS"],
-                "uncertainty_codes": ["SHARED_TARGET_DOES_NOT_PROVE_SHARED_ACTOR"],
+                "uncertainty_codes": multi_uncertainty,
                 "recommendation_codes": recommendations,
+                "classification": multi_classification,
+                "common_patterns": common_patterns,
+                "signature_candidates": signature_candidates,
             }
         )
     return result

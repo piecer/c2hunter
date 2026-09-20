@@ -28,34 +28,46 @@ type TCPSYNOnlyObservation struct {
 	Sequence uint32
 }
 type Record struct {
-	Key                                Key
-	CaptureJobID                       string
-	StartTime, EndTime                 time.Time
-	PacketCount, TotalBytes            uint64
-	PayloadPacketCount                 uint64
-	MinPacketSize, MaxPacketSize       uint32
-	AvgPacketSize                      float64
-	TCPFlags                           FlagCounts
-	TCPFlagsObserved                   bool
-	TCPSYNOnlyCount, TCPSYNACKCount    uint64
-	TCPACKOnlyCount                    uint64
-	TCPSYNOnlyObservations             []TCPSYNOnlyObservation
-	TCPSYNOnlyObservationsTruncated    bool
-	SYNACKRatio                        *float64 `json:"syn_ack_ratio,omitempty"`
-	RSTRatio                           *float64 `json:"rst_ratio,omitempty"`
-	ConnectionCount                    *uint64  `json:"connection_count,omitempty"`
-	Bidirectional                      bool
-	MinPayloadLength, MaxPayloadLength uint32
-	AvgPayloadLength                   float64
-	FirstPayloadHash, LastPayloadHash  string
-	PayloadPrefixHash, PayloadSimHash  string
-	PayloadSampleHex                   string
-	FirstPayloadLength                 uint32
-	PayloadEntropy, PayloadPrintable   float64
-	PayloadFeatureVersion              string
-	PCAPObjectReference                string
-	ProtocolMetadata                   metadata.Metadata
-	packetSizeSum, payloadLengthSum    uint64
+	Key                                    Key
+	CaptureJobID                           string
+	StartTime, EndTime                     time.Time
+	PacketCount, TotalBytes                uint64
+	PayloadPacketCount                     uint64
+	MinPacketSize, MaxPacketSize           uint32
+	AvgPacketSize                          float64
+	TCPFlags                               FlagCounts
+	TCPFlagsObserved                       bool
+	TCPSYNOnlyCount, TCPSYNACKCount        uint64
+	TCPACKOnlyCount                        uint64
+	TCPSYNOnlyObservations                 []TCPSYNOnlyObservation
+	TCPSYNOnlyObservationsTruncated        bool
+	SYNACKRatio                            *float64 `json:"syn_ack_ratio,omitempty"`
+	RSTRatio                               *float64 `json:"rst_ratio,omitempty"`
+	ConnectionCount                        *uint64  `json:"connection_count,omitempty"`
+	Bidirectional                          bool
+	MinPayloadLength, MaxPayloadLength     uint32
+	AvgPayloadLength                       float64
+	FirstPayloadHash, LastPayloadHash      string
+	PayloadPrefixHash, PayloadSimHash      string
+	PayloadSampleHex                       string
+	FirstPayloadLength                     uint32
+	PayloadEntropy, PayloadPrintable       float64
+	PayloadFeatureVersion                  string
+	PCAPObjectReference                    string
+	ProtocolMetadata                       metadata.Metadata
+	HopLimitMin, HopLimitMax, HopLimitMode uint8
+	HopLimitDistinctCount                  uint16
+	HopLimitObserved                       bool
+	IPIDObservedCount, IPIDZeroCount       uint64
+	IPIDDistinctCount                      uint16
+	IPIDValuesTruncated                    bool
+	IPIDMonotonicTransitions               uint64
+	IPIDTransitionCount                    uint64
+	packetSizeSum, payloadLengthSum        uint64
+	hopLimitCounts                         [256]uint32
+	ipIDValues                             map[uint16]struct{}
+	lastIPID                               uint16
+	lastIPIDObserved                       bool
 }
 type Aggregator struct {
 	sensorID, jobID     string
@@ -105,6 +117,7 @@ func (a *Aggregator) AddWithMetadata(p packet.Packet, protocolMetadata metadata.
 		r.EndTime = p.Timestamp
 	}
 	r.PacketCount++
+	trackNetworkIdentity(r, p)
 	r.TotalBytes += uint64(p.WireLength)    // #nosec G115 -- negative lengths are rejected at this public boundary
 	r.packetSizeSum += uint64(p.WireLength) // #nosec G115 -- negative lengths are rejected at this public boundary
 	if wireLength < r.MinPacketSize {
@@ -175,7 +188,57 @@ func (a *Aggregator) Flush() []Record {
 	sortRecords(out)
 	return out
 }
+func trackNetworkIdentity(record *Record, value packet.Packet) {
+	if value.HopLimitObserved {
+		if !record.HopLimitObserved {
+			record.HopLimitMin, record.HopLimitMax = value.HopLimit, value.HopLimit
+			record.HopLimitObserved = true
+		}
+		if value.HopLimit < record.HopLimitMin {
+			record.HopLimitMin = value.HopLimit
+		}
+		if value.HopLimit > record.HopLimitMax {
+			record.HopLimitMax = value.HopLimit
+		}
+		if record.hopLimitCounts[value.HopLimit] == 0 {
+			record.HopLimitDistinctCount++
+		}
+		record.hopLimitCounts[value.HopLimit]++
+	}
+	if !value.IPIDObserved {
+		return
+	}
+	record.IPIDObservedCount++
+	if value.IPID == 0 {
+		record.IPIDZeroCount++
+	}
+	if record.ipIDValues == nil {
+		record.ipIDValues = make(map[uint16]struct{})
+	}
+	if _, exists := record.ipIDValues[value.IPID]; !exists {
+		if len(record.ipIDValues) < 64 {
+			record.ipIDValues[value.IPID] = struct{}{}
+			record.IPIDDistinctCount++
+		} else {
+			record.IPIDValuesTruncated = true
+		}
+	}
+	if record.lastIPIDObserved {
+		record.IPIDTransitionCount++
+		if value.IPID == record.lastIPID+1 {
+			record.IPIDMonotonicTransitions++
+		}
+	}
+	record.lastIPID, record.lastIPIDObserved = value.IPID, true
+}
+
 func finalize(r Record) Record {
+	var modeCount uint32
+	for hopLimit, count := range r.hopLimitCounts {
+		if count > modeCount {
+			r.HopLimitMode, modeCount = uint8(hopLimit), count // #nosec G115 -- fixed 256-entry array
+		}
+	}
 	if r.PacketCount > 0 {
 		r.AvgPacketSize = float64(r.packetSizeSum) / float64(r.PacketCount)
 		r.AvgPayloadLength = float64(r.payloadLengthSum) / float64(r.PacketCount)

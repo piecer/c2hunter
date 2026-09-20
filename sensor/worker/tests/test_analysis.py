@@ -54,7 +54,7 @@ def test_worker_executes_ddos_report_without_candidates() -> None:
     request["ddos_coverage_context"] = {"parser_skipped_packet_count": 1}
     result = execute_analysis(request)
     assert result["candidates"] == []
-    assert result["ddos_attack"]["version"] == "ddos-attack-report-v1"
+    assert result["ddos_attack"]["version"] == "ddos-attack-report-v2"
     assert result["ddos_attack"]["findings"][0]["attack_type"] == "TCP_SYN_FLOOD"
     assert result["ddos_attack"]["summary"]["coverage_complete"] is False
     assert "PARSER_SKIPPED_PACKETS" in result["ddos_attack"]["warnings"]

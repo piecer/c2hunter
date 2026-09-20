@@ -517,6 +517,8 @@ _DDOS_UNCERTAINTY_CODES = frozenset(
         "RESETS_MAY_BE_DEFENSIVE_RESPONSES",
         "AMPLIFICATION_RATIO_UNOBSERVED",
         "SOURCE_SPOOFING_UNCONFIRMED",
+        "SOURCE_SPOOFING_NOT_CONFIRMED",
+        "BOTNET_ATTRIBUTION_UNCONFIRMED",
         "ICMP_TYPE_UNAVAILABLE",
         "SHARED_TARGET_DOES_NOT_PROVE_SHARED_ACTOR",
         "BUCKET_LIMIT_REACHED",
@@ -533,6 +535,147 @@ class DDoSTarget(BaseModel):
     @classmethod
     def valid_ip(cls, value: str) -> str:
         return str(ip_address(value))
+
+
+class DDoSClassification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    delivery_mechanism: Literal[
+        "DIRECT_DISTRIBUTED", "REFLECTION_AMPLIFICATION", "MIXED", "UNKNOWN"
+    ]
+    source_population: Literal[
+        "BOTNET_LIKE_COORDINATION",
+        "REFLECTOR_SET",
+        "DISTRIBUTED_UNATTRIBUTED",
+        "MIXED",
+        "UNKNOWN",
+    ]
+    source_authenticity: Literal[
+        "SOURCE_CONSISTENT", "SPOOFING_SUSPECTED", "SPOOFING_UNCONFIRMED", "MIXED", "UNKNOWN"
+    ]
+    confidence: Literal["high", "medium", "low"]
+
+
+class DDoSCommonPattern(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=r"^ddos-pattern-[0-9a-f]{16}$")
+    type: Literal[
+        "DESTINATION_CONVERGENCE",
+        "REFLECTION_SERVICE_CONVERGENCE",
+        "PACKET_SIZE_CLUSTER",
+        "PAYLOAD_PREFIX_CLUSTER",
+        "TCP_SYN_FLAG_DOMINANCE",
+        "TCP_ACK_FLAG_DOMINANCE",
+        "TCP_RST_FLAG_DOMINANCE",
+        "HOP_LIMIT_DIVERSITY",
+        "IP_ID_INCONSISTENCY",
+    ]
+    support_count: int = Field(ge=0, le=2**53 - 1)
+    support_ratio: float = Field(ge=0, le=1, allow_inf_nan=False)
+    values: list[str] = Field(max_length=16)
+
+    @field_validator("values", mode="before")
+    @classmethod
+    def strict_bounded_values(cls, value: object) -> object:
+        if not isinstance(value, list) or any(type(item) is not str for item in value):
+            raise ValueError("DDoS common pattern values must be JSON strings")
+        if any(len(item) > 128 or any(ord(char) < 32 for char in item) for item in value):
+            raise ValueError("DDoS common pattern value is invalid")
+        return value
+
+    @model_validator(mode="after")
+    def values_match_pattern_type(self) -> DDoSCommonPattern:
+        def decimal_values(maximum: int) -> bool:
+            return all(
+                re.fullmatch(r"[0-9]+", value) and int(value) <= maximum for value in self.values
+            )
+
+        if self.type == "DESTINATION_CONVERGENCE":
+            if len(self.values) != 2:
+                raise ValueError("destination convergence requires an IP and port")
+            ip_address(self.values[0])
+            if self.values[1] != "None" and not (
+                re.fullmatch(r"[0-9]+", self.values[1]) and int(self.values[1]) <= 65535
+            ):
+                raise ValueError("destination convergence port is invalid")
+        elif self.type == "REFLECTION_SERVICE_CONVERGENCE":
+            if not self.values or not decimal_values(65535):
+                raise ValueError("reflection service values must be ports")
+        elif self.type == "PACKET_SIZE_CLUSTER":
+            if not self.values or not decimal_values(65535):
+                raise ValueError("packet size values are invalid")
+        elif self.type == "PAYLOAD_PREFIX_CLUSTER":
+            if not self.values or any(
+                re.fullmatch(r"[0-9a-f]{64}", value) is None for value in self.values
+            ):
+                raise ValueError("payload prefix values must be SHA-256 hashes")
+        elif self.type.endswith("_FLAG_DOMINANCE"):
+            if self.values:
+                raise ValueError("TCP flag dominance values must be empty")
+        elif self.type == "HOP_LIMIT_DIVERSITY":
+            if len(self.values) != 2 or not decimal_values(255):
+                raise ValueError("hop limit diversity values are invalid")
+            if int(self.values[0]) > int(self.values[1]):
+                raise ValueError("hop limit diversity range is invalid")
+        elif self.type == "IP_ID_INCONSISTENCY":
+            if len(self.values) != 3 or not decimal_values(2**53 - 1):
+                raise ValueError("IP ID inconsistency values are invalid")
+        return self
+
+
+class DDoSSignatureCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=r"^ddos-sig-[0-9a-f]{16}$")
+    kind: Literal["TRAFFIC_SHAPE", "REFLECTION_PROFILE", "SPOOFING_HEURISTIC"]
+    protocol: Literal["TCP", "UDP", "ICMP", "ICMPV6", "MULTIPLE"]
+    source_ports: list[int] = Field(max_length=16)
+    destination_ports: list[int] = Field(max_length=16)
+    packet_size_range: tuple[int, int] | None = None
+    payload_prefix_hashes: list[str] = Field(max_length=8)
+    tcp_flag_profile: DDoSAttackType | None = None
+    confidence: Literal["high", "medium", "low"]
+    false_positive_codes: list[
+        Literal[
+            "SOURCE_ADDRESSES_MAY_BE_SPOOFED",
+            "DISTRIBUTED_TRAFFIC_MAY_HAVE_LEGITIMATE_CAUSES",
+            "MULTIPATH_OR_NAT_MAY_CHANGE_NETWORK_IDENTITY_FEATURES",
+        ]
+    ] = Field(min_length=1, max_length=4)
+    requires_human_approval: Literal[True]
+
+    @field_validator("source_ports", "destination_ports", mode="before")
+    @classmethod
+    def strict_ports(cls, value: object) -> object:
+        if not isinstance(value, list) or any(
+            type(item) is not int or not 0 <= item <= 65535 for item in value
+        ):
+            raise ValueError("DDoS signature ports must be JSON integers in range")
+        if len(value) != len(set(value)):
+            raise ValueError("DDoS signature ports must be unique")
+        return value
+
+    @field_validator("packet_size_range", mode="before")
+    @classmethod
+    def strict_packet_size_range(cls, value: object) -> object:
+        if value is None:
+            return value
+        if not isinstance(value, list | tuple) or len(value) != 2:
+            raise ValueError("DDoS packet size range must contain two integers")
+        if any(type(item) is not int or not 0 <= item <= 65535 for item in value):
+            raise ValueError("DDoS packet size range is invalid")
+        if value[0] > value[1]:
+            raise ValueError("DDoS packet size range is not ordered")
+        return value
+
+    @field_validator("payload_prefix_hashes", mode="before")
+    @classmethod
+    def strict_payload_prefix_hashes(cls, value: object) -> object:
+        if not isinstance(value, list) or any(
+            type(item) is not str or re.fullmatch(r"[0-9a-f]{64}", item) is None for item in value
+        ):
+            raise ValueError("DDoS payload prefix hashes must be SHA-256 values")
+        if len(value) != len(set(value)):
+            raise ValueError("DDoS payload prefix hashes must be unique")
+        return value
 
 
 class DDoSMetrics(BaseModel):
@@ -582,6 +725,14 @@ class DDoSMetrics(BaseModel):
     icmp_echo_request_ratio: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     component_types: list[DDoSAttackType] | None = Field(default=None, max_length=8)
     component_finding_count: int | None = Field(default=None, ge=2, le=4096)
+    hop_limit_min: int | None = Field(default=None, ge=0, le=255)
+    hop_limit_max: int | None = Field(default=None, ge=0, le=255)
+    network_identity_observed_records: int | None = Field(default=None, ge=0, le=2_000_000)
+    network_identity_anomaly_records: int | None = Field(default=None, ge=0, le=2_000_000)
+    ip_id_observed_count: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    ip_id_distinct_count: int | None = Field(default=None, ge=0, le=2**53 - 1)
+    ip_id_monotonic_ratio: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    network_identity_values_truncated: bool | None = None
 
 
 class DDoSFinding(BaseModel):
@@ -601,6 +752,9 @@ class DDoSFinding(BaseModel):
     evidence_codes: list[str] = Field(max_length=8)
     uncertainty_codes: list[str] = Field(max_length=8)
     recommendation_codes: list[str] = Field(max_length=8)
+    classification: DDoSClassification | None = None
+    common_patterns: list[DDoSCommonPattern] = Field(default_factory=list, max_length=8)
+    signature_candidates: list[DDoSSignatureCandidate] = Field(default_factory=list, max_length=4)
 
     @model_validator(mode="after")
     def ordered_time(self) -> DDoSFinding:
@@ -675,7 +829,21 @@ class DDoSFinding(BaseModel):
             else:
                 required_metrics |= {"icmp_type_observed_packets", "icmp_echo_request_ratio"}
                 expected_protocols = {"ICMP", "ICMPV6"}
-        if self.metrics.model_fields_set != required_metrics:
+        identity_metrics = {
+            "hop_limit_min",
+            "hop_limit_max",
+            "network_identity_observed_records",
+            "network_identity_anomaly_records",
+            "ip_id_observed_count",
+            "ip_id_distinct_count",
+            "ip_id_monotonic_ratio",
+            "network_identity_values_truncated",
+        }
+        measured_metrics = self.metrics.model_fields_set
+        if (
+            not required_metrics <= measured_metrics
+            or measured_metrics - required_metrics - identity_metrics
+        ):
             raise ValueError("DDoS finding measured facts do not match its attack type")
         if set(self.evidence_codes) != required_evidence:
             raise ValueError("DDoS finding evidence gates are inconsistent")
@@ -693,8 +861,13 @@ class DDoSFinding(BaseModel):
         }.get(self.attack_type, set())
         if not required_uncertainty <= uncertainty:
             raise ValueError("DDoS finding is missing mandatory family uncertainty")
-        if self.attack_type == "MULTI_VECTOR" and uncertainty != required_uncertainty:
-            raise ValueError("DDoS multi-vector uncertainty is inconsistent")
+        if self.attack_type == "MULTI_VECTOR":
+            allowed_multi_uncertainty = required_uncertainty | {
+                "BOTNET_ATTRIBUTION_UNCONFIRMED",
+                "SOURCE_SPOOFING_NOT_CONFIRMED",
+            }
+            if not uncertainty <= allowed_multi_uncertainty:
+                raise ValueError("DDoS multi-vector uncertainty is inconsistent")
         if self.attack_type != "MULTI_VECTOR":
             required_values = (
                 self.metrics.packet_count,
@@ -817,6 +990,86 @@ class DDoSFinding(BaseModel):
         expected_recommendations.extend(_DDOS_COMMON_RECOMMENDATIONS)
         if self.recommendation_codes != list(dict.fromkeys(expected_recommendations))[:8]:
             raise ValueError("DDoS finding recommendations are inconsistent")
+        if self.classification is not None:
+            classification = self.classification
+            if self.attack_type == "MULTI_VECTOR":
+                classification_component_types = set(self.metrics.component_types or [])
+                includes_reflection = (
+                    "POSSIBLE_REFLECTION_AMPLIFICATION" in classification_component_types
+                )
+                expected_delivery = "MIXED" if includes_reflection else "DIRECT_DISTRIBUTED"
+                expected_population = (
+                    "BOTNET_LIKE_COORDINATION"
+                    if self.attack_role == "PARTICIPANT_SIDE_OUTBOUND"
+                    else "MIXED"
+                    if includes_reflection
+                    else "DISTRIBUTED_UNATTRIBUTED"
+                )
+                spoofing_limited = "SOURCE_SPOOFING_NOT_CONFIRMED" in uncertainty
+                allowed_authenticity = (
+                    {"SPOOFING_SUSPECTED", "MIXED"}
+                    if spoofing_limited
+                    else {"SOURCE_CONSISTENT"}
+                    if self.attack_role == "PARTICIPANT_SIDE_OUTBOUND"
+                    else {"SPOOFING_UNCONFIRMED"}
+                )
+                allowed_classification_confidences = (
+                    {"low", "medium"}
+                    if self.attack_role == "VICTIM_SIDE_INBOUND"
+                    and classification.source_authenticity == "MIXED"
+                    else {
+                        "medium"
+                        if self.attack_role == "PARTICIPANT_SIDE_OUTBOUND"
+                        or classification.source_authenticity == "SPOOFING_SUSPECTED"
+                        else "low"
+                    }
+                )
+            else:
+                observed = self.metrics.network_identity_observed_records or 0
+                anomalies = self.metrics.network_identity_anomaly_records or 0
+                spoofing_suspected = observed > 0 and anomalies / observed >= 0.20
+                expected_delivery = (
+                    "REFLECTION_AMPLIFICATION"
+                    if self.attack_type == "POSSIBLE_REFLECTION_AMPLIFICATION"
+                    else "DIRECT_DISTRIBUTED"
+                )
+                expected_population = (
+                    "REFLECTOR_SET"
+                    if self.attack_type == "POSSIBLE_REFLECTION_AMPLIFICATION"
+                    else "BOTNET_LIKE_COORDINATION"
+                    if self.attack_role == "PARTICIPANT_SIDE_OUTBOUND"
+                    else "DISTRIBUTED_UNATTRIBUTED"
+                )
+                allowed_authenticity = {
+                    "SPOOFING_SUSPECTED"
+                    if spoofing_suspected
+                    else "SOURCE_CONSISTENT"
+                    if self.attack_role == "PARTICIPANT_SIDE_OUTBOUND"
+                    else "SPOOFING_UNCONFIRMED"
+                }
+                expected_classification_confidence = (
+                    "medium"
+                    if spoofing_suspected
+                    or self.attack_role == "PARTICIPANT_SIDE_OUTBOUND"
+                    or self.attack_type == "POSSIBLE_REFLECTION_AMPLIFICATION"
+                    else "low"
+                )
+                allowed_classification_confidences = {expected_classification_confidence}
+            if (
+                classification.delivery_mechanism != expected_delivery
+                or classification.source_population != expected_population
+                or classification.source_authenticity not in allowed_authenticity
+                or classification.confidence not in allowed_classification_confidences
+            ):
+                raise ValueError("DDoS finding classification is inconsistent")
+            if ("BOTNET_ATTRIBUTION_UNCONFIRMED" in uncertainty) != (
+                expected_population == "BOTNET_LIKE_COORDINATION"
+            ):
+                raise ValueError("DDoS finding classification uncertainty is inconsistent")
+            if ("SOURCE_SPOOFING_NOT_CONFIRMED" in uncertainty) != (
+                classification.source_authenticity in {"SPOOFING_SUSPECTED", "MIXED"}
+            ):
+                raise ValueError("DDoS finding classification uncertainty is inconsistent")
         for codes in (self.evidence_codes, self.uncertainty_codes, self.recommendation_codes):
             if len(codes) != len(set(codes)):
                 raise ValueError("DDoS finding code arrays must not contain duplicates")
@@ -872,8 +1125,8 @@ class DDoSSummary(BaseModel):
 
 class DDoSAttackReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    version: Literal["ddos-attack-report-v1"]
-    catalog_version: Literal["ddos-taxonomy-v1"]
+    version: Literal["ddos-attack-report-v1", "ddos-attack-report-v2"]
+    catalog_version: Literal["ddos-taxonomy-v1", "ddos-taxonomy-v2"]
     verdict: Literal[
         "attack_likely", "suspicious_traffic", "no_clear_attack", "insufficient_evidence"
     ]
@@ -922,6 +1175,12 @@ class DDoSAttackReport(BaseModel):
             "dominant_reflection_source_port",
             "icmp_type_observed_packets",
             "component_finding_count",
+            "hop_limit_min",
+            "hop_limit_max",
+            "network_identity_observed_records",
+            "network_identity_anomaly_records",
+            "ip_id_observed_count",
+            "ip_id_distinct_count",
         }
         numeric_metrics = integer_metrics | {
             "duration_seconds",
@@ -942,6 +1201,7 @@ class DDoSAttackReport(BaseModel):
             "average_packet_bytes",
             "amplification_ratio",
             "icmp_echo_request_ratio",
+            "ip_id_monotonic_ratio",
         }
         findings = value.get("findings")
         if isinstance(findings, list):
@@ -978,6 +1238,36 @@ class DDoSAttackReport(BaseModel):
 
     @model_validator(mode="after")
     def internally_consistent(self) -> DDoSAttackReport:
+        expected_catalog = (
+            "ddos-taxonomy-v2" if self.version == "ddos-attack-report-v2" else "ddos-taxonomy-v1"
+        )
+        if self.catalog_version != expected_catalog:
+            raise ValueError("DDoS report and taxonomy versions are inconsistent")
+        phase_fields = {"classification", "common_patterns", "signature_candidates"}
+        for finding in self.findings:
+            present = phase_fields & finding.model_fields_set
+            if self.version == "ddos-attack-report-v2":
+                if present != phase_fields or finding.classification is None:
+                    raise ValueError("DDoS v2 finding is missing classification or patterns")
+                if not finding.common_patterns or not finding.signature_candidates:
+                    raise ValueError("DDoS v2 finding requires patterns and signature candidates")
+                if (
+                    finding.attack_type != "MULTI_VECTOR"
+                    and not {
+                        "hop_limit_min",
+                        "hop_limit_max",
+                        "network_identity_observed_records",
+                        "network_identity_anomaly_records",
+                        "ip_id_observed_count",
+                        "ip_id_distinct_count",
+                        "ip_id_monotonic_ratio",
+                        "network_identity_values_truncated",
+                    }
+                    <= finding.metrics.model_fields_set
+                ):
+                    raise ValueError("DDoS v2 finding is missing Phase 2 identity metrics")
+            elif present:
+                raise ValueError("DDoS v1 finding contains v2 classification fields")
         if (
             self.summary.evaluated_records + self.summary.skipped_records
             > self.summary.scanned_records
@@ -1217,7 +1507,18 @@ class FlowRecord(BaseModel):
     tls_fingerprint: str | None = None
     certificate_fingerprint: str | None = None
     domain: str | None = None
-    packet_sizes: tuple[int, ...] = ()
+    packet_sizes: tuple[int, ...] = Field(default=(), max_length=32)
+    average_packet_size: float | None = Field(default=None, ge=0, le=65535, allow_inf_nan=False)
+    hop_limit_min: int | None = Field(default=None, ge=0, le=255, strict=True)
+    hop_limit_max: int | None = Field(default=None, ge=0, le=255, strict=True)
+    hop_limit_mode: int | None = Field(default=None, ge=0, le=255, strict=True)
+    hop_limit_distinct_count: int = Field(default=0, ge=0, le=256, strict=True)
+    ip_id_observed_count: int = Field(default=0, ge=0, le=2**64 - 1, strict=True)
+    ip_id_zero_count: int = Field(default=0, ge=0, le=2**64 - 1, strict=True)
+    ip_id_distinct_count: int = Field(default=0, ge=0, le=64, strict=True)
+    ip_id_values_truncated: bool = False
+    ip_id_monotonic_transitions: int = Field(default=0, ge=0, le=2**64 - 1, strict=True)
+    ip_id_transition_count: int = Field(default=0, ge=0, le=2**64 - 1, strict=True)
     tcp_flags_observed: bool = False
     tcp_syn_count: int = Field(default=0, ge=0)
     tcp_ack_count: int = Field(default=0, ge=0)
@@ -1293,6 +1594,29 @@ class FlowRecord(BaseModel):
                 raise ValueError("complete TCP SYN observations must match SYN-only count")
         elif self.tcp_syn_only_observations_truncated:
             raise ValueError("truncated TCP SYN observations require an observation array")
+        hop_limits = (self.hop_limit_min, self.hop_limit_max, self.hop_limit_mode)
+        if any(value is not None for value in hop_limits):
+            if any(value is None for value in hop_limits) or self.hop_limit_distinct_count < 1:
+                raise ValueError("hop limit statistics must be complete")
+            minimum, maximum, mode = self.hop_limit_min, self.hop_limit_max, self.hop_limit_mode
+            if minimum is None or maximum is None or mode is None:
+                raise ValueError("hop limit statistics must be complete")
+            if not minimum <= mode <= maximum:
+                raise ValueError("hop limit mode must be within the observed range")
+        elif self.hop_limit_distinct_count:
+            raise ValueError("hop limit distinct count requires observed statistics")
+        if self.hop_limit_distinct_count > self.packet_count:
+            raise ValueError("hop limit distinct count exceeds packet count")
+        if self.ip_id_observed_count > self.packet_count:
+            raise ValueError("IP ID observed count exceeds packet count")
+        if self.ip_id_zero_count > self.ip_id_observed_count:
+            raise ValueError("IP ID zero count exceeds observed count")
+        if self.ip_id_distinct_count > self.ip_id_observed_count:
+            raise ValueError("IP ID distinct count exceeds observed count")
+        if self.ip_id_monotonic_transitions > self.ip_id_transition_count:
+            raise ValueError("IP ID monotonic transitions exceed transition count")
+        if self.ip_id_transition_count > max(0, self.ip_id_observed_count - 1):
+            raise ValueError("IP ID transitions exceed observed count")
         return self
 
 

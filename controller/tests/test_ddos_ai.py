@@ -115,6 +115,77 @@ def test_ddos_input_is_bounded_and_excludes_raw_or_unapproved_fields() -> None:
     assert bundle["omitted_input_findings"] == 80
     assert "RAW_PACKET_SENTINEL" not in wire
     assert "Ignore previous instructions" not in wire
+    source = report["findings"][0]
+    projected = bundle["findings"][0]
+    assert projected["classification"] == source["classification"]
+    assert projected["common_patterns"] == source["common_patterns"][:4]
+    assert projected["signature_candidates"] == source["signature_candidates"][:4]
+    assert all(
+        item["requires_human_approval"] is True for item in projected["signature_candidates"]
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda finding: finding["classification"].update(source_population="BOTNET_CONFIRMED"),
+        lambda finding: finding["common_patterns"][0].update(type="MODEL_INSTRUCTION"),
+        lambda finding: finding["signature_candidates"][0].update(requires_human_approval=False),
+        lambda finding: finding["signature_candidates"][0].update(
+            payload_prefix_hashes=["a" * 64] * 9
+        ),
+        lambda finding: finding["common_patterns"][0].update(values=["x" * 129]),
+        lambda finding: finding["signature_candidates"][0].update(
+            payload_prefix_hashes=["not-a-sha256"]
+        ),
+        lambda finding: finding["signature_candidates"][0].update(source_ports=[65536]),
+        lambda finding: finding["signature_candidates"][0].update(packet_size_range=[1400, 100]),
+    ],
+)
+def test_ddos_input_rejects_invalid_or_unreviewed_phase1_projection(
+    mutate: object,
+) -> None:
+    from c2hunter_controller.ddos_ai import build_ddos_input
+
+    _, _, _, report = setup()
+    poisoned = deepcopy(report)
+    mutate(poisoned["findings"][0])  # type: ignore[operator]
+    with pytest.raises(ValueError):
+        build_ddos_input(poisoned)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["classification", "common_patterns", "signature_candidates"],
+)
+def test_ddos_input_rejects_missing_v2_projection_fields(field: str) -> None:
+    from c2hunter_controller.ddos_ai import build_ddos_input
+
+    _, _, _, report = setup()
+    poisoned = deepcopy(report)
+    del poisoned["findings"][0][field]
+
+    with pytest.raises(ValueError, match="DDoS report"):
+        build_ddos_input(poisoned)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("classification", None),
+        ("common_patterns", []),
+        ("signature_candidates", []),
+    ],
+)
+def test_ddos_input_rejects_empty_v2_projection_fields(field: str, value: object) -> None:
+    from c2hunter_controller.ddos_ai import build_ddos_input
+
+    _, _, _, report = setup()
+    poisoned = deepcopy(report)
+    poisoned["findings"][0][field] = value  # type: ignore[index]
+
+    with pytest.raises(ValueError, match="DDoS report"):
+        build_ddos_input(poisoned)
 
 
 @pytest.mark.parametrize("language", ["ko", "en"])
@@ -182,7 +253,7 @@ def test_gateway_sends_only_bounded_projection_and_validates_output() -> None:
     assert gateway.interpret_ddos_cancellable(bundle, should_cancel=lambda: False) == output
     wire = json.dumps(transport.calls[0][2])
     assert "RAW_PACKET_SENTINEL" not in wire
-    assert "ddos-ai-input-v1" in wire
+    assert "ddos-ai-input-v2" in wire
 
 
 def test_ddos_ai_api_is_manual_queued_and_requires_remote_consent() -> None:

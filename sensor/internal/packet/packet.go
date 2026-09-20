@@ -34,6 +34,9 @@ type Packet struct {
 	TCPFlags                    TCPFlags
 	Payload                     []byte
 	IPID                        uint16
+	IPIDObserved                bool
+	HopLimit                    uint8
+	HopLimitObserved            bool
 	TCPSequence                 uint32
 }
 

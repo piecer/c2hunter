@@ -20,7 +20,9 @@ func TestNewProducesStableContentAddressedIDAndControllerSchema(t *testing.T) {
 		FirstPayloadHash: "payload", LastPayloadHash: "last-payload", PayloadPrefixHash: "prefix", PayloadSampleHex: "626f74", FirstPayloadLength: 12,
 		PayloadEntropy: 4.25, PayloadPrintable: 0.5, PayloadSimHash: "0123456789abcdef",
 		PayloadFeatureVersion: "1",
-		ProtocolMetadata:      metadata.Metadata{Kind: metadata.KindTLS, TLS: &metadata.TLS{ClientHelloFingerprint: "tls", SNI: "c2.example"}},
+		HopLimitMin:           63, HopLimitMax: 64, HopLimitMode: 64, HopLimitDistinctCount: 2, HopLimitObserved: true,
+		IPIDObservedCount: 2, IPIDZeroCount: 0, IPIDDistinctCount: 2, IPIDMonotonicTransitions: 1, IPIDTransitionCount: 1,
+		ProtocolMetadata: metadata.Metadata{Kind: metadata.KindTLS, TLS: &metadata.TLS{ClientHelloFingerprint: "tls", SNI: "c2.example"}},
 	}
 	first, err := New([]flow.Record{record})
 	if err != nil {
@@ -48,6 +50,9 @@ func TestNewProducesStableContentAddressedIDAndControllerSchema(t *testing.T) {
 	}
 	if got.PayloadPrefixHash != "prefix" || *got.PayloadLength != 12 || *got.PayloadEntropy != 4.25 || *got.PayloadPrintableRatio != 0.5 || got.PayloadSimHash != "0123456789abcdef" || got.PayloadFeatureVersion != "1" {
 		t.Fatalf("payload features were not preserved: %+v", got)
+	}
+	if got.HopLimitMin == nil || *got.HopLimitMin != 63 || got.HopLimitMax == nil || *got.HopLimitMax != 64 || got.HopLimitMode == nil || *got.HopLimitMode != 64 || got.IPIDObservedCount != 2 || got.IPIDMonotonicTransitions != 1 {
+		t.Fatalf("network identity features were not preserved: %+v", got)
 	}
 }
 
