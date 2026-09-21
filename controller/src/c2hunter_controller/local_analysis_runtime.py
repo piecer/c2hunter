@@ -21,10 +21,14 @@ from .repositories import Repository
 logger = logging.getLogger(__name__)
 
 
+def result_releases_inflight(result: dict[str, Any]) -> bool:
+    return result.get("status") != "EVENT" or result.get("event") == "ANALYSIS_DELIVERY_SUPERSEDED"
+
+
 class LocalWorkerQueue:
     def __init__(self) -> None:
         self.jobs: Queue[dict[str, Any]] = Queue(maxsize=1)
-        self.results: Queue[dict[str, Any]] = Queue(maxsize=1)
+        self.results: Queue[dict[str, Any]] = Queue(maxsize=2)
 
     def receive(self, timeout: int) -> dict[str, Any] | None:
         try:
@@ -34,6 +38,9 @@ class LocalWorkerQueue:
 
     def complete(self, receipt: str, result: dict[str, Any]) -> None:
         self.results.put_nowait({**result, "receipt": receipt})
+
+    def publish_event(self, event: dict[str, Any]) -> None:
+        self.results.put_nowait({**event, "receipt": f"event:{event['job_id']}"})
 
     def close(self) -> None:
         pass
@@ -118,8 +125,10 @@ class LocalAnalysisRuntime:
                         pass
                 if self.pending is not None:
                     self.publish(self.pending)
+                    releases_inflight = result_releases_inflight(self.pending)
                     self.pending = None
-                    self.inflight = False
+                    if releases_inflight:
+                        self.inflight = False
                 if not self.inflight and self.pending is None and self.recovery_ids:
                     self.recover_one()
                 if not self.inflight and self.queue.jobs:
@@ -140,6 +149,20 @@ class LocalAnalysisRuntime:
         job_id = self.recovery_ids[0]
         job = self.repository.get_job(job_id)
         if job is not None and job.get("status") == "ANALYZING":
+            processing = job.get("processing")
+            if isinstance(processing, dict) and processing.get("phase") in {
+                "ANALYSIS_CLAIMED",
+                "ANALYSIS_RUNNING",
+            }:
+                self.pending = {
+                    "job_id": job_id,
+                    "receipt": job_id,
+                    "status": "ERROR",
+                    "error_code": "ANALYSIS_WORKER_LOST",
+                    "error": "local analysis worker stopped before a durable result",
+                }
+                self.recovery_ids.popleft()
+                return
             try:
                 records = job.get("flow_records")
                 if not job.get("dataset_id") or not isinstance(records, list):

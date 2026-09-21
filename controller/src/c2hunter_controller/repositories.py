@@ -5,6 +5,7 @@ import io
 import json
 import sqlite3
 import threading
+import uuid
 from _thread import RLock
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
@@ -151,6 +152,126 @@ _DEFAULT_CAPTURE_CHUNK_SIZE = 64 * 1024
 _DEFAULT_ARTIFACT_CHUNK_SIZE = 1024 * 1024
 _PCAP_EXPORT_POLICY_VERSION = "pcap-export-v8"
 _T = TypeVar("_T")
+
+
+def _claim_pcap_preparation_metadata(
+    job: dict[str, Any],
+    *,
+    now: datetime,
+    lease_seconds: int,
+    max_attempts: int,
+) -> dict[str, Any] | None:
+    if job.get("mode") != "PCAP_UPLOAD" or job.get("status") in _JOB_TERMINAL_STATUSES:
+        return None
+    processing = job.get("processing")
+    if not isinstance(processing, dict) or processing.get("phase") not in {
+        "UPLOAD_STORED",
+        "PARSING",
+        "ANALYSIS_ENQUEUE_PENDING",
+    }:
+        return None
+    if (
+        processing.get("phase") != "ANALYSIS_ENQUEUE_PENDING"
+        and int(processing.get("attempt", 0)) >= max_attempts
+    ):
+        return None
+
+    raw_expiry = processing.get("lease_expires_at")
+    if raw_expiry:
+        try:
+            if datetime.fromisoformat(str(raw_expiry)) > now:
+                return None
+        except ValueError:
+            return None
+    claimed = deepcopy(job)
+    occurred_at = now.isoformat()
+    retrying_committed_enqueue = processing.get("phase") == "ANALYSIS_ENQUEUE_PENDING"
+    claimed["processing"] = {
+        **processing,
+        "phase": (
+            "ANALYSIS_ENQUEUE_PENDING"
+            if processing.get("phase") == "ANALYSIS_ENQUEUE_PENDING"
+            else "PARSING"
+        ),
+        "phase_started_at": occurred_at,
+        "updated_at": occurred_at,
+        "attempt": int(processing.get("attempt", 0)) + (0 if retrying_committed_enqueue else 1),
+        "lease_token": (
+            str(processing["lease_token"])
+            if retrying_committed_enqueue and processing.get("lease_token")
+            else str(uuid.uuid4())
+        ),
+        "lease_expires_at": (now + timedelta(seconds=lease_seconds)).isoformat(),
+    }
+    claimed["updated_at"] = occurred_at
+    return claimed
+
+
+def _exhaust_pcap_preparation_metadata(
+    job: dict[str, Any], *, now: datetime, max_attempts: int
+) -> dict[str, Any] | None:
+    processing = job.get("processing")
+    if (
+        job.get("mode") != "PCAP_UPLOAD"
+        or job.get("status") in _JOB_TERMINAL_STATUSES
+        or not isinstance(processing, dict)
+        or processing.get("phase") != "PARSING"
+        or int(processing.get("attempt", 0)) < max_attempts
+    ):
+        return None
+    try:
+        if datetime.fromisoformat(str(processing["lease_expires_at"])) > now:
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    failed = deepcopy(job)
+    occurred_at = now.isoformat()
+    previous = str(failed["status"])
+    failed["status"] = "FAILED"
+    failed["error_code"] = "PCAP_PREPARATION_ATTEMPTS_EXHAUSTED"
+    failed["error"] = "PCAP preparation retry limit exhausted"
+    failed["processing"] = {
+        "phase": "FAILED",
+        "phase_started_at": occurred_at,
+        "updated_at": occurred_at,
+        "attempt": int(processing.get("attempt", 0)),
+    }
+    failed.setdefault("transitions", []).append(
+        {
+            "from_status": previous,
+            "to_status": "FAILED",
+            "occurred_at": occurred_at,
+            "reason": "PCAP preparation retry limit exhausted",
+        }
+    )
+    failed["updated_at"] = occurred_at
+    failed["completed_at"] = occurred_at
+    return failed
+
+
+def _owns_pcap_preparation(
+    job: dict[str, Any],
+    *,
+    attempt: int,
+    lease_token: str,
+    now: datetime,
+    phases: frozenset[str] = frozenset({"PARSING"}),
+) -> bool:
+    processing = job.get("processing")
+    if (
+        job.get("mode") != "PCAP_UPLOAD"
+        or job.get("status") in _JOB_TERMINAL_STATUSES
+        or not isinstance(processing, dict)
+        or processing.get("phase") not in phases
+        or processing.get("attempt") != attempt
+        or processing.get("lease_token") != lease_token
+    ):
+        return False
+    try:
+        expiry = datetime.fromisoformat(str(processing["lease_expires_at"]))
+    except (KeyError, TypeError, ValueError):
+        return False
+    return expiry > now
 
 
 def _pcap_export_snapshot(
@@ -631,6 +752,15 @@ class Repository(Protocol):
     def create_job(self, job: dict[str, Any]) -> tuple[dict[str, Any], bool]: ...
     def save_job(self, job: dict[str, Any]) -> dict[str, Any]: ...
     def save_job_metadata(self, job: dict[str, Any]) -> dict[str, Any]: ...
+    def transition_job_terminal(self, job: dict[str, Any]) -> bool: ...
+    def mark_analysis_started(
+        self,
+        job_id: str,
+        occurred_at: str,
+        *,
+        attempt: int | None = None,
+        lease_token: str | None = None,
+    ) -> bool: ...
     def get_job(self, job_id: str) -> dict[str, Any] | None: ...
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None: ...
     def get_job_summaries(self, job_ids: list[str]) -> dict[str, dict[str, Any]]: ...
@@ -639,6 +769,26 @@ class Repository(Protocol):
     def delete_job(self, job_id: str) -> bool: ...
     def delete_retained_source(self, job_id: str) -> bool: ...
     def save_job_capture(self, job_id: str, content: bytes) -> None: ...
+    def claim_pcap_preparation(
+        self, *, now: datetime, lease_seconds: int, max_attempts: int
+    ) -> dict[str, Any] | None: ...
+    def renew_pcap_preparation(
+        self, job_id: str, *, attempt: int, lease_token: str, lease_seconds: int
+    ) -> bool: ...
+    def publish_pcap_preparation(
+        self,
+        job: dict[str, Any],
+        *,
+        attempt: int,
+        lease_token: str,
+    ) -> bool: ...
+    def complete_pcap_preparation(
+        self, job: dict[str, Any], *, attempt: int, lease_token: str
+    ) -> bool: ...
+    def fail_pcap_preparation(
+        self, job: dict[str, Any], *, attempt: int, lease_token: str
+    ) -> bool: ...
+    def publish_job_capture(self, job: dict[str, Any], content: bytes) -> dict[str, Any] | None: ...
     def open_job_capture(self, job_id: str) -> CaptureSource | None: ...
     def get_capture_source_version(self, source_id: str, /) -> CaptureSourceVersion | None: ...
     def get_live_capture_source_version(self, source_id: str, /) -> CaptureSourceVersion | None: ...
@@ -2690,6 +2840,57 @@ class MemoryRepository(
         }
         return self.save_job(summary)
 
+    def transition_job_terminal(self, job: dict[str, Any]) -> bool:
+        if job.get("status") not in _JOB_TERMINAL_STATUSES:
+            raise ValueError("terminal transition requires a terminal target status")
+        with self._lock:
+            current = self.jobs.get(str(job["id"]))
+            if current is None or current.get("status") in _JOB_TERMINAL_STATUSES:
+                return False
+            stored = deepcopy(job)
+            stored["flow_records"] = deepcopy(current.get("flow_records", []))
+            stored["payload_signatures"] = deepcopy(current.get("payload_signatures", []))
+            self.jobs[str(job["id"])] = stored
+            return True
+
+    def mark_analysis_started(
+        self,
+        job_id: str,
+        occurred_at: str,
+        *,
+        attempt: int | None = None,
+        lease_token: str | None = None,
+    ) -> bool:
+        with self._lock:
+            current = self.jobs.get(job_id)
+            processing = current.get("processing") if current is not None else None
+            if (
+                current is None
+                or current.get("status") != "ANALYZING"
+                or not isinstance(processing, dict)
+            ):
+                return False
+            phase = processing.get("phase")
+            if phase == "ANALYSIS_CLAIMED" and (
+                int(processing.get("attempt", -1)) != attempt
+                or processing.get("lease_token") != lease_token
+            ):
+                return False
+            if phase not in {"ANALYSIS_QUEUED", "ANALYSIS_CLAIMED"}:
+                return False
+            started_processing = {
+                **processing,
+                "phase": "ANALYSIS_RUNNING",
+                "phase_started_at": occurred_at,
+                "updated_at": occurred_at,
+            }
+            started_processing.pop("lease_token", None)
+            started_processing.pop("lease_expires_at", None)
+            current["processing"] = started_processing
+            current["analysis_started_at"] = occurred_at
+            current["updated_at"] = occurred_at
+            return True
+
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         value = self.jobs.get(job_id)
         return deepcopy(value) if value else None
@@ -2725,6 +2926,108 @@ class MemoryRepository(
             )
             for job in self.jobs.values()
         ]
+
+    def claim_pcap_preparation(
+        self, *, now: datetime, lease_seconds: int, max_attempts: int = 3
+    ) -> dict[str, Any] | None:
+        del now
+        with self._lock:
+            authoritative_now = self._lease_clock()
+            ordered = sorted(self.jobs.values(), key=lambda job: str(job["created_at"]))
+            for job in ordered:
+                exhausted = _exhaust_pcap_preparation_metadata(
+                    job, now=authoritative_now, max_attempts=max_attempts
+                )
+                if exhausted is not None:
+                    self.jobs[str(exhausted["id"])] = exhausted
+                    continue
+                claimed = _claim_pcap_preparation_metadata(
+                    job,
+                    now=authoritative_now,
+                    lease_seconds=lease_seconds,
+                    max_attempts=max_attempts,
+                )
+                if claimed is None:
+                    continue
+                self.jobs[str(claimed["id"])] = claimed
+                return deepcopy(claimed)
+        return None
+
+    def renew_pcap_preparation(
+        self, job_id: str, *, attempt: int, lease_token: str, lease_seconds: int
+    ) -> bool:
+        with self._lock:
+            current = self.jobs.get(job_id)
+            now = self._lease_clock()
+            if current is None or not _owns_pcap_preparation(
+                current,
+                attempt=attempt,
+                lease_token=lease_token,
+                now=now,
+                phases=frozenset({"PARSING", "ANALYSIS_ENQUEUE_PENDING"}),
+            ):
+                return False
+            current["processing"]["lease_expires_at"] = (
+                now + timedelta(seconds=lease_seconds)
+            ).isoformat()
+            current["processing"]["updated_at"] = now.isoformat()
+            return True
+
+    def publish_pcap_preparation(
+        self,
+        job: dict[str, Any],
+        *,
+        attempt: int,
+        lease_token: str,
+    ) -> bool:
+        with self._lock:
+            current = self.jobs.get(str(job["id"]))
+            if current is None or not _owns_pcap_preparation(
+                current, attempt=attempt, lease_token=lease_token, now=self._lease_clock()
+            ):
+                return False
+            stored = deepcopy(job)
+            stored_processing = dict(stored["processing"])
+            current_processing = dict(current["processing"])
+            stored_processing["lease_expires_at"] = current_processing["lease_expires_at"]
+            stored_processing["lease_token"] = current_processing["lease_token"]
+            stored["processing"] = stored_processing
+            if "payload_signatures" not in stored:
+                stored["payload_signatures"] = deepcopy(current.get("payload_signatures", []))
+            self.jobs[str(job["id"])] = stored
+            return True
+
+    def complete_pcap_preparation(
+        self, job: dict[str, Any], *, attempt: int, lease_token: str
+    ) -> bool:
+        with self._lock:
+            current = self.jobs.get(str(job["id"]))
+            if current is None or not _owns_pcap_preparation(
+                current,
+                attempt=attempt,
+                lease_token=lease_token,
+                now=self._lease_clock(),
+                phases=frozenset({"ANALYSIS_ENQUEUE_PENDING"}),
+            ):
+                return False
+            stored = deepcopy(job)
+            stored["flow_records"] = deepcopy(current.get("flow_records", []))
+            stored["payload_signatures"] = deepcopy(current.get("payload_signatures", []))
+            self.jobs[str(job["id"])] = stored
+            return True
+
+    def fail_pcap_preparation(self, job: dict[str, Any], *, attempt: int, lease_token: str) -> bool:
+        with self._lock:
+            current = self.jobs.get(str(job["id"]))
+            if current is None or not _owns_pcap_preparation(
+                current, attempt=attempt, lease_token=lease_token, now=self._lease_clock()
+            ):
+                return False
+            stored = deepcopy(job)
+            stored["flow_records"] = deepcopy(current.get("flow_records", []))
+            stored["payload_signatures"] = deepcopy(current.get("payload_signatures", []))
+            self.jobs[str(job["id"])] = stored
+            return True
 
     def list_active_live_jobs(self) -> list[dict[str, Any]]:
         return [
@@ -2842,6 +3145,48 @@ class MemoryRepository(
                 len(snapshot),
                 digest,
             )
+
+    def publish_job_capture(self, job: dict[str, Any], content: bytes) -> dict[str, Any] | None:
+        with self._lock:
+            job_id = str(job["id"])
+            current = self.jobs.get(job_id)
+            processing = current.get("processing") if current is not None else None
+            source = current.get("source") if current is not None else None
+            if (
+                current is None
+                or not isinstance(processing, dict)
+                or (
+                    (current.get("status"), processing.get("phase"))
+                    not in {("CREATED", "UPLOAD_PENDING"), ("UPLOADING", "UPLOADING")}
+                )
+                or not isinstance(source, dict)
+                or source.get("packet_bytes_retained") is True
+            ):
+                return None
+            snapshot = bytes(content)
+            digest = hashlib.sha256(snapshot).hexdigest()
+            published_source = job.get("source")
+            if (
+                not isinstance(published_source, dict)
+                or published_source.get("packet_bytes_retained") is not True
+                or published_source.get("size_bytes") != len(snapshot)
+                or published_source.get("sha256") != digest
+            ):
+                raise ValueError("published capture metadata does not match content")
+            self.job_captures[job_id] = snapshot
+            self.capture_source_versions[job_id] = CaptureSourceVersion(
+                "PCAP_UPLOAD",
+                job_id,
+                f"captures/{job_id}.pcap",
+                f"sha256:{digest}",
+                len(snapshot),
+                digest,
+            )
+            stored = deepcopy(job)
+            stored["flow_records"] = deepcopy(current.get("flow_records", []))
+            stored["payload_signatures"] = deepcopy(current.get("payload_signatures", []))
+            self.jobs[job_id] = stored
+            return deepcopy(stored)
 
     def get_capture_source_version(self, job_id: str) -> CaptureSourceVersion | None:
         with self._lock:
@@ -4765,6 +5110,74 @@ class SQLiteRepository(
         }
         return self._put("job", job["id"], metadata)
 
+    def transition_job_terminal(self, job: dict[str, Any]) -> bool:
+        if job.get("status") not in _JOB_TERMINAL_STATUSES:
+            raise ValueError("terminal transition requires a terminal target status")
+        metadata = {
+            key: value
+            for key, value in job.items()
+            if key not in {"flow_records", "payload_signatures"}
+        }
+        with self._lock, self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            row = self.connection.execute(
+                "SELECT data FROM objects WHERE kind='job' AND id=?", (str(job["id"]),)
+            ).fetchone()
+            current = json.loads(row[0]) if row is not None else None
+            if current is None or current.get("status") in _JOB_TERMINAL_STATUSES:
+                return False
+            cursor = self.connection.execute(
+                "UPDATE objects SET data=? WHERE kind='job' AND id=?",
+                (self._serialize(metadata), str(job["id"])),
+            )
+            return cursor.rowcount == 1
+
+    def mark_analysis_started(
+        self,
+        job_id: str,
+        occurred_at: str,
+        *,
+        attempt: int | None = None,
+        lease_token: str | None = None,
+    ) -> bool:
+        with self._lock, self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            row = self.connection.execute(
+                "SELECT data FROM objects WHERE kind='job' AND id=?", (job_id,)
+            ).fetchone()
+            current = json.loads(row[0]) if row is not None else None
+            processing = current.get("processing") if current is not None else None
+            if (
+                current is None
+                or current.get("status") != "ANALYZING"
+                or not isinstance(processing, dict)
+            ):
+                return False
+            phase = processing.get("phase")
+            if phase == "ANALYSIS_CLAIMED" and (
+                int(processing.get("attempt", -1)) != attempt
+                or processing.get("lease_token") != lease_token
+            ):
+                return False
+            if phase not in {"ANALYSIS_QUEUED", "ANALYSIS_CLAIMED"}:
+                return False
+            started_processing = {
+                **processing,
+                "phase": "ANALYSIS_RUNNING",
+                "phase_started_at": occurred_at,
+                "updated_at": occurred_at,
+            }
+            started_processing.pop("lease_token", None)
+            started_processing.pop("lease_expires_at", None)
+            current["processing"] = started_processing
+            current["analysis_started_at"] = occurred_at
+            current["updated_at"] = occurred_at
+            cursor = self.connection.execute(
+                "UPDATE objects SET data=? WHERE kind='job' AND id=?",
+                (self._serialize(current), job_id),
+            )
+            return cursor.rowcount == 1
+
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         job = self._get("job", job_id)
         if job is None:
@@ -4795,6 +5208,172 @@ class SQLiteRepository(
 
     def list_jobs(self) -> list[dict[str, Any]]:
         return self._list("job")
+
+    def claim_pcap_preparation(
+        self, *, now: datetime, lease_seconds: int, max_attempts: int = 3
+    ) -> dict[str, Any] | None:
+        del now
+        with self._lock, self.connection:
+            authoritative_now = self._lease_clock()
+            self.connection.execute("BEGIN IMMEDIATE")
+            rows = self.connection.execute(
+                "SELECT id,data FROM objects WHERE kind='job' "
+                "AND json_extract(data,'$.mode')='PCAP_UPLOAD' "
+                "AND json_extract(data,'$.processing.phase') IN "
+                "('UPLOAD_STORED','PARSING','ANALYSIS_ENQUEUE_PENDING') "
+                "ORDER BY json_extract(data,'$.created_at'),id"
+            ).fetchall()
+            for row in rows:
+                raw_job = json.loads(row[1])
+                exhausted = _exhaust_pcap_preparation_metadata(
+                    raw_job, now=authoritative_now, max_attempts=max_attempts
+                )
+                if exhausted is not None:
+                    self.connection.execute(
+                        "UPDATE objects SET data=? WHERE kind='job' AND id=?",
+                        (self._serialize(exhausted), str(row[0])),
+                    )
+                    continue
+                claimed = _claim_pcap_preparation_metadata(
+                    raw_job,
+                    now=authoritative_now,
+                    lease_seconds=lease_seconds,
+                    max_attempts=max_attempts,
+                )
+                if claimed is None:
+                    continue
+                self.connection.execute(
+                    "UPDATE objects SET data=? WHERE kind='job' AND id=?",
+                    (self._serialize(claimed), str(row[0])),
+                )
+                signature_row = self.connection.execute(
+                    "SELECT data FROM job_payload_signatures WHERE job_id=?", (str(row[0]),)
+                ).fetchone()
+                claimed["payload_signatures"] = (
+                    json.loads(signature_row[0]) if signature_row is not None else []
+                )
+                flow_row = self.connection.execute(
+                    "SELECT data FROM job_flow_records WHERE job_id=?", (str(row[0]),)
+                ).fetchone()
+                claimed["flow_records"] = json.loads(flow_row[0]) if flow_row is not None else []
+                return claimed
+        return None
+
+    def renew_pcap_preparation(
+        self, job_id: str, *, attempt: int, lease_token: str, lease_seconds: int
+    ) -> bool:
+        with self._lock, self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            row = self.connection.execute(
+                "SELECT data FROM objects WHERE kind='job' AND id=?", (job_id,)
+            ).fetchone()
+            current = json.loads(row[0]) if row is not None else None
+            now = self._lease_clock()
+            if current is None or not _owns_pcap_preparation(
+                current,
+                attempt=attempt,
+                lease_token=lease_token,
+                now=now,
+                phases=frozenset({"PARSING", "ANALYSIS_ENQUEUE_PENDING"}),
+            ):
+                return False
+            processing = dict(current["processing"])
+            processing["lease_expires_at"] = (now + timedelta(seconds=lease_seconds)).isoformat()
+            processing["updated_at"] = now.isoformat()
+            current["processing"] = processing
+            self.connection.execute(
+                "UPDATE objects SET data=? WHERE kind='job' AND id=?",
+                (self._serialize(current), job_id),
+            )
+            return True
+
+    def publish_pcap_preparation(
+        self,
+        job: dict[str, Any],
+        *,
+        attempt: int,
+        lease_token: str,
+    ) -> bool:
+        with self._lock, self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            row = self.connection.execute(
+                "SELECT data FROM objects WHERE kind='job' AND id=?", (str(job["id"]),)
+            ).fetchone()
+            current = json.loads(row[0]) if row is not None else None
+            if current is None or not _owns_pcap_preparation(
+                current, attempt=attempt, lease_token=lease_token, now=self._lease_clock()
+            ):
+                return False
+            metadata = {
+                key: value
+                for key, value in job.items()
+                if key not in {"flow_records", "payload_signatures"}
+            }
+            metadata_processing = dict(metadata["processing"])
+            current_processing = dict(current["processing"])
+            metadata_processing["lease_expires_at"] = current_processing["lease_expires_at"]
+            metadata_processing["lease_token"] = current_processing["lease_token"]
+            metadata["processing"] = metadata_processing
+            self.connection.execute(
+                "UPDATE objects SET data=? WHERE kind='job' AND id=?",
+                (self._serialize(metadata), str(job["id"])),
+            )
+            self.connection.execute(
+                "INSERT INTO job_flow_records(job_id,data) VALUES(?,?) "
+                "ON CONFLICT(job_id) DO UPDATE SET data=excluded.data",
+                (str(job["id"]), self._serialize(job.get("flow_records", []))),
+            )
+            return True
+
+    def complete_pcap_preparation(
+        self, job: dict[str, Any], *, attempt: int, lease_token: str
+    ) -> bool:
+        with self._lock, self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            row = self.connection.execute(
+                "SELECT data FROM objects WHERE kind='job' AND id=?", (str(job["id"]),)
+            ).fetchone()
+            current = json.loads(row[0]) if row is not None else None
+            if current is None or not _owns_pcap_preparation(
+                current,
+                attempt=attempt,
+                lease_token=lease_token,
+                now=self._lease_clock(),
+                phases=frozenset({"ANALYSIS_ENQUEUE_PENDING"}),
+            ):
+                return False
+            metadata = {
+                key: value
+                for key, value in job.items()
+                if key not in {"flow_records", "payload_signatures"}
+            }
+            self.connection.execute(
+                "UPDATE objects SET data=? WHERE kind='job' AND id=?",
+                (self._serialize(metadata), str(job["id"])),
+            )
+            return True
+
+    def fail_pcap_preparation(self, job: dict[str, Any], *, attempt: int, lease_token: str) -> bool:
+        with self._lock, self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            row = self.connection.execute(
+                "SELECT data FROM objects WHERE kind='job' AND id=?", (str(job["id"]),)
+            ).fetchone()
+            current = json.loads(row[0]) if row is not None else None
+            if current is None or not _owns_pcap_preparation(
+                current, attempt=attempt, lease_token=lease_token, now=self._lease_clock()
+            ):
+                return False
+            metadata = {
+                key: value
+                for key, value in job.items()
+                if key not in {"flow_records", "payload_signatures"}
+            }
+            self.connection.execute(
+                "UPDATE objects SET data=? WHERE kind='job' AND id=?",
+                (self._serialize(metadata), str(job["id"])),
+            )
+            return True
 
     def list_active_live_jobs(self) -> list[dict[str, Any]]:
         rows = self.connection.execute(
@@ -4949,6 +5528,61 @@ class SQLiteRepository(
                 (job_id, f"captures/{job_id}.pcap", f"sha256:{digest}", len(content), digest),
             )
             self.connection.commit()
+
+    def publish_job_capture(self, job: dict[str, Any], content: bytes) -> dict[str, Any] | None:
+        with self._lock, self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            job_id = str(job["id"])
+            row = self.connection.execute(
+                "SELECT data FROM objects WHERE kind='job' AND id=?", (job_id,)
+            ).fetchone()
+            current = json.loads(row[0]) if row is not None else None
+            processing = current.get("processing") if current is not None else None
+            source = current.get("source") if current is not None else None
+            if (
+                current is None
+                or not isinstance(processing, dict)
+                or (
+                    (current.get("status"), processing.get("phase"))
+                    not in {("CREATED", "UPLOAD_PENDING"), ("UPLOADING", "UPLOADING")}
+                )
+                or not isinstance(source, dict)
+                or source.get("packet_bytes_retained") is True
+            ):
+                return None
+            digest = hashlib.sha256(content).hexdigest()
+            published_source = job.get("source")
+            if (
+                not isinstance(published_source, dict)
+                or published_source.get("packet_bytes_retained") is not True
+                or published_source.get("size_bytes") != len(content)
+                or published_source.get("sha256") != digest
+            ):
+                raise ValueError("published capture metadata does not match content")
+            self.connection.execute(
+                "INSERT INTO job_capture_blobs(job_id,content) VALUES(?,?) "
+                "ON CONFLICT(job_id) DO UPDATE SET content=excluded.content",
+                (job_id, content),
+            )
+            self.connection.execute(
+                "INSERT INTO pcap_capture_source_versions("
+                "source_kind,source_id,object_key,source_version_id,source_size_bytes,source_sha256"
+                ") VALUES('PCAP_UPLOAD',?,?,?,?,?) "
+                "ON CONFLICT(source_kind,source_id) DO UPDATE SET "
+                "object_key=excluded.object_key,source_version_id=excluded.source_version_id,"
+                "source_size_bytes=excluded.source_size_bytes,source_sha256=excluded.source_sha256",
+                (job_id, f"captures/{job_id}.pcap", f"sha256:{digest}", len(content), digest),
+            )
+            metadata = {
+                key: value
+                for key, value in job.items()
+                if key not in {"flow_records", "payload_signatures"}
+            }
+            self.connection.execute(
+                "UPDATE objects SET data=? WHERE kind='job' AND id=?",
+                (self._serialize(metadata), job_id),
+            )
+            return deepcopy(job)
 
     def get_capture_source_version(self, job_id: str) -> CaptureSourceVersion | None:
         with self._lock:

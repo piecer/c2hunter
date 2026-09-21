@@ -290,13 +290,49 @@ Content-Type: application/json
 
 #### PCAP 파일 업로드 분석
 
+Web UI와 신규 client는 작업을 먼저 만들고 원본을 별도 업로드한다. 첫 응답에서 job ID를
+확보하므로 업로드·파싱·queue 대기·실행 상태를 `GET /api/v1/analysis-jobs/{job_id}`로
+조회할 수 있다.
+
 ```http
-POST /api/v1/pcap-analysis-jobs?name=MyPCAP&filename=test.pcap&internal_networks=10.0.0.0%2F8 HTTP/1.1
-Authorization: Bearer <TOKEN>
-Content-Type: application/vnd.tcpdump.pcap    // raw PCAP data
+POST /api/v1/pcap-analysis-jobs/initiate HTTP/1.1
+Authorization: Bearer ***
+Content-Type: application/json
+
+{
+  "name": "MyPCAP",
+  "filename": "test.pcap",
+  "description": "case context",
+  "idempotency_key": "case-123-upload-1",
+  "analysis_module": "c2",
+  "internal_networks": ["10.0.0.0/8"],
+  "analysis": {"module": "c2", "minimum_candidate_score": 20}
+}
 ```
 
-**Query parameters**:
+```http
+PUT /api/v1/pcap-analysis-jobs/{job_id}/capture HTTP/1.1
+Authorization: Bearer ***
+Content-Type: application/vnd.tcpdump.pcap
+
+<raw PCAP data>
+```
+
+원본이 immutable storage에 저장되고 preparation intent가 job metadata에 반영된 뒤 두 번째
+요청은 `202 Accepted`와 `processing.phase=UPLOAD_STORED`를 반환한다. 이후 phase는
+공개 phase는 `PARSING → ANALYSIS_QUEUED → ANALYSIS_RUNNING → COMPLETED|FAILED|CANCELLED`로 진행한다.
+내부 queue 조정과 worker 선점 단계는 각각 `PARSING`, `ANALYSIS_QUEUED`로 투영된다. 준비된
+flow는 queue 공개 전에 durable storage에 commit되며, 준비 lease는 처리 중 주기적으로 갱신된다.
+`C2HUNTER_PCAP_PREPARATION_LEASE_SECONDS`,
+`C2HUNTER_PCAP_PREPARATION_LEASE_RENEW_SECONDS`,
+`C2HUNTER_PCAP_PREPARATION_MAX_ATTEMPTS`로 조정할 수 있다.
+브라우저 전송률 100%는 서버 저장 완료가 아니므로 UI는 이 구간을 “전송 완료 · 서버 저장
+확인 중”으로 표시한다.
+
+기존 raw binary `POST /api/v1/pcap-analysis-jobs?...`는 호환 경로로 유지된다. 아래 query
+parameter는 이 legacy 경로에만 적용된다.
+
+**Legacy query parameters**:
 
 | 파라미터 | 기본값 | 설명 |
 |---------|--------|------|

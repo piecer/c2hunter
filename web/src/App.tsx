@@ -38,9 +38,10 @@ type Sensor = { sensor_id: string; name: string; status?: string; derived_status
 type Enrollment = { id?: string; enrollment_id?: string; name: string; status: 'PENDING' | 'CLAIMED' | 'EXPIRED' | 'REVOKED'; expires_at: string; sensor_id?: string };
 type EnrollmentSecret = { enrollment_token: string; install_command: string; expires_at: string };
 type SensorPCAP = { id: string; sensor_id: string; sensor_name?: string; analysis_job_id?: string | null; filename: string; size_bytes: number; sha256: string; uploaded_at: string };
-type JobSource = { filename?: string; capture_format?: string; size_bytes?: number; sha256?: string; captured_packet_count?: number; parsed_packet_count?: number; skipped_packet_count?: number; link_types?: number[] };
+type JobSource = { filename?: string; capture_format?: string; size_bytes?: number; sha256?: string; packet_bytes_retained?: boolean; captured_packet_count?: number; parsed_packet_count?: number; skipped_packet_count?: number; link_types?: number[] };
 type JobTransition = { from_status?: string; to_status: string; occurred_at?: string; reason?: string };
-type Job = { network_anomaly?: NetworkAnomalyReport; ddos_attack?: DDoSAttackReport; ddos_attack_summary?: Record<string, unknown>; id: string; dataset_id?: string; parent_job_id?: string; name: string; description?: string; status: string; mode?: string; source_type?: string; source?: JobSource; created_at?: string; updated_at?: string; completed_at?: string; start_time?: string; end_time?: string; sensor_ids?: string[]; internal_networks?: string[]; capture?: Record<string, unknown>; analysis?: Record<string, unknown>; transitions?: JobTransition[]; progress_percent?: number; packet_count?: number; flow_count?: number; candidate_count?: number; warnings?: string[]; error_code?: string };
+type JobProcessing = { phase: string; phase_started_at?: string; updated_at?: string; attempt?: number };
+type Job = { network_anomaly?: NetworkAnomalyReport; ddos_attack?: DDoSAttackReport; ddos_attack_summary?: Record<string, unknown>; id: string; dataset_id?: string; parent_job_id?: string; name: string; description?: string; status: string; mode?: string; source_type?: string; source?: JobSource; processing?: JobProcessing; created_at?: string; updated_at?: string; completed_at?: string; start_time?: string; end_time?: string; sensor_ids?: string[]; internal_networks?: string[]; capture?: Record<string, unknown>; analysis?: Record<string, unknown>; transitions?: JobTransition[]; progress_percent?: number; packet_count?: number; flow_count?: number; candidate_count?: number; warnings?: string[]; error_code?: string };
 type Evidence = { type: string; detector?: string; version?: string; raw_score?: number; contribution?: number; score?: number; description?: string; hosts?: string[]; sensors?: string[]; first_seen?: string; last_seen?: string; metrics?: Record<string, unknown>; confidence?: number; warnings?: string[] };
 type ScoreAdjustment = { kind: string; points: number; explanation: string };
 type TrafficBucket = { start: string; packets: number; bytes: number; flows: number };
@@ -464,13 +465,26 @@ function PcapUpload() {
   const isDDoS = analysisModule === 'ddos_attack';
   const [file, setFile] = useState<File>();
   const [validationError, setValidationError] = useState('');
+  const [uploadStage, setUploadStage] = useState<'CREATING' | 'UPLOADING' | 'SENT' | 'ACCEPTED'>();
+  const [uploadProgress, setUploadProgress] = useState({ loaded: 0, total: 0 });
+  const [createdJob, setCreatedJob] = useState<Job>();
   const [detectorWeights, setDetectorWeights] = useState<DetectorWeights>({ ...defaultDetectorWeights });
-  const mutation = useMutation<Job, Error, { file: File; query: URLSearchParams }>({
-    mutationFn: ({ file: selected, query }) => {
+  const mutation = useMutation<Job, Error, { file: File; body: Record<string, unknown>; job?: Job }>({
+    mutationFn: async ({ file: selected, body, job }) => {
+      let created = job;
+      if (!created) {
+        setUploadStage('CREATING');
+        created = await api.post<Job>('/pcap-analysis-jobs/initiate', body);
+        setCreatedJob(created);
+      }
       const type = selected.name.toLowerCase().endsWith('.pcapng') ? 'application/x-pcapng' : 'application/vnd.tcpdump.pcap';
-      return api.upload(`/pcap-analysis-jobs?${query.toString()}`, selected, type);
+      setUploadStage('UPLOADING');
+      return api.uploadWithProgress<Job>(`/pcap-analysis-jobs/${encodeURIComponent(created.id)}/capture`, selected, type, progress => {
+        setUploadProgress(progress);
+        setUploadStage(progress.total > 0 && progress.loaded >= progress.total ? 'SENT' : 'UPLOADING');
+      });
     },
-    onSuccess: job => navigate(`/analyses/${job.id}`),
+    onSuccess: job => { setUploadStage('ACCEPTED'); navigate(`/analyses/${job.id}`); },
   });
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -478,28 +492,58 @@ function PcapUpload() {
     if (!file) { setValidationError('Select a PCAP or PCAPNG file.'); return; }
     if (file.size > PCAP_UPLOAD_MAX_BYTES) { setValidationError('PCAP files must be 500 MiB or smaller.'); return; }
     const form = new FormData(event.currentTarget);
-    const query = new URLSearchParams({
+    const analysis: Record<string, unknown> = {
+      module: analysisModule,
+      ...(isC2 ? {
+        profile: 'ddos_botnet',
+        minimum_candidate_score: Number(form.get('score')),
+        minimum_distinct_clients: Number(form.get('hosts')),
+        periodicity_min_samples: Number(form.get('samples')),
+        ml_anomaly_enabled: form.get('ml_anomaly_enabled') === 'on',
+        ml_anomaly_allow_standalone: form.get('ml_anomaly_allow_standalone') === 'on',
+        ...(form.has('detector_weights_explicit') ? { detector_weights: detectorWeights } : {}),
+      } : {}),
+      ...(isDDoS ? ddosParameters(form) : {}),
+    };
+    const body = {
       name: String(form.get('name')),
       description: String(form.get('description') ?? ''),
       filename: file.name,
-      analysis_module: String(form.get('analysis_module')),
-      internal_networks: String(form.get('internal_networks')),
-      ...(isC2 ? {
-        minimum_candidate_score: String(form.get('score')),
-        minimum_distinct_clients: String(form.get('hosts')),
-        periodicity_min_samples: String(form.get('samples')),
-        ml_anomaly_enabled: String(form.get('ml_anomaly_enabled') === 'on'),
-        ml_anomaly_allow_standalone: String(form.get('ml_anomaly_allow_standalone') === 'on'),
-      } : {}),
-      ...(isDDoS ? {
-        ...Object.fromEntries(Object.entries(ddosParameters(form)).map(([key, value]) => [key, String(value)])),
-      } : {}),
+      analysis_module: analysisModule,
+      internal_networks: String(form.get('internal_networks')).split(',').map(value => value.trim()).filter(Boolean),
+      analysis,
       idempotency_key: idempotencyKey(),
-    });
-    if (isC2 && form.has('detector_weights_explicit')) query.set('detector_weights', JSON.stringify(detectorWeights));
-    mutation.mutate({ file, query });
+    };
+    mutation.mutate({ file, body, job: createdJob });
   };
-  return <><header className="header-actions"><div><p className="eyebrow">OFFLINE INVESTIGATION</p><h1>Upload PCAP</h1><p className="muted">Analyze an existing capture for C2 detection or independent network observations.</p></div><Link to="/analyses">View analysis history</Link></header><form className="panel form" onSubmit={submit}><label>Analysis name<input name="name" required maxLength={200} /></label><label>Analysis module<select name="analysis_module" value={analysisModule} onChange={event => setAnalysisModule(event.target.value)}><option value="c2">C2 detection</option><option value="ddos_attack">DDoS attack analysis</option><option value="network_anomaly">Network anomaly</option></select></label>{analysisModule === 'network_anomaly' && <NetworkObservationHelp/>}{isDDoS && <><DDoSAnalysisHelp/><DDoSThresholdFields/></>}<label>Analyst note<textarea name="description" rows={3} maxLength={5000} placeholder="Case, ticket, or collection context" /></label><label>Capture file<input name="pcap" type="file" accept=".pcap,.pcapng,.cap,application/vnd.tcpdump.pcap,application/octet-stream" onChange={event => { const selected = event.currentTarget.files?.[0]; mutation.reset(); setValidationError(''); if (selected && selected.size > PCAP_UPLOAD_MAX_BYTES) { event.currentTarget.value = ''; setFile(undefined); setValidationError('PCAP files must be 500 MiB or smaller.'); return; } setFile(selected); }} required /></label>{file && <div className="file-summary" role="status"><strong>{file.name}</strong><span>{formatBytes(file.size)}</span></div>}<div className="grid"><label>Internal networks<input name="internal_networks" defaultValue="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" required /></label></div><fieldset hidden={!isC2} disabled={!isC2} style={!isC2 ? { display: 'none' } : undefined}><legend>C2 candidate thresholds</legend><div className="grid"><label>Minimum score<input name="score" type="number" min="0" max="100" defaultValue="0" required /></label><label>Minimum internal hosts<input name="hosts" type="number" min="2" defaultValue="3" required /></label><label>Beacon minimum samples<input name="samples" type="number" min="3" defaultValue="5" required /></label></div></fieldset><fieldset hidden={!isC2} disabled={!isC2} style={!isC2 ? { display: 'none' } : undefined}><DetectorWeightFields weights={detectorWeights} setWeights={setDetectorWeights} enabled={isC2}/><fieldset><legend>모집단 이상 탐지</legend><label className="check"><input type="checkbox" name="ml_anomaly_enabled"/>후보군 대비 이상 통신 탐지 사용</label><label className="check"><input type="checkbox" name="ml_anomaly_allow_standalone"/>이상 탐지만으로 후보 생성 허용</label><p className="muted">기본값은 사용 안 함입니다. 단독 후보 생성은 실험 기능이며, 허용하지 않으면 다른 탐지 근거가 있는 후보의 점수만 보강합니다.</p></fieldset></fieldset><p className="muted">Supported containers: classic PCAP and PCAPNG. Supported packet links include Ethernet, raw IP, Linux cooked capture v1/v2, and loopback. The upload limit is 500 MiB and 2,000,000 packets.</p>{(validationError || mutation.error) && <p role="alert" className="error-text">{validationError || mutation.error?.message}</p>}<button disabled={mutation.isPending}>{mutation.isPending ? 'Uploading and analyzing…' : 'Upload and analyze'}</button></form></>;
+  const stageLabel = uploadStage === 'CREATING'
+    ? '분석 작업을 생성하는 중…'
+    : uploadStage === 'UPLOADING'
+      ? `파일 전송 중 · ${formatBytes(uploadProgress.loaded)} / ${formatBytes(uploadProgress.total)}`
+      : uploadStage === 'SENT'
+        ? '전송 완료 · 서버 저장 확인 중'
+        : uploadStage === 'ACCEPTED'
+          ? '업로드 완료 · 분석 준비로 이동합니다'
+          : '';
+  return <>
+    <header className="header-actions"><div><p className="eyebrow">OFFLINE INVESTIGATION</p><h1>Upload PCAP</h1><p className="muted">Analyze an existing capture for C2 detection or independent network observations.</p></div><Link to="/analyses">View analysis history</Link></header>
+    <form className="panel form" onSubmit={submit}>
+      <label>Analysis name<input name="name" required maxLength={200} /></label>
+      <label>Analysis module<select name="analysis_module" value={analysisModule} onChange={event => setAnalysisModule(event.target.value)}><option value="c2">C2 detection</option><option value="ddos_attack">DDoS attack analysis</option><option value="network_anomaly">Network anomaly</option></select></label>
+      {analysisModule === 'network_anomaly' && <NetworkObservationHelp/>}
+      {isDDoS && <><DDoSAnalysisHelp/><DDoSThresholdFields/></>}
+      <label>Analyst note<textarea name="description" rows={3} maxLength={5000} placeholder="Case, ticket, or collection context" /></label>
+      <label>Capture file<input name="pcap" type="file" accept=".pcap,.pcapng,.cap,application/vnd.tcpdump.pcap,application/octet-stream" onChange={event => { const selected = event.currentTarget.files?.[0]; mutation.reset(); setCreatedJob(undefined); setUploadStage(undefined); setUploadProgress({ loaded: 0, total: 0 }); setValidationError(''); if (selected && selected.size > PCAP_UPLOAD_MAX_BYTES) { event.currentTarget.value = ''; setFile(undefined); setValidationError('PCAP files must be 500 MiB or smaller.'); return; } setFile(selected); }} required /></label>
+      {file && <div className="file-summary" role={uploadStage ? undefined : 'status'}><strong>{file.name}</strong><span>{formatBytes(file.size)}</span></div>}
+      {uploadStage && <section className="upload-progress-panel" role="status" aria-live="polite"><strong>{stageLabel}</strong>{uploadStage === 'UPLOADING' && uploadProgress.total > 0 && <progress aria-label="PCAP upload progress" max={uploadProgress.total} value={uploadProgress.loaded}/>}</section>}
+      <div className="grid"><label>Internal networks<input name="internal_networks" defaultValue="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" required /></label></div>
+      <fieldset hidden={!isC2} disabled={!isC2} style={!isC2 ? { display: 'none' } : undefined}><legend>C2 candidate thresholds</legend><div className="grid"><label>Minimum score<input name="score" type="number" min="0" max="100" defaultValue="0" required /></label><label>Minimum internal hosts<input name="hosts" type="number" min="2" defaultValue="3" required /></label><label>Beacon minimum samples<input name="samples" type="number" min="3" defaultValue="5" required /></label></div></fieldset>
+      <fieldset hidden={!isC2} disabled={!isC2} style={!isC2 ? { display: 'none' } : undefined}><DetectorWeightFields weights={detectorWeights} setWeights={setDetectorWeights} enabled={isC2}/><fieldset><legend>모집단 이상 탐지</legend><label className="check"><input type="checkbox" name="ml_anomaly_enabled"/>후보군 대비 이상 통신 탐지 사용</label><label className="check"><input type="checkbox" name="ml_anomaly_allow_standalone"/>이상 탐지만으로 후보 생성 허용</label><p className="muted">기본값은 사용 안 함입니다. 단독 후보 생성은 실험 기능이며, 허용하지 않으면 다른 탐지 근거가 있는 후보의 점수만 보강합니다.</p></fieldset></fieldset>
+      <p className="muted">Supported containers: classic PCAP and PCAPNG. Supported packet links include Ethernet, raw IP, Linux cooked capture v1/v2, and loopback. The upload limit is 500 MiB and 2,000,000 packets.</p>
+      {(validationError || mutation.error) && <div role="alert" className="error-text"><p>{validationError || mutation.error?.message}</p>{createdJob && mutation.variables && <div className="actions"><Link to={`/analyses/${createdJob.id}`}>생성된 작업 보기</Link><button type="button" className="secondary" disabled={mutation.isPending} onClick={() => mutation.mutate({ ...mutation.variables!, job: createdJob })}>기존 작업으로 업로드 재시도</button></div>}</div>}
+      <button disabled={mutation.isPending}>{mutation.isPending ? 'Uploading and analyzing…' : 'Upload and analyze'}</button>
+    </form>
+  </>;
 }
 
 function NewAnalysis() {
@@ -673,6 +717,25 @@ function AIAnalysisPanel({ job }: { job: Job }) {
   </section>;
 }
 
+function PcapAnalysisLifecycle({ job }: { job: Job }) {
+  const phase = job.processing?.phase ?? job.status;
+  const preparation = new Set(['UPLOAD_STORED', 'PARSING', 'INDEXING']);
+  const analysis = new Set(['ANALYSIS_QUEUED', 'ANALYSIS_RUNNING', 'FINALIZING', 'ANALYZING']);
+  const terminal = new Set(['COMPLETED', 'PARTIALLY_COMPLETED', 'FAILED', 'CANCELLED']);
+  const current = terminal.has(phase) ? 3 : analysis.has(phase) ? 2 : preparation.has(phase) ? 1 : 0;
+  const details: Record<number, string> = {
+    0: phase === 'UPLOAD_PENDING' ? '업로드를 시작할 준비가 되었습니다.' : 'PCAP 파일을 서버로 전송하고 저장을 확인하고 있습니다.',
+    1: 'PCAP을 읽고 분석 데이터를 준비하고 있습니다.',
+    2: phase === 'ANALYSIS_QUEUED' ? '분석 작업이 실행 대기 중입니다.' : phase === 'FINALIZING' ? '분석 결과를 안전하게 저장하고 있습니다.' : '탐지 분석을 실행하고 있습니다.',
+    3: phase === 'FAILED' ? '분석이 실패했습니다. 오류 정보를 확인하세요.' : phase === 'CANCELLED' ? '분석이 취소되었습니다.' : '분석 결과가 저장되었습니다.',
+  };
+  return <section className="panel analysis-lifecycle" aria-label="PCAP 분석 처리 단계">
+    <ol>{['업로드', '분석 준비', '분석 중', '완료'].map((label, index) => <li key={label} data-state={index < current ? 'complete' : index === current ? 'current' : 'pending'}><span aria-hidden="true">{index + 1}</span><strong>{label}</strong></li>)}</ol>
+    <p role="status">{details[current]}</p>
+    {job.processing?.phase_started_at && <small>현재 단계 시작 {fmt(job.processing.phase_started_at)}</small>}
+  </section>;
+}
+
 function JobDetail() {
   const { id } = useParams();
   const [detailsOwner, setDetailsOwner] = useState<string>();
@@ -695,6 +758,7 @@ function JobDetail() {
     const module = j.analysis?.module ?? 'c2';
     return <>
       <header className="header-actions"><div><p className="eyebrow">ANALYSIS DETAIL</p><h1>{j.name}</h1><span className={`badge ${j.status.toLowerCase()}`}>{j.status}</span><p className="record-id">Job {j.id}{j.dataset_id ? ` · Dataset ${j.dataset_id}` : ''}</p></div><Link to="/analyses">Back to analysis history</Link></header>
+      {(j.source_type === 'PCAP_UPLOAD' || j.processing) && <PcapAnalysisLifecycle job={j}/>}
       {j.description && <section className="panel"><h2>Analyst note</h2><p>{j.description}</p></section>}
       {(module === 'c2' || !terminal || ('error_code' in j && j.error_code === 'LIVE_CAPTURE_RESTART_INCOMPLETE') || strings(j.warnings).length > 0 || cancel.error || notice) && <section className="panel">
         {(module === 'c2' || (!terminal && typeof j.progress_percent === 'number')) && <label>Progress <progress value={terminal ? 100 : j.progress_percent ?? 0} max="100">{terminal ? 100 : j.progress_percent}%</progress></label>}

@@ -82,10 +82,10 @@ it.each(['/analyses/new', '/analyses/upload'])('isolates network controls and re
 
 it('uploads network evidence without C2 query settings even when C2 inputs are invalid', async () => {
   localStorage.setItem('c2hunter-token', 'token');
-  let query: URLSearchParams | undefined;
+  let submitted: Record<string, unknown> | undefined;
   vi.stubGlobal('fetch', vi.fn(async (input, init) => {
-    if (init?.method === 'POST') {
-      query = new URL(String(input), 'http://localhost').searchParams;
+    if (String(input) === '/api/v1/pcap-analysis-jobs/initiate' && init?.method === 'POST') {
+      submitted = JSON.parse(String(init.body));
       return new Response(JSON.stringify({ detail: 'Test keeps form open' }), { status: 400 });
     }
     return new Response(JSON.stringify({ items: [] }));
@@ -98,8 +98,10 @@ it('uploads network evidence without C2 query settings even when C2 inputs are i
   fireEvent.change(screen.getByLabelText('Analysis module'), { target: { value: 'network_anomaly' } });
   expect((screen.getByLabelText('Minimum score') as HTMLInputElement).willValidate).toBe(false);
   fireEvent.submit(screen.getByLabelText('Analysis name').closest('form')!);
-  await waitFor(() => expect(query?.get('analysis_module')).toBe('network_anomaly'));
-  expect([...query!.keys()].sort()).toEqual(['analysis_module', 'description', 'filename', 'idempotency_key', 'internal_networks', 'name']);
+  await waitFor(() => expect(submitted?.analysis_module).toBe('network_anomaly'));
+  expect(submitted?.analysis).toEqual({ module: 'network_anomaly' });
+  expect(submitted).not.toHaveProperty('minimum_candidate_score');
+  expect(submitted).not.toHaveProperty('detector_weights');
 });
 
 it('explains the workflow without inventing network stage percentages', async () => {

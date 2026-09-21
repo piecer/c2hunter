@@ -22,6 +22,7 @@ import c2hunter_controller.pcap as controller_pcap
 from c2hunter_controller.app import create_app
 from c2hunter_controller.capture_sink import CaptureStorageError
 from c2hunter_controller.config import Settings
+from c2hunter_controller.jobs import JobState, StateMachine
 from c2hunter_controller.pcap import build_capture_result, filter_records
 from c2hunter_controller.pcap_export_store import ExportQueueStorageError
 from c2hunter_controller.pcap_export_worker import create_pcap_export_worker
@@ -99,6 +100,204 @@ def _legacy_packet_record(packet: bytes, index: int) -> dict[str, Any]:
         "raw_packet_link_type": 1,
         "raw_packet_original_length": len(packet),
     }
+
+
+def test_pcap_upload_job_is_created_before_capture_bytes_are_sent() -> None:
+    repository = MemoryRepository()
+    repository.payload_signatures["signature-1"] = {
+        "id": "signature-1",
+        "enabled": True,
+        "created_at": "2026-09-21T05:00:00+00:00",
+    }
+    repository.allowlist["allow-1"] = {
+        "id": "allow-1",
+        "type": "IP",
+        "value": "192.0.2.10",
+        "created_at": "2026-09-21T05:00:00+00:00",
+    }
+    repository.detector_weight_presets["preset-1"] = {
+        "id": "preset-1",
+        "is_default": True,
+        "detector_weights": {"periodic_beacon": 1.75},
+        "created_at": "2026-09-21T05:00:00+00:00",
+    }
+    client = TestClient(create_app(Settings(environment="test"), repository))
+
+    response = client.post(
+        "/api/v1/pcap-analysis-jobs/initiate",
+        json={
+            "name": "staged upload",
+            "filename": "capture.pcap",
+            "description": "operator context",
+            "idempotency_key": "staged-upload-1",
+            "analysis_module": "c2",
+            "internal_networks": ["10.0.0.0/8"],
+            "analysis": {"module": "c2", "minimum_candidate_score": 20},
+        },
+    )
+
+    assert response.status_code == 201
+    job = response.json()
+    assert job["status"] == "CREATED"
+    assert job["processing"]["phase"] == "UPLOAD_PENDING"
+    assert job["source"] == {
+        "filename": "capture.pcap",
+        "packet_bytes_retained": False,
+    }
+    assert repository.get_job_capture(job["id"]) is None
+    stored = repository.get_job(job["id"])
+    assert stored is not None
+    assert stored["payload_signatures"] == [repository.payload_signatures["signature-1"]]
+    assert stored["allowlist"] == [repository.allowlist["allow-1"]]
+    assert stored["analysis"]["detector_weights"]["periodic_beacon"] == 1.75
+    assert client.get(f"/api/v1/analysis-jobs/{job['id']}").json()["processing"]["phase"] == (
+        "UPLOAD_PENDING"
+    )
+
+
+def test_pcap_capture_acceptance_is_durable_before_preparation() -> None:
+    repository = MemoryRepository()
+    application = create_app(Settings(environment="test"), repository)
+    client = TestClient(application)
+    created = client.post(
+        "/api/v1/pcap-analysis-jobs/initiate",
+        json={
+            "name": "durable upload",
+            "filename": "capture.pcap",
+            "idempotency_key": "durable-upload-1",
+            "analysis_module": "c2",
+            "internal_networks": ["10.0.0.0/8"],
+            "analysis": {"module": "c2"},
+        },
+    ).json()
+
+    response = client.put(
+        f"/api/v1/pcap-analysis-jobs/{created['id']}/capture",
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+
+    assert response.status_code == 202
+    accepted = response.json()
+    assert accepted["processing"]["phase"] == "UPLOAD_STORED"
+    assert accepted["source"]["packet_bytes_retained"] is True
+    assert accepted["source"]["size_bytes"] == len(_pcap())
+    assert accepted["source"]["sha256"] == hashlib.sha256(_pcap()).hexdigest()
+    assert repository.get_job_capture(created["id"]) == _pcap()
+    stored = repository.get_job(created["id"])
+    assert stored is not None
+    assert stored["flow_records"] == []
+
+
+def test_identical_capture_retry_succeeds_after_preparation_advances() -> None:
+    repository = MemoryRepository()
+    application = create_app(Settings(environment="test"), repository)
+    client = TestClient(application)
+    created = client.post(
+        "/api/v1/pcap-analysis-jobs/initiate",
+        json={
+            "name": "ambiguous upload retry",
+            "filename": "capture.pcap",
+            "idempotency_key": "ambiguous-upload-retry-1",
+            "analysis_module": "c2",
+            "internal_networks": ["10.0.0.0/8"],
+            "analysis": {"module": "c2"},
+        },
+    ).json()
+    first = client.put(
+        f"/api/v1/pcap-analysis-jobs/{created['id']}/capture",
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+    assert first.status_code == 202
+    assert application.state.process_pcap_preparations_once() is True
+
+    retry = client.put(
+        f"/api/v1/pcap-analysis-jobs/{created['id']}/capture",
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+
+    assert retry.status_code == 202
+    assert retry.json()["id"] == created["id"]
+    assert retry.json()["processing"]["phase"] == "ANALYSIS_QUEUED"
+
+
+def test_cancel_wins_when_upload_storage_finishes_after_cancellation() -> None:
+    class CancelDuringStorageRepository(MemoryRepository):
+        def publish_job_capture(self, job: dict[str, Any], content: bytes) -> dict[str, Any] | None:
+            current = self.get_job_summary(str(job["id"]))
+            assert current is not None
+            StateMachine().transition(current, JobState.CANCELLED, "cancelled during upload")
+            processing = dict(current["processing"])
+            processing["phase"] = "CANCELLED"
+            current["processing"] = processing
+            self.save_job_metadata(current)
+            return super().publish_job_capture(job, content)
+
+    repository = CancelDuringStorageRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    created = client.post(
+        "/api/v1/pcap-analysis-jobs/initiate",
+        json={
+            "name": "upload cancellation race",
+            "filename": "capture.pcap",
+            "idempotency_key": "upload-cancellation-race-1",
+            "analysis_module": "c2",
+            "internal_networks": ["10.0.0.0/8"],
+            "analysis": {"module": "c2"},
+        },
+    ).json()
+
+    response = client.put(
+        f"/api/v1/pcap-analysis-jobs/{created['id']}/capture",
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+
+    assert response.status_code == 409
+    stored = repository.get_job(created["id"])
+    assert stored is not None
+    assert stored["status"] == "CANCELLED"
+    assert stored["processing"]["phase"] == "CANCELLED"
+    assert stored["source"]["packet_bytes_retained"] is False
+    assert repository.get_job_capture(created["id"]) is None
+
+
+def test_upload_does_not_blindly_publish_an_intermediate_transfer_state() -> None:
+    class IntermediateStateRejectingRepository(MemoryRepository):
+        def save_job_metadata(self, job: dict[str, Any]) -> dict[str, Any]:
+            processing = job.get("processing")
+            if isinstance(processing, dict) and processing.get("phase") == "UPLOADING":
+                raise AssertionError(
+                    "intermediate upload state must be fenced with final publication"
+                )
+            return super().save_job_metadata(job)
+
+    repository = IntermediateStateRejectingRepository()
+    client = TestClient(create_app(Settings(environment="test"), repository))
+    created = client.post(
+        "/api/v1/pcap-analysis-jobs/initiate",
+        json={
+            "name": "early upload cancellation race",
+            "filename": "capture.pcap",
+            "idempotency_key": "early-upload-cancellation-race-1",
+            "analysis_module": "c2",
+            "internal_networks": ["10.0.0.0/8"],
+            "analysis": {"module": "c2"},
+        },
+    ).json()
+    response = client.put(
+        f"/api/v1/pcap-analysis-jobs/{created['id']}/capture",
+        content=_pcap(),
+        headers={"content-type": "application/vnd.tcpdump.pcap"},
+    )
+
+    assert response.status_code == 202
+    stored = repository.get_job(created["id"])
+    assert stored is not None
+    assert stored["processing"]["phase"] == "UPLOAD_STORED"
+    assert repository.get_job_capture(created["id"]) == _pcap()
 
 
 def test_streaming_export_uses_open_source_without_materializing(monkeypatch: Any) -> None:

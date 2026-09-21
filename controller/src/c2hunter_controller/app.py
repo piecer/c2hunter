@@ -116,6 +116,7 @@ from .pcap_export_service import (
 from .pcap_indexed_export import create_indexed_match_factory_from_settings
 from .pcap_offset_index import build_offline_upload_index
 from .pcap_offset_index_metrics import PcapOffsetIndexMetrics
+from .pcap_preparation_worker import PcapPreparationWorker, attach_ddos_coverage_context
 from .pcap_stream import (
     open_bounded_verified_capture,
 )
@@ -155,6 +156,7 @@ from .schemas import (
     Heartbeat,
     IntegrationSettingsUpdate,
     MispExportCreate,
+    PcapAnalysisJobCreate,
     PcapExportCancel,
     PcapExportCreate,
     PcapExportJobResponse,
@@ -217,11 +219,33 @@ def _page(items: list[dict[str, Any]], page: int, page_size: int) -> dict[str, A
 
 def _public_job(job: dict[str, Any]) -> dict[str, Any]:
     """Never return retained packets or detector snapshots in control-plane responses."""
-    return {
+    public = {
         key: value
         for key, value in job.items()
-        if key not in {"flow_records", "payload_signatures", "volatile_capture"}
+        if key
+        not in {
+            "flow_records",
+            "payload_signatures",
+            "volatile_capture",
+            "message_id",
+            "receipt",
+            "preparation_attempt",
+            "preparation_lease_token",
+        }
     }
+    processing = public.get("processing")
+    if isinstance(processing, dict):
+        public_processing = dict(processing)
+        public_processing.pop("lease_token", None)
+        public_processing.pop("lease_expires_at", None)
+        public_processing.pop("analysis_claim_token", None)
+        public_processing.pop("analysis_lease_expires_at", None)
+        public_processing["phase"] = {
+            "ANALYSIS_ENQUEUE_PENDING": "PARSING",
+            "ANALYSIS_CLAIMED": "ANALYSIS_QUEUED",
+        }.get(str(public_processing.get("phase")), public_processing.get("phase"))
+        public["processing"] = public_processing
+    return public
 
 
 def _public_ai_run(run: dict[str, Any]) -> dict[str, Any]:
@@ -2183,40 +2207,28 @@ def create_app(
         if warning not in warnings:
             warnings.append(warning)
 
-    def attach_ddos_coverage_context(job: dict[str, Any]) -> None:
-        if job.get("analysis", {}).get("module") != "ddos_attack":
-            return
-        raw_source = job.get("source")
-        source: dict[str, Any] = raw_source if isinstance(raw_source, dict) else {}
-        raw_quality = job.get("capture_quality")
-        quality: dict[str, Any] = raw_quality if isinstance(raw_quality, dict) else {}
-        is_uploaded_pcap = "captured_packet_count" in source
-        previous = job.get("ddos_coverage_context", {})
-        job["ddos_coverage_context"] = {
-            "parser_skipped_packet_count": int(source.get("skipped_packet_count", 0) or 0),
-            "sensor_dropped_packet_count": int(quality.get("dropped_packet_count", 0) or 0),
-            "sensor_clock_skew_detected": bool(quality.get("clock_skew_detected", False)),
-            "sensor_capture_quality_unavailable": not is_uploaded_pcap and not quality,
-            "capture_partial": bool(
-                int(job.get("capture_limit", {}).get("discarded_packets", 0) or 0) > 0
-                or job.get("capture_incomplete") is True
-                or job.get("error_code") == "LIVE_CAPTURE_RESTART_INCOMPLETE"
-            ),
-        }
-        # Coverage belongs to the immutable dataset, not the analysis attempt.
-        # Repeated attachment may add truncation but must not erase provenance.
-        context = job["ddos_coverage_context"]
-        for field, value in previous.items():
-            if field == "sensor_capture_quality_unavailable":
-                context[field] = value
-            elif field in context:
-                context[field] = max(context[field], value)
-
     def enqueue_worker_job(job: dict[str, Any]) -> None:
         envelope: dict[str, Any] = {"id": job["id"]}
+        for key in ("message_id", "preparation_attempt", "preparation_lease_token"):
+            if job.get(key) is not None:
+                envelope[key] = job[key]
         if isinstance(work_queue, MemoryControllerQueue):
             envelope["payload"] = job
         work_queue.enqueue(envelope)
+
+    pcap_preparation_worker = PcapPreparationWorker(
+        repo,
+        enqueue=enqueue_worker_job,
+        lease_seconds=config.pcap_preparation_lease_seconds,
+        lease_renew_seconds=config.pcap_preparation_lease_renew_seconds,
+        max_attempts=config.pcap_preparation_max_attempts,
+        max_packets=config.pcap_upload_max_packets,
+    )
+
+    def process_pcap_preparations_once() -> bool:
+        return pcap_preparation_worker.run_once()
+
+    app.state.process_pcap_preparations_once = process_pcap_preparations_once
 
     def begin_live_capture(job: dict[str, Any]) -> dict[str, Any]:
         if local_analysis_worker_health_path is not None and isinstance(flows, MemoryFlowStore):
@@ -2715,17 +2727,55 @@ def create_app(
         if job is None:
             work_queue.ack_result(receipt)
             return
+        module = job.get("analysis", {}).get("module", "c2")
+
+        def durable_c2_candidates() -> list[dict[str, Any]]:
+            raw_candidates = list(result.get("result", {}).get("candidates", []))
+            durable: list[dict[str, Any]] = []
+            for index, raw_candidate in enumerate(raw_candidates):
+                candidate = dict(raw_candidate)
+                candidate.setdefault(
+                    "id",
+                    str(uuid.uuid5(uuid.NAMESPACE_URL, f"c2hunter:{job['id']}:candidate:{index}")),
+                )
+                durable.append(candidate)
+            return durable
+
         if JobState(job["status"]) in {
             JobState.COMPLETED,
             JobState.PARTIALLY_COMPLETED,
             JobState.FAILED,
             JobState.CANCELLED,
         }:
+            if (
+                JobState(job["status"]) in {JobState.COMPLETED, JobState.PARTIALLY_COMPLETED}
+                and result.get("status") == "COMPLETED"
+                and module == "c2"
+            ):
+                repo.save_candidates(str(job["id"]), durable_c2_candidates())
             work_queue.ack_result(receipt)
             return
+        if result.get("status") == "EVENT":
+            if result.get("event") == "ANALYSIS_STARTED":
+                occurred_at = str(result.get("occurred_at") or datetime.now(UTC).isoformat())
+                repo.mark_analysis_started(
+                    str(job["id"]),
+                    occurred_at,
+                    attempt=(
+                        int(result["preparation_attempt"])
+                        if result.get("preparation_attempt") is not None
+                        else None
+                    ),
+                    lease_token=(
+                        str(result["preparation_lease_token"])
+                        if result.get("preparation_lease_token") is not None
+                        else None
+                    ),
+                )
+            work_queue.ack_result(receipt)
+            return
+        candidates: list[dict[str, Any]] = []
         if result.get("status") == "COMPLETED":
-            module = job.get("analysis", {}).get("module", "c2")
-            candidates: list[dict[str, Any]]
             if module == "network_anomaly":
                 job["network_anomaly"] = result["result"]["network_anomaly"]
                 candidates = []
@@ -2736,26 +2786,21 @@ def create_app(
                     job["error_code"] = "INVALID_DDOS_RESULT"
                     job["error"] = "worker returned an invalid DDoS report"
                     machine.transition(job, JobState.FAILED, "invalid DDoS worker result")
-                    repo.save_job_metadata(job)
+                    repo.transition_job_terminal(job)
                     work_queue.ack_result(receipt)
                     return
                 job["ddos_attack"] = report
                 job["ddos_attack_summary"] = _ddos_summary(report)
                 candidates = []
             elif module == "c2":
-                candidates = list(result.get("result", {}).get("candidates", []))
+                candidates = durable_c2_candidates()
             else:
                 job["error_code"] = "UNSUPPORTED_ANALYSIS_MODULE"
                 job["error"] = "worker result references an unsupported analysis module"
                 machine.transition(job, JobState.FAILED, "unsupported analysis module result")
-                repo.save_job_metadata(job)
+                repo.transition_job_terminal(job)
                 work_queue.ack_result(receipt)
                 return
-            for candidate in candidates:
-                candidate.setdefault("id", str(uuid.uuid4()))
-            repo.save_candidates(job["id"], candidates)
-            if module == "c2":
-                schedule_candidate_enrichment(str(job["id"]), candidates)
             job["candidate_count"] = len(candidates)
             machine.transition(job, JobState.COMPLETED, "worker result persisted")
         else:
@@ -2766,6 +2811,7 @@ def create_app(
                     "worker does not support the requested analysis module"
                 ),
                 "INVALID_JOB_ENVELOPE": "worker job envelope is invalid",
+                "ANALYSIS_WORKER_LOST": "analysis worker stopped before a durable result",
             }
             error_code = str(result.get("error_code", "WORKER_EXECUTION_FAILED"))
             if error_code not in worker_errors:
@@ -2773,7 +2819,22 @@ def create_app(
             job["error_code"] = error_code
             job["error"] = worker_errors.get(error_code, "worker execution failed")
             machine.transition(job, JobState.FAILED, "worker returned an error")
-        repo.save_job_metadata(job)
+        processing = job.get("processing")
+        if isinstance(processing, dict):
+            occurred_at = str(job.get("completed_at") or datetime.now(UTC).isoformat())
+            job["processing"] = {
+                **processing,
+                "phase": "COMPLETED" if job["status"] == JobState.COMPLETED else "FAILED",
+                "phase_started_at": occurred_at,
+                "updated_at": occurred_at,
+            }
+        if not repo.transition_job_terminal(job):
+            work_queue.ack_result(receipt)
+            return
+        if result.get("status") == "COMPLETED":
+            repo.save_candidates(job["id"], candidates)
+            if module == "c2":
+                schedule_candidate_enrichment(str(job["id"]), candidates)
         work_queue.ack_result(receipt)
 
     def process_results_once() -> bool:
@@ -2818,6 +2879,7 @@ def create_app(
         while not result_stop.is_set():
             try:
                 process_due_live_jobs_once()
+                process_pcap_preparations_once()
                 result = work_queue.claim_result(timeout=1)
                 if result is not None:
                     persist_claimed_result(result)
@@ -2867,10 +2929,15 @@ def create_app(
                 job["error"] = reason
                 repo.save_job_metadata(job)
 
+        def process_local_due_work() -> bool:
+            live_processed = process_due_live_jobs_once()
+            pcap_processed = process_pcap_preparations_once()
+            return live_processed or pcap_processed
+
         local_runtime = LocalAnalysisRuntime(
             work_queue,
             repo,
-            process_due_live_jobs_once,
+            process_local_due_work,
             persist_claimed_result,
             local_analysis_worker_health_path,
             enqueue_worker_job,
@@ -2994,6 +3061,157 @@ def create_app(
         elif not config.inline_flow_records_enabled:
             job = begin_live_capture(job) if payload.mode == "LIVE" else enqueue_analysis(job)
         return _public_job(job)
+
+    @app.post("/api/v1/pcap-analysis-jobs/initiate", status_code=201)
+    def initiate_pcap_analysis_job(payload: PcapAnalysisJobCreate) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        analysis = payload.analysis.model_dump(mode="json")
+        if (
+            payload.analysis_module == "c2"
+            and "detector_weights" not in payload.analysis.model_fields_set
+            and (preset_weights := default_detector_weights()) is not None
+        ):
+            analysis["detector_weights"] = preset_weights
+        requested = AnalysisJobCreate.model_validate(
+            {
+                "name": payload.name,
+                "idempotency_key": payload.idempotency_key,
+                "sensor_ids": ["pcap-upload:pending"],
+                "mode": "PCAP_UPLOAD",
+                "start_time": now,
+                "end_time": now + timedelta(microseconds=1),
+                "capture": {
+                    "max_packets": config.pcap_upload_max_packets,
+                    "directions": ["INBOUND", "OUTBOUND", "UNKNOWN"],
+                    "store_pcap": True,
+                },
+                "analysis": analysis,
+                "internal_networks": payload.internal_networks,
+            }
+        )
+        job = build_job(requested)
+        job["payload_signatures"] = payload_signature_snapshot()
+        job["allowlist"] = allowlist_snapshot()
+        job["description"] = payload.description
+        job["source"] = {
+            "filename": payload.filename,
+            "packet_bytes_retained": False,
+        }
+        job["processing"] = {
+            "phase": "UPLOAD_PENDING",
+            "phase_started_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+        }
+        saved, _ = repo.create_job(job)
+        return _public_job(saved)
+
+    @app.put("/api/v1/pcap-analysis-jobs/{job_id}/capture", status_code=202)
+    async def upload_pcap_analysis_capture(job_id: str, request: Request) -> dict[str, Any]:
+        job = repo.get_job(job_id)
+        if job is None or job.get("mode") != "PCAP_UPLOAD":
+            raise ApiError(404, "JOB_NOT_FOUND", "PCAP 분석 작업을 찾을 수 없습니다")
+        media_type = request.headers.get("content-type", "").split(";", 1)[0].lower()
+        if media_type not in {
+            "application/octet-stream",
+            "application/vnd.tcpdump.pcap",
+            "application/x-pcap",
+            "application/x-pcapng",
+        }:
+            raise ApiError(
+                415,
+                "UNSUPPORTED_PCAP_MEDIA_TYPE",
+                "PCAP 업로드는 binary PCAP/PCAPNG content type이어야 합니다",
+            )
+        announced = request.headers.get("content-length")
+        if announced is not None:
+            try:
+                announced_size = int(announced)
+            except ValueError as exc:
+                raise ApiError(
+                    400, "INVALID_CONTENT_LENGTH", "Content-Length가 유효하지 않습니다"
+                ) from exc
+            if announced_size > config.pcap_upload_max_bytes:
+                raise ApiError(413, "PCAP_TOO_LARGE", "PCAP 파일이 허용 크기를 초과합니다")
+
+        uploaded = bytearray()
+        async for chunk in request.stream():
+            if len(uploaded) + len(chunk) > config.pcap_upload_max_bytes:
+                raise ApiError(413, "PCAP_TOO_LARGE", "PCAP 파일이 허용 크기를 초과합니다")
+            uploaded.extend(chunk)
+        if not uploaded:
+            raise ApiError(422, "EMPTY_PCAP", "업로드된 PCAP 파일이 비어 있습니다")
+        content = bytes(uploaded)
+        digest = hashlib.sha256(content).hexdigest()
+        current = repo.get_job(job_id)
+        if current is None:
+            raise ApiError(404, "JOB_NOT_FOUND", "PCAP 분석 작업을 찾을 수 없습니다")
+        source = dict(current.get("source", {}))
+        if source.get("packet_bytes_retained") is True:
+            if source.get("sha256") != digest or int(source.get("size_bytes", -1)) != len(content):
+                raise ApiError(
+                    409,
+                    "PCAP_UPLOAD_CONFLICT",
+                    "이 작업에는 다른 PCAP 원본이 이미 저장되어 있습니다",
+                )
+            return _public_job(current)
+        current_processing = current.get("processing")
+        current_phase = (
+            str(current_processing.get("phase", "")) if isinstance(current_processing, dict) else ""
+        )
+        if current_phase not in {"UPLOAD_PENDING", "UPLOADING"}:
+            raise ApiError(409, "INVALID_JOB_STATE", "PCAP 업로드 상태가 변경되었습니다")
+        if current_phase == "UPLOAD_PENDING":
+            for state, reason in (
+                (JobState.WAITING_FOR_SENSOR, "offline upload slot allocated"),
+                (JobState.CAPTURING, "offline upload transfer started"),
+                (JobState.UPLOADING, "offline capture bytes received"),
+            ):
+                machine.transition(current, state, reason)
+        elif current.get("status") != JobState.UPLOADING:
+            raise ApiError(409, "INVALID_JOB_STATE", "PCAP 업로드 상태가 변경되었습니다")
+        source.update(
+            {
+                "size_bytes": len(content),
+                "sha256": digest,
+                "packet_bytes_retained": True,
+            }
+        )
+        current["source"] = source
+        machine.transition(current, JobState.INGESTING, "immutable upload stored")
+        occurred_at = datetime.now(UTC).isoformat()
+        current["processing"] = {
+            "phase": "UPLOAD_STORED",
+            "phase_started_at": occurred_at,
+            "updated_at": occurred_at,
+        }
+        try:
+            published = repo.publish_job_capture(current, content)
+        except Exception as exc:
+            raise ApiError(
+                503,
+                "PCAP_STORAGE_UNAVAILABLE",
+                "업로드한 PCAP 원본을 저장하지 못했습니다",
+            ) from exc
+        if published is not None:
+            return _public_job(published)
+        latest = repo.get_job(job_id)
+        if latest is None:
+            raise ApiError(404, "JOB_NOT_FOUND", "PCAP 분석 작업을 찾을 수 없습니다")
+        latest_source = latest.get("source")
+        if (
+            isinstance(latest_source, dict)
+            and latest_source.get("packet_bytes_retained") is True
+            and latest_source.get("sha256") == digest
+            and int(latest_source.get("size_bytes", -1)) == len(content)
+        ):
+            return _public_job(latest)
+        if isinstance(latest_source, dict) and latest_source.get("packet_bytes_retained") is True:
+            raise ApiError(
+                409,
+                "PCAP_UPLOAD_CONFLICT",
+                "이 작업에는 다른 PCAP 원본이 이미 저장되어 있습니다",
+            )
+        raise ApiError(409, "INVALID_JOB_STATE", "PCAP 업로드 상태가 변경되었습니다")
 
     @app.post("/api/v1/pcap-analysis-jobs", status_code=201)
     async def create_pcap_analysis_job(
@@ -3259,7 +3477,7 @@ def create_app(
             if candidate_count is None:
                 candidate_count = len(repo.get_candidates(item["id"]))
             summary["candidate_count"] = int(candidate_count)
-            summaries.append(summary)
+            summaries.append(_public_job(summary))
         return _page(summaries, page, page_size)
 
     @app.get("/api/v1/analysis-jobs/{job_id}")
@@ -3972,7 +4190,21 @@ def create_app(
         }:
             raise ApiError(409, "INVALID_JOB_STATE", "종료된 작업은 취소할 수 없습니다")
         machine.transition(job, JobState.CANCELLED, payload.reason)
-        return _public_job(repo.save_job_metadata(job))
+        processing = job.get("processing")
+        if isinstance(processing, dict):
+            occurred_at = str(job["completed_at"])
+            job["processing"] = {
+                **processing,
+                "phase": "CANCELLED",
+                "phase_started_at": occurred_at,
+                "updated_at": occurred_at,
+            }
+        if repo.transition_job_terminal(job):
+            return _public_job(job)
+        winner = repo.get_job_summary(job_id)
+        if winner is not None and winner.get("status") == JobState.CANCELLED:
+            return _public_job(winner)
+        raise ApiError(409, "INVALID_JOB_STATE", "작업 상태가 이미 종료되었습니다")
 
     @app.post("/api/v1/analysis-jobs/{job_id}/reanalyze", status_code=201)
     def reanalyze(job_id: str, payload: ReanalysisRequest) -> dict[str, Any]:

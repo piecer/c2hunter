@@ -1665,6 +1665,51 @@ class AnalysisJobCreate(BaseModel):
         return self
 
 
+class PcapAnalysisJobCreate(BaseModel):
+    """Metadata accepted before an offline capture is transferred."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    filename: str = Field(min_length=1, max_length=255)
+    description: str = Field(default="", max_length=5000)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+    analysis_module: Literal["c2", "network_anomaly", "ddos_attack"] = "c2"
+    internal_networks: list[str] = Field(min_length=1, max_length=256)
+    analysis: AnalysisParameters = Field(default_factory=AnalysisParameters)
+
+    @field_validator("name", "filename")
+    @classmethod
+    def nonblank_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("value must not be blank")
+        return normalized
+
+    @field_validator("filename")
+    @classmethod
+    def safe_filename(cls, value: str) -> str:
+        normalized = value.replace("\\", "/").rsplit("/", 1)[-1]
+        if normalized != value or not normalized:
+            raise ValueError("filename must be a basename")
+        return normalized
+
+    @field_validator("internal_networks")
+    @classmethod
+    def normalized_internal_networks(cls, values: list[str]) -> list[str]:
+        if any(len(value) > 64 for value in values):
+            raise ValueError("internal network is too long")
+        normalized = [str(ip_network(value, strict=False)) for value in values]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("internal networks must be unique")
+        return normalized
+
+    @model_validator(mode="after")
+    def matching_analysis_module(self) -> PcapAnalysisJobCreate:
+        if self.analysis.module != self.analysis_module:
+            raise ValueError("analysis module does not match analysis parameters")
+        return self
+
+
 class AnalysisJobUpdate(BaseModel):
     """Mutable analyst metadata; captured data and detector parameters stay immutable."""
 

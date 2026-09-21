@@ -75,4 +75,46 @@ describe('api client', () => {
       }),
     );
   });
+
+  it('reports binary upload transport progress with XHR', async () => {
+    localStorage.setItem('c2hunter-token', 'dev-token');
+    const progress: Array<{ loaded: number; total: number }> = [];
+    const headers: Record<string, string> = {};
+    class FakeXMLHttpRequest {
+      status = 202;
+      responseText = JSON.stringify({ id: 'job-1', processing: { phase: 'UPLOAD_STORED' } });
+      upload: { onprogress?: (event: ProgressEvent) => void } = {};
+      onload?: () => void;
+      onerror?: () => void;
+      method = '';
+      url = '';
+      open(method: string, url: string) { this.method = method; this.url = url; }
+      setRequestHeader(name: string, value: string) { headers[name] = value; }
+      send(body: Blob) {
+        expect(body.size).toBe(4);
+        this.upload.onprogress?.({ lengthComputable: true, loaded: 2, total: 4 } as ProgressEvent);
+        this.onload?.();
+      }
+      abort() {}
+    }
+    const request = new FakeXMLHttpRequest();
+    vi.stubGlobal('XMLHttpRequest', vi.fn(() => request));
+
+    const result = await api.uploadWithProgress<{ id: string; processing: { phase: string } }>(
+      '/pcap-analysis-jobs/job-1/capture',
+      new Blob([new Uint8Array([1, 2, 3, 4])]),
+      'application/vnd.tcpdump.pcap',
+      value => progress.push(value),
+    );
+
+    expect(request.method).toBe('PUT');
+    expect(request.url).toBe('/api/v1/pcap-analysis-jobs/job-1/capture');
+    expect(headers).toMatchObject({
+      accept: 'application/json',
+      authorization: 'Bearer dev-token',
+      'content-type': 'application/vnd.tcpdump.pcap',
+    });
+    expect(progress).toEqual([{ loaded: 2, total: 4 }]);
+    expect(result.processing.phase).toBe('UPLOAD_STORED');
+  });
 });

@@ -10,7 +10,33 @@ from test_durable_pipeline import AGENT_HEADERS, flow, job_payload, register_sen
 
 from c2hunter_controller.app import create_app
 from c2hunter_controller.config import Settings
+from c2hunter_controller.local_analysis_runtime import LocalWorkerQueue, result_releases_inflight
 from c2hunter_controller.repositories import SQLiteRepository
+
+
+def test_local_worker_bridge_buffers_started_event_and_terminal_result() -> None:
+    bridge = LocalWorkerQueue()
+
+    bridge.publish_event(
+        {
+            "job_id": "job-1",
+            "status": "EVENT",
+            "event": "ANALYSIS_STARTED",
+        }
+    )
+    bridge.complete("receipt-1", {"job_id": "job-1", "status": "COMPLETED"})
+
+    assert bridge.results.qsize() == 2
+
+
+def test_local_worker_start_event_does_not_release_inflight_job() -> None:
+    assert result_releases_inflight({"status": "EVENT", "event": "ANALYSIS_STARTED"}) is False
+    assert (
+        result_releases_inflight({"status": "EVENT", "event": "ANALYSIS_DELIVERY_SUPERSEDED"})
+        is True
+    )
+    assert result_releases_inflight({"status": "COMPLETED"}) is True
+    assert result_releases_inflight({"status": "ERROR"}) is True
 
 
 def test_live_job_is_processed_by_owned_worker(tmp_path, monkeypatch):

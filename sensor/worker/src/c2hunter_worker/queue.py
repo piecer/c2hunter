@@ -44,7 +44,7 @@ class RedisQueue:
     def complete(self, receipt: str, result: dict[str, Any]) -> None:
         encoded = json.dumps(result, separators=(",", ":"), default=str)
         script = """
-        redis.call('RPUSH', KEYS[1], ARGV[1])
+        redis.call('LPUSH', KEYS[1], ARGV[1])
         redis.call('LREM', KEYS[2], 1, ARGV[2])
         redis.call('ZREM', KEYS[3], ARGV[2])
         return 1
@@ -57,6 +57,12 @@ class RedisQueue:
             self.leases_key,
             encoded,
             receipt,
+        )
+
+    def publish_event(self, event: dict[str, Any]) -> None:
+        self.client.lpush(
+            self.results_key,
+            json.dumps(event, separators=(",", ":"), default=str),
         )
 
     def recover_expired(self) -> int:

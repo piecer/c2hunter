@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
@@ -313,6 +313,25 @@ describe('C2Hunter UI', () => {
     expect(await screen.findByRole('table', { name: 'Analysis candidates' })).toBeInTheDocument();
     expect(await screen.findByRole('table', { name: 'Analysis flows' })).toBeInTheDocument();
     expect(screen.getByText('analysis requested')).toBeInTheDocument();
+  });
+
+  it('shows a truthful four-step lifecycle for staged PCAP jobs', async () => {
+    renderAt('/analyses/staged-job', async input => {
+      const path = String(input);
+      if (path === '/api/v1/analysis-jobs/staged-job') return new Response(JSON.stringify({
+        id: 'staged-job', name: 'Staged investigation', source_type: 'PCAP_UPLOAD', status: 'INGESTING',
+        processing: { phase: 'PARSING', phase_started_at: '2026-09-21T05:00:01Z' },
+        source: { filename: 'capture.pcap', packet_bytes_retained: true }, analysis: { module: 'c2' },
+      }), { status: 200 });
+      return new Response(JSON.stringify({ items: [] }), { status: 200 });
+    });
+
+    const lifecycle = await screen.findByRole('region', { name: 'PCAP 분석 처리 단계' });
+    expect(within(lifecycle).getByText('업로드')).toBeInTheDocument();
+    expect(within(lifecycle).getByText('분석 준비').closest('li')).toHaveAttribute('data-state', 'current');
+    expect(within(lifecycle).getByText('분석 중')).toBeInTheDocument();
+    expect(within(lifecycle).getByText('완료')).toBeInTheDocument();
+    expect(within(lifecycle).getByText('PCAP을 읽고 분석 데이터를 준비하고 있습니다.')).toBeInTheDocument();
   });
 
   it('shows AI run status and evidence-linked candidate assessment', async () => {
@@ -1268,10 +1287,21 @@ describe('C2Hunter UI', () => {
   it('accepts a PCAP at the 500 MiB boundary and sends it as the binary request body', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
-      if (path.startsWith('/api/v1/pcap-analysis-jobs?') && init?.method === 'POST') return new Response(JSON.stringify({ id: 'upload-job', name: 'Offline case', status: 'COMPLETED' }), { status: 201 });
+      if (path === '/api/v1/pcap-analysis-jobs/initiate' && init?.method === 'POST') return new Response(JSON.stringify({ id: 'upload-job', name: 'Offline case', status: 'CREATED' }), { status: 201 });
       if (path === '/api/v1/analysis-jobs/upload-job') return new Response(JSON.stringify({ id: 'upload-job', name: 'Offline case', status: 'COMPLETED' }), { status: 200 });
       return new Response(JSON.stringify({ error: { message: 'missing fixture' } }), { status: 404 });
     });
+    let sentBody: Blob | undefined;
+    vi.stubGlobal('XMLHttpRequest', vi.fn(() => ({
+      status: 202,
+      responseText: JSON.stringify({ id: 'upload-job', name: 'Offline case', status: 'INGESTING' }),
+      upload: {} as { onprogress?: (event: ProgressEvent) => void },
+      onload: undefined as (() => void) | undefined,
+      onerror: undefined as (() => void) | undefined,
+      onabort: undefined as (() => void) | undefined,
+      open() {}, setRequestHeader() {}, abort() {},
+      send(body: Blob) { sentBody = body; this.upload.onprogress?.({ lengthComputable: true, loaded: body.size, total: body.size } as ProgressEvent); this.onload?.(); },
+    })));
     localStorage.setItem('c2hunter-token', 'token');
     vi.stubGlobal('fetch', fetchMock);
     render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/upload']}><App /></MemoryRouter></QueryClientProvider>);
@@ -1284,28 +1314,134 @@ describe('C2Hunter UI', () => {
     expect(screen.getByRole('status')).toHaveTextContent('500.0 MiB');
     fireEvent.submit(screen.getByRole('button', { name: 'Upload and analyze' }).closest('form')!);
 
-    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => String(url).startsWith('/api/v1/pcap-analysis-jobs?') && init?.method === 'POST')).toBe(true));
-    const uploadCall = fetchMock.mock.calls.find(([url]) => String(url).startsWith('/api/v1/pcap-analysis-jobs?'));
-    const url = new URL(String(uploadCall?.[0]), 'http://localhost');
-    expect(url.searchParams.get('name')).toBe('Offline case');
-    expect(url.searchParams.get('filename')).toBe('sample.pcap');
-    expect(JSON.parse(String(url.searchParams.get('detector_weights')))).toEqual(expect.objectContaining({
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => String(url) === '/api/v1/pcap-analysis-jobs/initiate' && init?.method === 'POST')).toBe(true));
+    const initiate = fetchMock.mock.calls.find(([url]) => String(url) === '/api/v1/pcap-analysis-jobs/initiate');
+    const body = JSON.parse(String(initiate?.[1]?.body));
+    expect(body).toMatchObject({ name: 'Offline case', filename: 'sample.pcap' });
+    expect(body.analysis.detector_weights).toEqual(expect.objectContaining({
       common_destination: 0.25,
       protocol_similarity: 0.5,
       analyst_payload_signature: 1,
     }));
-    expect(uploadCall?.[1]?.body).toBe(file);
-    expect(uploadCall?.[1]?.headers).toEqual(expect.objectContaining({ 'content-type': 'application/vnd.tcpdump.pcap' }));
+    expect(sentBody).toBe(file);
+  });
+
+  it('creates the job first and distinguishes bytes sent from durable upload acceptance', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/v1/pcap-analysis-jobs/initiate' && init?.method === 'POST') return new Response(JSON.stringify({ id: 'staged-job', name: 'Staged case', status: 'CREATED', processing: { phase: 'UPLOAD_PENDING' } }), { status: 201 });
+      if (path === '/api/v1/analysis-jobs/staged-job') return new Response(JSON.stringify({ id: 'staged-job', name: 'Staged case', status: 'INGESTING', processing: { phase: 'UPLOAD_STORED' }, analysis: { module: 'c2' } }), { status: 200 });
+      if (path === '/api/v1/analysis-jobs/staged-job/candidates?page_size=200') return new Response(JSON.stringify({ items: [] }), { status: 200 });
+      return new Response(JSON.stringify({ error: { message: 'missing fixture' } }), { status: 404 });
+    });
+    class StagedUploadRequest {
+      status = 202;
+      responseText = JSON.stringify({ id: 'staged-job', status: 'INGESTING', processing: { phase: 'UPLOAD_STORED' } });
+      upload: { onprogress?: (event: ProgressEvent) => void } = {};
+      onload?: () => void;
+      onerror?: () => void;
+      onabort?: () => void;
+      method = '';
+      url = '';
+      open(method: string, url: string) { this.method = method; this.url = url; }
+      setRequestHeader() {}
+      send(body: Blob) { this.upload.onprogress?.({ lengthComputable: true, loaded: body.size, total: body.size } as ProgressEvent); }
+      abort() {}
+    }
+    let uploadRequest: StagedUploadRequest | undefined;
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('XMLHttpRequest', vi.fn(() => { uploadRequest = new StagedUploadRequest(); return uploadRequest; }));
+    localStorage.setItem('c2hunter-token', 'token');
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/upload']}><App /></MemoryRouter></QueryClientProvider>);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('Analysis name'), 'Staged case');
+    await user.upload(screen.getByLabelText('Capture file'), new File([new Uint8Array([1, 2, 3, 4])], 'capture.pcap', { type: 'application/vnd.tcpdump.pcap' }));
+    fireEvent.submit(screen.getByRole('button', { name: 'Upload and analyze' }).closest('form')!);
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url) === '/api/v1/pcap-analysis-jobs/initiate')).toBe(true));
+    await waitFor(() => expect(uploadRequest?.url).toBe('/api/v1/pcap-analysis-jobs/staged-job/capture'));
+    expect(screen.getByRole('status')).toHaveTextContent('전송 완료 · 서버 저장 확인 중');
+    const initiate = fetchMock.mock.calls.find(([url]) => String(url) === '/api/v1/pcap-analysis-jobs/initiate');
+    expect(JSON.parse(String(initiate?.[1]?.body))).toMatchObject({ name: 'Staged case', filename: 'capture.pcap' });
+
+    await act(async () => uploadRequest?.onload?.());
+    expect(await screen.findByRole('heading', { name: 'Staged case' })).toBeInTheDocument();
+  });
+
+  it('retries a failed capture upload against the already-created job', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/v1/pcap-analysis-jobs/initiate' && init?.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'retry-job', name: 'Retry case', status: 'CREATED' }), { status: 201 });
+      }
+      if (path === '/api/v1/analysis-jobs/retry-job') {
+        return new Response(JSON.stringify({ id: 'retry-job', name: 'Retry case', status: 'INGESTING', processing: { phase: 'UPLOAD_STORED' } }), { status: 200 });
+      }
+      if (path === '/api/v1/analysis-jobs/retry-job/candidates?page_size=200') {
+        return new Response(JSON.stringify({ items: [] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: { message: 'missing fixture' } }), { status: 404 });
+    });
+    const requests: Array<{ url: string; fail: boolean }> = [];
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('XMLHttpRequest', vi.fn(() => {
+      const request = {
+        status: requests.length === 0 ? 0 : 202,
+        responseText: JSON.stringify({ id: 'retry-job', name: 'Retry case', status: 'INGESTING' }),
+        upload: {} as { onprogress?: (event: ProgressEvent) => void },
+        onload: undefined as (() => void) | undefined,
+        onerror: undefined as (() => void) | undefined,
+        onabort: undefined as (() => void) | undefined,
+        url: '',
+        open(_method: string, url: string) { this.url = url; },
+        setRequestHeader() {}, abort() {},
+        send(body: Blob) {
+          const fail = requests.length === 0;
+          requests.push({ url: this.url, fail });
+          this.upload.onprogress?.({ lengthComputable: true, loaded: body.size, total: body.size } as ProgressEvent);
+          queueMicrotask(() => fail ? this.onerror?.() : this.onload?.());
+        },
+      };
+      return request;
+    }));
+    localStorage.setItem('c2hunter-token', 'token');
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/upload']}><App /></MemoryRouter></QueryClientProvider>);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('Analysis name'), 'Retry case');
+    await user.upload(screen.getByLabelText('Capture file'), new File([new Uint8Array([1, 2, 3])], 'retry.pcap'));
+    fireEvent.submit(screen.getByRole('button', { name: 'Upload and analyze' }).closest('form')!);
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url) === '/api/v1/pcap-analysis-jobs/initiate')).toBe(true));
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(await screen.findByRole('link', { name: '생성된 작업 보기' })).toHaveAttribute('href', '/analyses/retry-job');
+    fireEvent.submit(screen.getByRole('button', { name: 'Upload and analyze' }).closest('form')!);
+
+    expect(await screen.findByRole('heading', { name: 'Retry case' })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/v1/pcap-analysis-jobs/initiate')).toHaveLength(1);
+    expect(requests.map(request => request.url)).toEqual([
+      '/api/v1/pcap-analysis-jobs/retry-job/capture',
+      '/api/v1/pcap-analysis-jobs/retry-job/capture',
+    ]);
   });
 
   it('uses the server default for PCAP upload when weights are untouched', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
-      if (path.startsWith('/api/v1/pcap-analysis-jobs?') && init?.method === 'POST') {
+      if (path === '/api/v1/pcap-analysis-jobs/initiate' && init?.method === 'POST') {
         return new Response(JSON.stringify({ id: 'upload-job', status: 'CREATED' }), { status: 201 });
       }
       return new Response(JSON.stringify({ items: [] }), { status: 200 });
     });
+    vi.stubGlobal('XMLHttpRequest', vi.fn(() => ({
+      status: 202,
+      responseText: JSON.stringify({ id: 'upload-job', status: 'INGESTING' }),
+      upload: {} as { onprogress?: (event: ProgressEvent) => void },
+      onload: undefined as (() => void) | undefined,
+      onerror: undefined as (() => void) | undefined,
+      onabort: undefined as (() => void) | undefined,
+      open() {}, setRequestHeader() {}, abort() {},
+      send(body: Blob) { this.upload.onprogress?.({ lengthComputable: true, loaded: body.size, total: body.size } as ProgressEvent); },
+    })));
     localStorage.setItem('c2hunter-token', 'token');
     vi.stubGlobal('fetch', fetchMock);
     render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/upload']}><App /></MemoryRouter></QueryClientProvider>);
@@ -1316,10 +1452,9 @@ describe('C2Hunter UI', () => {
     await user.upload(screen.getByLabelText('Capture file'), file);
     fireEvent.submit(screen.getByRole('button', { name: 'Upload and analyze' }).closest('form')!);
 
-    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => String(url).startsWith('/api/v1/pcap-analysis-jobs?') && init?.method === 'POST')).toBe(true));
-    const uploadCall = fetchMock.mock.calls.find(([url]) => String(url).startsWith('/api/v1/pcap-analysis-jobs?'));
-    const url = new URL(String(uploadCall?.[0]), 'http://localhost');
-    expect(url.searchParams.has('detector_weights')).toBe(false);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => String(url) === '/api/v1/pcap-analysis-jobs/initiate' && init?.method === 'POST')).toBe(true));
+    const initiate = fetchMock.mock.calls.find(([url]) => String(url) === '/api/v1/pcap-analysis-jobs/initiate');
+    expect(JSON.parse(String(initiate?.[1]?.body)).analysis).not.toHaveProperty('detector_weights');
   });
 
   it('rejects a PCAP larger than 500 MiB before upload', async () => {

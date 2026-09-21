@@ -95,7 +95,10 @@ from c2hunter_controller.repositories import (
     ArtifactWriteResult,
     CaptureSource,
     Repository,
+    _claim_pcap_preparation_metadata,
+    _exhaust_pcap_preparation_metadata,
     _job_matches_structural_binding,
+    _owns_pcap_preparation,
     _pcap_export_snapshot,
 )
 
@@ -104,6 +107,10 @@ _JOB_TERMINAL_STATUSES = {"COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELL
 logger = logging.getLogger(__name__)
 
 _MISSING_OBJECT_CODES = {"NoSuchKey", "NoSuchObject", "NoSuchVersion"}
+
+
+class _CapturePublishRejected(Exception):
+    pass
 
 
 def _serialize_shared_connection[**P, R](method: Callable[P, R]) -> Callable[P, R]:
@@ -4031,6 +4038,93 @@ ORDER BY source_kind,source_id
             self.connection.commit()
         return deepcopy(metadata)
 
+    def transition_job_terminal(self, job: dict[str, Any]) -> bool:
+        if job.get("status") not in _JOB_TERMINAL_STATUSES:
+            raise ValueError("terminal transition requires a terminal target status")
+        metadata = {
+            key: value
+            for key, value in job.items()
+            if key not in {"flow_records", "payload_signatures"}
+        }
+        with self._lock, self.connection.cursor() as cursor:
+            try:
+                cursor.execute(
+                    "UPDATE controller_objects SET data=%s::jsonb WHERE kind='job' AND id=%s "
+                    "AND data->>'status' NOT IN "
+                    "('COMPLETED','PARTIALLY_COMPLETED','FAILED','CANCELLED')",
+                    (self._json(metadata), str(job["id"])),
+                )
+                changed = cursor.rowcount == 1
+                if changed:
+                    self._audit("job", str(job["id"]), metadata)
+                self.connection.commit()
+                return changed
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def mark_analysis_started(
+        self,
+        job_id: str,
+        occurred_at: str,
+        *,
+        attempt: int | None = None,
+        lease_token: str | None = None,
+    ) -> bool:
+        with self._lock, self.connection.cursor() as cursor:
+            try:
+                cursor.execute(
+                    "SELECT data FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
+                    (job_id,),
+                )
+                row = cursor.fetchone()
+                current = (
+                    row[0]
+                    if row is not None and isinstance(row[0], dict)
+                    else json.loads(row[0])
+                    if row is not None
+                    else None
+                )
+                processing = current.get("processing") if current is not None else None
+                if (
+                    current is None
+                    or current.get("status") != "ANALYZING"
+                    or not isinstance(processing, dict)
+                ):
+                    self.connection.commit()
+                    return False
+                phase = processing.get("phase")
+                if phase == "ANALYSIS_CLAIMED" and (
+                    int(processing.get("attempt", -1)) != attempt
+                    or processing.get("lease_token") != lease_token
+                ):
+                    self.connection.commit()
+                    return False
+                if phase not in {"ANALYSIS_QUEUED", "ANALYSIS_CLAIMED"}:
+                    self.connection.commit()
+                    return False
+                started_processing = {
+                    **processing,
+                    "phase": "ANALYSIS_RUNNING",
+                    "phase_started_at": occurred_at,
+                    "updated_at": occurred_at,
+                }
+                started_processing.pop("lease_token", None)
+                started_processing.pop("lease_expires_at", None)
+                current["processing"] = started_processing
+                current["analysis_started_at"] = occurred_at
+                current["updated_at"] = occurred_at
+                cursor.execute(
+                    "UPDATE controller_objects SET data=%s::jsonb WHERE kind='job' AND id=%s",
+                    (self._json(current), job_id),
+                )
+                changed = cursor.rowcount == 1
+                self.connection.commit()
+                return changed
+            except Exception:
+                self.connection.rollback()
+                raise
+
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         job = self.get_job_summary(job_id)
         if job is None:
@@ -4051,6 +4145,274 @@ ORDER BY source_kind,source_id
 
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None:
         return self._get("job", job_id)
+
+    def claim_pcap_preparation(
+        self, *, now: datetime, lease_seconds: int, max_attempts: int = 3
+    ) -> dict[str, Any] | None:
+        del now
+        with self._lock, self.connection.cursor() as cursor:
+            try:
+                cursor.execute(
+                    "SELECT id,data FROM controller_objects "
+                    "WHERE kind='job' AND data->>'mode'='PCAP_UPLOAD' "
+                    "AND data->'processing'->>'phase' IN "
+                    "('UPLOAD_STORED','PARSING','ANALYSIS_ENQUEUE_PENDING') "
+                    "AND data->>'status' NOT IN "
+                    "('COMPLETED','PARTIALLY_COMPLETED','FAILED','CANCELLED') "
+                    "AND (data->'processing'->>'phase'='UPLOAD_STORED' "
+                    "OR (data->'processing'->>'lease_expires_at')::timestamptz "
+                    "<= clock_timestamp()) "
+                    "ORDER BY data->>'created_at',id LIMIT 1 FOR UPDATE SKIP LOCKED"
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    self.connection.commit()
+                    return None
+                cursor.execute("SELECT clock_timestamp()")
+                clock_row = cursor.fetchone()
+                if clock_row is None or not isinstance(clock_row[0], datetime):
+                    raise RuntimeError("database clock unavailable")
+                authoritative_now = clock_row[0]
+                raw = row[1]
+                job = dict(raw) if isinstance(raw, dict) else json.loads(raw)
+                exhausted = _exhaust_pcap_preparation_metadata(
+                    job, now=authoritative_now, max_attempts=max_attempts
+                )
+                if exhausted is not None:
+                    cursor.execute(
+                        "UPDATE controller_objects SET data=%s::jsonb WHERE kind='job' AND id=%s",
+                        (self._json(exhausted), str(row[0])),
+                    )
+                    self._audit("job", str(row[0]), exhausted)
+                    self.connection.commit()
+                    return None
+                claimed = _claim_pcap_preparation_metadata(
+                    job,
+                    now=authoritative_now,
+                    lease_seconds=lease_seconds,
+                    max_attempts=max_attempts,
+                )
+                if claimed is None:
+                    self.connection.commit()
+                    return None
+                cursor.execute(
+                    "UPDATE controller_objects SET data=%s::jsonb WHERE kind='job' AND id=%s",
+                    (self._json(claimed), str(row[0])),
+                )
+                self.connection.commit()
+                return claimed
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def renew_pcap_preparation(
+        self, job_id: str, *, attempt: int, lease_token: str, lease_seconds: int
+    ) -> bool:
+        with self._lock, self.connection.cursor() as cursor:
+            try:
+                cursor.execute(
+                    "SELECT data FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
+                    (job_id,),
+                )
+                row = cursor.fetchone()
+                cursor.execute("SELECT clock_timestamp()")
+                clock_row = cursor.fetchone()
+                current = (
+                    row[0]
+                    if row is not None and isinstance(row[0], dict)
+                    else json.loads(row[0])
+                    if row is not None
+                    else None
+                )
+                if (
+                    clock_row is None
+                    or not isinstance(clock_row[0], datetime)
+                    or current is None
+                    or not _owns_pcap_preparation(
+                        current,
+                        attempt=attempt,
+                        lease_token=lease_token,
+                        now=clock_row[0],
+                        phases=frozenset({"PARSING", "ANALYSIS_ENQUEUE_PENDING"}),
+                    )
+                ):
+                    self.connection.rollback()
+                    return False
+                processing = dict(current["processing"])
+                processing["lease_expires_at"] = (
+                    clock_row[0] + timedelta(seconds=lease_seconds)
+                ).isoformat()
+                processing["updated_at"] = clock_row[0].isoformat()
+                current["processing"] = processing
+                cursor.execute(
+                    "UPDATE controller_objects SET data=%s::jsonb WHERE kind='job' AND id=%s",
+                    (self._json(current), job_id),
+                )
+                changed = cursor.rowcount == 1
+                self.connection.commit()
+                return changed
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def publish_pcap_preparation(
+        self,
+        job: dict[str, Any],
+        *,
+        attempt: int,
+        lease_token: str,
+    ) -> bool:
+        with self._lock, self.connection.cursor() as cursor:
+            try:
+                cursor.execute(
+                    "SELECT data FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
+                    (str(job["id"]),),
+                )
+                row = cursor.fetchone()
+                cursor.execute("SELECT clock_timestamp()")
+                clock_row = cursor.fetchone()
+                current = (
+                    row[0]
+                    if row is not None and isinstance(row[0], dict)
+                    else json.loads(row[0])
+                    if row is not None
+                    else None
+                )
+                if (
+                    clock_row is None
+                    or not isinstance(clock_row[0], datetime)
+                    or current is None
+                    or not _owns_pcap_preparation(
+                        current,
+                        attempt=attempt,
+                        lease_token=lease_token,
+                        now=clock_row[0],
+                    )
+                ):
+                    self.connection.rollback()
+                    return False
+                metadata = {
+                    key: value
+                    for key, value in job.items()
+                    if key not in {"flow_records", "payload_signatures"}
+                }
+                metadata_processing = dict(metadata["processing"])
+                current_processing = dict(current["processing"])
+                metadata_processing["lease_expires_at"] = current_processing["lease_expires_at"]
+                metadata_processing["lease_token"] = current_processing["lease_token"]
+                metadata["processing"] = metadata_processing
+                cursor.execute(
+                    "UPDATE controller_objects SET data=%s::jsonb WHERE kind='job' AND id=%s",
+                    (self._json(metadata), str(job["id"])),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("preparation publication metadata rowcount mismatch")
+                self._replace_job_flow_records(
+                    cursor, str(job["id"]), list(job.get("flow_records", []))
+                )
+                self.connection.commit()
+                return True
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def complete_pcap_preparation(
+        self, job: dict[str, Any], *, attempt: int, lease_token: str
+    ) -> bool:
+        with self._lock, self.connection.cursor() as cursor:
+            try:
+                cursor.execute(
+                    "SELECT data FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
+                    (str(job["id"]),),
+                )
+                row = cursor.fetchone()
+                cursor.execute("SELECT clock_timestamp()")
+                clock_row = cursor.fetchone()
+                current = (
+                    row[0]
+                    if row is not None and isinstance(row[0], dict)
+                    else json.loads(row[0])
+                    if row is not None
+                    else None
+                )
+                if (
+                    clock_row is None
+                    or not isinstance(clock_row[0], datetime)
+                    or current is None
+                    or not _owns_pcap_preparation(
+                        current,
+                        attempt=attempt,
+                        lease_token=lease_token,
+                        now=clock_row[0],
+                        phases=frozenset({"ANALYSIS_ENQUEUE_PENDING"}),
+                    )
+                ):
+                    self.connection.rollback()
+                    return False
+                metadata = {
+                    key: value
+                    for key, value in job.items()
+                    if key not in {"flow_records", "payload_signatures"}
+                }
+                cursor.execute(
+                    "UPDATE controller_objects SET data=%s::jsonb WHERE kind='job' AND id=%s",
+                    (self._json(metadata), str(job["id"])),
+                )
+                changed = cursor.rowcount == 1
+                if changed:
+                    self._audit("job", str(job["id"]), metadata)
+                self.connection.commit()
+                return changed
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def fail_pcap_preparation(self, job: dict[str, Any], *, attempt: int, lease_token: str) -> bool:
+        with self._lock, self.connection.cursor() as cursor:
+            try:
+                cursor.execute(
+                    "SELECT data FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
+                    (str(job["id"]),),
+                )
+                row = cursor.fetchone()
+                cursor.execute("SELECT clock_timestamp()")
+                clock_row = cursor.fetchone()
+                current = (
+                    row[0]
+                    if row is not None and isinstance(row[0], dict)
+                    else json.loads(row[0])
+                    if row is not None
+                    else None
+                )
+                if (
+                    clock_row is None
+                    or not isinstance(clock_row[0], datetime)
+                    or current is None
+                    or not _owns_pcap_preparation(
+                        current,
+                        attempt=attempt,
+                        lease_token=lease_token,
+                        now=clock_row[0],
+                    )
+                ):
+                    self.connection.rollback()
+                    return False
+                metadata = {
+                    key: value
+                    for key, value in job.items()
+                    if key not in {"flow_records", "payload_signatures"}
+                }
+                cursor.execute(
+                    "UPDATE controller_objects SET data=%s::jsonb WHERE kind='job' AND id=%s",
+                    (self._json(metadata), str(job["id"])),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("preparation failure metadata rowcount mismatch")
+                self.connection.commit()
+                return True
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def get_job_summaries(self, job_ids: list[str]) -> dict[str, dict[str, Any]]:
         selected = list(dict.fromkeys(job_ids))
@@ -4374,6 +4736,15 @@ ORDER BY source_kind,source_id
         self._perform_capture_cleanup(cleanup_id, object_key)
 
     def save_job_capture(self, job_id: str, content: bytes) -> None:
+        self._save_job_capture(job_id, content, published_job=None)
+
+    def publish_job_capture(self, job: dict[str, Any], content: bytes) -> dict[str, Any] | None:
+        published = self._save_job_capture(str(job["id"]), content, published_job=job)
+        return deepcopy(job) if published else None
+
+    def _save_job_capture(
+        self, job_id: str, content: bytes, *, published_job: dict[str, Any] | None
+    ) -> bool:
         object_key = self._capture_generation_key(job_id)
         expected_size = len(content)
         expected_sha256 = hashlib.sha256(content).hexdigest()
@@ -4410,17 +4781,35 @@ ORDER BY source_kind,source_id
                 job = None
                 if row is not None:
                     job = row[0] if isinstance(row[0], dict) else json.loads(row[0])
-                source_metadata = job.get("source") if isinstance(job, dict) else None
+                current_source = job.get("source") if isinstance(job, dict) else None
+                source_metadata = (
+                    published_job.get("source") if published_job is not None else current_source
+                )
+                processing = job.get("processing") if isinstance(job, dict) else None
+                current_matches_upload = (
+                    published_job is not None
+                    and isinstance(job, dict)
+                    and isinstance(processing, dict)
+                    and (
+                        (job.get("status"), processing.get("phase"))
+                        in {("CREATED", "UPLOAD_PENDING"), ("UPLOADING", "UPLOADING")}
+                    )
+                    and isinstance(current_source, dict)
+                    and current_source.get("packet_bytes_retained") is not True
+                )
                 if (
                     not isinstance(job, dict)
                     or job.get("id") != job_id
                     or job.get("mode") != "PCAP_UPLOAD"
+                    or (published_job is not None and not current_matches_upload)
                     or not isinstance(source_metadata, dict)
                     or source_metadata.get("packet_bytes_retained") is not True
                     or int(source_metadata.get("size_bytes", -1)) != expected_size
                     or source_metadata.get("sha256") != expected_sha256
                 ):
                     self.connection.rollback()
+                    if published_job is not None:
+                        raise _CapturePublishRejected
                     raise ArtifactStorageError("canonical capture metadata does not match upload")
                 cursor.execute(
                     "SELECT object_key FROM pcap_capture_source_versions "
@@ -4458,12 +4847,28 @@ ORDER BY source_kind,source_id
                         ),
                         prior_key,
                     )
+                if published_job is not None:
+                    metadata = {
+                        key: value
+                        for key, value in published_job.items()
+                        if key not in {"flow_records", "payload_signatures"}
+                    }
+                    cursor.execute(
+                        "UPDATE controller_objects SET data=%s::jsonb WHERE kind='job' AND id=%s",
+                        (self._json(metadata), job_id),
+                    )
+                    if cursor.rowcount != 1:
+                        raise ArtifactStorageError("capture metadata publication rowcount mismatch")
                 self.connection.commit()
+        except _CapturePublishRejected:
+            self._cleanup_failed_capture_upload(job_id, object_key)
+            return False
         except Exception as exc:
             self._cleanup_failed_capture_upload(job_id, object_key)
             raise ArtifactStorageError("capture version persistence failed") from exc
         if prior_cleanup is not None:
             self._perform_capture_cleanup(*prior_cleanup)
+        return True
 
     def get_job_capture(self, job_id: str) -> bytes | None:
         source = self.open_job_capture(job_id)

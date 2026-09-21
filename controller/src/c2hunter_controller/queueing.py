@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import uuid
@@ -21,11 +22,18 @@ class MemoryControllerQueue:
     def __init__(self) -> None:
         self.jobs: list[dict[str, Any]] = []
         self.results: list[dict[str, Any]] = []
+        self._message_ids: set[str] = set()
 
     def ready(self) -> bool:
         return True
 
     def enqueue(self, job: dict[str, Any]) -> None:
+        raw_message_id = job.get("message_id")
+        if raw_message_id is not None:
+            message_id = str(raw_message_id)
+            if message_id in self._message_ids:
+                return
+            self._message_ids.add(message_id)
         self.jobs.append(deepcopy(job))
 
     def claim_result(self, timeout: int = 0) -> dict[str, Any] | None:
@@ -53,6 +61,7 @@ class RedisControllerQueue:
         self.client = redis.Redis.from_url(redis_url, decode_responses=True)
         self.jobs_key = jobs_key
         self.results_key = results_key
+
         self.processing_key = f"{results_key}:processing"
         self.leases_key = f"{results_key}:leases"
         self.visibility_timeout = visibility_timeout
@@ -64,8 +73,36 @@ class RedisControllerQueue:
             return False
 
     def enqueue(self, job: dict[str, Any]) -> None:
-        envelope = {**job, "message_id": str(uuid.uuid4())}
-        self.client.lpush(self.jobs_key, json.dumps(envelope, separators=(",", ":"), default=str))
+        raw_message_id = job.get("message_id")
+        message_id = str(raw_message_id or uuid.uuid4())
+        envelope = {**job, "message_id": message_id}
+        encoded = json.dumps(envelope, separators=(",", ":"), default=str)
+        if raw_message_id is None:
+            self.client.lpush(self.jobs_key, encoded)
+            return
+        dedupe_key = (
+            f"{self.jobs_key}:message:{hashlib.sha256(message_id.encode('utf-8')).hexdigest()}"
+        )
+        script = """
+        local dedupe_type = redis.call('TYPE', KEYS[1]).ok
+        local jobs_type = redis.call('TYPE', KEYS[2]).ok
+        if dedupe_type ~= 'none' and dedupe_type ~= 'string' then
+          return redis.error_reply('dedupe key has incompatible type')
+        end
+        if jobs_type ~= 'none' and jobs_type ~= 'list' then
+          return redis.error_reply('jobs key has incompatible type')
+        end
+        if not redis.acl_check_cmd('SET', KEYS[1], '1', 'NX')
+           or not redis.acl_check_cmd('LPUSH', KEYS[2], ARGV[1]) then
+          return redis.error_reply('analysis enqueue ACL preflight failed')
+        end
+        if redis.call('SET', KEYS[1], '1', 'NX') then
+          redis.call('LPUSH', KEYS[2], ARGV[1])
+          return 1
+        end
+        return 0
+        """
+        self.client.eval(script, 2, dedupe_key, self.jobs_key, encoded)
 
     def claim_result(self, timeout: int = 0) -> dict[str, Any] | None:
         self.recover()
@@ -89,6 +126,19 @@ class RedisControllerQueue:
         pipeline = self.client.pipeline(transaction=True)
         pipeline.lrem(self.processing_key, 1, receipt)
         pipeline.zrem(self.leases_key, receipt)
+        try:
+            result = json.loads(receipt)
+        except (TypeError, ValueError):
+            result = None
+        releases_dedupe = isinstance(result, dict) and (
+            result.get("status") != "EVENT" or result.get("event") == "ANALYSIS_DELIVERY_SUPERSEDED"
+        )
+        if isinstance(result, dict) and releases_dedupe and result.get("job_id"):
+            message_id = f"analysis-job:{result['job_id']}"
+            dedupe_key = (
+                f"{self.jobs_key}:message:{hashlib.sha256(message_id.encode('utf-8')).hexdigest()}"
+            )
+            pipeline.delete(dedupe_key)
         pipeline.execute()  # type: ignore[no-untyped-call]
 
     def recover(self) -> int:

@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     flow_ingestion_grace_seconds: int = Field(default=65, ge=0)
     pcap_upload_max_bytes: int = Field(default=500 * 1024 * 1024, gt=0)
     pcap_upload_max_packets: int = Field(default=2_000_000, gt=0)
+    pcap_preparation_lease_seconds: int = Field(default=120, gt=1, le=86_400)
+    pcap_preparation_lease_renew_seconds: int = Field(default=30, gt=0, le=43_200)
+    pcap_preparation_max_attempts: int = Field(default=3, ge=1, le=20)
     pcap_offset_index_max_packets: int | None = Field(default=None, gt=0)
     pcap_offset_index_max_interfaces: int = Field(default=4_096, gt=0, le=1_000_000)
     pcap_offset_index_batch_size: int = Field(default=1_000, gt=0, le=10_000)
@@ -206,6 +209,10 @@ class Settings(BaseSettings):
             self.pcap_export_scan_max_bytes = self.pcap_upload_max_bytes
         if self.pcap_export_scan_max_packets is None:
             self.pcap_export_scan_max_packets = self.pcap_upload_max_packets
+        if self.pcap_preparation_lease_renew_seconds * 2 > self.pcap_preparation_lease_seconds:
+            raise ValueError(
+                "PCAP preparation lease renewal must be at most half the lease duration"
+            )
         if self.pcap_offset_index_lease_renew_seconds * 2 > self.pcap_offset_index_lease_seconds:
             raise ValueError(
                 "PCAP offset index lease renewal must be at most half the lease duration"

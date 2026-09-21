@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import uuid
+from datetime import datetime, timedelta
 from typing import Any
 
 
@@ -83,6 +85,135 @@ class PostgresJobLoader:
                 else json.loads(raw_signatures)
             )
         return metadata
+
+    def claim_analysis(
+        self,
+        job_id: str,
+        *,
+        attempt: int,
+        lease_token: str,
+        lease_seconds: int,
+    ) -> tuple[str, str | None]:
+        with self.connection.transaction(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
+                (job_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return ("SUPERSEDED", None)
+            raw = row[0]
+            job = dict(raw) if isinstance(raw, dict) else json.loads(raw)
+            processing = job.get("processing")
+            if job.get("status") != "ANALYZING" or not isinstance(processing, dict):
+                return ("SUPERSEDED", None)
+            cursor.execute("SELECT clock_timestamp()")
+            clock_row = cursor.fetchone()
+            if clock_row is None or not isinstance(clock_row[0], datetime):
+                raise RuntimeError("database clock unavailable")
+            now = clock_row[0]
+            if processing.get("phase") in {"ANALYSIS_CLAIMED", "ANALYSIS_RUNNING"}:
+                raw_expiry = processing.get("analysis_lease_expires_at")
+                if raw_expiry and now < datetime.fromisoformat(str(raw_expiry)):
+                    return ("ACTIVE", None)
+                occurred_at = now.isoformat()
+                job["status"] = "FAILED"
+                job["error_code"] = "ANALYSIS_WORKER_LOST"
+                job["error"] = "analysis worker lease expired before a durable result"
+                job["completed_at"] = occurred_at
+                job["updated_at"] = occurred_at
+                failed_processing = dict(processing)
+                failed_processing.update(
+                    {
+                        "phase": "FAILED",
+                        "phase_started_at": occurred_at,
+                        "updated_at": occurred_at,
+                    }
+                )
+                failed_processing.pop("analysis_claim_token", None)
+                failed_processing.pop("analysis_lease_expires_at", None)
+                job["processing"] = failed_processing
+                cursor.execute(
+                    "UPDATE controller_objects SET data=%s::jsonb WHERE kind='job' AND id=%s",
+                    (json.dumps(job, separators=(",", ":"), default=str), job_id),
+                )
+                return ("SUPERSEDED", None)
+            if int(processing.get("attempt", -1)) != attempt:
+                return ("SUPERSEDED", None)
+            phase = processing.get("phase")
+            if phase not in {"ANALYSIS_ENQUEUE_PENDING", "ANALYSIS_QUEUED"}:
+                return ("SUPERSEDED", None)
+            if processing.get("lease_token") != lease_token:
+                return ("SUPERSEDED", None)
+            occurred_at = now.isoformat()
+            analysis_claim_token = str(uuid.uuid4())
+            claimed_processing = dict(processing)
+            claimed_processing.update(
+                {
+                    "phase": "ANALYSIS_CLAIMED",
+                    "phase_started_at": occurred_at,
+                    "updated_at": occurred_at,
+                    "analysis_claim_token": analysis_claim_token,
+                    "analysis_lease_expires_at": (
+                        now + timedelta(seconds=lease_seconds)
+                    ).isoformat(),
+                }
+            )
+            claimed_processing.pop("lease_expires_at", None)
+            job["processing"] = claimed_processing
+            job["analysis_claimed_at"] = occurred_at
+            job["updated_at"] = occurred_at
+            cursor.execute(
+                "UPDATE controller_objects SET data=%s::jsonb WHERE kind='job' AND id=%s",
+                (json.dumps(job, separators=(",", ":"), default=str), job_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("analysis claim update was not persisted")
+            return ("CLAIMED", analysis_claim_token)
+
+    def renew_analysis(
+        self, job_id: str, *, claim_token: str, lease_seconds: int
+    ) -> bool:
+        with self.connection.transaction(), self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
+                (job_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return False
+            raw = row[0]
+            job = dict(raw) if isinstance(raw, dict) else json.loads(raw)
+            processing = job.get("processing")
+            cursor.execute("SELECT clock_timestamp()")
+            clock_row = cursor.fetchone()
+            if clock_row is None or not isinstance(clock_row[0], datetime):
+                raise RuntimeError("database clock unavailable")
+            now = clock_row[0]
+            if (
+                job.get("status") != "ANALYZING"
+                or not isinstance(processing, dict)
+                or processing.get("phase")
+                not in {"ANALYSIS_CLAIMED", "ANALYSIS_RUNNING"}
+                or processing.get("analysis_claim_token") != claim_token
+            ):
+                return False
+            raw_expiry = processing.get("analysis_lease_expires_at")
+            if not raw_expiry or now >= datetime.fromisoformat(str(raw_expiry)):
+                return False
+            occurred_at = now.isoformat()
+            renewed_processing = dict(processing)
+            renewed_processing["analysis_lease_expires_at"] = (
+                now + timedelta(seconds=lease_seconds)
+            ).isoformat()
+            renewed_processing["updated_at"] = occurred_at
+            job["processing"] = renewed_processing
+            job["updated_at"] = occurred_at
+            cursor.execute(
+                "UPDATE controller_objects SET data=%s::jsonb WHERE kind='job' AND id=%s",
+                (json.dumps(job, separators=(",", ":"), default=str), job_id),
+            )
+            return cursor.rowcount == 1
 
     def close(self) -> None:
         if self._connection is not None:

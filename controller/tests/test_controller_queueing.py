@@ -17,6 +17,9 @@ class FakePipeline:
     def zrem(self, *args: Any) -> None:
         self.calls.append(("zrem", args))
 
+    def delete(self, *args: Any) -> None:
+        self.calls.append(("delete", args))
+
     def execute(self) -> None:
         self.calls.append(("execute", ()))
 
@@ -129,6 +132,25 @@ def test_redis_queue_ready_enqueue_and_ack_paths() -> None:
 
     client.raise_on_ping = True
     assert queue.ready() is False
+
+
+def test_redis_queue_deduplicates_stable_messages_until_terminal_ack() -> None:
+    client = FakeRedis()
+    queue = redis_queue(client)
+    stable = {"id": "job-1", "message_id": "analysis-job:job-1"}
+
+    queue.enqueue(stable)
+    queue.enqueue(stable)
+
+    evaluated = [args for name, args in client.calls if name == "eval"]
+    assert len(evaluated) == 2
+    assert evaluated[0][1] == 2
+    assert evaluated[0][3] == "jobs"
+    assert evaluated[0][4] == json.dumps(stable, separators=(",", ":"))
+
+    terminal = json.dumps({"job_id": "job-1", "status": "COMPLETED"})
+    queue.ack_result(terminal)
+    assert any(name == "delete" for name, _args in client.pipeline_value.calls)
 
 
 def test_redis_queue_claims_blocking_and_nonblocking_results() -> None:
