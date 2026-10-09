@@ -160,10 +160,14 @@ def generate_high_recall_candidates(
     *,
     trusted_peers: set[str] | None = None,
     limit: int | None = None,
+    require_packet_timing: bool = False,
+    max_peers: int | None = None,
 ) -> list[PrefilterCandidate]:
     """Rank plausible peers for bounded AI review."""
     if limit is not None and limit < 1:
         raise ValueError("limit must be positive")
+    if max_peers is not None and max_peers < 1:
+        raise ValueError("max_peers must be positive")
     trusted = trusted_peers or set()
     grouped: dict[str, list[tuple[Flow, str, int | None]]] = defaultdict(list)
     for flow in context.scoped_flows():
@@ -172,6 +176,8 @@ def generate_high_recall_candidates(
             continue
         peer, host, port = endpoint
         grouped[peer].append((flow, host, port))
+        if max_peers is not None and len(grouped) > max_peers:
+            raise ValueError("generated peer pool exceeds its admission limit")
     retry_duplicates = syn_retry_duplicate_flow_ids(context)
     for peer, peer_flows in tuple(grouped.items()):
         suppressed = outbound_control_flood_flow_ids(
@@ -204,10 +210,13 @@ def generate_high_recall_candidates(
                 },
             )
         ]
+        timing_available = not require_packet_timing or all(
+            flow.packet_count == 1 and flow.duration_seconds == 0 for flow, _host, _port in ordered
+        )
         for factor in (
-            _interval_factor(ordered),
+            _interval_factor(ordered) if timing_available else None,
             _payload_factor(ordered),
-            _synchronization_factor(ordered),
+            _synchronization_factor(ordered) if timing_available else None,
             _robust_anomaly_factor(len(ordered), total_bytes, profiles),
         ):
             if factor is not None:
@@ -248,7 +257,9 @@ def generate_high_recall_candidates(
             PrefilterCandidate(
                 candidate_ip=peer,
                 prefilter_score=score,
-                score_version=PREFILTER_VERSION,
+                score_version="ai-prefilter-shadow-v1"
+                if require_packet_timing
+                else PREFILTER_VERSION,
                 factors=tuple(factors),
                 internal_hosts=tuple(sorted({host for _flow, host, _port in ordered})),
                 protocols=tuple(sorted({flow.protocol for flow, _host, _port in ordered})),

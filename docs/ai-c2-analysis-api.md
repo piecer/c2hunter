@@ -25,6 +25,38 @@
 
 ## 조회
 
+### 선택적 행동 탐색 (1차 shadow)
+
+Run 생성 요청에 `"discovery_mode":"shadow"`를 추가한다. 기본값 `legacy`는 기존 선택
+방식을 유지한다. shadow는 `analysis_kind=C2`에서만 지원하며 기존 Job/Candidate/점수를
+변경하지 않는다. `candidate_limit`은 두 모드 모두 1–5이다. 규칙 없는 행동 후보에 최대
+2개 슬롯을 우선 배정하고, 남은 슬롯은 기존 순위로 채운다. 겹치는 peer는 한 번만
+검토하며 `COMMUNICATION_STATUS`를 행동 C2 후보로 재분류하지 않는다.
+
+`selection_summary`는 `behavior-selection-v1`과 다음 필드를 제공한다:
+`candidate_pool_count`, `selected_count`, `omitted_count`, `discovery_candidate_count`,
+`discovery_selected_count`, `rule_free_selected_count`, `reserved_discovery_slots`, `warnings`.
+미선택은 정상 판정을 뜻하지 않으며 후보 풀의 크기도 전체 트래픽 관측 범위가 아니다.
+후보가 없는 shadow Run도 빈 결과와 관측 한계를 남길 수 있다.
+
+`GET /ai-runs/{run_id}/selection?offset=0&limit=20`은 불변 선택 스냅샷을 조회한다.
+`limit`은 1–50, `offset`은 0–2048이다. 응답은 `items`, `total`, `offset`, `limit`,
+`next_offset`이며 클라이언트는 서버의 `next_offset`을 따라야 한다. 행에는
+`candidate_id`, `external_ip`, `origin` (`RULE`, `PREFILTER`, `BEHAVIOR`,
+`RULE_AND_BEHAVIOR`), `existing_score`, nullable `anomaly_score`, `selected`,
+`reason` (`DISCOVERY_RESERVED`, `RANKED`, `BUDGET_LIMIT`)이 있다. 내부 전체
+`selection_inventory`는 Run 조회 응답에 실리지 않는다. legacy Run의 선택 목록은 비어 있다.
+
+shadow assessment는 `discovery_origin`, nullable `behavior_anomaly_score`를 추가한다.
+행동 근거와 정상 예약 통신이라는 대안, 기준선/관측 한계는 저장된 evidence bundle에
+포함된다. 행동 이상도, 기존 규칙 점수, 모델 신뢰도는 서로 다르며 보정된 악성 확률이 아니다.
+같은 멱등 키로 선택 모드나 후보 한도를 바꾸면 `AI_RUN_NOT_ALLOWED`로 거절한다.
+
+`GET /ai-capabilities`로 제공자/모델/전송 대상을 확인한다. 원격으로 분류된 C2 모델에도
+`allow_remote=true`가 필요하며 미동의 요청은 `AI_REMOTE_CONSENT_REQUIRED` (409)로
+큐 적재 전에 거절한다. `language`는 `ko`/`en`; C2 결과의 두 요약 중 화면 언어를
+선택하며 모든 자유문장에 대한 자동 번역을 보장하지 않는다.
+
 - `GET /analysis-jobs/{job_id}/ai-runs`
 - `GET /ai-runs/{run_id}`
 - `GET /ai-runs/{run_id}/assessments`

@@ -136,6 +136,7 @@ from .schemas import (
     AIAnalysisRunResponse,
     AIArtifactReview,
     AIFeedbackCreate,
+    AISelectionPage,
     AnalysisJobCreate,
     AnalysisJobUpdate,
     AnalysisParameters,
@@ -250,7 +251,9 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
 
 def _public_ai_run(run: dict[str, Any]) -> dict[str, Any]:
     """Hide the DDoS model input snapshot while preserving the legacy public run contract."""
-    return {key: value for key, value in run.items() if key != "ddos_input"}
+    return {
+        key: value for key, value in run.items() if key not in {"ddos_input", "selection_inventory"}
+    }
 
 
 def _validated_ddos_report(value: object) -> dict[str, Any]:
@@ -3554,9 +3557,9 @@ def create_app(
                 "ANALYSIS_KIND_MISMATCH",
                 "AI 분석 유형이 원본 분석 모듈과 일치하지 않습니다",
             )
+        if config.ai_model_endpoint_is_remote and not payload.allow_remote:
+            raise ApiError(409, "AI_REMOTE_CONSENT_REQUIRED", "Remote model consent required")
         if payload.analysis_kind in {"NETWORK_ANOMALY", "DDOS_ATTACK"}:
-            if config.ai_model_endpoint_is_remote and not payload.allow_remote:
-                raise ApiError(409, "AI_REMOTE_CONSENT_REQUIRED", "Remote model consent required")
             capabilities = ai_capabilities()
             capability_name = (
                 "network_interpretation"
@@ -3580,6 +3583,7 @@ def create_app(
                 created_by=created_by,
                 analysis_kind=payload.analysis_kind,
                 language=payload.language,
+                discovery_mode=payload.discovery_mode,
             )
         except AIAnalysisError as exc:
             message = str(exc)
@@ -3662,6 +3666,27 @@ def create_app(
         if run is None:
             raise ApiError(404, "AI_RUN_NOT_FOUND", "AI 분석 Run을 찾을 수 없습니다")
         return _public_ai_run({**run, "candidate_count": len(run.get("candidate_ids", []))})
+
+    @app.get("/api/v1/ai-runs/{run_id}/selection", response_model=AISelectionPage)
+    def list_ai_run_selection(
+        run_id: str,
+        offset: int = Query(0, ge=0, le=2048),
+        limit: int = Query(20, ge=1, le=50),
+    ) -> dict[str, Any]:
+        run = repo.get_ai_run(run_id)
+        if run is None:
+            raise ApiError(404, "AI_RUN_NOT_FOUND", "AI 분석 Run을 찾을 수 없습니다")
+        inventory = run.get("selection_inventory", [])
+        total = len(inventory)
+        items = inventory[offset : offset + limit]
+        next_offset = offset + len(items)
+        return {
+            "items": items,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "next_offset": next_offset if next_offset < total else None,
+        }
 
     @app.get("/api/v1/ai-runs/{run_id}/assessments")
     def list_ai_analysis_assessments(

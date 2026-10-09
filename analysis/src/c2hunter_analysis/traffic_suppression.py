@@ -131,7 +131,9 @@ def outbound_control_flood_flow_ids(context: AnalysisContext, flows: Iterable[Fl
         id(flow)
         for flow in control_rows
         if not _payload_observed(flow)
-        and _tcp_flag_count(flow, "ack") / max(1, flow.packet_count) <= 0.2
+        # Peer-level ACK ratio helps classify a flood; it cannot prove that
+        # an individual aggregate contains no acknowledged communication.
+        and _tcp_flag_count(flow, "ack") == 0
     }
 
 

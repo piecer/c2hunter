@@ -1,9 +1,13 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from c2hunter_analysis.domain import AnalysisContext, Flow
-from c2hunter_analysis.traffic_suppression import is_outbound_control_flood
+from c2hunter_analysis.traffic_suppression import (
+    is_outbound_control_flood,
+    outbound_control_flood_flow_ids,
+)
 
 START = datetime(2026, 8, 28, tzinfo=UTC)
 HOST = "10.0.0.10"
@@ -123,3 +127,13 @@ def test_invalid_direct_flow_duration_fails_open_without_crashing(duration: floa
     flows = [flow(flags={"syn": 40}, duration=duration)]
 
     assert is_outbound_control_flood(context(flows), flows) is False
+
+
+@pytest.mark.parametrize("encoding", ["flags", "counter"])
+def test_same_peer_flood_preserves_aggregate_with_one_ack(encoding: str) -> None:
+    flood = flow(packets=100000, flags={"syn": 100000}, duration=1)
+    mixed = flow(packets=20, flags={"syn": 19, "ack": 1}, duration=1)
+    if encoding == "counter":
+        mixed = replace(mixed, tcp_flags={"syn": 19}, tcp_ack_count=1)
+    rows = [flood, mixed]
+    assert outbound_control_flood_flow_ids(context(rows), rows) == {id(flood)}

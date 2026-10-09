@@ -341,7 +341,7 @@ def test_queue_depth_and_bounded_terminal_cleanup_parity(
     first = repository.claim_live_segment_index(now=now, lease_seconds=30)
     assert first is not None and first.lease_token is not None
     assert repository.complete_live_segment_index(
-        first.spec.source_id, attempt=first.attempt, lease_token=first.lease_token
+        first.spec.source_id, attempt=first.attempt, lease_token=first.lease_token, now=now
     )
     second = repository.claim_live_segment_index(now=now, lease_seconds=30)
     assert second is not None and second.lease_token is not None

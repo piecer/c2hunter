@@ -53,6 +53,42 @@ AI worker는 시작 시 provider의 model 목록을 조회해 readiness를 확�
   deduplicate하지 않고 기존 C2 분석 입력으로 보존한다.
 - Flow가 없으면 기존 Candidate만 사용하고, 기존 Candidate가 없어도 적합한 external peer가 있으면 AI Run을 생성할 수 있다.
 
+## 행동 기반 탐색: 1차 shadow 운영
+
+완료/부분 완료 C2 분석 화면에서 기본 해제된 `행동 기반 탐색 사용`을 선택하고 AI
+Run을 실행한다. 기존 규칙 결과는 그대로 남으며, 행동 후보의 분석 결과와 검토
+범위는 별도로 표시된다. 외부 모델은 표시된 전송 대상에 대한 동의가 필요하다.
+중단하려면 다음 실행부터 선택을 해제한다. 이미 저장된 Run/피드백은 삭제하지 않는다.
+
+1차는 장기 학습기가 아니다. 같은 작업 안의 protocol/service/packet-or-aggregate
+집단에서 median/MAD를 계산한다. stream당 outbound 8개, 같은 서비스 집단 8개 peer
+이상이 필요하며 반복 간격, record 평균 크기 안정성, 방향별 byte 비중 중 두 종류의
+독립 근거가 상대 이상이어야 한다. 균일한 정상 heartbeat 집단, 흔한 DNS/NTP,
+기존 control-flood/SYN retry 제외 조건은 보수적으로 처리한다. 소수 peer만 있는
+캡처나 새로운 단독 서비스는 `INSUFFICIENT_SERVICE_COHORT`로 탐색되지 않을 수 있다.
+
+LIVE 집계 flush 간격과 min/max 크기를 패킷 시퀀스로 해석하지 않는다. 집계 입력은
+반복 간격 근거를 사용할 수 없으며, 크기/방향 등 남은 근거가 충분해야 한다.
+shadow의 보조 prefilter도 `ai-prefilter-shadow-v1`로 구분하며 집계 peer의 beacon/
+동시 접속 factor와 그 순위 가산점을 제외한다. 기존 legacy 모드의 prefilter는 유지한다.
+`PRIMARY_STREAM_ONLY`, `CAPTURE_COMPLETENESS_UNVERIFIED`, 역사 기준선 부재를
+항상 구분한다. 시계 오차/누락/짧은 관측은 악성 근거가 아니라 판단 한계다.
+
+자원 한도는 두 단계이다. shadow Run admission은 입력 100,000 flow와 결합 전 후보
+2,048개를 넘으면 거절한다. 생성 peer도 집단 점수 계산 전에 2,048개 한도를 적용한다.
+행동 탐색 자체는 8,192 flow, 256 peer, SYN 관측 256개,
+context collection별 128개로 제한된다. 내부 한도 초과 시 행동 순위를 일부만 만들지
+않고 해당 탐색을 비우며 `*_BUDGET_EXCEEDED` 경고를 남긴다. 기존 후보 검토는 남을
+수 있으므로 `COMPLETED`만 보고 행동 탐색 전체 성공으로 해석하면 안 된다. 잘못된
+packet count는 1로 보정하지 않는다. packet count/byte count/duration/timestamp가
+없거나 잘못되면 shadow 요청을 거절하며 관측하지 않은 값을 0으로 만들지 않는다.
+기록된 센서 clock offset은 행동 후보의 관측 신뢰도 감점에 전달한다.
+
+`evaluate_shadow_job`은 운영과 같은 1–5개 선택 예산을 사용하고 선택 전 recall,
+선택 후 recall, 추가 양성/오탐 및 판단 유보를 분리한다. synthetic/FakeGateway 결과는
+계약 검증일 뿐 정확도 개선 증거가 아니다. 실제 라벨 검증과 false-positive 검토 전에는
+자동 차단, 자동 룰 배포, 온라인 자기학습을 활성화하지 않는다.
+
 ## Splunk/MISP 초안
 
 - 완료된 assessment마다 `SPLUNK_HUNT`, `SPLUNK_DETECTION`, `MISP_DRAFT` 3개를 생성한다.

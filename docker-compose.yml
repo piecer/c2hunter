@@ -29,6 +29,8 @@ services:
     restart: unless-stopped
   controller:
     build: { context: ., dockerfile: scripts/controller.Dockerfile }
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       C2HUNTER_ENVIRONMENT: "${C2HUNTER_ENVIRONMENT:-development}"
       C2HUNTER_DATABASE_URL: "postgresql://${POSTGRES_USER:-c2hunter}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-c2hunter}"

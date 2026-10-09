@@ -2250,6 +2250,42 @@ class CandidateListResponse(BaseModel):
     page_size: int
 
 
+class AISelectionSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal["behavior-selection-v1"]
+    candidate_pool_count: int = Field(ge=0, le=2048)
+    selected_count: int = Field(ge=0, le=5)
+    omitted_count: int = Field(ge=0, le=2048)
+    discovery_candidate_count: int = Field(ge=0, le=2048)
+    discovery_selected_count: int = Field(ge=0, le=5)
+    rule_free_selected_count: int = Field(ge=0, le=5)
+    reserved_discovery_slots: int = Field(ge=0, le=2)
+    warnings: list[str] = Field(max_length=30)
+
+
+class AISelectionItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: str = Field(max_length=200)
+    external_ip: str = Field(max_length=45)
+    origin: Literal["RULE", "PREFILTER", "BEHAVIOR", "RULE_AND_BEHAVIOR"]
+    existing_score: float = Field(ge=0, le=100, allow_inf_nan=False)
+    anomaly_score: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    selected: bool
+    reason: Literal["DISCOVERY_RESERVED", "RANKED", "BUDGET_LIMIT"]
+
+
+class AISelectionPage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[AISelectionItem] = Field(max_length=50)
+    total: int = Field(ge=0, le=2048)
+    offset: int = Field(ge=0)
+    limit: int = Field(ge=1, le=50)
+    next_offset: int | None = Field(default=None, ge=0)
+
+
 class AIAnalysisRunResponse(BaseModel):
     # Existing runs have an extensible metadata envelope. Preserve those fields;
     # only the new diagnostic is a closed, strict public contract.
@@ -2258,6 +2294,8 @@ class AIAnalysisRunResponse(BaseModel):
     id: str
     status: str
     failure_diagnostic: NetworkFailureDiagnostic | None = None
+    discovery_mode: Literal["legacy", "shadow"] = "legacy"
+    selection_summary: AISelectionSummary | None = None
 
 
 class AIAnalysisRunListResponse(BaseModel):
@@ -2274,6 +2312,7 @@ class AIAnalysisRunCreate(BaseModel):
     analysis_kind: Literal["C2", "NETWORK_ANOMALY", "DDOS_ATTACK"] = "C2"
     language: Literal["ko", "en"] = "ko"
     allow_remote: bool = Field(default=False, strict=True)
+    discovery_mode: Literal["legacy", "shadow"] = "legacy"
 
 
 class AIAnalysisRunCancel(BaseModel):

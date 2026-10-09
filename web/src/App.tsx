@@ -6,6 +6,10 @@ import NetworkAIInterpretation from './NetworkAIInterpretation';
 import NetworkAnomalyPanel, { type NetworkAnomalyReport } from './NetworkAnomalyPanel';
 import DDoSAttackPanel, { type DDoSAttackReport } from './DDoSAttackPanel';
 import DDoSAIInterpretation from './DDoSAIInterpretation';
+import ReportLanguageScope from './ReportLanguage';
+import C2DiscoverySelection, { type SelectionSummary } from './C2DiscoverySelection';
+import C2AssessmentDetails, { type AIAssessment } from './C2AssessmentDetails';
+import { useReportLanguage } from './reportLanguageContext';
 import AnalysisConfiguration, { StructuredValue } from './AnalysisConfiguration';
 import { runPcapExportLifecycle, type PcapExportLifecycleResult } from './pcapExportLifecycle';
 import './styles.css';
@@ -60,11 +64,10 @@ const threatIntelStatusLabel = (threatIntel: ThreatIntelligence) => {
 type MispExport = { id: string; event_id: string; candidate_ip: string; attribute_type: 'ip-src'; status: 'EXPORTED' | 'ALREADY_EXPORTED' | 'FAILED'; attribute_id?: string | null; error?: string; created_by: string; created_at: string };
 type IntegrationSettings = { version: number; virustotal_enabled: boolean; abuseipdb_enabled: boolean; misp_enabled: boolean; misp_url: string; misp_verify_tls: boolean; threat_intel_timeout_seconds: number; threat_intel_request_delay_seconds: number; abuseipdb_max_age_days: number; abuseipdb_positive_threshold: number; candidate_auto_enrichment_enabled: boolean; candidate_auto_enrichment_limit: number; candidate_auto_enrichment_workers: number; candidate_auto_enrichment_queue_capacity: number; management_event_id: string; management_auto_register: boolean; immediate_action_event_id: string; immediate_action_auto_register: boolean; immediate_action_min_positive_providers: number; updated_by?: string; updated_at?: string };
 type Candidate = { id: string; job_id?: string; candidate_ip: string; score: number; severity: string; occurrence_count?: number; duplicate_count?: number; candidate_kind?: 'C2' | 'COMMUNICATION_STATUS'; distinct_internal_hosts?: number; hosts?: string[]; internal_hosts?: string[]; sensors?: string[]; sensor_ids?: string[]; protocols?: string[]; ports?: number[]; domains?: string[]; first_seen?: string; last_seen?: string; evidence?: Evidence[]; evidence_count?: number; adjustments?: ScoreAdjustment[]; traffic_series?: number[]; traffic_buckets?: TrafficBucket[]; related_attack_targets?: string[]; flow_count?: number; packet_count?: number; byte_count?: number; workflow_status?: 'NEEDS_REVIEW' | 'IN_REVIEW' | 'ACTION_REQUIRED' | 'ACTION_IN_PROGRESS' | 'ACTION_COMPLETED' | 'FALSE_POSITIVE'; action_status?: 'NOT_REQUIRED' | CandidateAction['status']; current_verdict?: CandidateVerdict; verdict_history?: CandidateVerdict[]; current_action?: CandidateAction; action_history?: CandidateAction[]; threat_intelligence?: ThreatIntelligence; ti_assessment?: ThreatIntelAssessment; misp_exports?: MispExport[] };
-type AIFactor = { title: string; evidence_ids: string[]; explanation: string; strength?: string };
-type AIAssessment = { id: string; candidate_id: string; external_ip: string; review_priority?: number; assessment: { candidate: { external_ip: string; verdict: string; confidence: number; summary_ko: string; summary_en: string }; supporting_factors: AIFactor[]; counter_factors: AIFactor[]; missing_information: string[]; limitations: string[] } };
+
 type AIArtifact = { id: string; artifact_type: 'SPLUNK_HUNT' | 'SPLUNK_DETECTION' | 'MISP_DRAFT'; validation_status: string; approved_status: 'PENDING' | 'APPROVED' | 'REJECTED'; content: Record<string, unknown> };
 type AIFeedback = { id: string; verdict: 'CONFIRM_C2' | 'CONFIRM_BENIGN' | 'NEED_MORE_DATA' | 'REJECT_EXPLANATION'; corrected_confidence?: number | null; note: string; created_by: string; created_at: string };
-type AIRun = { id: string; analysis_job_id: string; status: string; progress_percent?: number; candidate_count: number; created_at: string; error_code?: string; error_message?: string };
+type AIRun = { id: string; analysis_job_id: string; status: string; progress_percent?: number; candidate_count: number; created_at: string; error_code?: string; error_message?: string; discovery_mode?: 'legacy' | 'shadow'; selection_summary?: SelectionSummary };
 type FlowLabel = { id: string; verdict: 'C2' | 'BENIGN'; confidence: 'CONFIRMED' | 'HIGH' | 'MEDIUM'; note: string; created_by?: string; created_at: string };
 type FlowRecordReview = { flow_id: string; job_id: string; sensor_id?: string; timestamp: string; source_ip: string; destination_ip: string; source_port?: number; destination_port?: number; internal_ip?: string; external_ip?: string; service_port?: number; protocol: string; direction: string; packet_count?: number; total_bytes?: number; payload_hash?: string; payload_prefix_hash?: string; payload_length?: number; payload_entropy?: number; payload_printable_ratio?: number; payload_simhash?: string; payload_feature_version?: string; has_payload: boolean; current_label?: FlowLabel | null };
 type PayloadPreview = { flow_id: string; payload_hex: string; payload_ascii: string; sample_bytes: number; payload_length?: number; truncated: boolean; payload_hash?: string };
@@ -667,49 +670,79 @@ function AIFeedbackPanel({ assessmentId }: { assessmentId: string }) {
   </section>;
 }
 
-function AIAnalysisPanel({ job }: { job: Job }) {
+function AIAnalysisPanel({ job, knownCandidateIds }: { job: Job; knownCandidateIds: string[] }) {
   const queryClient = useQueryClient();
+  const language = useReportLanguage();
+  const t = (en: string, ko: string) => language === 'ko' ? ko : en;
+  const [shadow, setShadow] = useState(false);
+  const capabilities = useQuery<{ available: boolean; remote: boolean; destination?: string | null; provider?: string; model_name?: string; reason?: string | null }, Error>({
+    queryKey: ['ai-capabilities'], queryFn: () => api.get('/ai-capabilities'), retry: false,
+  });
+  const config = capabilities.data;
+  const [consentedDestination, setConsentedDestination] = useState<string | null>(null);
+  const allowRemote = Boolean(config?.remote && config.destination && consentedDestination === config.destination);
   const [candidateLimit, setCandidateLimit] = useState(5);
   const runs = useQuery<List<AIRun>, Error>({
     queryKey: ['ai-runs', job.id],
     queryFn: () => api.get(`/analysis-jobs/${job.id}/ai-runs`),
     refetchInterval: query => items(query.state.data).some(run => !terminalStatuses.has(run.status)) ? 2000 : false,
   });
-  const latest = items(runs.data)[0];
+  const saved = items(runs.data)[0];
+  const run = useQuery<AIRun, Error>({
+    queryKey: ['ai-run', saved?.id], queryFn: () => api.get(`/ai-runs/${saved?.id}`),
+    enabled: Boolean(saved?.id), retry: false,
+    refetchInterval: query => query.state.error || !terminalStatuses.has(query.state.data?.status ?? saved?.status ?? '') ? 2000 : false,
+  });
+  // A terminal observation must win over an older running response from either endpoint.
+  const detail = run.data?.id === saved?.id ? run.data : undefined;
+  const latest = saved && terminalStatuses.has(saved.status) && !terminalStatuses.has(detail?.status ?? '') ? saved : detail ?? saved;
+  const terminalRun = Boolean(latest && terminalStatuses.has(latest.status));
   const assessments = useQuery<List<AIAssessment>, Error>({
-    queryKey: ['ai-assessments', latest?.id],
+    // The terminal snapshot needs its own fetch, fenced from any in-flight partial response.
+    queryKey: ['ai-assessments', latest?.id, terminalRun ? 'terminal' : 'active'],
     queryFn: () => api.get(`/ai-runs/${latest?.id}/assessments`),
     enabled: Boolean(latest?.id),
-    refetchInterval: latest && !terminalStatuses.has(latest.status) ? 2000 : false,
+    refetchInterval: latest && !terminalRun ? 2000 : false,
   });
   const start = useMutation({
     mutationFn: () => api.post<AIRun>(`/analysis-jobs/${job.id}/ai-runs`, {
       idempotency_key: `web-${job.id}-${Date.now()}`,
       candidate_limit: candidateLimit,
+      ...(shadow ? { discovery_mode: 'shadow' } : {}),
+      language,
+      allow_remote: allowRemote,
     }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['ai-runs', job.id] });
     },
   });
-  const canStart = job.status === 'COMPLETED' || job.status === 'PARTIALLY_COMPLETED';
+  const completed = job.status === 'COMPLETED' || job.status === 'PARTIALLY_COMPLETED';
+  const canStart = completed && config?.available === true && !capabilities.isError && (!config.remote || allowRemote);
   return <section className="panel" aria-labelledby="ai-c2-analysis-heading">
     <div className="header-actions">
-      <div><p className="eyebrow">BOUNDED EVIDENCE · LOCAL MODEL</p><h2 id="ai-c2-analysis-heading">AI C2 분석</h2></div>
+      <div><p className="eyebrow">BOUNDED EVIDENCE</p><h2 id="ai-c2-analysis-heading">AI C2 분석</h2></div>
       <div className="ai-run-controls"><label>Candidate limit<select value={candidateLimit} onChange={event => setCandidateLimit(Number(event.target.value))}>{[1, 2, 3, 4, 5].map(value => <option key={value} value={value}>{value}</option>)}</select></label><button type="button" disabled={!canStart || start.isPending} onClick={() => start.mutate()}>{start.isPending ? 'AI 분석 실행 중…' : 'Run AI analysis'}</button></div>
     </div>
-    {!canStart && <p className="muted">완료되거나 부분 완료된 분석에서만 새 AI Run을 시작할 수 있습니다.</p>}
+    <label className="check"><input type="checkbox" checked={shadow} disabled={start.isPending} onChange={event => setShadow(event.target.checked)}/>{t('Opt in to behavioral discovery (shadow)', '행동 기반 탐색 사용 (shadow, 선택 사항)')}</label>
+    <p className="muted">{t('Shadow review only: does not change source scores or automatically block traffic. The 1–5 candidate budget still applies.', 'Shadow 검토 전용: 원본 점수를 변경하지 않으며 자동 차단하지 않습니다. 후보 1–5개 제한은 유지됩니다.')}</p>
+    {config && <p>{t('Provider / model / destination', '제공자 / 모델 / 전송 대상')}: {config.provider ?? '—'} · {config.model_name ?? '—'} · {config.destination ?? '—'}</p>}
+    {config?.remote && <label className="check"><input type="checkbox" checked={allowRemote} disabled={!config.destination || start.isPending} onChange={event => setConsentedDestination(event.target.checked ? config.destination ?? null : null)}/>{t('I consent to sending bounded evidence to this remote model destination.', '이 원격 모델 대상에 제한된 증거를 전송하는 데 동의합니다.')}</label>}
+    {capabilities.isLoading && <p role="status">{t('Checking AI availability…', 'AI 사용 가능 여부 확인 중…')}</p>}
+    {(capabilities.isError || config?.available === false) && <p role="alert">{t('AI is unavailable', 'AI를 사용할 수 없습니다')}: {capabilities.error?.message ?? config?.reason}</p>}
+    {!completed && <p className="muted">완료되거나 부분 완료된 분석에서만 새 AI Run을 시작할 수 있습니다.</p>}
     {runs.isError && <p role="alert" className="error-text">AI 분석 기능을 사용할 수 없습니다: {runs.error.message}</p>}
     {start.error && <p role="alert" className="error-text">AI Run 생성 실패: {start.error.message}</p>}
     {!runs.isLoading && !latest && !runs.isError && <p className="muted">아직 실행된 AI Run이 없습니다.</p>}
     {latest && <><div className="ai-run-summary"><span className={`badge ${latest.status.toLowerCase()}`}>{latest.status}</span><span>{latest.candidate_count}개 후보</span><span>{fmt(latest.created_at)}</span>{latest.error_code && <span className="error-text">{latest.error_code}: {latest.error_message}</span>}</div><progress aria-label="AI analysis progress" max="100" value={latest.progress_percent ?? (latest.status === 'COMPLETED' ? 100 : 0)} /></>}
+    {latest?.selection_summary?.version === 'behavior-selection-v1' && <C2DiscoverySelection key={latest.id} runId={latest.id} summary={latest.selection_summary}/>}
+    {run.isError && <p role="alert" className="error-text">{t('Run details could not be read; coverage is unconfirmed', '실행 상세를 읽지 못했습니다. 범위를 확인할 수 없습니다')}: {run.error.message}</p>}
+    {assessments.isError && <p role="alert" className="error-text">{t('AI assessments could not be read', 'AI 판정을 읽지 못했습니다')}: {assessments.error.message}</p>}
     {assessments.isLoading && latest && <p role="status">AI 후보 판정을 불러오는 중…</p>}
     {items(assessments.data).map(item => {
       const result = item.assessment;
-      const evidenceIds = [...result.supporting_factors, ...result.counter_factors].flatMap(factor => factor.evidence_ids);
       return <article className="ai-assessment" key={item.id}>
-        <div className="header-actions"><h3><Link to={`/candidates/${item.candidate_id}`}>{item.external_ip}</Link></h3><div><span className={`badge verdict-${result.candidate.verdict.toLowerCase()}`}>AI {result.candidate.verdict}</span> <strong>신뢰도 {Math.round(result.candidate.confidence * 100)}%</strong> <span>Review priority {item.review_priority ?? 0}</span></div></div>
-        <p>{result.candidate.summary_ko}</p>
-        <dl><dt>근거 ID</dt><dd>{evidenceIds.length ? evidenceIds.map(id => <code key={id}>{id}</code>) : '연결된 근거 없음'}</dd><dt>누락 정보</dt><dd>{result.missing_information.join(', ') || '없음'}</dd></dl>
+        <div className="header-actions"><h3>{(!item.discovery_origin && latest?.discovery_mode !== 'shadow') || knownCandidateIds.includes(item.candidate_id) ? <Link to={`/candidates/${item.candidate_id}`}>{item.external_ip}</Link> : item.external_ip}</h3><div><span className={`badge verdict-${result.candidate.verdict.toLowerCase()}`}>AI {result.candidate.verdict}</span> <strong>{t('Model confidence', '신뢰도')} {Math.round(result.candidate.confidence * 100)}%</strong> <span>Review priority {item.review_priority ?? 0}</span></div></div>
+        <C2AssessmentDetails key={`${latest?.id}:${item.id}`} item={item}/>
         <AIArtifactPanel assessmentId={item.id}/>
         <AIFeedbackPanel assessmentId={item.id}/>
       </article>;
@@ -768,7 +801,7 @@ function JobDetail() {
         {!terminal && <button className="danger" disabled={cancel.isPending} onClick={() => cancel.mutate()}>{cancel.isPending ? 'Cancelling…' : 'Cancel analysis'}</button>}
         {cancel.error && <p role="alert" className="error-text">{cancel.error.message}</p>}{notice && <p role="status">{notice}</p>}
       </section>}
-      {module === 'network_anomaly' ? <NetworkAnomalyPanel key={j.id} report={j.network_anomaly}><NetworkAIInterpretation key={j.id} jobId={j.id} completed={j.status === 'COMPLETED' && Boolean(j.network_anomaly)}/></NetworkAnomalyPanel> : module === 'ddos_attack' && j.ddos_attack ? <DDoSAttackPanel key={`${j.id}:${j.ddos_attack.primary_finding_id ?? 'none'}:${String(j.ddos_attack.summary?.finding_count ?? 'unknown')}`} report={j.ddos_attack} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}><DDoSAIInterpretation jobId={j.id} completed={j.status === 'COMPLETED'}/></DDoSAttackPanel> : module === 'c2' ? <AIAnalysisPanel job={j}/> : <p role="alert">Unsupported analysis module.</p>}
+      {module === 'network_anomaly' ? <NetworkAnomalyPanel key={j.id} report={j.network_anomaly}><NetworkAIInterpretation key={j.id} jobId={j.id} completed={j.status === 'COMPLETED' && Boolean(j.network_anomaly)}/></NetworkAnomalyPanel> : module === 'ddos_attack' && j.ddos_attack ? <DDoSAttackPanel key={`${j.id}:${j.ddos_attack.primary_finding_id ?? 'none'}:${String(j.ddos_attack.summary?.finding_count ?? 'unknown')}`} report={j.ddos_attack} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}><DDoSAIInterpretation jobId={j.id} completed={j.status === 'COMPLETED'}/></DDoSAttackPanel> : module === 'c2' ? <ReportLanguageScope key={`c2-ai-${j.id}`}><AIAnalysisPanel job={j} knownCandidateIds={items(candidates.data).map(candidate => candidate.id)}/></ReportLanguageScope> : <p role="alert">Unsupported analysis module.</p>}
       {module !== 'c2' && <button type="button" className="secondary" aria-expanded={detailsOwner === j.id} onClick={() => setDetailsOwner(detailsOwner === j.id ? undefined : j.id)}>작업 상세 / Job details</button>}
       {(module === 'c2' || detailsOwner === j.id) && <>
       {module !== 'c2' && <><section className="metrics compact"><article><strong>{(j.packet_count ?? 0).toLocaleString()}</strong><span>Packets</span></article><article><strong>{(j.flow_count ?? 0).toLocaleString()}</strong><span>Flows</span></article>{j.analysis?.module === 'network_anomaly' ? <article><strong>{j.network_anomaly?.version === 'network-pattern-report-v1' ? (typeof j.network_anomaly.summary?.flow_count === 'number' ? j.network_anomaly.summary.flow_count.toLocaleString() : '—') : j.network_anomaly?.flows?.length.toLocaleString() ?? '—'}</strong><span>Observed bidirectional flows</span></article> : String(module) === 'ddos_attack' ? <article><strong>{Number(j.ddos_attack?.summary.finding_count ?? 0).toLocaleString()}</strong><span>DDoS findings</span></article> : <article><strong>{(j.candidate_count ?? 0).toLocaleString()}</strong><span>Candidates</span></article>}<article><strong>{strings(j.sensor_ids).length}</strong><span>Sensors</span></article></section></>}

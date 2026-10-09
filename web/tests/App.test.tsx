@@ -6,6 +6,8 @@ import { describe, expect, it, vi } from 'vitest';
 import App from '../src/App';
 
 const responses: Record<string, unknown> = {
+  '/api/v1/ai-capabilities': { available: true, remote: false, provider: 'fake', model_name: 'test', destination: null },
+  '/api/v1/ai-runs/ai-run-1': { id: 'ai-run-1', analysis_job_id: 'job-1', status: 'COMPLETED', candidate_count: 1, created_at: '2026-07-20T10:11:00Z' },
   '/api/v1/dashboard': {
     generated_at: '2026-07-20T10:10:00Z',
     fleet: { total: 3, online: 2, offline: 1, degraded: 0, dropped_packets: 6 },
@@ -69,16 +71,345 @@ responses['/api/v1/ai-assessments/assessment-1/feedback'] = {
   total: 1,
 };
 
-function renderAt(route: string, handler?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
+const shadowRun = {
+  id: 'shadow-1', analysis_job_id: 'job-1', status: 'COMPLETED', candidate_count: 2, created_at: '2026-07-20T10:11:00Z', discovery_mode: 'shadow',
+  selection_summary: { version: 'behavior-selection-v1', candidate_pool_count: 31, selected_count: 2, omitted_count: 29, discovery_candidate_count: 10, discovery_selected_count: 1, rule_free_selected_count: 1, reserved_discovery_slots: 1, warnings: ['DISCOVERY_COVERAGE_LIMITED'] },
+};
+
+function renderAt(route: string, handler?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>, client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   localStorage.setItem('c2hunter-token', 'token');
   vi.stubGlobal('fetch', vi.fn(handler ?? (async (input: RequestInfo | URL) => {
     const path = String(input);
     return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404, headers: { 'content-type': 'application/json' } });
   })));
-  return render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={[route]}><App /></MemoryRouter></QueryClientProvider>);
+  return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[route]}><App /></MemoryRouter></QueryClientProvider>);
 }
 
 describe('C2Hunter UI', () => {
+  it('automatically recovers C2 run detail polling after a transient failure', async () => {
+    // Only polling clocks are fake; HTTP body reads and React notifications settle normally.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const running = { ...shadowRun, status: 'RUNNING', progress_percent: 30, selection_summary: undefined };
+    let detailReads = 0;
+    const view = renderAt('/analyses/job-1', async input => {
+      const path = String(input);
+      if (path.endsWith('/job-1/ai-runs')) return Response.json({ items: [running] });
+      if (path.endsWith('/ai-runs/shadow-1')) {
+        detailReads++;
+        if (detailReads === 2) return Response.json({ error: { message: 'temporary detail failure' } }, { status: 503 });
+        return Response.json(detailReads === 1 ? running : { ...shadowRun, progress_percent: 100 });
+      }
+      return Response.json(responses[path] ?? { items: [] });
+    }, client);
+    try {
+      const panel = await screen.findByRole('region', { name: 'AI C2 분석' });
+      await waitFor(() => expect(client.getQueryData(['ai-run', 'shadow-1'])).toMatchObject({ status: 'RUNNING' }));
+      expect(within(panel).getByRole('progressbar', { name: 'AI analysis progress' })).toHaveAttribute('value', '30');
+      await act(async () => { await client.invalidateQueries({ queryKey: ['ai-run', 'shadow-1'] }); });
+      expect(await within(panel).findByRole('alert')).toHaveTextContent('temporary detail failure');
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      await waitFor(() => expect(detailReads).toBe(3));
+      await waitFor(() => expect(within(panel).getByRole('progressbar', { name: 'AI analysis progress' })).toHaveAttribute('value', '100'));
+      expect(within(panel).getByText('COMPLETED')).toBeInTheDocument();
+      expect(within(panel).queryByRole('alert')).not.toBeInTheDocument();
+      expect(within(panel).getByText('후보 풀 31 · 선택 2 · 미선택 29')).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+      expect(detailReads).toBe(3);
+    } finally {
+      view.unmount();
+      client.clear();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a terminal C2 list status ahead of cached or late running details', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const running = { ...shadowRun, status: 'RUNNING', progress_percent: 30, selection_summary: undefined };
+    let listed = running;
+    let detailReads = 0;
+    let releaseLate!: (response: Response) => void;
+    const late = new Promise<Response>(resolve => { releaseLate = resolve; });
+    const view = renderAt('/analyses/job-1', async input => {
+      const path = String(input);
+      if (path.endsWith('/job-1/ai-runs')) return Response.json({ items: [listed] });
+      if (path.endsWith('/ai-runs/shadow-1')) {
+        detailReads++;
+        if (detailReads === 2) return Response.json({ error: { message: 'temporary detail failure' } }, { status: 503 });
+        if (detailReads === 3) return late;
+        return Response.json(detailReads === 1 ? running : { ...shadowRun, progress_percent: 100 });
+      }
+      return Response.json(responses[path] ?? { items: [] });
+    }, client);
+    try {
+      const panel = await screen.findByRole('region', { name: 'AI C2 분석' });
+      await waitFor(() => expect(client.getQueryData(['ai-run', 'shadow-1'])).toMatchObject({ status: 'RUNNING' }));
+      await act(async () => { await client.invalidateQueries({ queryKey: ['ai-run', 'shadow-1'] }); });
+      expect(await within(panel).findByRole('alert')).toHaveTextContent('temporary detail failure');
+      listed = { ...running, status: 'COMPLETED', progress_percent: 100 };
+      await act(async () => { await client.invalidateQueries({ queryKey: ['ai-runs', 'job-1'] }); });
+      await waitFor(() => expect(within(panel).getByRole('progressbar', { name: 'AI analysis progress' })).toHaveAttribute('value', '100'));
+      expect(within(panel).getByText('COMPLETED')).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(detailReads).toBe(3);
+      await act(async () => { releaseLate(Response.json(running)); });
+      await waitFor(() => expect(within(panel).queryByRole('alert')).not.toBeInTheDocument());
+      expect(within(panel).getByRole('progressbar', { name: 'AI analysis progress' })).toHaveAttribute('value', '100');
+      expect(within(panel).queryByText('RUNNING')).not.toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(await within(panel).findByText('후보 풀 31 · 선택 2 · 미선택 29')).toBeInTheDocument();
+      expect(detailReads).toBe(4);
+      await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+      expect(detailReads).toBe(4);
+    } finally {
+      view.unmount();
+      client.clear();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['empty', 'partial', 'pending-empty', 'pending-partial', 'initial-pending'])(
+    'fetches authoritative C2 assessments at terminal transition after %s responses', async schedule => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+      const running = { ...shadowRun, status: 'RUNNING', progress_percent: 30, selection_summary: undefined };
+      const base = (responses['/api/v1/ai-runs/ai-run-1/assessments'] as { items: Record<string, unknown>[] }).items[0];
+      const partial = { ...base, id: 'partial-assessment', external_ip: 'partial-result' };
+      const finalRows = [{ ...base, id: 'final-assessment', external_ip: 'authoritative-result' }];
+      const staleRows = [{ ...base, id: 'stale-assessment', external_ip: 'late-stale-result' }];
+      const initialRows = schedule.includes('partial') ? [partial] : [];
+      const initialPending = schedule === 'initial-pending';
+      const pendingRefetch = schedule.startsWith('pending-');
+      let completed = false;
+      let assessmentReads = 0;
+      let releaseLate!: (response: Response) => void;
+      const late = new Promise<Response>(resolve => { releaseLate = resolve; });
+      const view = renderAt('/analyses/job-1', async input => {
+        const path = String(input);
+        if (path.endsWith('/job-1/ai-runs')) return Response.json({ items: [running] });
+        if (path.endsWith('/ai-runs/shadow-1')) return Response.json(completed ? { ...shadowRun, progress_percent: 100 } : running);
+        if (path.endsWith('/shadow-1/assessments')) {
+          assessmentReads++;
+          if (!completed && (initialPending || (pendingRefetch && assessmentReads === 2))) return late;
+          return Response.json({ items: completed ? finalRows : initialRows });
+        }
+        return Response.json(responses[path] ?? { items: [] });
+      }, client);
+      try {
+        const panel = await screen.findByRole('region', { name: 'AI C2 분석' });
+        await waitFor(() => expect(assessmentReads).toBe(1));
+        await waitFor(() => expect(client.getQueryData(['ai-run', 'shadow-1'])).toMatchObject({ status: 'RUNNING' }));
+        if (!initialPending) {
+          // Exercise a real successful fetch, not a pre-seeded assessment cache.
+          await waitFor(() => expect(client.getQueriesData({ queryKey: ['ai-assessments', 'shadow-1'] }).some(([, data]) => data !== undefined)).toBe(true));
+          if (initialRows.length) expect(await within(panel).findByText('partial-result')).toBeInTheDocument();
+        }
+        if (pendingRefetch) {
+          act(() => { void client.invalidateQueries({ queryKey: ['ai-assessments', 'shadow-1'] }); });
+          await waitFor(() => expect(assessmentReads).toBe(2));
+        }
+        // Complete the parent between child polling ticks; never invalidate the child here.
+        completed = true;
+        await act(async () => { await client.invalidateQueries({ queryKey: ['ai-run', 'shadow-1'] }); });
+        await waitFor(() => expect(within(panel).getByText('COMPLETED')).toBeInTheDocument());
+        expect(await within(panel).findByText('authoritative-result')).toBeInTheDocument();
+        expect(assessmentReads).toBe(pendingRefetch ? 3 : 2);
+        expect(within(panel).queryByText('partial-result')).not.toBeInTheDocument();
+        if (initialPending || pendingRefetch) {
+          await act(async () => { releaseLate(Response.json({ items: staleRows })); });
+          await waitFor(() => expect(client.isFetching({ queryKey: ['ai-assessments', 'shadow-1'] })).toBe(0));
+          expect(within(panel).getByText('authoritative-result')).toBeInTheDocument();
+          expect(within(panel).queryByText('late-stale-result')).not.toBeInTheDocument();
+        }
+        await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+        expect(assessmentReads).toBe(pendingRefetch ? 3 : 2);
+      } finally {
+        view.unmount();
+        client.clear();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('keeps C2 discovery opt-in and sends the selected mode, cap and language', async () => {
+    const posts: Record<string, unknown>[] = [];
+    renderAt('/analyses/job-1', async (input, init) => {
+      const path = String(input);
+      if (path.endsWith('/ai-capabilities')) return Response.json({ available: true, remote: false });
+      if (init?.method === 'POST' && path.endsWith('/ai-runs')) {
+        posts.push(JSON.parse(String(init.body)));
+        return Response.json({ id: 'new-run', status: 'COMPLETED' });
+      }
+      if (path === '/api/v1/analysis-jobs/job-1') return Response.json({ ...(responses[path] as object), status: 'COMPLETED' });
+      return Response.json(responses[path] ?? {});
+    });
+    const user = userEvent.setup();
+    const panel = await screen.findByRole('region', { name: 'AI C2 분석' });
+    const checkbox = within(panel).getByRole('checkbox', { name: /행동 기반 탐색/ });
+    expect(checkbox).not.toBeChecked();
+    expect(within(panel).getByText(/원본 점수를 변경하지 않으며 자동 차단하지 않습니다/)).toBeInTheDocument();
+    expect(within(panel).getByLabelText('Candidate limit').querySelectorAll('option')).toHaveLength(5);
+    await user.click(within(panel).getByRole('button', { name: 'Run AI analysis' }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]).toMatchObject({ candidate_limit: 5, language: 'ko', allow_remote: false });
+    expect(posts[0].discovery_mode ?? 'legacy').toBe('legacy');
+    await user.click(checkbox);
+    await user.selectOptions(within(panel).getByLabelText('Candidate limit'), '2');
+    await user.selectOptions(screen.getByLabelText('보고서 언어 / Report language'), 'en');
+    await user.click(within(panel).getByRole('button', { name: 'Run AI analysis' }));
+    await waitFor(() => expect(posts).toHaveLength(2));
+    expect(posts[1]).toMatchObject({ candidate_limit: 2, discovery_mode: 'shadow', language: 'en', allow_remote: false });
+  });
+
+  it('requires destination-specific remote consent before starting C2 shadow review', async () => {
+    const posts: Record<string, unknown>[] = [];
+    renderAt('/analyses/job-1', async (input, init) => {
+      const path = String(input);
+      if (path.endsWith('/ai-capabilities')) return Response.json({ available: true, remote: true, provider: 'remote', model_name: 'test', destination: 'https://model.example' });
+      if (init?.method === 'POST' && path.endsWith('/ai-runs')) { posts.push(JSON.parse(String(init.body))); return Response.json({ id: 'remote-run', status: 'COMPLETED' }); }
+      if (path === '/api/v1/analysis-jobs/job-1') return Response.json({ ...(responses[path] as object), status: 'COMPLETED' });
+      return Response.json(responses[path] ?? {});
+    });
+    const user = userEvent.setup();
+    const panel = await screen.findByRole('region', { name: 'AI C2 분석' });
+    const consent = await within(panel).findByRole('checkbox', { name: /원격 모델.*동의/ });
+    expect(consent).not.toBeChecked();
+    expect(within(panel).getByText(/https:\/\/model.example/)).toBeInTheDocument();
+    expect(within(panel).getByRole('button', { name: 'Run AI analysis' })).toBeDisabled();
+    await user.click(consent);
+    await user.click(within(panel).getByRole('checkbox', { name: /행동 기반 탐색/ }));
+    await user.click(within(panel).getByRole('button', { name: 'Run AI analysis' }));
+    await waitFor(() => expect(posts[0]).toMatchObject({ discovery_mode: 'shadow', allow_remote: true }));
+  });
+
+  it('shows shadow coverage and pages the immutable selection using next_offset', async () => {
+    const requested: string[] = [];
+    renderAt('/analyses/job-1', async input => {
+      const path = String(input); requested.push(path);
+      if (path.endsWith('/job-1/ai-runs')) return Response.json({ items: [{ ...shadowRun, selection_summary: undefined }] });
+      if (path.endsWith('/ai-runs/shadow-1')) return Response.json(shadowRun);
+      if (path.includes('/selection?')) {
+        const offset = Number(new URL(path, 'https://test').searchParams.get('offset'));
+        return Response.json({ items: [{ candidate_id: `behavior-${offset}`, external_ip: offset ? '198.51.100.2' : '198.51.100.1', origin: 'BEHAVIOR', existing_score: 0, anomaly_score: 81, selected: !offset, reason: offset ? 'BUDGET_LIMIT' : 'DISCOVERY_RESERVED' }], total: 31, offset, limit: 20, next_offset: offset ? null : 7 });
+      }
+      return Response.json(responses[path] ?? { items: [] });
+    });
+    const user = userEvent.setup();
+    const coverage = await screen.findByRole('region', { name: '탐색 범위' });
+    expect(await within(coverage).findByText('후보 풀 31 · 선택 2 · 미선택 29')).toBeInTheDocument();
+    expect(within(coverage).getByText(/미선택은 안전하다는 뜻이 아닙니다/)).toBeInTheDocument();
+    expect(within(coverage).getByText('DISCOVERY_COVERAGE_LIMITED')).toBeInTheDocument();
+    expect(requested.filter(path => path.includes('/selection?'))).toHaveLength(0);
+    await user.click(within(coverage).getByRole('button', { name: '선택 목록 보기' }));
+    const table = await screen.findByRole('table', { name: '선택 목록' });
+    expect(await within(table).findByText('198.51.100.1')).toBeInTheDocument();
+    expect(within(table).queryByRole('link')).not.toBeInTheDocument();
+    expect(within(table).getByRole('columnheader', { name: '원본 점수' })).toBeInTheDocument();
+    expect(within(table).getByRole('columnheader', { name: '행동 이상 점수' })).toBeInTheDocument();
+    expect(within(table).getByText('BEHAVIOR')).toBeInTheDocument();
+    await user.click(within(coverage).getByRole('button', { name: '다음 선택 목록' }));
+    expect(await within(table).findByText('198.51.100.2')).toBeInTheDocument();
+    expect(within(table).queryByText('198.51.100.1')).not.toBeInTheDocument();
+    expect(within(coverage).getByRole('button', { name: '다음 선택 목록' })).toBeDisabled();
+    expect(requested.filter(path => path.includes('/selection?'))).toEqual(['/api/v1/ai-runs/shadow-1/selection?offset=0&limit=20', '/api/v1/ai-runs/shadow-1/selection?offset=7&limit=20']);
+    await user.click(within(coverage).getByRole('button', { name: '이전 선택 목록' }));
+    expect(await within(table).findByText('198.51.100.1')).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText('보고서 언어 / Report language'), 'en');
+    expect(screen.getByText('Candidate pool 31 · Selected 2 · Omitted 29')).toBeInTheDocument();
+    expect(screen.getByText(/Omitted does not mean benign/)).toBeInTheDocument();
+  });
+
+  it('separates shadow facts from AI interpretation and exposes counter evidence in either language', async () => {
+    const base = (responses['/api/v1/ai-runs/ai-run-1/assessments'] as { items: { assessment: Record<string, unknown> }[] }).items[0];
+    renderAt('/analyses/job-1', async input => {
+      const path = String(input);
+      if (path.endsWith('/job-1/ai-runs')) return Response.json({ items: [shadowRun] });
+      if (path.endsWith('/ai-runs/shadow-1')) return Response.json(shadowRun);
+      if (path.endsWith('/shadow-1/assessments')) return Response.json({ items: [{ ...base, id: 'shadow-assessment', candidate_id: 'behavior-only', external_ip: '198.51.100.44', discovery_origin: 'BEHAVIOR', behavior_anomaly_score: 81, evidence_bundle: { candidate: { external_ip: '198.51.100.44', existing_c2hunter_score: 0 }, metadata: { reduced: true }, evidence: [{ id: 'E-counter', type: 'COMMON_SERVICE', summary: 'Observed on common service', contribution: 0, metrics: { distinct_hosts: 4 } }] }, assessment: { ...base.assessment, counter_factors: [{ title: 'Common service', explanation: 'May be normal scheduled traffic', evidence_ids: ['E-counter'] }], recommended_actions: [{ action: 'Compare endpoint logs', reason: 'Check process ownership', priority: 'HIGH', passive_only: true }], limitations: ['Short capture'] } }] });
+      return Response.json(responses[path] ?? { items: [] });
+    });
+    const user = userEvent.setup();
+    const panel = await screen.findByRole('region', { name: 'AI C2 분석' });
+    expect(await within(panel).findByText('198.51.100.44')).toBeInTheDocument();
+    expect(within(panel).queryByRole('link', { name: '198.51.100.44' })).not.toBeInTheDocument();
+    const facts = within(panel).getByRole('region', { name: '관찰된 사실' });
+    expect(within(facts).getByText('BEHAVIOR')).toBeInTheDocument();
+    expect(within(facts).getByText('81')).toBeInTheDocument();
+    expect(within(facts).getByText('0')).toBeInTheDocument();
+    expect(within(panel).getByText(/보정된 악성 확률이 아닙니다/)).toBeInTheDocument();
+    expect(within(panel).getByRole('heading', { name: 'AI 해석 — 분석가 검토 필요' })).toBeInTheDocument();
+    expect(within(panel).getByRole('heading', { name: '반대 근거' })).toBeInTheDocument();
+    expect(within(panel).getByText('May be normal scheduled traffic')).toBeInTheDocument();
+    expect(within(panel).getByText('Local reputation')).toBeInTheDocument();
+    expect(within(panel).getByText('Compare endpoint logs')).toBeInTheDocument();
+    expect(within(panel).getByText('Check process ownership')).toBeInTheDocument();
+    expect(within(panel).getByText('Short capture')).toBeInTheDocument();
+    expect(within(panel).getByText(/증거 묶음이 축약되었습니다/)).toBeInTheDocument();
+    expect(within(panel).queryByText('Observed on common service')).not.toBeInTheDocument();
+    await user.click(within(panel).getByRole('button', { name: '저장된 증거 보기' }));
+    expect(within(panel).getByText('Observed on common service')).toBeInTheDocument();
+    expect(within(panel).getByText(/distinct_hosts/)).toBeInTheDocument();
+    await user.click(within(panel).getByRole('button', { name: '저장된 증거 보기' }));
+    expect(within(panel).queryByText('Observed on common service')).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText('보고서 언어 / Report language'), 'en');
+    expect(within(panel).getByText('Review periodic traffic evidence.')).toBeInTheDocument();
+    expect(within(panel).queryByText('주기 통신 근거를 검토해야 합니다.')).not.toBeInTheDocument();
+    expect(within(panel).getByText(/not a calibrated probability of maliciousness/)).toBeInTheDocument();
+    expect(within(panel).getByRole('heading', { name: 'Counter evidence' })).toBeInTheDocument();
+  });
+
+  it('resets job-owned C2 shadow controls and ignores an old pending selection page', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    for (const id of ['job-1', 'job-2']) {
+      client.setQueryData(['job', id], { ...(responses['/api/v1/analysis-jobs/job-1'] as object), id, name: id, status: 'COMPLETED', parent_job_id: id === 'job-1' ? 'job-2' : undefined });
+      client.setQueryData(['ai-runs', id], { items: [{ ...shadowRun, id: `shadow-${id}`, analysis_job_id: id }] });
+    }
+    let completeOldPage: (value: Response) => void = () => {};
+    const oldPage = new Promise<Response>(resolve => { completeOldPage = resolve; });
+    const requested: string[] = [];
+    localStorage.setItem('c2hunter-token', 'token');
+    vi.stubGlobal('fetch', vi.fn(async input => {
+      const path = String(input); requested.push(path);
+      if (path.endsWith('/ai-capabilities')) return Response.json({ available: true, remote: true, destination: 'https://model.example' });
+      if (path.includes('/selection?offset=7')) return oldPage;
+      if (path.includes('/selection?')) return Response.json({ items: [], total: 31, offset: 0, limit: 20, next_offset: 7 });
+      return Response.json(responses[path] ?? { items: [] });
+    }));
+    render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/analyses/job-1']}><App/></MemoryRouter></QueryClientProvider>);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('checkbox', { name: /행동 기반 탐색/ }));
+    await user.click(await screen.findByRole('checkbox', { name: /원격 모델.*동의/ }));
+    await user.selectOptions(screen.getByLabelText('Candidate limit'), '1');
+    await user.click(screen.getByRole('button', { name: '선택 목록 보기' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: '다음 선택 목록' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: '다음 선택 목록' }));
+    await waitFor(() => expect(requested.some(path => path.includes('shadow-job-1/selection?offset=7'))).toBe(true));
+    await user.click(screen.getByRole('link', { name: 'job-2' }));
+    await screen.findByRole('heading', { name: 'job-2' });
+    expect(screen.getByRole('checkbox', { name: /행동 기반 탐색/ })).not.toBeChecked();
+    expect(screen.getByRole('checkbox', { name: /원격 모델.*동의/ })).not.toBeChecked();
+    expect(screen.getByLabelText('Candidate limit')).toHaveValue('5');
+    expect(screen.getByRole('button', { name: '선택 목록 보기' })).toHaveAttribute('aria-expanded', 'false');
+    await act(async () => completeOldPage(Response.json({ items: [{ candidate_id: 'stale', external_ip: 'stale-old-owner', origin: 'BEHAVIOR', existing_score: 0, anomaly_score: 1, selected: false, reason: 'BUDGET_LIMIT' }], total: 31, offset: 7, limit: 20, next_offset: null })));
+    expect(screen.queryByText('stale-old-owner')).not.toBeInTheDocument();
+    expect(requested.some(path => path.includes('shadow-job-2/selection'))).toBe(false);
+    await user.click(screen.getByRole('button', { name: '선택 목록 보기' }));
+    await waitFor(() => expect(requested).toContain('/api/v1/ai-runs/shadow-job-2/selection?offset=0&limit=20'));
+  });
+
+  it.each(['run', 'assessments'])('reports failed shadow %s reads instead of implying full coverage', async failed => {
+    renderAt('/analyses/job-1', async input => {
+      const path = String(input);
+      if (path.endsWith('/job-1/ai-runs')) return Response.json({ items: [{ ...shadowRun, selection_summary: undefined }] });
+      if (path.endsWith('/ai-runs/shadow-1')) return failed === 'run' ? Response.json({ detail: 'read failed' }, { status: 503 }) : Response.json(shadowRun);
+      if (path.endsWith('/shadow-1/assessments')) return failed === 'assessments' ? Response.json({ detail: 'read failed' }, { status: 503 }) : Response.json({ items: [] });
+      return Response.json(responses[path] ?? { items: [] });
+    });
+    const panel = await screen.findByRole('region', { name: 'AI C2 분석' });
+    expect(await within(panel).findByRole('alert')).toHaveTextContent(failed === 'run' ? '실행 상세를 읽지 못했습니다' : 'AI 판정을 읽지 못했습니다');
+  });
+
   it('shows dashboard priorities, threat posture, and recent activity', async () => {
     renderAt('/');
     expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeInTheDocument();

@@ -5,15 +5,17 @@ import json
 import math
 import uuid
 from collections import Counter, defaultdict
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal, Protocol, cast
 
 from c2hunter_analysis.ai_candidates import generate_high_recall_candidates
+from c2hunter_analysis.behavior_discovery import MAX_CONTEXT_ITEMS, discover_behavior_candidates
 from c2hunter_analysis.domain import AnalysisContext, Flow, normalize_tcp_syn_observations
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from .ai_discovery import MAX_SELECTION_CANDIDATES
 from .ai_feedback import REVIEW_PRIORITY_VERSION, calculate_review_priority
 from .ai_gateway import AIAnalysisCancelled
 from .ddos_ai import DDoSOutputError
@@ -568,12 +570,22 @@ def _analysis_context_from_job(job: dict[str, Any]) -> AnalysisContext | None:
     )
 
 
-def _prefilter_candidate_dicts(job: dict[str, Any]) -> list[dict[str, Any]]:
+def _prefilter_candidate_dicts(
+    job: dict[str, Any], *, shadow: bool = False
+) -> list[dict[str, Any]]:
     context = _analysis_context_from_job(job)
     if context is None:
         return []
     generated: list[dict[str, Any]] = []
-    for candidate in generate_high_recall_candidates(context):
+    try:
+        candidates = generate_high_recall_candidates(
+            context,
+            require_packet_timing=shadow,
+            max_peers=MAX_SELECTION_CANDIDATES if shadow else None,
+        )
+    except ValueError as exc:
+        raise AIAnalysisError(str(exc)) from exc
+    for candidate in candidates:
         evidence = [
             {
                 "type": f"AI_PREFILTER_{factor.name}",
@@ -632,6 +644,8 @@ def _candidate_snapshot(candidate: dict[str, Any]) -> dict[str, Any]:
             "last_seen",
             "source",
             "prefilter_factors",
+            "discovery_origin",
+            "behavior_anomaly_score",
         )
         if candidate.get(key) is not None
     }
@@ -652,9 +666,9 @@ def _candidate_snapshot(candidate: dict[str, Any]) -> dict[str, Any]:
 
 
 def _ranked_candidate_snapshots(
-    job: dict[str, Any], existing: list[dict[str, Any]], limit: int
+    job: dict[str, Any], existing: list[dict[str, Any]], limit: int, *, shadow: bool = False
 ) -> list[dict[str, Any]]:
-    generated = _prefilter_candidate_dicts(job)
+    generated = _prefilter_candidate_dicts(job, shadow=shadow)
     generated_by_ip = {str(item["candidate_ip"]): item for item in generated}
     merged: list[dict[str, Any]] = []
     for item in existing:
@@ -677,6 +691,125 @@ def _ranked_candidate_snapshots(
             str(item.get("candidate_ip", "")),
         ),
     )[:limit]
+
+
+def _shadow_candidate_selection(
+    job: dict[str, Any], existing: list[dict[str, Any]], limit: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    from .ai_discovery import (
+        MAX_DISCOVERY_INPUT_FLOWS,
+        MAX_SELECTION_CANDIDATES,
+        select_shadow_candidates,
+    )
+
+    if len(job.get("flow_records", [])) > MAX_DISCOVERY_INPUT_FLOWS:
+        raise AIAnalysisError("behavior discovery input exceeds its admission limit")
+    if len(existing) > MAX_SELECTION_CANDIDATES:
+        raise AIAnalysisError("behavior discovery candidate pool exceeds its admission limit")
+    # Legacy compatibility defaults are not observations. Require the raw
+    # measurements used by shadow features before invoking that parser.
+    for record in job.get("flow_records", []):
+        if (
+            not isinstance(record, dict)
+            or type(record.get("packet_count")) is not int
+            or not 1 <= record["packet_count"] <= 2**53
+        ):
+            raise AIAnalysisError("behavior discovery requires valid packet count observations")
+        if type(record.get("total_bytes")) is not int or not 0 <= record["total_bytes"] <= 2**53:
+            raise AIAnalysisError("behavior discovery requires valid byte count observations")
+        duration = record.get("duration_seconds")
+        if (
+            not isinstance(duration, int | float)
+            or isinstance(duration, bool)
+            or not 0 <= duration <= 31_536_000
+            or not math.isfinite(duration)
+        ):
+            raise AIAnalysisError("behavior discovery requires valid duration observations")
+        try:
+            timestamp = record.get("timestamp")
+            if isinstance(timestamp, str):
+                timestamp = datetime.fromisoformat(timestamp)
+            if not isinstance(timestamp, datetime) or timestamp.utcoffset() is None:
+                raise ValueError("unobserved timestamp")
+            timestamp + timedelta(seconds=duration, microseconds=1)
+        except (OverflowError, TypeError, ValueError):
+            raise AIAnalysisError(
+                "behavior discovery requires valid timestamp observations"
+            ) from None
+    legacy = _ranked_candidate_snapshots(job, existing, MAX_SELECTION_CANDIDATES + 1, shadow=True)
+    context = _analysis_context_from_job(job)
+    if context is not None:
+        operations = job.get("operations")
+        sensors = operations.get("sensors", {}) if isinstance(operations, dict) else {}
+        offsets: dict[str, float] = {}
+        if isinstance(sensors, dict):
+            if len(sensors) > MAX_CONTEXT_ITEMS:
+                raise AIAnalysisError(
+                    "behavior discovery clock metadata exceeds its admission limit"
+                )
+            for sensor, status in sensors.items():
+                offset = status.get("clock_offset_ms") if isinstance(status, dict) else None
+                if isinstance(offset, int | float) and not isinstance(offset, bool):
+                    offsets[str(sensor)] = float(offset)
+        context = replace(context, clock_offsets_ms=offsets)
+    result = discover_behavior_candidates(context) if context is not None else None
+    behavior = []
+    for candidate in result.candidates if result else ():
+        behavior.append(
+            {
+                "id": "ai-behavior-"
+                + hashlib.sha256(
+                    f"{job.get('id', '')}:{candidate.candidate_ip}".encode()
+                ).hexdigest()[:16],
+                "candidate_ip": candidate.candidate_ip,
+                "candidate_kind": "C2",
+                "score": 0,
+                "behavior_anomaly_score": candidate.anomaly_score,
+                "internal_hosts": list(candidate.internal_hosts),
+                "protocols": list(candidate.protocols),
+                "ports": list(candidate.ports),
+                "first_seen": candidate.first_seen.isoformat(),
+                "last_seen": candidate.last_seen.isoformat(),
+                "source": "BEHAVIOR_DISCOVERY",
+                "evidence": [
+                    {
+                        "type": f"BEHAVIOR_{factor.name}",
+                        "description": factor.explanation,
+                        "contribution": factor.points,
+                        "metrics": {**factor.metrics, "limitations": list(candidate.limitations)},
+                    }
+                    for factor in candidate.factors
+                ],
+            }
+        )
+    try:
+        selected, inventory, summary = select_shadow_candidates(legacy, behavior, limit=limit)
+    except ValueError as exc:
+        raise AIAnalysisError(str(exc)) from exc
+    summary["warnings"].extend(result.warnings if result else ("NO_USABLE_FLOW_RECORDS",))
+    if not behavior:
+        summary["warnings"].append("NO_DISCOVERY_EVIDENCE")
+    summary["warnings"].extend(["CAPTURE_COMPLETENESS_UNVERIFIED", "PRIMARY_STREAM_ONLY"])
+    for item in selected:
+        item["evidence"] = [
+            {
+                "type": "BEHAVIOR_COVERAGE",
+                "description": (
+                    "Shadow comparison uses only this job, not historical normal behavior. "
+                    "Anomaly rank is not a C2 probability; "
+                    "scheduled benign traffic is an alternative."
+                ),
+                "contribution": 0,
+                "metrics": {
+                    "baseline_scope": "CURRENT_JOB",
+                    "warnings": summary["warnings"],
+                    "examined_peer_count": result.examined_peer_count if result else 0,
+                    "excluded_peer_count": result.excluded_peer_count if result else 0,
+                },
+            },
+            *item.get("evidence", []),
+        ][:50]
+    return selected, inventory, summary
 
 
 class FakeGateway:
@@ -741,6 +874,7 @@ class AIAnalysisService:
         created_by: str,
         analysis_kind: str = "C2",
         language: str = "ko",
+        discovery_mode: str = "legacy",
     ) -> tuple[dict[str, Any], bool]:
         job = self.repository.get_job(analysis_job_id)
         if job is None:
@@ -749,6 +883,10 @@ class AIAnalysisService:
             raise AIAnalysisError("analysis job must be completed before AI analysis")
         if not 1 <= candidate_limit <= 5:
             raise AIAnalysisError("candidate_limit must be between 1 and 5")
+        if discovery_mode not in {"legacy", "shadow"} or (
+            discovery_mode == "shadow" and analysis_kind != "C2"
+        ):
+            raise AIAnalysisError("behavior discovery is only available for C2 shadow runs")
         if analysis_kind not in {"C2", "NETWORK_ANOMALY", "DDOS_ATTACK"} or language not in {
             "ko",
             "en",
@@ -756,6 +894,8 @@ class AIAnalysisService:
             raise AIAnalysisError("invalid analysis kind or language")
         network_input = None
         ddos_input = None
+        selection_inventory = None
+        selection_summary = None
         candidates: list[dict[str, Any]]
         if analysis_kind == "NETWORK_ANOMALY":
             from .network_ai import build_network_input
@@ -773,6 +913,10 @@ class AIAnalysisService:
             except (ValueError, TypeError):
                 raise AIAnalysisError("DDoS report input failed validation.") from None
             candidates = []
+        elif discovery_mode == "shadow":
+            candidates, selection_inventory, selection_summary = _shadow_candidate_selection(
+                job, self.repository.get_candidates(analysis_job_id), candidate_limit
+            )
         else:
             candidates = _ranked_candidate_snapshots(
                 job,
@@ -848,9 +992,23 @@ class AIAnalysisService:
                     "output_schema_version": "ddos-interpretation-v1",
                 }
             )
+        if selection_summary is not None:
+            run.update(
+                {
+                    "discovery_mode": discovery_mode,
+                    "selection_summary": selection_summary,
+                    "selection_inventory": selection_inventory,
+                }
+            )
         stored, created = self.repository.create_ai_run(run)
-        if stored.get("analysis_kind", "C2") != analysis_kind or (
-            analysis_kind != "C2" and stored.get("language") != language
+        if (
+            stored.get("analysis_kind", "C2") != analysis_kind
+            or (analysis_kind != "C2" and stored.get("language") != language)
+            or stored.get("discovery_mode", "legacy") != discovery_mode
+            or (
+                (discovery_mode == "shadow" or stored.get("discovery_mode") == "shadow")
+                and stored.get("candidate_limit") != candidate_limit
+            )
         ):
             raise AIAnalysisError("idempotency key already used for a different analysis request")
         return stored, created
@@ -977,6 +1135,18 @@ class AIAnalysisService:
                         "existing_c2hunter_score": bundle.candidate.existing_c2hunter_score,
                         "prefilter_score": bundle.candidate.prefilter_score,
                         "prefilter_score_version": bundle.candidate.prefilter_score_version,
+                        **(
+                            {
+                                "discovery_origin": candidates_by_id[
+                                    bundle.candidate.candidate_id
+                                ].get("discovery_origin"),
+                                "behavior_anomaly_score": candidates_by_id[
+                                    bundle.candidate.candidate_id
+                                ].get("behavior_anomaly_score"),
+                            }
+                            if run.get("discovery_mode") == "shadow"
+                            else {}
+                        ),
                         "review_priority": calculate_review_priority(
                             existing_score=bundle.candidate.existing_c2hunter_score,
                             prefilter_score=bundle.candidate.prefilter_score,

@@ -3,10 +3,13 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from c2hunter_analysis.ai_candidates import PrefilterCandidate, generate_high_recall_candidates
 from c2hunter_analysis.domain import AnalysisContext, Flow
+
+if TYPE_CHECKING:
+    from .ai_analysis import ModelGateway
 
 
 @dataclass(frozen=True)
@@ -308,6 +311,90 @@ def run_fixture_profile(model_profile: str) -> dict[str, Any]:
         }
     )
     return report
+
+
+def evaluate_shadow_job(
+    job: dict[str, Any],
+    existing: list[dict[str, Any]],
+    *,
+    labels: dict[str, bool],
+    candidate_limit: int,
+    gateway: ModelGateway,
+    data_provenance: Literal["synthetic", "labeled_holdout", "unlabeled"],
+) -> dict[str, Any]:
+    """Exercise the production selector and only its admitted model calls.
+
+    Structural output validation does not establish semantic evidence fidelity.
+    Labels must be supplied independently; model confidence is not a probability.
+    """
+    from .ai_analysis import (
+        CandidateAssessment,
+        _shadow_candidate_selection,
+        build_evidence_bundle,
+        validate_assessment_evidence,
+    )
+
+    selected, inventory, summary = _shadow_candidate_selection(job, existing, candidate_limit)
+    malicious = {peer for peer, label in labels.items() if label}
+    benign = {peer for peer, label in labels.items() if not label}
+    pool = {str(item["external_ip"]) for item in inventory}
+    admitted = {str(item["candidate_ip"]) for item in selected}
+    rule_peers = {str(item["candidate_ip"]) for item in existing}
+    positives: set[str] = set()
+    outcomes: list[dict[str, Any]] = []
+    for item in selected:
+        bundle = build_evidence_bundle(item, job=job)
+        started = time.perf_counter()
+        response = gateway.assess(bundle)
+        assessment = CandidateAssessment.model_validate(response)
+        validate_assessment_evidence(assessment, bundle)
+        peer = str(item["candidate_ip"])
+        verdict = assessment.candidate.verdict
+        if verdict in {"LIKELY_C2", "SUSPICIOUS"}:
+            positives.add(peer)
+        outcomes.append(
+            {
+                "external_ip": peer,
+                "verdict": verdict,
+                "latency_ms": (time.perf_counter() - started) * 1000,
+                "input_estimated_tokens": bundle.metadata.estimated_tokens
+                if bundle.metadata
+                else 0,
+            }
+        )
+    true_positive = len(positives & malicious)
+    false_positive = len(positives & benign)
+    return {
+        "schema_version": "behavior-evaluation-v1",
+        "data_provenance": data_provenance,
+        "model_provider": gateway.provider,
+        "model_name": gateway.model,
+        "candidate_limit": candidate_limit,
+        "model_calls": len(outcomes),
+        "selection_summary": summary,
+        "candidate_generation": {
+            "recall_before_selection": len(pool & malicious) / len(malicious)
+            if malicious
+            else None,
+            "recall_at_budget": len(admitted & malicious) / len(malicious) if malicious else None,
+        },
+        "verdict": {
+            "true_positive": true_positive,
+            "false_positive": false_positive,
+            "end_to_end_recall": true_positive / len(malicious) if malicious else None,
+            "precision": (
+                true_positive / (true_positive + false_positive)
+                if true_positive + false_positive
+                else None
+            ),
+            "additional_true_positive": len((positives & malicious) - rule_peers),
+            "additional_false_positive": len((positives & benign) - rule_peers),
+            "unlabeled_selected_count": len(admitted - malicious - benign),
+            "inconclusive_count": sum(item["verdict"] == "INCONCLUSIVE" for item in outcomes),
+        },
+        "semantic_accuracy_verified": False,
+        "outcomes": outcomes,
+    }
 
 
 def json_bytes(value: dict[str, Any]) -> bytes:
