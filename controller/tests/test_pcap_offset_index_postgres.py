@@ -23,6 +23,7 @@ from c2hunter_controller.pcap_offset_index import (
 from c2hunter_controller.pcap_offset_index_queue import LiveIndexTask
 from c2hunter_controller.production import MinioBlobStore, PostgresRepository
 from c2hunter_controller.repositories import ArtifactStorageError, CaptureSource
+from tests.postgres_initialization_fixtures import isolate_historical_migration
 
 
 class RecordingCursor:
@@ -324,8 +325,10 @@ def test_postgres_migration_uses_normalized_generation_interface_packet_owner_ta
         "postgresql://stage9.invalid/controller", cast(MinioBlobStore, SimpleNamespace())
     )
     monkeypatch.setattr(repository, "_ensure_candidate_query_indexes", lambda _connection: None)
+    historical_calls = isolate_historical_migration(monkeypatch, repository, connection)
 
     assert repository.connection is connection
+    assert historical_calls == [connection]
     schema = connection.calls[0][0]
     for table in (
         "pcap_offset_index_generations",
@@ -1304,8 +1307,10 @@ def test_postgres_forward_migration_replaces_arbitrarily_named_upload_only_check
         "postgresql://stage10.invalid/controller", cast(MinioBlobStore, SimpleNamespace())
     )
     monkeypatch.setattr(repository, "_ensure_candidate_query_indexes", lambda _connection: None)
+    historical_calls = isolate_historical_migration(monkeypatch, repository, connection)
 
     assert repository.connection is connection
+    assert historical_calls == [connection]
     schema = connection.calls[0][0]
     assert "pg_get_constraintdef" in schema
     assert "format('ALTER TABLE %I DROP CONSTRAINT %I'" in schema

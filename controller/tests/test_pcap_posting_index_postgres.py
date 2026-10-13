@@ -18,6 +18,7 @@ from c2hunter_controller.pcap_posting_index import (
 from c2hunter_controller.pcap_posting_index_queue import PostingIndexAdmission, PostingIndexTaskSpec
 from c2hunter_controller.production import MinioBlobStore, PostgresRepository
 from c2hunter_controller.repositories import MemoryRepository
+from tests.postgres_initialization_fixtures import isolate_historical_migration
 
 
 def _sql_without_literals(query: str) -> str:
@@ -273,11 +274,16 @@ def test_stage11_postgres_migration_is_additive_normalized_and_idempotent(
     )
 
     for _ in range(2):
+        expected_connection = connections[0]
         repository = PostgresRepository(
             "postgresql://stage11.invalid/controller", cast(MinioBlobStore, SimpleNamespace())
         )
         monkeypatch.setattr(repository, "_ensure_candidate_query_indexes", lambda _connection: None)
+        historical_calls = isolate_historical_migration(
+            monkeypatch, repository, expected_connection
+        )
         connection = repository.connection
+        assert historical_calls == [connection] and connection is expected_connection
         schema = connection.calls[0][0]
         for table in (
             "pcap_posting_index_intents",
@@ -337,7 +343,9 @@ def test_postgres_ddl_model_rejects_task_whose_parent_differs_from_intent(
     repository = PostgresRepository(
         "postgresql://stage11.invalid/controller", cast(MinioBlobStore, SimpleNamespace())
     )
+    historical_calls = isolate_historical_migration(monkeypatch, repository, connection)
     schema_connection = repository.connection
+    assert historical_calls == [connection]
     schema = re.sub(r"\s*([(),])\s*", r"\1", " ".join(schema_connection.calls[0][0].split()))
     repository.close()
     match = re.search(

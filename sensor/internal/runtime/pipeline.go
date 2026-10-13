@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -54,6 +55,8 @@ type CaptureCompletion struct {
 }
 
 type CaptureSnapshot struct {
+	CaptureReadiness   *CaptureReadiness `json:"capture_readiness"`
+	observation        *captureObservation
 	ReceivedPackets    uint64
 	DroppedPackets     uint64
 	DecodeErrors       uint64
@@ -79,11 +82,16 @@ type InterfaceSnapshot struct {
 }
 
 type Pipeline struct {
-	cfg         PipelineConfig
-	manager     *BatchManager
-	ownsManager bool
-	mu          sync.RWMutex
-	snapshot    CaptureSnapshot
+	cfg     PipelineConfig
+	manager *BatchManager
+	// Instance-local encoding boundary permits deterministic persistence fault tests.
+	encodeBatch    func(flowbatch.Batch) ([]byte, error)
+	ownsManager    bool
+	mu             sync.RWMutex
+	snapshot       CaptureSnapshot
+	readerReady    bool
+	readerTerminal bool
+	readerContext  context.Context
 	// cachedDrop holds the latest dropped-packet count from periodic refresh.
 	cachedDrop atomic.Uint64
 }
@@ -189,10 +197,15 @@ func NewPipeline(cfg PipelineConfig) (*Pipeline, error) {
 		}
 		ownsManager = true
 	}
-	return &Pipeline{cfg: cfg, manager: manager, ownsManager: ownsManager}, nil
+	return &Pipeline{cfg: cfg, manager: manager, ownsManager: ownsManager, encodeBatch: flowbatch.Encode}, nil
 }
 
 func (p *Pipeline) Run(ctx context.Context) error {
+	p.mu.Lock()
+	p.readerContext = ctx
+	p.readerReady = false
+	p.readerTerminal = false
+	p.mu.Unlock()
 	if p.ownsManager {
 		managerCtx, stopManager := context.WithCancel(context.WithoutCancel(ctx))
 		p.manager.Start(managerCtx)
@@ -219,24 +232,44 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 	})
 
+	if ctx.Err() != nil {
+		p.setStopReason(capture.StopContext)
+		return nil
+	}
 	reader, err := p.cfg.Source()
+	if err == nil && nilCaptureReader(reader) {
+		err = errors.New("packet source returned nil reader")
+	}
 	if err != nil {
 		p.fail("capture open failed: " + err.Error())
 		return err
 	}
+	if ctx.Err() != nil {
+		if reader != nil {
+			_ = reader.Close()
+		}
+		p.setStopReason(capture.StopContext)
+		return nil
+	}
 	if retainer, ok := reader.(capture.RawFrameRetainer); ok {
 		retainer.SetRetainRawFrame(p.cfg.PCAPSink != nil || len(p.cfg.PCAPSinks) > 0)
 	}
-	defer reader.Close()
 
 	readerCtx, cancelReader := context.WithCancel(ctx)
-	defer cancelReader()
+
 	events := make(chan packetEvent, p.cfg.PacketQueueSize)
 	readerDone := make(chan struct{})
+	readerStarted := make(chan struct{})
 	go func() {
 		defer close(readerDone)
+		p.markReaderStarted()
+		close(readerStarted)
 		p.readPackets(readerCtx, reader, events)
 	}()
+
+	// Explicit handoff: the reader owns start publication; the parent never
+	// writes ready=true, even when EOF wins the scheduling race.
+	<-readerStarted
 
 	// Periodic socket-stats snapshot (1 s interval). This removes per-packet
 	// syscall overhead from the hot path; DroppedPackets is updated here and
@@ -256,6 +289,16 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			}
 		}
 	}()
+
+	// All post-launch returns revoke and join both users before Close. In
+	// particular, queue/encoding failures must not bypass the ring ownership fence.
+	joinReader := func() {
+		p.revokeReader()
+		cancelReader()
+		<-readerDone
+		<-statsDone
+	}
+	defer func() { joinReader(); _ = reader.Close() }()
 
 	aggregator := flow.NewAggregatorWithPayloadPreview(p.cfg.SensorID, p.cfg.JobID, p.cfg.IdleTimeout, p.cfg.PayloadPreviewBytes)
 	queue := batch.NewQueue[flow.Record](p.cfg.BatchMaxItems, p.cfg.BatchMaxBytes, recordSize)
@@ -280,11 +323,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 
 	finish := func(reason capture.StopReason) error {
-		cancelReader()
-		// AF_PACKET Close unmaps its ring. Wait until Next has returned so the
-		// capture goroutine cannot access that mapping after Run returns.
-		<-readerDone
-		<-statsDone
+		joinReader()
 		p.setStopReason(reason)
 		if reason == capture.StopMaxPackets || reason == capture.StopMaxBytes {
 			completed := make([]CaptureCompletion, 0, len(activeJobs))
@@ -370,6 +409,9 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				}
 				budgetStop = reason
 			}
+			if budgetStop != "" || (p.cfg.Limits.MaxPackets > 0 && capturedPackets+1 >= p.cfg.Limits.MaxPackets) || (p.cfg.Limits.MaxBytes > 0 && capturedBytes+wireBytes >= p.cfg.Limits.MaxBytes) {
+				p.revokeReader()
+			}
 			if p.cfg.PCAPSink != nil {
 				p.cfg.PCAPSink.Enqueue(pkt)
 			}
@@ -401,8 +443,41 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 }
 
+func nilCaptureReader(reader capture.Reader) bool {
+	if reader == nil {
+		return true
+	}
+	value := reflect.ValueOf(reader)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+// Reader startup and terminal publication share one latch. No acknowledgement
+// in the parent can revive a reader which already terminated.
+func (p *Pipeline) markReaderStarted() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.readerTerminal && p.readerContext != nil && p.readerContext.Err() == nil {
+		p.readerReady = true
+	}
+}
+func (p *Pipeline) revokeReader() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.readerTerminal = true
+	p.readerReady = false
+}
+
 func (p *Pipeline) readPackets(ctx context.Context, reader capture.Reader, events chan<- packetEvent) {
 	for {
+		if ctx.Err() != nil {
+			p.revokeReader()
+			return
+		}
 		pkt, err := reader.Next(ctx)
 		if errors.Is(err, capture.ErrPollTimeout) || errors.Is(err, capture.ErrUnsupportedPacket) {
 			continue
@@ -417,6 +492,7 @@ func (p *Pipeline) readPackets(ctx context.Context, reader capture.Reader, event
 			continue
 		}
 		if err != nil {
+			p.revokeReader()
 			select {
 			case events <- packetEvent{err: err}:
 			case <-ctx.Done():
@@ -477,10 +553,12 @@ func (p *Pipeline) persist(records []flow.Record) error {
 	}
 	completed, err := flowbatch.New(records)
 	if err != nil {
+		p.revokeReader()
 		return err
 	}
-	data, err := flowbatch.Encode(completed)
+	data, err := p.encodeBatch(completed)
 	if err != nil {
+		p.revokeReader()
 		return err
 	}
 	if !p.manager.Enqueue(spool.Batch{ID: completed.BatchID, Data: data, CreatedAt: p.cfg.Now()}) {
@@ -508,9 +586,38 @@ func (p *Pipeline) refreshSpoolMetrics() {
 }
 
 func (p *Pipeline) Snapshot() CaptureSnapshot {
+	out := p.snapshotWithReadiness(&readinessBudget{})
+	if out.observation == nil {
+		out.observation = &captureObservation{interfaces: []CaptureReadyInterface{}}
+	}
+	return out
+}
+func (p *Pipeline) snapshotWithReadiness(budget *readinessBudget) CaptureSnapshot {
 	p.mu.RLock()
 	out := p.snapshot
+	out.observation = nil
+	if budget != nil && !budget.failed {
+		ids := p.cfg.ActiveJobIDs
+		if len(ids) == 0 {
+			ids = []string{p.cfg.JobID}
+		}
+		if budget.admit(1, len(ids)) {
+			ready := p.readerReady && p.readerContext != nil && p.readerContext.Err() == nil
+			if p.cfg.CaptureBudget != nil {
+				select {
+				case <-p.cfg.CaptureBudget.Done():
+					ready = false
+				default:
+				}
+			}
+			out.observation = pipelineObservation(p.cfg.Interface, p.cfg.Direction, ids, ready)
+			if !out.observation.complete {
+				budget.failed = true
+			}
+		}
+	}
 	out.ActiveJobs = append([]string(nil), out.ActiveJobs...)
+	out.CompletedJobs = append([]CaptureCompletion(nil), out.CompletedJobs...)
 	out.Interfaces = append([]InterfaceSnapshot(nil), out.Interfaces...)
 	p.mu.RUnlock()
 	manager := p.manager.Snapshot()
@@ -530,6 +637,7 @@ func (p *Pipeline) update(change func(*CaptureSnapshot)) {
 	change(&p.snapshot)
 }
 func (p *Pipeline) fail(message string) {
+	p.revokeReader()
 	p.update(func(s *CaptureSnapshot) {
 		s.LastError = message
 		if len(s.Interfaces) > 0 {

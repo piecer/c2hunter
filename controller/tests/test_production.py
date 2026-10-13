@@ -114,6 +114,25 @@ class FakeConnection:
         self.closed = True
 
 
+@pytest.fixture(autouse=True)
+def isolate_historical_owner_migration(monkeypatch: Any) -> list[Any]:
+    """These constructor/unit fakes do not model PostgreSQL catalogs.
+
+    Isolate only the additive owner migration, not connection acquisition,
+    schema initialization, concurrent indexes, legacy migrations or cleanup.
+    Actual PostgreSQL migration acceptance remains a separate engine gate.
+    """
+    calls: list[Any] = []
+
+    def initialize(connection: Any) -> None:
+        assert isinstance(connection, FakeConnection)
+        assert not connection.closed and connection.autocommit is False
+        calls.append(connection)
+
+    monkeypatch.setattr(production.historical_sql, "initialize_postgres", initialize)
+    return calls
+
+
 class ActiveExportCursor(FakeCursor):
     def execute(self, query: str, params: tuple | None = None) -> None:
         super().execute(query, params)
@@ -336,7 +355,9 @@ class ActiveDeleteJobConnection(DeleteJobConnection):
         return ActiveDeleteJobCursor(self)
 
 
-def test_connection_initialization_is_thread_safe(monkeypatch: Any) -> None:
+def test_connection_initialization_is_thread_safe(
+    monkeypatch: Any, isolate_historical_owner_migration: list[Any]
+) -> None:
     first_connect_started = threading.Event()
     second_connect_started = threading.Event()
     second_worker_started = threading.Event()
@@ -375,6 +396,7 @@ def test_connection_initialization_is_thread_safe(monkeypatch: Any) -> None:
         assert first.result(timeout=1) is second.result(timeout=1)
 
     assert connection_count == 1
+    assert isolate_historical_owner_migration == [first.result()]
     queries = first.result().queries
     schema = queries[0]
     concurrent_indexes = "\n".join(queries[1:])
@@ -399,19 +421,23 @@ def test_connection_initialization_is_thread_safe(monkeypatch: Any) -> None:
     )
     assert "pg_advisory_unlock" in concurrent_indexes
     assert first.result().autocommit is False
-    assert "WHERE candidate ? 'id'" in schema
-    assert "DELETE FROM job_candidates AS legacy" in schema
-    assert "record.job_id=legacy.job_id" in schema
-    assert "DELETE FROM job_candidates;" not in schema
+    migration = "\n".join(queries)
+    assert "ORDER BY id FOR UPDATE" in migration
+    assert "WHERE legacy.job_id=ANY(%s) AND candidate ? 'id'" in migration
+    assert "DELETE FROM job_candidates AS legacy" in migration
+    assert "record.job_id=legacy.job_id" in migration
+    assert "DELETE FROM job_candidates;" not in migration
     assert "CREATE TABLE IF NOT EXISTS job_flow_record_chunks" in schema
     assert "CREATE TABLE IF NOT EXISTS job_payload_signatures" in schema
     assert "CREATE TABLE IF NOT EXISTS ai_feedback" in schema
     assert "ai_feedback_assessment_created" in schema
-    assert "SET data=data-'flow_records'" in schema
-    assert "SET data=data-'payload_signatures'" in schema
+    assert "SET data=data-'flow_records'" in migration
+    assert "SET data=data-'payload_signatures'" in migration
 
 
-def test_failed_connection_initialization_closes_connection_and_can_retry(monkeypatch: Any) -> None:
+def test_failed_connection_initialization_closes_connection_and_can_retry(
+    monkeypatch: Any, isolate_historical_owner_migration: list[Any]
+) -> None:
     failed_connection = FakeConnection(execute_error=RuntimeError("schema initialization failed"))
     successful_connection = FakeConnection()
     connections = iter((failed_connection, successful_connection))
@@ -427,7 +453,55 @@ def test_failed_connection_initialization_closes_connection_and_can_retry(monkey
         _ = repository.connection
 
     assert failed_connection.closed
+    assert repository._connection is None
     assert repository.connection is successful_connection
+    assert isolate_historical_owner_migration == [successful_connection]
+
+
+@pytest.mark.parametrize("close_error", [False, True])
+def test_failed_historical_migration_closes_unpublished_connection_and_can_retry(
+    monkeypatch: Any,
+    close_error: bool,
+) -> None:
+    from c2hunter_controller.historical_ai_storage import HistoricalStorageError
+
+    failed, healthy = FakeConnection(), FakeConnection()
+    connections = iter((failed, healthy))
+    repository = PostgresRepository("postgresql://test", cast(MinioBlobStore, SimpleNamespace()))
+    monkeypatch.setitem(
+        sys.modules, "psycopg", SimpleNamespace(connect=lambda *a, **kw: next(connections))
+    )
+    fault = HistoricalStorageError()
+    calls = []
+    closed = []
+
+    def close_failed() -> None:
+        closed.append(failed)
+        failed.closed = True
+        if close_error:
+            raise OSError("secondary close failure")
+
+    monkeypatch.setattr(failed, "close", close_failed)
+
+    def migrate(connection: Any) -> None:
+        calls.append(connection)
+        assert repository._connection is None
+        assert not connection.closed and not connection.autocommit
+        assert any("pg_advisory_unlock" in query for query in connection.queries)
+        if connection is failed:
+            raise fault
+
+    monkeypatch.setattr(production.historical_sql, "initialize_postgres", migrate)
+    with pytest.raises(HistoricalStorageError) as raised:
+        _ = repository.connection
+    assert raised.value is fault
+    assert failed.closed and repository._connection is None
+    assert closed == [failed] and not healthy.closed
+    assert repository.connection is healthy
+    assert repository.connection is healthy  # No extra initializer on reuse.
+    assert calls == [failed, healthy] and not healthy.closed
+    repository.close()
+    assert healthy.closed and repository._connection is None
 
 
 def test_failed_concurrent_index_initialization_restores_connection_state(
@@ -1184,7 +1258,9 @@ def test_postgres_sensor_pcap_lookup_is_job_scoped_parameterized_and_indexed() -
     assert [segment["id"] for segment in segments] == ["segment-a", "segment-b"]
 
 
-def test_postgres_schema_indexes_sensor_pcaps_by_job_and_export_order(monkeypatch: Any) -> None:
+def test_postgres_schema_indexes_sensor_pcaps_by_job_and_export_order(
+    monkeypatch: Any, isolate_historical_owner_migration: list[Any]
+) -> None:
     connection = FakeConnection()
     monkeypatch.setitem(
         sys.modules,
@@ -1195,6 +1271,7 @@ def test_postgres_schema_indexes_sensor_pcaps_by_job_and_export_order(monkeypatc
 
     _ = repository.connection
 
+    assert isolate_historical_owner_migration == [connection]
     schema = connection.queries[0]
     assert "controller_objects_sensor_pcap_job_uploaded_id" in schema
     assert "data->>'analysis_job_id'" in schema

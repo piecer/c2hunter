@@ -250,15 +250,14 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def _public_ai_run(run: dict[str, Any]) -> dict[str, Any]:
-    """Hide the DDoS model input snapshot while preserving the legacy public run contract."""
-    return {
-        key: value for key, value in run.items() if key not in {"ddos_input", "selection_inventory"}
-    }
+    from .historical_ai_http import public_run
+
+    return public_run(run)
 
 
 def _validated_ddos_report(value: object) -> dict[str, Any]:
     report = DDoSAttackReport.model_validate(value)
-    return cast(dict[str, Any], report.model_dump(mode="json", exclude_unset=True))
+    return report.model_dump(mode="json", exclude_unset=True)
 
 
 def _ddos_summary(report: dict[str, Any]) -> dict[str, Any]:
@@ -1352,10 +1351,31 @@ def create_app(
     app.state.pcap_export_executor = pcap_export_executor
     app.state.metrics_registry = registry
     app.include_router(operations_router(repo, flows, work_queue, registry))
+    from .baseline_admission import BaselineAdmission
+    from .historical_ai import HistoricalAIError
+    from .historical_ai_access import HistoricalAccessDenied, public_ai_access
+    from .historical_ai_http import saved_pages_router
+    from .historical_ai_storage import HistoricalStorageError
+    from .historical_baseline_api import BaselineTransport, baseline_router
+
+    app.state.baseline_transport = BaselineTransport()
+    app.state.baseline_admission = BaselineAdmission()
+    app.include_router(
+        baseline_router(repo, app.state.baseline_transport, app.state.baseline_admission)
+    )
+    app.include_router(saved_pages_router(repo, app.state.baseline_transport))
+    app.router.add_event_handler("shutdown", app.state.baseline_transport.shutdown)
 
     @app.middleware("http")
     async def security(request: Request, call_next: Any) -> Response:
         path = request.url.path
+        parts = path.strip("/").split("/")
+        baseline_page = (
+            request.method == "GET"
+            and len(parts) == 5
+            and parts[:3] == ["api", "v1", "ai-runs"]
+            and parts[4] in {"baseline-comparisons", "baseline-sources"}
+        )
         peer_ip = request.client.host if request.client is not None else "unknown"
         client_key = trusted_client_ip(
             peer_ip,
@@ -1363,13 +1383,17 @@ def create_app(
             config.trusted_proxy_networks,
         )
         try:
+            if (
+                path.startswith("/api/v1/historical-baselines/") or baseline_page
+            ) and not config.api_auth_required:
+                raise SecurityError(403, "BASELINE_AUTH_REQUIRED", "인증이 필요합니다")
             if request.method == "POST" and path == "/api/v1/auth/dev-login":
                 rate_limiter.check("dev-login", client_key, config.dev_login_rate_limit)
             if is_enrollment_claim(request.method, path):
                 rate_limiter.check(
                     "enrollment-claim", client_key, config.enrollment_claim_rate_limit
                 )
-            minimum_role = required_role(request.method, path)
+            minimum_role = Role.ANALYST if baseline_page else required_role(request.method, path)
             if config.api_auth_required and minimum_role is not None:
                 principal = authenticator.authenticate(request.headers.get("authorization"))
                 require_role(principal, minimum_role)
@@ -1387,7 +1411,17 @@ def create_app(
             if exc.retry_after is not None:
                 response.headers["retry-after"] = str(exc.retry_after)
             return response
-        return cast(Response, await call_next(request))
+        public_principal = getattr(request.state, "principal", None)
+        compact_runs = request.method == "GET" and (
+            (len(parts) == 4 and parts[:3] == ["api", "v1", "ai-runs"])
+            or (
+                len(parts) == 5
+                and parts[:3] == ["api", "v1", "analysis-jobs"]
+                and parts[4] == "ai-runs"
+            )
+        )
+        with public_ai_access(getattr(public_principal, "role", None), compact_runs=compact_runs):
+            return cast(Response, await call_next(request))
 
     @app.middleware("http")
     async def observability(request: Request, call_next: Any) -> Response:
@@ -1420,6 +1454,20 @@ def create_app(
         response = _error(request, exc.status, exc.code, exc.message, exc.details)
         response.headers.update(exc.headers)
         return response
+
+    @app.exception_handler(HistoricalAccessDenied)
+    async def historical_access_error(
+        request: Request, exc: HistoricalAccessDenied
+    ) -> JSONResponse:
+        return _error(request, exc.status_code, exc.code, exc.message)
+
+    @app.exception_handler(HistoricalStorageError)
+    @app.exception_handler(HistoricalAIError)
+    async def historical_storage_error(request: Request, exc: Exception) -> JSONResponse:
+        from .historical_ai_http import transport_error
+
+        error = transport_error(exc)
+        return _error(request, error.status, error.code, error.message)
 
     @app.post(
         "/api/v1/auth/dev-login",
@@ -2750,12 +2798,6 @@ def create_app(
             JobState.FAILED,
             JobState.CANCELLED,
         }:
-            if (
-                JobState(job["status"]) in {JobState.COMPLETED, JobState.PARTIALLY_COMPLETED}
-                and result.get("status") == "COMPLETED"
-                and module == "c2"
-            ):
-                repo.save_candidates(str(job["id"]), durable_c2_candidates())
             work_queue.ack_result(receipt)
             return
         if result.get("status") == "EVENT":
@@ -2831,13 +2873,12 @@ def create_app(
                 "phase_started_at": occurred_at,
                 "updated_at": occurred_at,
             }
-        if not repo.transition_job_terminal(job):
-            work_queue.ack_result(receipt)
-            return
         if result.get("status") == "COMPLETED":
-            repo.save_candidates(job["id"], candidates)
-            if module == "c2":
+            won = repo.complete_job_with_candidates(job, candidates)
+            if won and module == "c2":
                 schedule_candidate_enrichment(str(job["id"]), candidates)
+        else:
+            repo.transition_job_terminal(job)
         work_queue.ack_result(receipt)
 
     def process_results_once() -> bool:
@@ -3022,16 +3063,20 @@ def create_app(
             candidates = calculate(job, job.get("allowlist", []))
         else:
             raise ValueError(f"unsupported analysis module: {module}")
-        repo.save_candidates(job["id"], candidates)
-        if module == "c2":
-            schedule_candidate_enrichment(str(job["id"]), candidates)
         job["candidate_count"] = len(candidates)
         job["flow_count"] = len(job.get("flow_records", []))
         job["packet_count"] = sum(
             int(record.get("packet_count", 1)) for record in job.get("flow_records", [])
         )
         machine.transition(job, JobState.COMPLETED, "analysis completed")
-        return repo.save_job_metadata(job)
+        if repo.complete_job_with_candidates(job, candidates):
+            if module == "c2":
+                schedule_candidate_enrichment(str(job["id"]), candidates)
+            return job
+        winner = repo.get_job_summary(str(job["id"]))
+        if winner is None:
+            raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
+        return winner
 
     @app.post("/api/v1/analysis-jobs", status_code=201)
     def create_analysis_job(payload: AnalysisJobCreate) -> dict[str, Any]:
@@ -3527,8 +3572,43 @@ def create_app(
         status_code=201,
         response_model=AIAnalysisRunResponse,
         response_model_exclude_unset=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {"schema": AIAnalysisRunCreate.model_json_schema()}
+                },
+            }
+        },
     )
-    def create_ai_analysis_run(
+    async def create_ai_analysis_run(
+        job_id: str,
+        request: Request,
+        response: Response,
+    ) -> dict[str, Any]:
+        from . import historical_ai as historical_dto
+        from .historical_ai_http import create_payload, domain_errors, transport_error
+        from .historical_ai_storage import HISTORICAL_STORAGE_ERRORS
+
+        payload = await create_payload(request)
+        try:
+            if payload.baseline_mode == "historical":
+
+                def historical_create() -> dict[str, Any]:
+                    with domain_errors():
+                        return create_ai_analysis_run_sync(job_id, payload, request, response)
+
+                return cast(
+                    dict[str, Any],
+                    await app.state.baseline_transport.call(historical_create),
+                )
+            return await run_in_threadpool(
+                create_ai_analysis_run_sync, job_id, payload, request, response
+            )
+        except (historical_dto.HistoricalAIError, *HISTORICAL_STORAGE_ERRORS) as error:
+            raise transport_error(error) from None
+
+    def create_ai_analysis_run_sync(
         job_id: str,
         payload: AIAnalysisRunCreate,
         request: Request,
@@ -3536,7 +3616,7 @@ def create_app(
     ) -> dict[str, Any]:
         if not config.ai_analysis_enabled or ai_service is None or ai_tasks is None:
             raise ApiError(503, "AI_ANALYSIS_DISABLED", "AI 분석 기능이 비활성화되어 있습니다")
-        source_job = repo.get_job_summary(job_id)
+        source_job = repo.get_job_summary(job_id) if payload.baseline_mode == "off" else None
         source_module = (
             source_job.get("analysis", {}).get("module") if source_job is not None else None
         )
@@ -3584,6 +3664,10 @@ def create_app(
                 analysis_kind=payload.analysis_kind,
                 language=payload.language,
                 discovery_mode=payload.discovery_mode,
+                baseline_mode=payload.baseline_mode,
+                baseline_reference=payload.baseline_reference,
+                allow_remote=payload.allow_remote,
+                baseline_admission=app.state.baseline_admission,
             )
         except AIAnalysisError as exc:
             message = str(exc)
@@ -3592,18 +3676,30 @@ def create_app(
             raise ApiError(409, "AI_RUN_NOT_ALLOWED", message) from exc
         if not created:
             response.status_code = 200
-        else:
+        historical_dispatch = payload.baseline_mode == "historical" and run["status"] == "QUEUED"
+        if created or historical_dispatch:
             started = perf_counter()
             try:
-                ai_tasks.enqueue(run["id"])
+                if historical_dispatch:
+                    ai_tasks.ensure_enqueued(run["id"])
+                else:
+                    ai_tasks.enqueue(run["id"])
             except OverflowError as exc:
                 if not local_ai_worker_enabled:
                     raise
                 ai_service.cancel(run["id"], "local AI queue capacity exceeded")
                 raise ApiError(503, "AI_QUEUE_FULL", "Local AI queue capacity exceeded") from exc
             except Exception as exc:
+                from .historical_ai_storage import HISTORICAL_STORAGE_ERRORS
+
                 reason = type(exc).__name__
                 safe_ai_metric(lambda: ai_enqueue_failures.labels(reason=reason).inc())
+                # Inline dispatch may fail in storage, not in the queue. Preserve
+                # its uncertain outcome and the existing domain error mapping.
+                if historical_dispatch and not isinstance(exc, HISTORICAL_STORAGE_ERRORS):
+                    raise ApiError(
+                        503, "AI_QUEUE_UNAVAILABLE", "AI queue dispatch could not be confirmed"
+                    ) from None
                 raise
             finally:
                 waiting_depth: int | None
@@ -3636,7 +3732,7 @@ def create_app(
                 "status": run["status"],
             },
         )
-        return _public_ai_run({**run, "candidate_count": len(run.get("candidate_ids", []))})
+        return _public_ai_run(run)
 
     @app.get(
         "/api/v1/analysis-jobs/{job_id}/ai-runs",
@@ -3648,12 +3744,17 @@ def create_app(
         page: int = Query(1, ge=1),
         page_size: int = Query(50, ge=1, le=200),
     ) -> dict[str, Any]:
-        if repo.get_job_summary(job_id) is None:
-            raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
-        runs = [
-            _public_ai_run({**run, "candidate_count": len(run.get("candidate_ids", []))})
-            for run in repo.list_ai_runs(job_id)
-        ]
+        from .historical_ai_http import domain_errors
+        from .historical_ai_storage import historical_marker
+
+        with domain_errors():
+            saved = repo.list_ai_runs(job_id)
+            if (
+                not any(historical_marker(run) for run in saved)
+                and repo.get_job_summary(job_id) is None
+            ):
+                raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
+            runs = [_public_ai_run(run) for run in saved]
         return _page(runs, page, page_size)
 
     @app.get(
@@ -3662,10 +3763,13 @@ def create_app(
         response_model_exclude_unset=True,
     )
     def get_ai_analysis_run(run_id: str) -> dict[str, Any]:
-        run = repo.get_ai_run(run_id)
-        if run is None:
-            raise ApiError(404, "AI_RUN_NOT_FOUND", "AI 분석 Run을 찾을 수 없습니다")
-        return _public_ai_run({**run, "candidate_count": len(run.get("candidate_ids", []))})
+        from .historical_ai_http import domain_errors
+
+        with domain_errors():
+            run = repo.get_ai_run(run_id)
+            if run is None:
+                raise ApiError(404, "AI_RUN_NOT_FOUND", "AI 분석 Run을 찾을 수 없습니다")
+            return _public_ai_run(run)
 
     @app.get("/api/v1/ai-runs/{run_id}/selection", response_model=AISelectionPage)
     def list_ai_run_selection(
@@ -3676,6 +3780,10 @@ def create_app(
         run = repo.get_ai_run(run_id)
         if run is None:
             raise ApiError(404, "AI_RUN_NOT_FOUND", "AI 분석 Run을 찾을 수 없습니다")
+        from .historical_ai_storage import historical_marker, materialize_historical_run
+
+        if historical_marker(run):
+            run, _ = materialize_historical_run(run)
         inventory = run.get("selection_inventory", [])
         total = len(inventory)
         items = inventory[offset : offset + limit]
@@ -3786,9 +3894,16 @@ def create_app(
         stored = repo.get_ai_assessment(assessment_id)
         if stored is None:
             raise ApiError(404, "AI_ASSESSMENT_NOT_FOUND", "AI 후보 판정을 찾을 수 없습니다")
+        from .historical_ai_mutations import saved_bundle
+        from .historical_ai_storage import historical_marker
+
+        historical = historical_marker(stored)
+        historical_bundle = saved_bundle(repo, stored) if historical else None
         try:
             assessment = CandidateAssessment.model_validate(stored.get("assessment"))
-            bundle = CandidateEvidenceBundle.model_validate(stored.get("evidence_bundle"))
+            bundle = historical_bundle or CandidateEvidenceBundle.model_validate(
+                stored.get("evidence_bundle")
+            )
             artifacts = build_ai_artifacts(
                 assessment_id=assessment_id,
                 ai_run_id=str(stored["ai_run_id"]),
@@ -3797,9 +3912,12 @@ def create_app(
                 bundle=bundle,
             )
         except (AIArtifactError, ValidationError, KeyError, TypeError, ValueError) as exc:
+            if historical:
+                raise ApiError(
+                    503, "BASELINE_STORAGE_UNAVAILABLE", "기준선 저장소를 사용할 수 없습니다"
+                ) from None
             raise ApiError(409, "AI_ARTIFACT_REGENERATION_FAILED", str(exc)) from exc
-        for artifact in artifacts:
-            repo.save_ai_artifact(artifact)
+        artifacts = [repo.save_ai_artifact(artifact) for artifact in artifacts]
         principal = getattr(request.state, "principal", None)
         repo.append_audit_event(
             "ai-artifacts-regenerate",
@@ -3877,7 +3995,7 @@ def create_app(
                 "status": run["status"],
             },
         )
-        return _public_ai_run({**run, "candidate_count": len(run.get("candidate_ids", []))})
+        return _public_ai_run(run)
 
     @app.get("/api/v1/analysis-jobs/{job_id}/flows")
     def list_analysis_flows(

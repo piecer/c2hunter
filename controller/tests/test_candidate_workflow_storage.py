@@ -25,6 +25,11 @@ def test_sqlite_migrates_legacy_job_candidate_json_once(tmp_path: Path) -> None:
     path = tmp_path / "legacy-candidates.db"
     connection = sqlite3.connect(path)
     connection.execute("CREATE TABLE candidates(job_id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+    connection.execute("CREATE TABLE objects(kind TEXT,id TEXT,data TEXT,PRIMARY KEY(kind,id))")
+    connection.execute(
+        "INSERT INTO objects VALUES('job','job-1',?)",
+        (json.dumps({"id": "job-1", "status": "COMPLETED"}),),
+    )
     connection.execute(
         "INSERT INTO candidates(job_id,data) VALUES(?,?)",
         ("job-1", json.dumps([_candidate("candidate-1"), _candidate("candidate-2", 80)])),
@@ -52,6 +57,7 @@ def test_sqlite_migrates_legacy_job_candidate_json_once(tmp_path: Path) -> None:
 
 def test_sqlite_replaces_job_candidates_in_normalized_table(tmp_path: Path) -> None:
     repository = SQLiteRepository(tmp_path / "normalized-candidates.db")
+    repository.save_job({"id": "job-1", "status": "COMPLETED"})
     repository.save_candidates("job-1", [_candidate("candidate-1"), _candidate("candidate-2", 80)])
 
     repository.save_candidates("job-1", [_candidate("candidate-2", 90)])
@@ -70,6 +76,7 @@ def test_candidate_query_prefilters_normalized_rows(tmp_path: Path, repository_k
         if repository_kind == "memory"
         else SQLiteRepository(tmp_path / "query-candidates.db")
     )
+    repository.save_job({"id": "job-1", "status": "COMPLETED"})
     repository.save_candidates(
         "job-1",
         [
@@ -90,6 +97,7 @@ def test_candidate_query_prefilters_normalized_rows(tmp_path: Path, repository_k
 
 def test_sqlite_candidate_page_sorts_and_paginates_in_repository(tmp_path: Path) -> None:
     repository = SQLiteRepository(tmp_path / "controller.db")
+    repository.save_job({"id": "job-1", "status": "COMPLETED"})
     repository.save_candidates(
         "job-1",
         [
@@ -122,6 +130,7 @@ def test_candidate_page_collapses_repeated_ip_into_latest_occurrence(
         else SQLiteRepository(tmp_path / "repeated-candidates.db")
     )
     repeated_ip = "203.0.113.77"
+    repository.save_job({"id": "job-old", "status": "COMPLETED"})
     repository.save_candidates(
         "job-old",
         [
@@ -132,6 +141,7 @@ def test_candidate_page_collapses_repeated_ip_into_latest_occurrence(
             }
         ],
     )
+    repository.save_job({"id": "job-new", "status": "COMPLETED"})
     repository.save_candidates(
         "job-new",
         [
@@ -169,6 +179,7 @@ def test_candidate_page_collapses_repeated_ip_into_latest_occurrence(
 
 def test_sqlite_candidate_workflow_counts_use_latest_decision_and_action(tmp_path: Path) -> None:
     repository = SQLiteRepository(tmp_path / "controller.db")
+    repository.save_job({"id": "job-1", "status": "COMPLETED"})
     repository.save_candidates(
         "job-1",
         [_candidate("candidate-new", 90), _candidate("candidate-done", 80)],
@@ -291,6 +302,7 @@ def test_sqlite_candidate_workflow_resources_survive_reopen(tmp_path: Path) -> N
     # The workflow records remain independent from detector-produced candidate JSON.
     path = tmp_path / "controller.db"
     repository = SQLiteRepository(path)
+    repository.save_job({"id": "job-1", "status": "COMPLETED"})
     repository.save_candidates("job-1", [{"id": "candidate-1", "candidate_ip": "203.0.113.44"}])
     repository.save_candidate_decision(
         {

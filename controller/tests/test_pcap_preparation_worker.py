@@ -649,15 +649,17 @@ def test_uncertain_queue_delivery_retries_with_one_stable_message() -> None:
     assert queue.jobs[0]["message_id"] == f"analysis-job:{job_id}"
 
 
-def test_completed_c2_result_redelivery_repairs_candidate_side_effects() -> None:
+def test_result_redelivery_retries_atomic_candidate_publication() -> None:
     class FailOnceCandidateRepository(MemoryRepository):
         fail_once = True
 
-        def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None:
+        def complete_job_with_candidates(
+            self, job: dict[str, Any], candidates: list[dict[str, Any]]
+        ) -> bool:
             if self.fail_once:
                 self.fail_once = False
                 raise RuntimeError("injected candidate persistence failure")
-            super().save_candidates(job_id, candidates)
+            return super().complete_job_with_candidates(job, candidates)
 
     repository = FailOnceCandidateRepository()
     queue = MemoryControllerQueue()
@@ -675,7 +677,7 @@ def test_completed_c2_result_redelivery_repairs_candidate_side_effects() -> None
     with pytest.raises(RuntimeError, match="candidate persistence failure"):
         application.state.process_results_once()
     terminal = repository.get_job_summary(job_id)
-    assert terminal is not None and terminal["status"] == "COMPLETED"
+    assert terminal is not None and terminal["status"] == "ANALYZING"
     assert repository.get_candidates(job_id) == []
 
     queue.results.append(dict(result))

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from './api';
+import { historicalAccessDenied, historicalErrorText } from './historicalReferenceErrors';
 import { useReportLanguage } from './reportLanguageContext';
 
 export type DiscoveryOrigin = 'RULE' | 'PREFILTER' | 'BEHAVIOR' | 'RULE_AND_BEHAVIOR';
@@ -24,7 +25,7 @@ export default function C2DiscoverySelection({ runId, summary }: { runId: string
   const page = useQuery<SelectionPage, Error>({
     queryKey: ['ai-selection', runId, offset],
     queryFn: () => api.get(`/ai-runs/${runId}/selection?offset=${offset}&limit=20`),
-    enabled: open, retry: false, staleTime: Infinity,
+    enabled: open, retry: false, retryOnMount: false, staleTime: Infinity, refetchOnWindowFocus: false, refetchOnReconnect: false,
   });
   const next = page.data?.next_offset;
   return <section className="c2-discovery" aria-label={t('Discovery coverage', '탐색 범위')}>
@@ -37,7 +38,7 @@ export default function C2DiscoverySelection({ runId, summary }: { runId: string
     {open && <>
       <p className="muted">{t('Immutable selection snapshot · up to 20 rows per page. Source score and behavior anomaly are separate signals, not malicious probabilities.', '불변 선택 스냅샷 · 페이지당 최대 20행. 원본 점수와 행동 이상 점수는 서로 다른 신호이며 악성 확률이 아닙니다.')}</p>
       {page.isLoading && <p role="status">{t('Loading selection…', '선택 목록 조회 중…')}</p>}
-      {page.isError && <p role="alert">{t('Selection could not be read', '선택 목록 조회 실패')}: {page.error.message} <button type="button" onClick={() => void page.refetch()}>{t('Retry selection', '선택 목록 재시도')}</button></p>}
+      {page.isError && <p role="alert">{t('Selection could not be read', '선택 목록 조회 실패')}: {historicalAccessDenied(page.error) ? historicalErrorText(page.error, language) : page.error.message} {!historicalAccessDenied(page.error) && <button type="button" onClick={() => void page.refetch()}>{t('Retry selection', '선택 목록 재시도')}</button>}</p>}
       <div className="table-wrap"><table aria-label={t('Selection inventory', '선택 목록')}><thead><tr>
         <th>IP</th><th>{t('Origin', '출처')}</th><th>{t('Source score', '원본 점수')}</th><th>{t('Behavior anomaly score', '행동 이상 점수')}</th><th>{t('Selected', '선택 여부')}</th><th>{t('Reason', '이유')}</th>
       </tr></thead><tbody>{!page.isError && page.data?.items.map(item => <tr key={item.candidate_id}>

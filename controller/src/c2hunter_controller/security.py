@@ -177,6 +177,11 @@ def required_role(method: str, path: str) -> Role | None:
         if method == "PUT" and len(suffix) == 2 and suffix[0] == "pcap-segments":
             return None
 
+    if parts[0] == "historical-baselines":
+        if method == "GET":
+            return Role.ANALYST if parts[-1] in {"sources", "control-events"} else Role.VIEWER
+        return Role.ANALYST if method == "POST" and parts[-1] == "preview" else Role.ADMIN
+
     if method == "GET":
         if parts[0] == "integration-settings":
             return Role.ADMIN

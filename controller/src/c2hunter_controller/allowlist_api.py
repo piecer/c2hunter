@@ -54,7 +54,13 @@ def allowlist_router(repository: Repository) -> APIRouter:
                     )
                     changed = True
             if changed:
-                repository.save_candidates(job_id, candidates)
+                try:
+                    repository.save_candidates(job_id, candidates)
+                except ValueError as error:
+                    if error.args != ("candidate parent job not found",):
+                        raise
+                    # The snapshot can outlive its parent; never recreate its metadata.
+                    continue
                 job = repository.get_job(job_id)
                 if job is not None:
                     job["candidate_count"] = sum(

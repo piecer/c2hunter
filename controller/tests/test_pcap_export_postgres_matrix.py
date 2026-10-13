@@ -18,6 +18,7 @@ from c2hunter_controller.pcap_export_queue import (
 )
 from c2hunter_controller.production import MinioBlobStore, PostgresRepository
 from c2hunter_controller.repositories import ArtifactStorageError
+from tests.postgres_initialization_fixtures import isolate_historical_migration
 
 
 @dataclass
@@ -129,20 +130,78 @@ def row(value: dict[str, Any]) -> tuple[str]:
 def test_postgres_migration_creates_durable_queue_and_indexes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    connection = MatrixConnection(Step("CREATE TABLE IF NOT EXISTS controller_objects"))
+    connection = MatrixConnection(
+        Step("CREATE TABLE IF NOT EXISTS controller_objects"),
+        Step("ORDER BY id FOR UPDATE"),
+        Step("INSERT INTO job_flow_records"),
+        Step("INSERT INTO candidate_records"),
+        Step("DELETE FROM job_candidates AS legacy"),
+        Step("CREATE TABLE IF NOT EXISTS baseline_catalog"),
+    )
+    commits_after_calls: list[int] = []
+    commit = connection.commit
+
+    def record_commit() -> None:
+        commits_after_calls.append(len(connection.calls))
+        commit()
+
+    monkeypatch.setattr(connection, "commit", record_commit)
     repo = PostgresRepository(
         "postgresql://matrix.invalid/controller", cast(MinioBlobStore, SimpleNamespace())
     )
     monkeypatch.setattr("psycopg.connect", lambda *_args, **_kwargs: connection)
     monkeypatch.setattr(repo, "_ensure_candidate_query_indexes", lambda _connection: None)
+    historical_calls = isolate_historical_migration(monkeypatch, repo, connection)
 
     assert repo.connection is connection
+    assert historical_calls == [connection]
     migration = connection.calls[0][0]
     assert "CREATE TABLE IF NOT EXISTS pcap_export_jobs" in migration
     assert "pcap_export_jobs_principal_idempotency" in migration
     assert "pcap_export_jobs_reusable_coalesce" in migration
     assert "pcap_export_jobs_claim" in migration
-    assert connection.commits == 1
+    # Independent contract: do not derive the expectation from the schema producer.
+    expected_baseline = """
+        CREATE TABLE IF NOT EXISTS baseline_catalog(id INTEGER PRIMARY KEY CHECK(id=1));
+        INSERT INTO baseline_catalog(id) VALUES(1) ON CONFLICT(id) DO NOTHING;
+        CREATE TABLE IF NOT EXISTS baseline_scopes(
+          scope_id TEXT PRIMARY KEY, config_json TEXT NOT NULL,
+          config_byte_size INTEGER NOT NULL CHECK(config_byte_size BETWEEN 1 AND 65536),
+          config_content_sha256 TEXT NOT NULL, config_sha256 TEXT NOT NULL,
+          created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+          control_revision BIGINT NOT NULL CHECK(control_revision>=0),
+          frozen INTEGER NOT NULL CHECK(frozen IN (0,1)),
+          state TEXT NOT NULL CHECK(state IN ('EMPTY','HAS_REFERENCE','REVOKED','RETIRED')),
+          accepted_event_end TEXT, active_generation_id TEXT, previous_generation_id TEXT,
+          CHECK(octet_length(config_json) BETWEEN 1 AND 65536 )
+        );
+        CREATE TABLE IF NOT EXISTS baseline_generations(
+          scope_id TEXT NOT NULL REFERENCES baseline_scopes(scope_id), generation_id TEXT NOT NULL,
+          publication_revision BIGINT NOT NULL CHECK(publication_revision>=1),
+          document_json TEXT NOT NULL, content_sha256 TEXT NOT NULL,
+          byte_size INTEGER NOT NULL CHECK(byte_size BETWEEN 1 AND 2097152),
+          PRIMARY KEY(scope_id,generation_id), UNIQUE(scope_id,publication_revision),
+          CHECK(octet_length(document_json) BETWEEN 1 AND 2097152 )
+        );
+        CREATE TABLE IF NOT EXISTS baseline_operations(
+          scope_id TEXT NOT NULL REFERENCES baseline_scopes(scope_id),
+          revision BIGINT NOT NULL CHECK(revision>=1),
+          idempotency_key TEXT NOT NULL, request_sha256 TEXT NOT NULL,
+          operation_id TEXT NOT NULL UNIQUE, receipt_json TEXT NOT NULL,
+          receipt_sha256 TEXT NOT NULL,
+          receipt_byte_size INTEGER NOT NULL CHECK(receipt_byte_size BETWEEN 1 AND 4096),
+          PRIMARY KEY(scope_id,revision), UNIQUE(scope_id,idempotency_key),
+          CHECK(octet_length(receipt_json) BETWEEN 1 AND 4096 )
+        );
+    """
+    baseline, params = connection.calls[5]
+    assert " ".join(baseline.split()) == " ".join(expected_baseline.split())
+    assert params is None
+    assert connection.steps == []
+    # Bootstrap DDL releases table locks before ordered job migration begins;
+    # baseline DDL follows legacy candidates and precedes the final commit.
+    assert commits_after_calls == [1, 6]
+    assert connection.commits == 2
 
 
 def test_postgres_enqueue_replay_conflict_and_coalesce_precede_full_capacity() -> None:

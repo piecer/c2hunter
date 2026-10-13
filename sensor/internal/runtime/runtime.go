@@ -40,11 +40,12 @@ type Config struct {
 }
 
 type Health struct {
-	Status     Status          `json:"status"`
-	Registered bool            `json:"registered"`
-	LastError  string          `json:"last_error,omitempty"`
-	UpdatedAt  time.Time       `json:"updated_at"`
-	Capture    CaptureSnapshot `json:"capture"`
+	Status           Status          `json:"status"`
+	Registered       bool            `json:"registered"`
+	LastError        string          `json:"last_error,omitempty"`
+	UpdatedAt        time.Time       `json:"updated_at"`
+	Capture          CaptureSnapshot `json:"capture"`
+	CaptureSampledAt time.Time       `json:"capture_sampled_at"`
 }
 
 type Runner struct {
@@ -182,18 +183,26 @@ func (r *Runner) runHeartbeats(ctx context.Context) bool {
 
 func (r *Runner) Health() Health {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.health
+	out := r.health
+	r.mu.RUnlock()
+	if r.cfg.Capture != nil {
+		out.Capture = r.cfg.Capture.Snapshot()
+		// Arbitrary/direct CaptureRuntime implementations cannot mint authority.
+		if _, ok := r.cfg.Capture.(*Supervisor); !ok {
+			out.Capture.CaptureReadiness = nil
+		}
+		out.Capture.ActiveJobs = append([]string(nil), out.Capture.ActiveJobs...)
+		out.Capture.CompletedJobs = append([]CaptureCompletion(nil), out.Capture.CompletedJobs...)
+		out.Capture.Interfaces = append([]InterfaceSnapshot(nil), out.Capture.Interfaces...)
+	}
+	out.CaptureSampledAt = time.Now().UTC()
+	return out
 }
 
 func (r *Runner) setHealth(status Status, registered bool, lastError string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	snapshot := CaptureSnapshot{}
-	if r.cfg.Capture != nil {
-		snapshot = r.cfg.Capture.Snapshot()
-	}
-	r.health = Health{Status: status, Registered: registered, LastError: lastError, UpdatedAt: time.Now().UTC(), Capture: snapshot}
+	r.health = Health{Status: status, Registered: registered, LastError: lastError, UpdatedAt: time.Now().UTC()}
 }
 
 func (r *Runner) captureHealth() (Status, string) {
@@ -221,6 +230,7 @@ func (r *Runner) HealthHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		health := r.Health()
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
 		if health.Status == StatusError {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}

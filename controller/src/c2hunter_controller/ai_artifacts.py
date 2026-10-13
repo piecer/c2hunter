@@ -4,7 +4,7 @@ import re
 import uuid
 from datetime import UTC, datetime
 from ipaddress import ip_address, ip_network
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -331,6 +331,11 @@ class AIArtifactService:
         artifact = self.repository.get_ai_artifact(artifact_id)
         if artifact is None:
             raise AIArtifactError("AI artifact not found")
+        from .historical_ai_mutations import validate_mutation
+        from .historical_ai_storage import historical_marker
+
+        if historical_marker(artifact):
+            validate_mutation(reviewed_by, note, max_note=2000)
         current = artifact.get("approved_status")
         if current == status:
             return artifact
@@ -343,4 +348,4 @@ class AIArtifactService:
             "approved_at": datetime.now(UTC).isoformat(),
             "review_note": note,
         }
-        return self.repository.save_ai_artifact(cast(dict[str, Any], updated))
+        return self.repository.save_ai_artifact(updated)

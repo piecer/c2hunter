@@ -4,6 +4,7 @@ import json
 import time
 from collections.abc import Callable
 from copy import deepcopy
+from threading import RLock
 from typing import Any, Protocol, cast
 
 
@@ -11,6 +12,15 @@ class AIAnalysisTaskQueue(Protocol):
     def ready(self) -> bool: ...
 
     def enqueue(self, run_id: str) -> None: ...
+
+    def ensure_enqueued(self, run_id: str) -> None:
+        """Ensure one waiting/owned dispatch, atomically with queue claims.
+
+        Historical admission and replay both use this seam. An uncertain reply
+        may be retried without adding work already waiting or being processed.
+        Completion racing a stale caller may produce a terminal no-op delivery.
+        """
+        ...
 
     def depth(self) -> int: ...
 
@@ -20,12 +30,25 @@ class InlineAIAnalysisTaskQueue:
 
     def __init__(self, execute: Callable[[str], dict[str, Any]]) -> None:
         self.execute = execute
+        self._lock = RLock()
+        self._active: set[str] = set()
 
     def ready(self) -> bool:
         return True
 
     def enqueue(self, run_id: str) -> None:
         self.execute(run_id)
+
+    def ensure_enqueued(self, run_id: str) -> None:
+        with self._lock:
+            if run_id in self._active:
+                return
+            self._active.add(run_id)
+        try:
+            self.execute(run_id)
+        finally:
+            with self._lock:
+                self._active.remove(run_id)
 
     def depth(self) -> int:
         return 0
@@ -34,16 +57,37 @@ class InlineAIAnalysisTaskQueue:
 class MemoryAIAnalysisTaskQueue:
     def __init__(self) -> None:
         self.run_ids: list[str] = []
+        self.lock = RLock()
+        self._inflight: set[str] = set()
 
     def ready(self) -> bool:
         return True
 
     def enqueue(self, run_id: str) -> None:
-        if run_id not in self.run_ids:
-            self.run_ids.append(run_id)
+        with self.lock:
+            if run_id not in self.run_ids:
+                self.run_ids.append(run_id)
+
+    def ensure_enqueued(self, run_id: str) -> None:
+        with self.lock:
+            if run_id not in self._inflight:
+                self.enqueue(run_id)
+
+    def claim_local(self) -> str | None:
+        with self.lock:
+            if not self.run_ids:
+                return None
+            run_id = self.run_ids.pop(0)
+            self._inflight.add(run_id)
+            return run_id
+
+    def release_local(self, run_id: str) -> None:
+        with self.lock:
+            self._inflight.discard(run_id)
 
     def depth(self) -> int:
-        return len(self.run_ids)
+        with self.lock:
+            return len(self.run_ids)
 
 
 class RedisAIAnalysisTaskQueue:
@@ -62,6 +106,22 @@ class RedisAIAnalysisTaskQueue:
     def enqueue(self, run_id: str) -> None:
         envelope = json.dumps({"ai_run_id": run_id}, separators=(",", ":"))
         self.client.lpush(self.queue_key, envelope)
+
+    def ensure_enqueued(self, run_id: str) -> None:
+        # The worker moves this exact envelope between waiting and processing
+        # atomically. Check both in the same operation as insertion; a separate
+        # existence test followed by LPUSH would race claims and HTTP retries.
+        # No new marker/TTL is needed, including for previously queued runs.
+        envelope = json.dumps({"ai_run_id": run_id}, separators=(",", ":"))
+        script = """
+        for _, key in ipairs({KEYS[1], KEYS[2]}) do
+          for _, raw in ipairs(redis.call('LRANGE', key, 0, -1)) do
+            if raw == ARGV[1] then return 0 end
+          end
+        end
+        return redis.call('LPUSH', KEYS[1], ARGV[1])
+        """
+        self.client.eval(script, 2, self.queue_key, f"{self.queue_key}:processing", envelope)
 
     def depth(self) -> int:
         return cast(int, self.client.llen(self.queue_key))

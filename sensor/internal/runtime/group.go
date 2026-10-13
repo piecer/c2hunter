@@ -9,9 +9,10 @@ import (
 )
 
 type CaptureGroup struct {
-	members []CaptureRuntime
-	mu      sync.RWMutex
-	errors  []string
+	members  []CaptureRuntime
+	mu       sync.RWMutex
+	errors   []string
+	lifetime *captureLifetime
 }
 
 type backgroundCaptureRuntime interface{ backgroundRuntime() }
@@ -39,6 +40,11 @@ func NewCaptureGroup(members []CaptureRuntime) (*CaptureGroup, error) {
 
 func (g *CaptureGroup) Run(ctx context.Context) error {
 	foregroundCtx, cancelForeground := context.WithCancel(ctx)
+	life := &captureLifetime{ctx: foregroundCtx}
+	g.mu.Lock()
+	g.lifetime = life
+	g.mu.Unlock()
+	defer life.terminal.Store(true)
 	backgroundCtx, cancelBackground := context.WithCancel(context.Background())
 	trailingCtx, cancelTrailing := context.WithCancel(context.Background())
 	defer cancelForeground()
@@ -51,18 +57,21 @@ func (g *CaptureGroup) Run(ctx context.Context) error {
 	results := make(chan result, len(g.members))
 	remaining := map[captureRuntimeKind]int{}
 	for _, member := range g.members {
-		kind := foregroundRuntime
+		kind := runtimeKind(member)
 		memberCtx := foregroundCtx
-		if _, trailing := member.(trailingBackgroundCaptureRuntime); trailing {
-			kind = trailingBackgroundRuntime
+		switch kind {
+		case trailingBackgroundRuntime:
 			memberCtx = trailingCtx
-		} else if _, background := member.(backgroundCaptureRuntime); background {
-			kind = backgroundRuntime
+		case backgroundRuntime:
 			memberCtx = backgroundCtx
 		}
 		remaining[kind]++
 		go func(runtime CaptureRuntime, runtimeCtx context.Context, runtimeKind captureRuntimeKind) {
-			results <- result{err: runtime.Run(runtimeCtx), kind: runtimeKind}
+			err := runtime.Run(runtimeCtx)
+			if runtimeKind == foregroundRuntime || err != nil {
+				life.terminal.Store(true)
+			}
+			results <- result{err: err, kind: runtimeKind}
 		}(member, memberCtx, kind)
 	}
 	var failures []error
@@ -94,13 +103,31 @@ func (g *CaptureGroup) Run(ctx context.Context) error {
 	return errors.Join(failures...)
 }
 
-func (g *CaptureGroup) Snapshot() CaptureSnapshot {
+func (g *CaptureGroup) Snapshot() CaptureSnapshot { return g.snapshotWithReadiness(&readinessBudget{}) }
+func (g *CaptureGroup) snapshotWithReadiness(budget *readinessBudget) CaptureSnapshot {
+	g.mu.RLock()
+	life := g.lifetime
+	g.mu.RUnlock()
 	var out CaptureSnapshot
+	if budget != nil && !budget.failed {
+		out.observation = &captureObservation{complete: true, interfaces: []CaptureReadyInterface{}}
+	}
 	jobs := make(map[string]struct{})
 	completed := make(map[string]struct{})
 	var messages []string
 	for _, member := range g.members {
-		snap := member.Snapshot()
+		childBudget := budget
+		if runtimeKind(member) != foregroundRuntime {
+			childBudget = nil
+		}
+		snap := snapshotCapture(member, childBudget)
+		if out.observation != nil && childBudget != nil {
+			if budget.failed {
+				out.observation.invalidate()
+			} else {
+				out.observation.add(snap.observation)
+			}
+		}
 		out.ReceivedPackets += snap.ReceivedPackets
 		out.DroppedPackets += snap.DroppedPackets
 		out.DecodeErrors += snap.DecodeErrors
@@ -135,6 +162,9 @@ func (g *CaptureGroup) Snapshot() CaptureSnapshot {
 	}
 	g.mu.RLock()
 	messages = append(messages, g.errors...)
+	if out.observation != nil && (g.lifetime != life || !life.live()) {
+		out.observation.invalidate()
+	}
 	g.mu.RUnlock()
 	for job := range jobs {
 		out.ActiveJobs = append(out.ActiveJobs, job)
@@ -142,6 +172,16 @@ func (g *CaptureGroup) Snapshot() CaptureSnapshot {
 
 	out.LastError = strings.Join(uniqueStrings(messages), "; ")
 	return out
+}
+
+func runtimeKind(member CaptureRuntime) captureRuntimeKind {
+	if _, ok := member.(trailingBackgroundCaptureRuntime); ok {
+		return trailingBackgroundRuntime
+	}
+	if _, ok := member.(backgroundCaptureRuntime); ok {
+		return backgroundRuntime
+	}
+	return foregroundRuntime
 }
 
 func uniqueStrings(values []string) []string {

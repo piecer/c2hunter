@@ -2313,6 +2313,8 @@ class AIAnalysisRunCreate(BaseModel):
     language: Literal["ko", "en"] = "ko"
     allow_remote: bool = Field(default=False, strict=True)
     discovery_mode: Literal["legacy", "shadow"] = "legacy"
+    baseline_mode: Literal["off", "historical"] = "off"
+    baseline_reference: dict[str, Any] | None = None
 
 
 class AIAnalysisRunCancel(BaseModel):

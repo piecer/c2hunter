@@ -32,6 +32,14 @@ from c2hunter_analysis.pcap_postings import (
     PostingQueryLimits,
 )
 
+from c2hunter_controller import _baseline_storage as baseline_storage
+from c2hunter_controller import historical_ai as historical_dto
+from c2hunter_controller import historical_ai_sql as historical_sql
+from c2hunter_controller import historical_ai_storage as historical_runs
+from c2hunter_controller import historical_generation as baseline_values
+from c2hunter_controller import historical_read as historical_reader
+from c2hunter_controller.baseline_admission import BaselineAdmission, BaselineLease
+from c2hunter_controller.historical_baseline import QualityReview, ScopeConfig
 from c2hunter_controller.pcap_export_store import (
     TERMINAL_EXPORT_STATES,
     ExportPrincipalLimitError,
@@ -492,6 +500,100 @@ class MinioBlobStore:
 
 
 class PostgresRepository(Repository):
+    def control_baseline_scope(
+        self, scope_id: str, request: baseline_values.ControlRequest, actor: str, now: datetime
+    ) -> baseline_values.ControlResult:
+        request, actor, now, digest = baseline_storage.control_arguments(
+            scope_id, request, actor, now
+        )
+        with self._lock:
+            return baseline_storage.sql_control(
+                baseline_storage.publication_connection(self, postgres=True),
+                scope_id,
+                request,
+                actor,
+                now,
+                digest,
+                postgres=True,
+            )
+
+    def page_baseline_control_events(
+        self, scope_id: str, offset: int = 0, limit: int = 20
+    ) -> baseline_values.ControlPage:
+        baseline_storage.control_page_arguments(scope_id, offset, limit)
+        with self._lock:
+            return baseline_storage.sql_events(
+                baseline_storage.publication_connection(self, postgres=True),
+                scope_id,
+                offset,
+                limit,
+                postgres=True,
+            )
+
+    def publish_baseline_source(
+        self,
+        scope_id: str,
+        request: baseline_values.ApprovalRequest,
+        actor: str,
+        now: datetime,
+        *,
+        admission: BaselineAdmission | None = None,
+    ) -> baseline_values.PublicationResult:
+        request, actor, now, digest = baseline_storage.approval_arguments(
+            scope_id, request, actor, now
+        )
+        with BaselineLease(admission) as lease, self._lock, baseline_storage.approval_errors():
+            return baseline_storage.sql_publish(
+                baseline_storage.publication_connection(self, postgres=True),
+                scope_id,
+                request,
+                actor,
+                now,
+                digest,
+                postgres=True,
+                admission=lease,
+            )
+
+    def page_baseline_sources(
+        self, scope_id: str, generation_id: str, offset: int = 0, limit: int = 20
+    ) -> baseline_values.SourcePage:
+        baseline_storage.source_page_arguments(scope_id, generation_id, offset, limit)
+        with self._lock:
+            return baseline_storage.sql_sources(
+                baseline_storage.publication_connection(self, postgres=True),
+                scope_id,
+                generation_id,
+                offset,
+                limit,
+                postgres=True,
+            )
+
+    def create_baseline_scope(
+        self, config: ScopeConfig, actor: str, now: datetime
+    ) -> tuple[baseline_values.ScopeView, bool]:
+        proposed = baseline_storage.new_scope(config, actor, now)
+        with self._lock:
+            return baseline_storage.sql_create(self.connection, proposed, postgres=True)
+
+    def get_baseline_scope(self, scope_id: str) -> baseline_values.ScopeView | None:
+        baseline_storage.scope_id(scope_id)
+        with self._lock:
+            return baseline_storage.sql_get(self.connection, scope_id, postgres=True)
+
+    def page_baseline_scopes(self, offset: int = 0, limit: int = 20) -> baseline_values.ScopePage:
+        baseline_storage.page_arguments(offset, limit)
+        with self._lock:
+            return baseline_storage.sql_page(self.connection, offset, limit, postgres=True)
+
+    def preview_baseline_source(
+        self, scope_id: str, job_id: str, expected_revision: int, purpose: historical_reader.Purpose
+    ) -> baseline_values.SourcePreview:
+        baseline_storage.preview_arguments(scope_id, job_id, expected_revision, purpose)
+        with self._lock:
+            return baseline_storage.sql_preview(
+                self.connection, scope_id, job_id, expected_revision, purpose, postgres=True
+            )
+
     """PostgreSQL JSONB control-plane repository with MinIO export blobs and audit rows."""
 
     _DETECTOR_PRESET_ADVISORY_LOCK = 112737
@@ -502,6 +604,38 @@ class PostgresRepository(Repository):
         "max_attempts,lease_token,lease_expires_at,next_attempt_at,queued_at,updated_at,error_code"
     )
     _LIVE_TASK_RETURNING_COLUMNS = "task." + _LIVE_TASK_COLUMNS.replace(",", ",task.")
+
+    def read_historical_source(
+        self,
+        job_id: str,
+        *,
+        purpose: historical_reader.Purpose,
+        scope: ScopeConfig,
+        quality_review: QualityReview | None,
+    ) -> historical_reader.HistoricalReadSnapshot:
+        historical_reader.validate_arguments(job_id, purpose, scope, quality_review)
+        import psycopg
+        from psycopg.pq import TransactionStatus
+
+        with self._lock:
+            try:
+                connection = self.connection
+                if (
+                    connection.info.transaction_status != TransactionStatus.IDLE
+                    or connection.autocommit
+                ):
+                    raise historical_reader.HistoricalReadError("BASELINE_BUSY")
+                with connection.transaction(), connection.cursor() as cursor:
+                    cursor.execute("SET LOCAL lock_timeout='5s'")
+                    return historical_reader.postgres_snapshot(
+                        cursor, job_id, purpose, scope, quality_review
+                    )
+            except psycopg.errors.LockNotAvailable:
+                raise historical_reader.HistoricalReadError("BASELINE_BUSY") from None
+            except psycopg.Error:
+                raise historical_reader.HistoricalReadError(
+                    "BASELINE_STORAGE_UNAVAILABLE"
+                ) from None
 
     def __init__(self, database_url: str, blob_store: MinioBlobStore) -> None:
         self.database_url = database_url
@@ -2021,6 +2155,23 @@ class PostgresRepository(Repository):
                             (data->>'analysis_job_id'),(data->>'uploaded_at'),id
                           ) WHERE kind='sensor_pcap';
 
+                        """
+                    )
+                    # Release bootstrap DDL table locks before acquiring job row fences.
+                    # Otherwise a deleting job owner can wait on our schema lock while
+                    # we wait on its row, creating a lock-order cycle.
+                    connection.commit()
+                    cursor.execute(
+                        "SELECT id FROM controller_objects WHERE kind='job' AND ("
+                        "data ? 'flow_records' OR data ? 'payload_signatures' OR "
+                        "EXISTS (SELECT 1 FROM job_flow_records "
+                        "WHERE job_id=controller_objects.id) OR "
+                        "EXISTS (SELECT 1 FROM job_candidates WHERE job_id=controller_objects.id)) "
+                        "ORDER BY id FOR UPDATE"
+                    )
+                    migration_job_ids = [str(row[0]) for row in cursor.fetchall()]
+                    cursor.execute(
+                        """
                         INSERT INTO job_flow_records(job_id,data)
                           SELECT id,data->'flow_records'
                           FROM controller_objects
@@ -2049,33 +2200,43 @@ class PostgresRepository(Repository):
                         UPDATE controller_objects
                           SET data=data-'payload_signatures'
                           WHERE kind='job' AND data ? 'payload_signatures';
-                        INSERT INTO candidate_records(
-                          candidate_id,job_id,position,score,severity,excluded,data
-                        )
-                          SELECT candidate->>'id',legacy.job_id,entry.ordinality-1,
-                                 COALESCE((candidate->>'score')::integer,0),
-                                 COALESCE(candidate->>'severity',''),
-                                 COALESCE((candidate->>'excluded')::boolean,false),candidate
-                          FROM job_candidates AS legacy
-                          CROSS JOIN LATERAL jsonb_array_elements(legacy.data)
-                            WITH ORDINALITY AS entry(candidate,ordinality)
-                          WHERE candidate ? 'id'
-                          ON CONFLICT(candidate_id) DO NOTHING;
-                        DELETE FROM job_candidates AS legacy
-                          WHERE jsonb_array_length(legacy.data)=(
-                            SELECT COUNT(*)
-                            FROM candidate_records AS record
-                            WHERE record.job_id=legacy.job_id
-                          );
                         """
                     )
+                    self._migrate_legacy_candidates(cursor, migration_job_ids)
+                    cursor.execute(baseline_storage.schema(postgres=True))
                 connection.commit()
                 self._ensure_candidate_query_indexes(connection)
+                historical_sql.initialize_postgres(connection)
             except Exception:
-                connection.close()
+                historical_sql.close_quarantined(connection)
                 raise
             self._connection = connection
             return connection
+
+    @staticmethod
+    def _migrate_legacy_candidates(cursor: Any, job_ids: list[str]) -> None:
+        """Re-read legacy rows only for the initializer's ordered, locked parents."""
+        cursor.execute(
+            "INSERT INTO candidate_records("
+            "candidate_id,job_id,position,score,severity,excluded,data) "
+            "SELECT candidate->>'id',legacy.job_id,entry.ordinality-1,"
+            "COALESCE((candidate->>'score')::integer,0),"
+            "COALESCE(candidate->>'severity',''),"
+            "COALESCE((candidate->>'excluded')::boolean,false),candidate "
+            "FROM job_candidates AS legacy "
+            "JOIN controller_objects j ON j.kind='job' AND j.id=legacy.job_id "
+            "CROSS JOIN LATERAL jsonb_array_elements(legacy.data) "
+            "WITH ORDINALITY AS entry(candidate,ordinality) "
+            "WHERE legacy.job_id=ANY(%s) AND candidate ? 'id' "
+            "ON CONFLICT(candidate_id) DO NOTHING",
+            (job_ids,),
+        )
+        cursor.execute(
+            "DELETE FROM job_candidates AS legacy WHERE legacy.job_id=ANY(%s) AND "
+            "jsonb_array_length(legacy.data)=(SELECT COUNT(*) FROM candidate_records AS record "
+            "WHERE record.job_id=legacy.job_id)",
+            (job_ids,),
+        )
 
     @staticmethod
     def _ensure_candidate_query_indexes(connection: Any) -> None:
@@ -2193,11 +2354,14 @@ class PostgresRepository(Repository):
         return chunks
 
     @classmethod
-    def _replace_job_flow_records(cls, cursor: Any, job_id: str, records: list[Any]) -> None:
+    def _replace_job_flow_records(cls, cursor: Any, job_id: str, records: list[Any] | None) -> None:
         try:
             cursor.execute("DELETE FROM job_flow_record_chunks WHERE job_id=%s", (job_id,))
             cursor.execute("DELETE FROM job_flow_records WHERE job_id=%s", (job_id,))
-            for chunk_no, chunk in enumerate(cls._json_array_chunks(records)):
+            # Omission still clears replacement callers' parts, but is not an
+            # observed empty array. Only explicit input earns an empty chunk.
+            chunks = [] if records is None else cls._json_array_chunks(records) or [""]
+            for chunk_no, chunk in enumerate(chunks):
                 cursor.execute(
                     "INSERT INTO job_flow_record_chunks(job_id,chunk_no,data) "
                     "VALUES(%s,%s,('[' || %s || ']')::jsonb)",
@@ -3989,7 +4153,9 @@ ORDER BY source_kind,source_id
                 "INSERT INTO controller_objects(kind,id,data) VALUES('job',%s,%s::jsonb)",
                 (job["id"], self._json(metadata)),
             )
-            self._replace_job_flow_records(cursor, job["id"], list(job.get("flow_records", [])))
+            self._replace_job_flow_records(
+                cursor, job["id"], list(job["flow_records"]) if "flow_records" in job else None
+            )
             cursor.execute(
                 "INSERT INTO job_payload_signatures(job_id,data) VALUES(%s,%s::jsonb)",
                 (job["id"], self._json(job.get("payload_signatures", []))),
@@ -4061,6 +4227,64 @@ ORDER BY source_kind,source_id
                 return changed
             except Exception:
                 self.connection.rollback()
+                raise
+
+    def complete_job_with_candidates(
+        self, job: dict[str, Any], candidates: list[dict[str, Any]]
+    ) -> bool:
+        if job.get("status") not in {"COMPLETED", "PARTIALLY_COMPLETED"}:
+            raise ValueError("successful publication requires a successful terminal status")
+        if type(job.get("candidate_count")) is not int or job["candidate_count"] != len(candidates):
+            raise ValueError("candidate_count must match candidates")
+        metadata = {
+            key: value
+            for key, value in job.items()
+            if key not in {"flow_records", "payload_signatures"}
+        }
+        connection = self.connection
+        with self._lock:
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT data FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
+                        (str(job["id"]),),
+                    )
+                    row = cursor.fetchone()
+                    if row is None or row[0].get("status") in _JOB_TERMINAL_STATUSES:
+                        connection.commit()
+                        return False
+                    cursor.execute("DELETE FROM candidate_records WHERE job_id=%s", (job["id"],))
+                    cursor.executemany(
+                        "INSERT INTO candidate_records("
+                        "candidate_id,job_id,position,score,severity,excluded,data"
+                        ") VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                        [
+                            (
+                                str(candidate["id"]),
+                                str(job["id"]),
+                                position,
+                                int(candidate.get("score", 0)),
+                                str(candidate.get("severity", "")),
+                                bool(candidate.get("excluded", False)),
+                                self._json(candidate),
+                            )
+                            for position, candidate in enumerate(candidates)
+                        ],
+                    )
+                    cursor.execute(
+                        "UPDATE controller_objects SET data=%s::jsonb WHERE kind='job' AND id=%s",
+                        (self._json(metadata), str(job["id"])),
+                    )
+                    for kind, value in (("job", metadata), ("candidates", candidates)):
+                        cursor.execute(
+                            "INSERT INTO audit_events(kind,object_id,occurred_at,data) "
+                            "VALUES(%s,%s,%s,%s::jsonb)",
+                            (kind, str(job["id"]), datetime.now(UTC), self._json(value)),
+                        )
+                connection.commit()
+                return True
+            except Exception:
+                connection.rollback()
                 raise
 
     def mark_analysis_started(
@@ -4308,7 +4532,9 @@ ORDER BY source_kind,source_id
                 if cursor.rowcount != 1:
                     raise RuntimeError("preparation publication metadata rowcount mismatch")
                 self._replace_job_flow_records(
-                    cursor, str(job["id"]), list(job.get("flow_records", []))
+                    cursor,
+                    str(job["id"]),
+                    list(job["flow_records"]) if "flow_records" in job else None,
                 )
                 self.connection.commit()
                 return True
@@ -6222,6 +6448,12 @@ ORDER BY source_kind,source_id
         with self._lock:
             try:
                 with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT id FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
+                        (job_id,),
+                    )
+                    if cursor.fetchone() is None:
+                        raise ValueError("candidate parent job not found")
                     cursor.execute("DELETE FROM candidate_records WHERE job_id=%s", (job_id,))
                     cursor.executemany(
                         "INSERT INTO candidate_records("
@@ -6475,10 +6707,16 @@ ORDER BY source_kind,source_id
         )
 
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        from .historical_ai_storage import reject_generic_historical
+
+        reject_generic_historical(run)
         connection = self.connection
         with self._lock:
             try:
                 with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended('pcap-export-admission',0))"
+                    )
                     cursor.execute(
                         "INSERT INTO ai_analysis_runs"
                         "(run_id,analysis_job_id,idempotency_key,created_at,data) "
@@ -6495,17 +6733,18 @@ ORDER BY source_kind,source_id
                     )
                     row = cursor.fetchone()
                     if row is None:
-                        cursor.execute(
-                            "SELECT data FROM ai_analysis_runs "
-                            "WHERE analysis_job_id=%s AND idempotency_key=%s",
+                        existing = historical_sql.RunSQL(cursor, True).get(
+                            "analysis_job_id=? AND idempotency_key=?",
                             (run["analysis_job_id"], run["idempotency_key"]),
                         )
-                        existing_row = cursor.fetchone()
-                        if existing_row is None:
+                        if existing is None:
                             raise RuntimeError("AI run idempotency conflict could not be read")
+                        historical_runs.require(
+                            historical_runs.OWNER_KEY not in existing,
+                            "BASELINE_IDEMPOTENCY_CONFLICT",
+                        )
                         connection.commit()
-                        value = existing_row[0]
-                        return (value if isinstance(value, dict) else json.loads(value)), False
+                        return existing, False
                     cursor.execute(
                         "INSERT INTO audit_events(kind,object_id,occurred_at,data) "
                         "VALUES('ai-run',%s,%s,%s::jsonb)",
@@ -6517,186 +6756,174 @@ ORDER BY source_kind,source_id
                 connection.rollback()
                 raise
 
-    def save_ai_run(self, run: dict[str, Any]) -> dict[str, Any]:
-        connection = self.connection
+    @contextmanager
+    def _historical_connection(self) -> Iterator[Any]:
         with self._lock:
+            connection = self.connection
             try:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        "SELECT data FROM ai_analysis_runs WHERE run_id=%s FOR UPDATE",
-                        (run["id"],),
-                    )
-                    row = cursor.fetchone()
-                    if row is None:
-                        connection.commit()
-                        raise KeyError(f"AI run not found: {run['id']}")
-                    value = row[0]
-                    existing = value if isinstance(value, dict) else json.loads(value)
-                    if existing.get("status") in {"COMPLETED", "FAILED", "CANCELLED"}:
-                        connection.commit()
-                        return existing
-                    cursor.execute(
-                        "UPDATE ai_analysis_runs SET data=%s::jsonb WHERE run_id=%s",
-                        (self._json(run), run["id"]),
-                    )
-                    cursor.execute(
-                        "INSERT INTO audit_events(kind,object_id,occurred_at,data) "
-                        "VALUES('ai-run',%s,%s,%s::jsonb)",
-                        (run["id"], datetime.now(UTC), self._json(run)),
-                    )
-                connection.commit()
-                return deepcopy(run)
-            except Exception:
-                connection.rollback()
+                yield connection
+            except historical_runs.HistoricalStorageOutcomeUnknown:
+                self._connection = None
+                historical_sql.close_quarantined(connection)
                 raise
 
+    def _confirm_historical_run(self, run: dict[str, Any]) -> None:
+        import psycopg
+
+        historical_sql.confirm_run(
+            run, lambda: psycopg.connect(self.database_url, autocommit=False), postgres=True
+        )
+
+    def save_ai_run(self, run: dict[str, Any]) -> dict[str, Any]:
+        with self._historical_connection() as connection:
+            with historical_sql.transaction(connection, postgres=True, write=True) as cursor:
+                saved = historical_sql.RunSQL(cursor, True).save(run)
+            if historical_runs.OWNER_KEY in saved:
+                self._confirm_historical_run(saved)
+            return deepcopy(saved)
+
+    def admit_historical_ai_run(
+        self,
+        request: historical_dto.HistoricalAdmissionRequest,
+        builder: historical_runs.Builder,
+        *,
+        admission: BaselineAdmission | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        request = historical_dto.checked_request(request)
+        with BaselineLease(admission) as lease, self._historical_connection() as connection:
+            with historical_sql.transaction(connection, postgres=True, write=True) as cursor:
+                run, created = historical_sql.RunSQL(cursor, True).admit(request, builder, lease)
+            self._confirm_historical_run(run)
+            return run, created
+
+    def get_ai_run_by_request(self, job_id: str, idempotency_key: str) -> dict[str, Any] | None:
+        with (
+            self._historical_connection() as connection,
+            historical_sql.transaction(connection, postgres=True) as cursor,
+        ):
+            return historical_sql.RunSQL(cursor, True).get(
+                "analysis_job_id=? AND idempotency_key=?", (job_id, idempotency_key)
+            )
+
     def get_ai_run(self, run_id: str) -> dict[str, Any] | None:
-        with self.connection.cursor() as cursor:
-            cursor.execute("SELECT data FROM ai_analysis_runs WHERE run_id=%s", (run_id,))
-            row = cursor.fetchone()
-            self.connection.commit()
-        if row is None:
-            return None
-        value = row[0]
-        return value if isinstance(value, dict) else json.loads(value)
+        with (
+            self._historical_connection() as connection,
+            historical_sql.transaction(connection, postgres=True) as cursor,
+        ):
+            return historical_sql.RunSQL(cursor, True).get("run_id=?", (run_id,), compact=True)
 
     def list_ai_runs(self, job_id: str) -> list[dict[str, Any]]:
-        with self.connection.cursor() as cursor:
+        with (
+            self._historical_connection() as connection,
+            historical_sql.transaction(connection, postgres=True) as cursor,
+        ):
             cursor.execute(
-                "SELECT data FROM ai_analysis_runs "
+                "SELECT ctid::text FROM ai_analysis_runs "
                 "WHERE analysis_job_id=%s ORDER BY created_at DESC",
                 (job_id,),
             )
-            rows = cursor.fetchall()
-            self.connection.commit()
-        return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
+            ids = cursor.fetchall()
+            store = historical_sql.RunSQL(cursor, True)
+            return [
+                cast(dict[str, Any], store.get("ctid=?::tid", (row[0],), compact=True))
+                for row in ids
+            ]
 
     def save_ai_assessment(self, assessment: dict[str, Any]) -> dict[str, Any]:
-        connection = self.connection
-        with self._lock:
-            try:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        "INSERT INTO ai_candidate_assessments"
-                        "(assessment_id,ai_run_id,created_at,data) VALUES(%s,%s,%s,%s::jsonb) "
-                        "ON CONFLICT(assessment_id) DO NOTHING",
-                        (
-                            assessment["id"],
-                            assessment["ai_run_id"],
-                            assessment["created_at"],
-                            self._json(assessment),
-                        ),
-                    )
-                    cursor.execute(
-                        "INSERT INTO audit_events(kind,object_id,occurred_at,data) "
-                        "VALUES('ai-assessment',%s,%s,%s::jsonb)",
-                        (assessment["id"], datetime.now(UTC), self._json(assessment)),
-                    )
-                connection.commit()
-                return deepcopy(assessment)
-            except Exception:
-                connection.rollback()
-                raise
+        import psycopg
+
+        from .historical_ai_descendants import SQLAccess, confirm_descendant
+
+        with self._historical_connection() as connection:
+            with historical_sql.transaction(connection, postgres=True, write=True) as cursor:
+                saved = SQLAccess(cursor, True).save("A", assessment)
+            if saved.get("baseline_mode") == "historical":
+                confirm_descendant(
+                    "A",
+                    saved,
+                    lambda: psycopg.connect(self.database_url, autocommit=False),
+                    postgres=True,
+                )
+            return saved
 
     def get_ai_assessment(self, assessment_id: str) -> dict[str, Any] | None:
-        with self.connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT data FROM ai_candidate_assessments WHERE assessment_id=%s",
-                (assessment_id,),
-            )
-            row = cursor.fetchone()
-            self.connection.commit()
-        if row is None:
-            return None
-        value = row[0]
-        return value if isinstance(value, dict) else json.loads(value)
+        from .historical_ai_descendants import SQLAccess
+
+        with (
+            self._historical_connection() as connection,
+            historical_sql.transaction(connection, postgres=True) as cursor,
+        ):
+            return SQLAccess(cursor, True).get("A", assessment_id)
 
     def list_ai_assessments(self, run_id: str) -> list[dict[str, Any]]:
-        with self.connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT data FROM ai_candidate_assessments WHERE ai_run_id=%s ORDER BY created_at",
-                (run_id,),
-            )
-            rows = cursor.fetchall()
-            self.connection.commit()
-        return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
+        from .historical_ai_descendants import SQLAccess
+
+        with (
+            self._historical_connection() as connection,
+            historical_sql.transaction(connection, postgres=True) as cursor,
+        ):
+            return SQLAccess(cursor, True).list("A", run_id)
 
     def save_ai_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]:
-        connection = self.connection
-        with self._lock:
-            try:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        "INSERT INTO ai_generated_artifacts"
-                        "(artifact_id,assessment_id,created_at,data) VALUES(%s,%s,%s,%s::jsonb) "
-                        "ON CONFLICT(artifact_id) DO UPDATE SET data=excluded.data",
-                        (
-                            artifact["id"],
-                            artifact["assessment_id"],
-                            artifact["created_at"],
-                            self._json(artifact),
-                        ),
-                    )
-                connection.commit()
-                return deepcopy(artifact)
-            except Exception:
-                connection.rollback()
-                raise
+        import psycopg
+
+        from .historical_ai_descendants import SQLAccess, confirm_descendant
+
+        with self._historical_connection() as connection:
+            with historical_sql.transaction(connection, postgres=True, write=True) as cursor:
+                saved = SQLAccess(cursor, True).save("T", artifact)
+            if saved.get("baseline_mode") == "historical":
+                confirm_descendant(
+                    "T",
+                    saved,
+                    lambda: psycopg.connect(self.database_url, autocommit=False),
+                    postgres=True,
+                )
+            return saved
 
     def get_ai_artifact(self, artifact_id: str) -> dict[str, Any] | None:
-        with self.connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT data FROM ai_generated_artifacts WHERE artifact_id=%s", (artifact_id,)
-            )
-            row = cursor.fetchone()
-            self.connection.commit()
-        if row is None:
-            return None
-        return row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        from .historical_ai_descendants import SQLAccess
+
+        with (
+            self._historical_connection() as connection,
+            historical_sql.transaction(connection, postgres=True) as cursor,
+        ):
+            return SQLAccess(cursor, True).get("T", artifact_id)
 
     def list_ai_artifacts(self, assessment_id: str) -> list[dict[str, Any]]:
-        with self.connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT data FROM ai_generated_artifacts "
-                "WHERE assessment_id=%s ORDER BY created_at,artifact_id",
-                (assessment_id,),
-            )
-            rows = cursor.fetchall()
-            self.connection.commit()
-        return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
+        from .historical_ai_descendants import SQLAccess
+
+        with (
+            self._historical_connection() as connection,
+            historical_sql.transaction(connection, postgres=True) as cursor,
+        ):
+            return SQLAccess(cursor, True).list("T", assessment_id)
 
     def save_ai_feedback(self, feedback: dict[str, Any]) -> dict[str, Any]:
-        connection = self.connection
-        with self._lock:
-            try:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        "INSERT INTO ai_feedback"
-                        "(feedback_id,assessment_id,created_at,data) VALUES(%s,%s,%s,%s::jsonb) "
-                        "ON CONFLICT(feedback_id) DO NOTHING",
-                        (
-                            feedback["id"],
-                            feedback["assessment_id"],
-                            feedback["created_at"],
-                            self._json(feedback),
-                        ),
-                    )
-                connection.commit()
-                return deepcopy(feedback)
-            except Exception:
-                connection.rollback()
-                raise
+        import psycopg
+
+        from .historical_ai_descendants import SQLAccess, confirm_descendant
+
+        with self._historical_connection() as connection:
+            with historical_sql.transaction(connection, postgres=True, write=True) as cursor:
+                saved = SQLAccess(cursor, True).save("F", feedback)
+            if saved.get("baseline_mode") == "historical":
+                confirm_descendant(
+                    "F",
+                    saved,
+                    lambda: psycopg.connect(self.database_url, autocommit=False),
+                    postgres=True,
+                )
+            return saved
 
     def list_ai_feedback(self, assessment_id: str) -> list[dict[str, Any]]:
-        with self.connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT data FROM ai_feedback "
-                "WHERE assessment_id=%s ORDER BY created_at,feedback_id",
-                (assessment_id,),
-            )
-            rows = cursor.fetchall()
-            self.connection.commit()
-        return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
+        from .historical_ai_descendants import SQLAccess
+
+        with (
+            self._historical_connection() as connection,
+            historical_sql.transaction(connection, postgres=True) as cursor,
+        ):
+            return SQLAccess(cursor, True).list("F", assessment_id)
 
     def append_audit_event(self, kind: str, object_id: str, data: dict[str, Any]) -> None:
         self._audit(kind, object_id, data)
@@ -6833,21 +7060,46 @@ ORDER BY source_kind,source_id
             )
         return records
 
+    @staticmethod
+    def _lock_candidate_parent_first(cursor: Any, candidate_id: str) -> tuple[str, Any] | None:
+        # Discovery is deliberately unlocked. Never acquire a job after a candidate lock.
+        cursor.execute(
+            "SELECT job_id FROM candidate_records WHERE candidate_id=%s", (candidate_id,)
+        )
+        owner = cursor.fetchone()
+        if owner is None:
+            return None
+        job_id = str(owner[0])
+        cursor.execute(
+            "SELECT id FROM controller_objects WHERE kind='job' AND id=%s FOR UPDATE",
+            (job_id,),
+        )
+        if cursor.fetchone() is None:
+            return None
+        cursor.execute(
+            "SELECT job_id,data FROM candidate_records WHERE candidate_id=%s FOR UPDATE",
+            (candidate_id,),
+        )
+        row = cursor.fetchone()
+        if row is None or str(row[0]) != job_id:
+            return None
+        return job_id, row[1]
+
     def update_candidate(self, candidate_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
         """Update a candidate by ID across all jobs."""
         connection = self.connection
         with self._lock:
             try:
                 with connection.cursor() as cursor:
-                    cursor.execute(
-                        "SELECT data FROM candidate_records WHERE candidate_id=%s FOR UPDATE",
-                        (candidate_id,),
-                    )
-                    row = cursor.fetchone()
+                    row = self._lock_candidate_parent_first(cursor, candidate_id)
                     if row is None:
                         connection.commit()
                         return None
-                    value = row[0]
+                    if ("id" in updates and updates["id"] != candidate_id) or (
+                        "job_id" in updates and updates["job_id"] != row[0]
+                    ):
+                        raise ValueError("candidate identity is immutable")
+                    value = row[1]
                     updated = value if isinstance(value, dict) else json.loads(value)
                     updated = deepcopy(updated)
                     updates_copy = deepcopy(updates)
@@ -6885,6 +7137,9 @@ ORDER BY source_kind,source_id
         with self._lock:
             try:
                 with connection.cursor() as cursor:
+                    if self._lock_candidate_parent_first(cursor, candidate_id) is None:
+                        connection.commit()
+                        return False
                     cursor.execute(
                         "DELETE FROM candidate_records WHERE candidate_id=%s "
                         "RETURNING candidate_id",

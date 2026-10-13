@@ -16,13 +16,10 @@ from typing import Any, cast
 from .ai_analysis import TERMINAL_STATES, AIAnalysisService, AIRepository
 from .ai_gateway import AIAnalysisCancelled
 from .ai_queueing import MemoryAIAnalysisTaskQueue
+from .historical_ai_storage import historical_marker
 
 
 class LocalAITaskQueue(MemoryAIAnalysisTaskQueue):
-    def __init__(self) -> None:
-        super().__init__()
-        self.lock = threading.Lock()
-
     def enqueue(self, run_id: str) -> None:
         with self.lock:
             if run_id in self.run_ids:
@@ -91,7 +88,12 @@ class LocalAIRuntime:
             # Cancellation wins over a late completion or model failure.
             if name == "save_ai_run":
                 latest = self.service.repository.get_ai_run(args[0]["id"])
-                if latest is not None and latest["status"] in TERMINAL_STATES:
+                if (
+                    latest is not None
+                    and latest["status"] in TERMINAL_STATES
+                    and not historical_marker(latest)
+                    and not historical_marker(args[0])
+                ):
                     future.set_result(deepcopy(latest))
                     return
             result = getattr(self.service.repository, name)(*args)
@@ -104,19 +106,27 @@ class LocalAIRuntime:
         while not self.stopped.is_set():
             self.service_call()
             try:
-                self.finished.get_nowait()
+                self.queue.release_local(self.finished.get_nowait())
                 self.inflight = None
             except Empty:
                 pass
-            if self.inflight is None and self.queue.run_ids:
-                run_id = self.queue.run_ids.pop(0)
-                run = self.service.repository.get_ai_run(run_id)
-                if run is not None and run["status"] not in TERMINAL_STATES:
-                    self.inflight = run_id
-                    self.thread = threading.Thread(
-                        target=self.compute, args=(run_id,), name="local-ai-worker", daemon=True
-                    )
-                    self.thread.start()
+            if self.inflight is None and (run_id := self.queue.claim_local()) is not None:
+                handed_off = False
+                try:
+                    run = self.service.repository.get_ai_run(run_id)
+                    if run is not None and run["status"] not in TERMINAL_STATES:
+                        thread = threading.Thread(
+                            target=self.compute, args=(run_id,), name="local-ai-worker", daemon=True
+                        )
+                        thread.start()
+                        self.thread = thread
+                        self.inflight = run_id
+                        handed_off = True
+                finally:
+                    # Only a started compute owner can send the finished notification.
+                    # Failed reads/construction/start must leave exact replay recoverable.
+                    if not handed_off:
+                        self.queue.release_local(run_id)
             await asyncio.sleep(0.01)
 
     async def stop(self) -> None:

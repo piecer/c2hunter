@@ -9,6 +9,9 @@ import DDoSAIInterpretation from './DDoSAIInterpretation';
 import ReportLanguageScope from './ReportLanguage';
 import C2DiscoverySelection, { type SelectionSummary } from './C2DiscoverySelection';
 import C2AssessmentDetails, { type AIAssessment } from './C2AssessmentDetails';
+import HistoricalReferenceInput, { type BaselineReference } from './HistoricalReferenceInput';
+import HistoricalReferenceDetails, { type BaselineSummary } from './HistoricalReferenceDetails';
+import { historicalAccessDenied, historicalErrorText } from './historicalReferenceErrors';
 import { useReportLanguage } from './reportLanguageContext';
 import AnalysisConfiguration, { StructuredValue } from './AnalysisConfiguration';
 import { runPcapExportLifecycle, type PcapExportLifecycleResult } from './pcapExportLifecycle';
@@ -67,7 +70,7 @@ type Candidate = { id: string; job_id?: string; candidate_ip: string; score: num
 
 type AIArtifact = { id: string; artifact_type: 'SPLUNK_HUNT' | 'SPLUNK_DETECTION' | 'MISP_DRAFT'; validation_status: string; approved_status: 'PENDING' | 'APPROVED' | 'REJECTED'; content: Record<string, unknown> };
 type AIFeedback = { id: string; verdict: 'CONFIRM_C2' | 'CONFIRM_BENIGN' | 'NEED_MORE_DATA' | 'REJECT_EXPLANATION'; corrected_confidence?: number | null; note: string; created_by: string; created_at: string };
-type AIRun = { id: string; analysis_job_id: string; status: string; progress_percent?: number; candidate_count: number; created_at: string; error_code?: string; error_message?: string; discovery_mode?: 'legacy' | 'shadow'; selection_summary?: SelectionSummary };
+type AIRun = { id: string; analysis_job_id: string; status: string; progress_percent?: number; candidate_count: number; created_at: string; error_code?: string; error_message?: string; discovery_mode?: 'legacy' | 'shadow'; selection_summary?: SelectionSummary; baseline_mode?: 'off' | 'historical'; baseline_summary?: BaselineSummary };
 type FlowLabel = { id: string; verdict: 'C2' | 'BENIGN'; confidence: 'CONFIRMED' | 'HIGH' | 'MEDIUM'; note: string; created_by?: string; created_at: string };
 type FlowRecordReview = { flow_id: string; job_id: string; sensor_id?: string; timestamp: string; source_ip: string; destination_ip: string; source_port?: number; destination_port?: number; internal_ip?: string; external_ip?: string; service_port?: number; protocol: string; direction: string; packet_count?: number; total_bytes?: number; payload_hash?: string; payload_prefix_hash?: string; payload_length?: number; payload_entropy?: number; payload_printable_ratio?: number; payload_simhash?: string; payload_feature_version?: string; has_payload: boolean; current_label?: FlowLabel | null };
 type PayloadPreview = { flow_id: string; payload_hex: string; payload_ascii: string; sample_bytes: number; payload_length?: number; truncated: boolean; payload_hash?: string };
@@ -612,16 +615,18 @@ function DDoSJobReanalysis({ job }: { job: Job }) {
 
 function AIArtifactPanel({ assessmentId }: { assessmentId: string }) {
   const queryClient = useQueryClient();
+  const language = useReportLanguage();
   const artifacts = useQuery<List<AIArtifact>, Error>({
     queryKey: ['ai-artifacts', assessmentId],
     queryFn: () => api.get(`/ai-assessments/${assessmentId}/artifacts`),
+    retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
   });
   const review = useMutation({
     mutationFn: ({ id, action }: { id: string; action: 'approve' | 'reject' }) => api.post(`/ai-artifacts/${id}/${action}`, { note: 'Reviewed from C2Hunter web console' }),
     onSuccess: async () => queryClient.invalidateQueries({ queryKey: ['ai-artifacts', assessmentId] }),
   });
   if (artifacts.isLoading) return <p role="status">AI 생성 초안을 불러오는 중…</p>;
-  if (artifacts.isError) return <p role="alert" className="error-text">AI 생성 초안을 불러오지 못했습니다: {artifacts.error.message}</p>;
+  if (artifacts.isError) return <p role="alert" className="error-text">AI 생성 초안을 불러오지 못했습니다: {historicalAccessDenied(artifacts.error) ? historicalErrorText(artifacts.error, language) : artifacts.error.message}</p>;
   if (!items(artifacts.data).length) return <p className="muted">생성된 Splunk/MISP 초안이 없습니다.</p>;
   return <section aria-label="AI-generated artifacts" className="artifact-grid">
     {items(artifacts.data).map(artifact => {
@@ -642,11 +647,13 @@ function AIArtifactPanel({ assessmentId }: { assessmentId: string }) {
 
 function AIFeedbackPanel({ assessmentId }: { assessmentId: string }) {
   const queryClient = useQueryClient();
+  const language = useReportLanguage();
   const [verdict, setVerdict] = useState<AIFeedback['verdict']>('NEED_MORE_DATA');
   const [note, setNote] = useState('');
   const feedback = useQuery<List<AIFeedback>, Error>({
     queryKey: ['ai-feedback', assessmentId],
     queryFn: () => api.get(`/ai-assessments/${assessmentId}/feedback`),
+    retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
   });
   const submit = useMutation({
     mutationFn: () => api.post(`/ai-assessments/${assessmentId}/feedback`, { verdict, note }),
@@ -659,14 +666,14 @@ function AIFeedbackPanel({ assessmentId }: { assessmentId: string }) {
     <h4>Analyst feedback</h4>
     <p className="muted">Confirmed analyst feedback is append-only and does not replace the AI verdict above.</p>
     {feedback.isLoading && <p role="status">분석가 피드백을 불러오는 중…</p>}
-    {feedback.isError && <p role="alert" className="error-text">피드백 조회 실패: {feedback.error.message}</p>}
-    {items(feedback.data).map(item => <article className="feedback-entry" key={item.id}><span className={`badge feedback-${item.verdict.toLowerCase()}`}>{item.verdict}</span><p>{item.note}</p><small>{item.created_by} · {fmt(item.created_at)}</small></article>)}
-    <form onSubmit={event => { event.preventDefault(); if (note.trim()) submit.mutate(); }}>
+    {feedback.isError && <p role="alert" className="error-text">피드백 조회 실패: {historicalAccessDenied(feedback.error) ? historicalErrorText(feedback.error, language) : feedback.error.message}</p>}
+    {!feedback.isError && items(feedback.data).map(item => <article className="feedback-entry" key={item.id}><span className={`badge feedback-${item.verdict.toLowerCase()}`}>{item.verdict}</span><p>{item.note}</p><small>{item.created_by} · {fmt(item.created_at)}</small></article>)}
+    <form onSubmit={event => { event.preventDefault(); if (note.trim() && !historicalAccessDenied(feedback.error) && !historicalAccessDenied(submit.error)) submit.mutate(); }}>
       <label>Confirmed assessment<select value={verdict} onChange={event => setVerdict(event.target.value as AIFeedback['verdict'])}><option value="CONFIRM_C2">Confirm C2</option><option value="CONFIRM_BENIGN">Confirm benign</option><option value="NEED_MORE_DATA">Need more data</option><option value="REJECT_EXPLANATION">Reject AI explanation</option></select></label>
       <label>Analyst note<textarea required minLength={1} maxLength={5000} value={note} onChange={event => setNote(event.target.value)} /></label>
-      <button disabled={submit.isPending || !note.trim()}>{submit.isPending ? 'Saving feedback…' : 'Save confirmed feedback'}</button>
+      <button disabled={submit.isPending || !note.trim() || historicalAccessDenied(feedback.error) || historicalAccessDenied(submit.error)}>{submit.isPending ? 'Saving feedback…' : 'Save confirmed feedback'}</button>
     </form>
-    {submit.error && <p role="alert" className="error-text">피드백 저장 실패: {submit.error.message}</p>}
+    {submit.error && <p role="alert" className="error-text">피드백 저장 실패: {historicalAccessDenied(submit.error) ? historicalErrorText(submit.error, language) : submit.error.message}</p>}
   </section>;
 }
 
@@ -675,6 +682,9 @@ function AIAnalysisPanel({ job, knownCandidateIds }: { job: Job; knownCandidateI
   const language = useReportLanguage();
   const t = (en: string, ko: string) => language === 'ko' ? ko : en;
   const [shadow, setShadow] = useState(false);
+  const [historical, setHistorical] = useState(false);
+  const [pinnedBaseline, setPinnedBaseline] = useState<{ runId?: string; reference: BaselineReference } | null>(null);
+  const [savedRunId, setSavedRunId] = useState<string>();
   const capabilities = useQuery<{ available: boolean; remote: boolean; destination?: string | null; provider?: string; model_name?: string; reason?: string | null }, Error>({
     queryKey: ['ai-capabilities'], queryFn: () => api.get('/ai-capabilities'), retry: false,
   });
@@ -687,7 +697,8 @@ function AIAnalysisPanel({ job, knownCandidateIds }: { job: Job; knownCandidateI
     queryFn: () => api.get(`/analysis-jobs/${job.id}/ai-runs`),
     refetchInterval: query => items(query.state.data).some(run => !terminalStatuses.has(run.status)) ? 2000 : false,
   });
-  const saved = items(runs.data)[0];
+  const saved = items(runs.data).find(item => item.id === savedRunId) ?? items(runs.data)[0];
+  const baselineReference = pinnedBaseline?.runId === saved?.id ? pinnedBaseline?.reference ?? null : null;
   const run = useQuery<AIRun, Error>({
     queryKey: ['ai-run', saved?.id], queryFn: () => api.get(`/ai-runs/${saved?.id}`),
     enabled: Boolean(saved?.id), retry: false,
@@ -702,43 +713,53 @@ function AIAnalysisPanel({ job, knownCandidateIds }: { job: Job; knownCandidateI
     queryKey: ['ai-assessments', latest?.id, terminalRun ? 'terminal' : 'active'],
     queryFn: () => api.get(`/ai-runs/${latest?.id}/assessments`),
     enabled: Boolean(latest?.id),
-    refetchInterval: latest && !terminalRun ? 2000 : false,
+    retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
+    refetchInterval: query => !historicalAccessDenied(query.state.error) && latest && !terminalRun ? 2000 : false,
   });
   const start = useMutation({
     mutationFn: () => api.post<AIRun>(`/analysis-jobs/${job.id}/ai-runs`, {
       idempotency_key: `web-${job.id}-${Date.now()}`,
       candidate_limit: candidateLimit,
       ...(shadow ? { discovery_mode: 'shadow' } : {}),
+      ...(shadow && historical ? { analysis_kind: 'C2', baseline_mode: 'historical', baseline_reference: baselineReference } : {}),
       language,
       allow_remote: allowRemote,
     }),
+    retry: false,
+    onError: () => { if (historical) setPinnedBaseline(null); },
     onSuccess: async () => {
+      setPinnedBaseline(null);
+      setSavedRunId(undefined);
       await queryClient.invalidateQueries({ queryKey: ['ai-runs', job.id] });
     },
   });
   const completed = job.status === 'COMPLETED' || job.status === 'PARTIALLY_COMPLETED';
-  const canStart = completed && config?.available === true && !capabilities.isError && (!config.remote || allowRemote);
+  const canStart = completed && config?.available === true && !capabilities.isError && (!config.remote || allowRemote) && (!historical || !shadow || baselineReference !== null);
   return <section className="panel" aria-labelledby="ai-c2-analysis-heading">
     <div className="header-actions">
       <div><p className="eyebrow">BOUNDED EVIDENCE</p><h2 id="ai-c2-analysis-heading">AI C2 분석</h2></div>
       <div className="ai-run-controls"><label>Candidate limit<select value={candidateLimit} onChange={event => setCandidateLimit(Number(event.target.value))}>{[1, 2, 3, 4, 5].map(value => <option key={value} value={value}>{value}</option>)}</select></label><button type="button" disabled={!canStart || start.isPending} onClick={() => start.mutate()}>{start.isPending ? 'AI 분석 실행 중…' : 'Run AI analysis'}</button></div>
     </div>
-    <label className="check"><input type="checkbox" checked={shadow} disabled={start.isPending} onChange={event => setShadow(event.target.checked)}/>{t('Opt in to behavioral discovery (shadow)', '행동 기반 탐색 사용 (shadow, 선택 사항)')}</label>
+    <label className="check"><input type="checkbox" checked={shadow} disabled={start.isPending} onChange={event => { setShadow(event.target.checked); setHistorical(false); setPinnedBaseline(null); }}/>{t('Opt in to behavioral discovery (shadow)', '행동 기반 탐색 사용 (shadow, 선택 사항)')}</label>
     <p className="muted">{t('Shadow review only: does not change source scores or automatically block traffic. The 1–5 candidate budget still applies.', 'Shadow 검토 전용: 원본 점수를 변경하지 않으며 자동 차단하지 않습니다. 후보 1–5개 제한은 유지됩니다.')}</p>
+    {shadow && <label className="check"><input type="checkbox" checked={historical} disabled={start.isPending} onChange={event => { setHistorical(event.target.checked); setPinnedBaseline(null); }}/>{t('Use historical reference (optional)', '과거 참조 사용 (선택 사항)')}</label>}
+    {shadow && historical && <HistoricalReferenceInput key={`${job.id}:${saved?.id ?? 'none'}`} jobId={job.id} value={baselineReference} onChange={value => { setPinnedBaseline(value ? { runId: saved?.id, reference: value } : null); start.reset(); }} disabled={start.isPending} requestError={start.error}/>}
     {config && <p>{t('Provider / model / destination', '제공자 / 모델 / 전송 대상')}: {config.provider ?? '—'} · {config.model_name ?? '—'} · {config.destination ?? '—'}</p>}
     {config?.remote && <label className="check"><input type="checkbox" checked={allowRemote} disabled={!config.destination || start.isPending} onChange={event => setConsentedDestination(event.target.checked ? config.destination ?? null : null)}/>{t('I consent to sending bounded evidence to this remote model destination.', '이 원격 모델 대상에 제한된 증거를 전송하는 데 동의합니다.')}</label>}
     {capabilities.isLoading && <p role="status">{t('Checking AI availability…', 'AI 사용 가능 여부 확인 중…')}</p>}
     {(capabilities.isError || config?.available === false) && <p role="alert">{t('AI is unavailable', 'AI를 사용할 수 없습니다')}: {capabilities.error?.message ?? config?.reason}</p>}
     {!completed && <p className="muted">완료되거나 부분 완료된 분석에서만 새 AI Run을 시작할 수 있습니다.</p>}
     {runs.isError && <p role="alert" className="error-text">AI 분석 기능을 사용할 수 없습니다: {runs.error.message}</p>}
-    {start.error && <p role="alert" className="error-text">AI Run 생성 실패: {start.error.message}</p>}
+    {start.error && <p role="alert" className="error-text">AI Run 생성 실패: {historical ? historicalErrorText(start.error, language) : start.error.message}</p>}
     {!runs.isLoading && !latest && !runs.isError && <p className="muted">아직 실행된 AI Run이 없습니다.</p>}
+    {items(runs.data).length > 0 && <label>{t('Saved AI run', '저장된 AI 실행')}<select value={saved?.id ?? ''} disabled={start.isPending} onChange={event => { setSavedRunId(event.target.value); setPinnedBaseline(null); start.reset(); }}>{items(runs.data).map(item => <option key={item.id} value={item.id}>{item.created_at} · {item.status} · {item.id}</option>)}</select></label>}
     {latest && <><div className="ai-run-summary"><span className={`badge ${latest.status.toLowerCase()}`}>{latest.status}</span><span>{latest.candidate_count}개 후보</span><span>{fmt(latest.created_at)}</span>{latest.error_code && <span className="error-text">{latest.error_code}: {latest.error_message}</span>}</div><progress aria-label="AI analysis progress" max="100" value={latest.progress_percent ?? (latest.status === 'COMPLETED' ? 100 : 0)} /></>}
+    {latest?.baseline_summary?.schema_version === 'historical-baseline-v1' && <HistoricalReferenceDetails key={`${job.id}:${latest.id}:${latest.baseline_summary.scope_id}`} runId={latest.id} summary={latest.baseline_summary}/>}
     {latest?.selection_summary?.version === 'behavior-selection-v1' && <C2DiscoverySelection key={latest.id} runId={latest.id} summary={latest.selection_summary}/>}
     {run.isError && <p role="alert" className="error-text">{t('Run details could not be read; coverage is unconfirmed', '실행 상세를 읽지 못했습니다. 범위를 확인할 수 없습니다')}: {run.error.message}</p>}
-    {assessments.isError && <p role="alert" className="error-text">{t('AI assessments could not be read', 'AI 판정을 읽지 못했습니다')}: {assessments.error.message}</p>}
+    {assessments.isError && <p role="alert" className="error-text">{t('AI assessments could not be read', 'AI 판정을 읽지 못했습니다')}: {historicalAccessDenied(assessments.error) ? historicalErrorText(assessments.error, language) : assessments.error.message}</p>}
     {assessments.isLoading && latest && <p role="status">AI 후보 판정을 불러오는 중…</p>}
-    {items(assessments.data).map(item => {
+    {!assessments.isError && items(assessments.data).map(item => {
       const result = item.assessment;
       return <article className="ai-assessment" key={item.id}>
         <div className="header-actions"><h3>{(!item.discovery_origin && latest?.discovery_mode !== 'shadow') || knownCandidateIds.includes(item.candidate_id) ? <Link to={`/candidates/${item.candidate_id}`}>{item.external_ip}</Link> : item.external_ip}</h3><div><span className={`badge verdict-${result.candidate.verdict.toLowerCase()}`}>AI {result.candidate.verdict}</span> <strong>{t('Model confidence', '신뢰도')} {Math.round(result.candidate.confidence * 100)}%</strong> <span>Review priority {item.review_priority ?? 0}</span></div></div>

@@ -1198,6 +1198,7 @@ def test_automatic_enrichment_records_unexpected_provider_failure() -> None:
         threat_intel_service=BrokenThreatIntelService(),
     )
     candidate = {"id": "candidate-broken", "candidate_ip": "203.0.113.44", "score": 90}
+    repository.save_job({"id": "job-broken", "status": "COMPLETED"})
     repository.save_candidates("job-broken", [candidate])
 
     app.state.schedule_candidate_enrichment("job-broken", [candidate])
@@ -1236,6 +1237,7 @@ def test_automatic_enrichment_queue_capacity_does_not_block_analysis() -> None:
         {"id": "candidate-first", "candidate_ip": "203.0.113.44", "score": 90},
         {"id": "candidate-overflow", "candidate_ip": "203.0.113.45", "score": 80},
     ]
+    repository.save_job({"id": "job-capacity", "status": "COMPLETED"})
     repository.save_candidates("job-capacity", candidates)
 
     app.state.schedule_candidate_enrichment("job-capacity", candidates)
@@ -1259,6 +1261,7 @@ def test_automatic_enrichment_after_shutdown_is_skipped_without_raising() -> Non
         threat_intel_service=FakeThreatIntelService(),
     )
     candidate = {"id": "candidate-shutdown", "candidate_ip": "203.0.113.44", "score": 90}
+    repository.save_job({"id": "job-shutdown", "status": "COMPLETED"})
     repository.save_candidates("job-shutdown", [candidate])
 
     app.router.on_shutdown[-1]()
@@ -1296,6 +1299,7 @@ def test_shutdown_cancels_enrichment_that_has_not_started() -> None:
         {"id": "candidate-running", "candidate_ip": "203.0.113.44", "score": 90},
         {"id": "candidate-queued", "candidate_ip": "203.0.113.45", "score": 80},
     ]
+    repository.save_job({"id": "job-shutdown", "status": "COMPLETED"})
     repository.save_candidates("job-shutdown", candidates)
     app.state.schedule_candidate_enrichment("job-shutdown", candidates)
     assert threat_intel.started.wait(timeout=1)

@@ -58,8 +58,14 @@ class AIFeedbackService:
         note: str,
         created_by: str,
     ) -> dict[str, Any]:
-        if self.repository.get_ai_assessment(assessment_id) is None:
+        assessment = self.repository.get_ai_assessment(assessment_id)
+        if assessment is None:
             raise AIFeedbackError("AI assessment not found")
+        from .historical_ai_mutations import validate_mutation
+        from .historical_ai_storage import historical_marker
+
+        if historical_marker(assessment):
+            validate_mutation(created_by, note, max_note=5000)
         feedback = {
             "id": str(uuid.uuid4()),
             "assessment_id": assessment_id,

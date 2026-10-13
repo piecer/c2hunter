@@ -31,6 +31,14 @@ from c2hunter_analysis.pcap_postings import (
     PostingQueryLimits,
 )
 
+from . import _baseline_storage as baseline_storage
+from . import historical_ai as historical_dto
+from . import historical_ai_sql as historical_sql
+from . import historical_ai_storage as historical_runs
+from . import historical_generation as baseline_values
+from . import historical_read as historical_reader
+from .baseline_admission import BaselineAdmission, BaselineLease
+from .historical_baseline import QualityReview, ScopeConfig
 from .pcap_export_store import ExportQueueStorageError, RepositoryQueueStore
 from .pcap_indexed_export import (
     CaptureByteRange,
@@ -662,6 +670,36 @@ def _candidate_workflow_counts_from_records(
 
 
 class Repository(Protocol):
+    def control_baseline_scope(
+        self, scope_id: str, request: baseline_values.ControlRequest, actor: str, now: datetime
+    ) -> baseline_values.ControlResult: ...
+    def page_baseline_control_events(
+        self, scope_id: str, offset: int = 0, limit: int = 20
+    ) -> baseline_values.ControlPage: ...
+    def create_baseline_scope(
+        self, config: ScopeConfig, actor: str, now: datetime
+    ) -> tuple[baseline_values.ScopeView, bool]: ...
+    def get_baseline_scope(self, scope_id: str) -> baseline_values.ScopeView | None: ...
+    def page_baseline_scopes(
+        self, offset: int = 0, limit: int = 20
+    ) -> baseline_values.ScopePage: ...
+    def preview_baseline_source(
+        self, scope_id: str, job_id: str, expected_revision: int, purpose: historical_reader.Purpose
+    ) -> baseline_values.SourcePreview: ...
+
+    def publish_baseline_source(
+        self,
+        scope_id: str,
+        request: baseline_values.ApprovalRequest,
+        actor: str,
+        now: datetime,
+        *,
+        admission: BaselineAdmission | None = None,
+    ) -> baseline_values.PublicationResult: ...
+    def page_baseline_sources(
+        self, scope_id: str, generation_id: str, offset: int = 0, limit: int = 20
+    ) -> baseline_values.SourcePage: ...
+
     def for_background_worker(self) -> Self: ...
     def close(self) -> None: ...
 
@@ -753,6 +791,10 @@ class Repository(Protocol):
     def save_job(self, job: dict[str, Any]) -> dict[str, Any]: ...
     def save_job_metadata(self, job: dict[str, Any]) -> dict[str, Any]: ...
     def transition_job_terminal(self, job: dict[str, Any]) -> bool: ...
+
+    def complete_job_with_candidates(
+        self, job: dict[str, Any], candidates: list[dict[str, Any]]
+    ) -> bool: ...
     def mark_analysis_started(
         self,
         job_id: str,
@@ -761,6 +803,15 @@ class Repository(Protocol):
         attempt: int | None = None,
         lease_token: str | None = None,
     ) -> bool: ...
+    def read_historical_source(
+        self,
+        job_id: str,
+        *,
+        purpose: historical_reader.Purpose,
+        scope: ScopeConfig,
+        quality_review: QualityReview | None,
+    ) -> historical_reader.HistoricalReadSnapshot: ...
+
     def get_job(self, job_id: str) -> dict[str, Any] | None: ...
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None: ...
     def get_job_summaries(self, job_ids: list[str]) -> dict[str, dict[str, Any]]: ...
@@ -977,6 +1028,14 @@ class Repository(Protocol):
         self, settings: dict[str, Any], expected_version: int
     ) -> tuple[dict[str, Any] | None, str]: ...
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]: ...
+    def admit_historical_ai_run(
+        self,
+        request: historical_dto.HistoricalAdmissionRequest,
+        builder: historical_runs.Builder,
+        *,
+        admission: BaselineAdmission | None = None,
+    ) -> tuple[dict[str, Any], bool]: ...
+    def get_ai_run_by_request(self, job_id: str, idempotency_key: str) -> dict[str, Any] | None: ...
     def save_ai_run(self, run: dict[str, Any]) -> dict[str, Any]: ...
     def get_ai_run(self, run_id: str) -> dict[str, Any] | None: ...
     def list_ai_runs(self, job_id: str) -> list[dict[str, Any]]: ...
@@ -2517,14 +2576,148 @@ class PostingIndexRepositoryMixin:
 class MemoryRepository(
     PostingIndexQueueRepositoryMixin, PostingIndexRepositoryMixin, LiveIndexQueueRepositoryMixin
 ):
+    _baseline_scopes: dict[str, baseline_values.ScopeView]
+    _baseline_generations: dict[tuple[str, str], tuple[Any, ...]]
+    _baseline_operations: dict[tuple[str, str], tuple[Any, ...]]
+
+    def control_baseline_scope(
+        self, scope_id: str, request: baseline_values.ControlRequest, actor: str, now: datetime
+    ) -> baseline_values.ControlResult:
+        request, actor, now, digest = baseline_storage.control_arguments(
+            scope_id, request, actor, now
+        )
+        with self._lock:
+            scopes, generations, operations, result = baseline_storage.memory_control(
+                self._baseline_scopes,
+                self._baseline_generations,
+                self._baseline_operations,
+                scope_id,
+                request,
+                actor,
+                now,
+                digest,
+            )
+            self._baseline_scopes = scopes
+            self._baseline_generations = generations
+            self._baseline_operations = operations
+            return result
+
+    def page_baseline_control_events(
+        self, scope_id: str, offset: int = 0, limit: int = 20
+    ) -> baseline_values.ControlPage:
+        baseline_storage.control_page_arguments(scope_id, offset, limit)
+        with self._lock:
+            return baseline_storage.memory_events(
+                self._baseline_scopes,
+                self._baseline_generations,
+                self._baseline_operations,
+                scope_id,
+                offset,
+                limit,
+            )
+
+    def publish_baseline_source(
+        self,
+        scope_id: str,
+        request: baseline_values.ApprovalRequest,
+        actor: str,
+        now: datetime,
+        *,
+        admission: BaselineAdmission | None = None,
+    ) -> baseline_values.PublicationResult:
+        request, actor, now, digest = baseline_storage.approval_arguments(
+            scope_id, request, actor, now
+        )
+        with BaselineLease(admission) as lease, self._lock, baseline_storage.approval_errors():
+            scopes, generations, operations, result = baseline_storage.memory_publish(
+                self._baseline_scopes,
+                self._baseline_generations,
+                self._baseline_operations,
+                self.jobs,
+                self.candidates,
+                scope_id,
+                request,
+                actor,
+                now,
+                digest,
+                admission=lease,
+            )
+            self._baseline_scopes = scopes
+            self._baseline_generations = generations
+            self._baseline_operations = operations
+            return result
+
+    def page_baseline_sources(
+        self, scope_id: str, generation_id: str, offset: int = 0, limit: int = 20
+    ) -> baseline_values.SourcePage:
+        baseline_storage.source_page_arguments(scope_id, generation_id, offset, limit)
+        with self._lock:
+            return baseline_storage.memory_sources(
+                self._baseline_scopes,
+                self._baseline_generations,
+                scope_id,
+                generation_id,
+                offset,
+                limit,
+            )
+
+    def create_baseline_scope(
+        self, config: ScopeConfig, actor: str, now: datetime
+    ) -> tuple[baseline_values.ScopeView, bool]:
+        proposed = baseline_storage.new_scope(config, actor, now)
+        with self._lock:
+            scopes, view, created = baseline_storage.memory_create(
+                self._baseline_scopes, proposed, self._baseline_generations
+            )
+            self._baseline_scopes = scopes
+            return view, created
+
+    def get_baseline_scope(self, scope_id: str) -> baseline_values.ScopeView | None:
+        with self._lock:
+            return baseline_storage.memory_get(
+                self._baseline_scopes, scope_id, self._baseline_generations
+            )
+
+    def page_baseline_scopes(self, offset: int = 0, limit: int = 20) -> baseline_values.ScopePage:
+        with self._lock:
+            return baseline_storage.memory_page(
+                self._baseline_scopes, offset, limit, self._baseline_generations
+            )
+
+    def preview_baseline_source(
+        self, scope_id: str, job_id: str, expected_revision: int, purpose: historical_reader.Purpose
+    ) -> baseline_values.SourcePreview:
+        baseline_storage.preview_arguments(scope_id, job_id, expected_revision, purpose)
+        with self._lock:
+            view = baseline_storage._revision(
+                baseline_storage.memory_get(
+                    self._baseline_scopes, scope_id, self._baseline_generations
+                ),
+                expected_revision,
+            )
+            acquired = historical_reader._memory_acquire(
+                self.jobs, self.candidates, job_id, purpose, structural=True
+            )
+            view = baseline_storage._revision(
+                baseline_storage.memory_get(
+                    self._baseline_scopes, scope_id, self._baseline_generations
+                ),
+                expected_revision,
+            )
+            return baseline_storage.finish_preview(acquired, view, purpose)
+
     def __init__(self, *, _lease_clock: Callable[[], datetime] | None = None) -> None:
         self._lease_clock = _lease_clock or (lambda: datetime.now(UTC))
         self.sensors: dict[str, dict[str, Any]] = {}
         self.groups: dict[str, dict[str, Any]] = {}
+        self._baseline_generations = {}
+        self._baseline_scopes = {}
+        self._baseline_operations = {}
         self.jobs: dict[str, dict[str, Any]] = {}
         self.idempotency_keys: dict[str, str] = {}
         self.candidates: dict[str, list[dict[str, Any]]] = {}
         self.ai_runs: dict[str, dict[str, Any]] = {}
+        self._historical_admissions: dict[str, dict[str, Any]] = {}
         self.ai_run_idempotency_keys: dict[tuple[str, str], str] = {}
         self.ai_assessments: dict[str, dict[str, Any]] = {}
         self.ai_artifacts: dict[str, dict[str, Any]] = {}
@@ -2562,6 +2755,20 @@ class MemoryRepository(
         self.posting_index_generations: dict[str, PostingIndexSnapshot] = {}
         self.posting_index_owners: dict[tuple[str, str, str], str] = {}
         self._lock = threading.RLock()
+
+    def read_historical_source(
+        self,
+        job_id: str,
+        *,
+        purpose: historical_reader.Purpose,
+        scope: ScopeConfig,
+        quality_review: QualityReview | None,
+    ) -> historical_reader.HistoricalReadSnapshot:
+        historical_reader.validate_arguments(job_id, purpose, scope, quality_review)
+        with self._lock:
+            return historical_reader.memory_snapshot(
+                self.jobs, self.candidates, job_id, purpose, scope, quality_review
+            )
 
     def _posting_now(self) -> datetime:
         return self._lease_clock()
@@ -2853,6 +3060,46 @@ class MemoryRepository(
             self.jobs[str(job["id"])] = stored
             return True
 
+    def complete_job_with_candidates(
+        self, job: dict[str, Any], candidates: list[dict[str, Any]]
+    ) -> bool:
+        if job.get("status") not in {"COMPLETED", "PARTIALLY_COMPLETED"}:
+            raise ValueError("successful publication requires a successful terminal status")
+        if type(job.get("candidate_count")) is not int or job["candidate_count"] != len(candidates):
+            raise ValueError("candidate_count must match candidates")
+        with self._lock:
+            current = self.jobs.get(str(job["id"]))
+            if current is None or current.get("status") in _JOB_TERMINAL_STATUSES:
+                return False
+            stored = deepcopy(job)
+            stored["flow_records"] = deepcopy(current.get("flow_records", []))
+            stored["payload_signatures"] = deepcopy(current.get("payload_signatures", []))
+            saved_candidates = deepcopy(candidates)
+            # Validate the same persisted scalar fields before either publication.
+            for candidate in saved_candidates:
+                str(candidate["id"])
+                int(candidate.get("score", 0))
+                json.dumps(candidate, default=str)
+            metadata = {
+                key: value
+                for key, value in stored.items()
+                if key not in {"flow_records", "payload_signatures"}
+            }
+            events = [
+                {
+                    "kind": kind,
+                    "object_id": str(job["id"]),
+                    "occurred_at": datetime.now(UTC).isoformat(),
+                    "data": deepcopy(value),
+                }
+                for kind, value in (("job", metadata), ("candidates", saved_candidates))
+            ]
+            audits = [*self.audit_events, *events]
+            self.candidates[str(job["id"])] = saved_candidates
+            self.jobs[str(job["id"])] = stored
+            self.audit_events = audits
+            return True
+
     def mark_analysis_started(
         self,
         job_id: str,
@@ -2892,20 +3139,22 @@ class MemoryRepository(
             return True
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
-        value = self.jobs.get(job_id)
-        return deepcopy(value) if value else None
+        with self._lock:
+            value = self.jobs.get(job_id)
+            return deepcopy(value) if value else None
 
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None:
-        value = self.jobs.get(job_id)
-        if value is None:
-            return None
-        return deepcopy(
-            {
-                key: item
-                for key, item in value.items()
-                if key not in {"flow_records", "payload_signatures"}
-            }
-        )
+        with self._lock:
+            value = self.jobs.get(job_id)
+            if value is None:
+                return None
+            return deepcopy(
+                {
+                    key: item
+                    for key, item in value.items()
+                    if key not in {"flow_records", "payload_signatures"}
+                }
+            )
 
     def get_job_summaries(self, job_ids: list[str]) -> dict[str, dict[str, Any]]:
         summaries: dict[str, dict[str, Any]] = {}
@@ -2916,16 +3165,17 @@ class MemoryRepository(
         return summaries
 
     def list_jobs(self) -> list[dict[str, Any]]:
-        return [
-            deepcopy(
-                {
-                    key: item
-                    for key, item in job.items()
-                    if key not in {"flow_records", "payload_signatures"}
-                }
-            )
-            for job in self.jobs.values()
-        ]
+        with self._lock:
+            return [
+                deepcopy(
+                    {
+                        key: item
+                        for key, item in job.items()
+                        if key not in {"flow_records", "payload_signatures"}
+                    }
+                )
+                for job in self.jobs.values()
+            ]
 
     def claim_pcap_preparation(
         self, *, now: datetime, lease_seconds: int, max_attempts: int = 3
@@ -3090,6 +3340,7 @@ class MemoryRepository(
                 self.ai_assessments.pop(assessment_id, None)
             for run_id in run_ids:
                 self.ai_runs.pop(run_id, None)
+                self._historical_admissions.pop(run_id, None)
             for key, run_id in list(self.ai_run_idempotency_keys.items()):
                 if run_id in run_ids:
                     self.ai_run_idempotency_keys.pop(key, None)
@@ -3555,17 +3806,23 @@ class MemoryRepository(
 
     def save_candidates(self, job_id: str, candidates: list[dict[str, Any]]) -> None:
         with self._lock:
+            if job_id not in self.jobs:
+                raise ValueError("candidate parent job not found")
             self.candidates[job_id] = deepcopy(candidates)
 
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]:
-        return deepcopy(self.candidates.get(job_id, []))
+        with self._lock:
+            return deepcopy(self.candidates.get(job_id, []))
 
     def get_candidate(self, candidate_id: str) -> tuple[str, dict[str, Any]] | None:
-        for job_id, candidates in self.candidates.items():
-            candidate = next((item for item in candidates if item.get("id") == candidate_id), None)
-            if candidate is not None:
-                return job_id, deepcopy(candidate)
-        return None
+        with self._lock:
+            for job_id, candidates in self.candidates.items():
+                candidate = next(
+                    (item for item in candidates if item.get("id") == candidate_id), None
+                )
+                if candidate is not None:
+                    return job_id, deepcopy(candidate)
+            return None
 
     def query_candidates(
         self,
@@ -3574,14 +3831,15 @@ class MemoryRepository(
         severity: str | None = None,
         include_suppressed: bool = False,
     ) -> list[tuple[str, dict[str, Any]]]:
-        return [
-            (job_id, deepcopy(candidate))
-            for job_id, candidates in self.candidates.items()
-            for candidate in candidates
-            if int(candidate.get("score", 0)) >= minimum_score
-            and (severity is None or candidate.get("severity") == severity)
-            and (include_suppressed or not candidate.get("excluded", False))
-        ]
+        with self._lock:
+            return [
+                (job_id, deepcopy(candidate))
+                for job_id, candidates in self.candidates.items()
+                for candidate in candidates
+                if int(candidate.get("score", 0)) >= minimum_score
+                and (severity is None or candidate.get("severity") == severity)
+                and (include_suppressed or not candidate.get("excluded", False))
+            ]
 
     def query_candidate_page(
         self,
@@ -3679,18 +3937,43 @@ class MemoryRepository(
         )
 
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        from .historical_ai_storage import reject_generic_historical
+
+        reject_generic_historical(run)
         key = (run["analysis_job_id"], run["idempotency_key"])
         with self._lock:
             existing_id = self.ai_run_idempotency_keys.get(key)
             if existing_id is not None:
-                return deepcopy(self.ai_runs[existing_id]), False
+                existing = cast(
+                    dict[str, Any],
+                    historical_runs.memory_internal(
+                        self.ai_runs,
+                        self._historical_admissions,
+                        self.ai_run_idempotency_keys,
+                        existing_id,
+                    ),
+                )
+                historical_runs.require(
+                    historical_runs.OWNER_KEY not in existing, "BASELINE_IDEMPOTENCY_CONFLICT"
+                )
+                return existing, False
+            historical_runs.require(run["id"] not in self._historical_admissions)
             self.ai_runs[run["id"]] = deepcopy(run)
             self.ai_run_idempotency_keys[key] = run["id"]
             return deepcopy(run), True
 
     def save_ai_run(self, run: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
-            existing = self.ai_runs.get(run["id"])
+            existing = historical_runs.memory_internal(
+                self.ai_runs, self._historical_admissions, self.ai_run_idempotency_keys, run["id"]
+            )
+            if existing is not None and historical_runs.OWNER_KEY in existing:
+                saved = historical_runs.lifecycle_save(existing, run)
+                self.ai_runs[run["id"]] = {
+                    key: value for key, value in saved.items() if key != historical_runs.OWNER_KEY
+                }
+                return deepcopy(saved)
+            historical_runs.require(not historical_runs.historical_marker(run))
             if existing is not None and existing.get("status") in {
                 "COMPLETED",
                 "FAILED",
@@ -3700,77 +3983,151 @@ class MemoryRepository(
             self.ai_runs[run["id"]] = deepcopy(run)
             return deepcopy(run)
 
+    def admit_historical_ai_run(
+        self,
+        request: historical_dto.HistoricalAdmissionRequest,
+        builder: historical_runs.Builder,
+        *,
+        admission: BaselineAdmission | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        request = historical_dto.checked_request(request)
+        with BaselineLease(admission) as lease, self._lock:
+            from .historical_ai_access import authorize
+
+            authorize(True)
+            existing = self.get_ai_run_by_request(
+                request.analysis_job_id, request.payload.idempotency_key
+            )
+            if existing is not None:
+                historical_runs.replay_matches(existing, request)
+                return existing, False
+            historical_runs.require(lease.acquire(), "BASELINE_BUSY")
+            ref = request.payload.baseline_reference
+            if ref is None:
+                raise historical_runs.HistoricalStorageError()
+            scope = baseline_storage._revision(
+                baseline_storage.memory_get(
+                    self._baseline_scopes, ref.scope_id, self._baseline_generations
+                ),
+                ref.expected_revision,
+            )
+            generation = (
+                baseline_storage._stored_document(
+                    scope,
+                    scope.active.generation_id,
+                    self._baseline_generations[(ref.scope_id, scope.active.generation_id)],
+                )
+                if scope.active
+                else None
+            )
+            target = historical_reader.memory_ai_target(
+                self.jobs,
+                self.candidates,
+                request.analysis_job_id,
+                scope.config,
+                ref.quality_review,
+            )
+            run = historical_runs.stage_admission(request, target, scope, generation, builder)
+            historical_runs.require(request.run_id not in self.ai_runs)
+            runs, owners, keys = (
+                dict(self.ai_runs),
+                dict(self._historical_admissions),
+                dict(self.ai_run_idempotency_keys),
+            )
+            stored = deepcopy(run)
+            owners[request.run_id] = stored.pop(historical_runs.OWNER_KEY)
+            runs[request.run_id] = stored
+            keys[(request.analysis_job_id, request.payload.idempotency_key)] = request.run_id
+            self.ai_runs, self._historical_admissions, self.ai_run_idempotency_keys = (
+                runs,
+                owners,
+                keys,
+            )
+            return deepcopy(run), True
+
+    def get_ai_run_by_request(self, job_id: str, idempotency_key: str) -> dict[str, Any] | None:
+        with self._lock:
+            run_id = self.ai_run_idempotency_keys.get((job_id, idempotency_key))
+            return (
+                historical_runs.memory_internal(
+                    self.ai_runs, self._historical_admissions, self.ai_run_idempotency_keys, run_id
+                )
+                if run_id is not None
+                else None
+            )
+
     def get_ai_run(self, run_id: str) -> dict[str, Any] | None:
-        value = self.ai_runs.get(run_id)
-        return deepcopy(value) if value is not None else None
+        with self._lock:
+            return historical_runs.memory_internal(
+                self.ai_runs,
+                self._historical_admissions,
+                self.ai_run_idempotency_keys,
+                run_id,
+                compact=True,
+            )
 
     def list_ai_runs(self, job_id: str) -> list[dict[str, Any]]:
-        return deepcopy(
-            sorted(
-                (run for run in self.ai_runs.values() if run["analysis_job_id"] == job_id),
-                key=lambda run: run["created_at"],
-                reverse=True,
-            )
-        )
+        with self._lock:
+            return [
+                cast(dict[str, Any], self.get_ai_run(run_id))
+                for run_id, run in sorted(
+                    (
+                        (run_id, run)
+                        for run_id, run in self.ai_runs.items()
+                        if run["analysis_job_id"] == job_id
+                    ),
+                    key=lambda item: item[1]["created_at"],
+                    reverse=True,
+                )
+            ]
 
     def save_ai_assessment(self, assessment: dict[str, Any]) -> dict[str, Any]:
+        from .historical_ai_descendants import MemoryAccess
+
         with self._lock:
-            self.ai_assessments.setdefault(assessment["id"], deepcopy(assessment))
-            return deepcopy(self.ai_assessments[assessment["id"]])
+            return MemoryAccess(self).save("A", assessment)
 
     def get_ai_assessment(self, assessment_id: str) -> dict[str, Any] | None:
-        value = self.ai_assessments.get(assessment_id)
-        return deepcopy(value) if value is not None else None
+        from .historical_ai_descendants import MemoryAccess
+
+        with self._lock:
+            return MemoryAccess(self).get("A", assessment_id)
 
     def list_ai_assessments(self, run_id: str) -> list[dict[str, Any]]:
-        return deepcopy(
-            sorted(
-                (
-                    assessment
-                    for assessment in self.ai_assessments.values()
-                    if assessment["ai_run_id"] == run_id
-                ),
-                key=lambda assessment: assessment["created_at"],
-            )
-        )
+        from .historical_ai_descendants import MemoryAccess
+
+        with self._lock:
+            return MemoryAccess(self).list("A", run_id)
 
     def save_ai_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]:
+        from .historical_ai_descendants import MemoryAccess
+
         with self._lock:
-            self.ai_artifacts[artifact["id"]] = deepcopy(artifact)
-            return deepcopy(artifact)
+            return MemoryAccess(self).save("T", artifact)
 
     def get_ai_artifact(self, artifact_id: str) -> dict[str, Any] | None:
-        value = self.ai_artifacts.get(artifact_id)
-        return deepcopy(value) if value is not None else None
+        from .historical_ai_descendants import MemoryAccess
+
+        with self._lock:
+            return MemoryAccess(self).get("T", artifact_id)
 
     def list_ai_artifacts(self, assessment_id: str) -> list[dict[str, Any]]:
-        return deepcopy(
-            sorted(
-                (
-                    artifact
-                    for artifact in self.ai_artifacts.values()
-                    if artifact["assessment_id"] == assessment_id
-                ),
-                key=lambda artifact: (artifact["created_at"], artifact["artifact_type"]),
-            )
-        )
+        from .historical_ai_descendants import MemoryAccess
+
+        with self._lock:
+            return MemoryAccess(self).list("T", assessment_id)
 
     def save_ai_feedback(self, feedback: dict[str, Any]) -> dict[str, Any]:
+        from .historical_ai_descendants import MemoryAccess
+
         with self._lock:
-            self.ai_feedback.setdefault(feedback["id"], deepcopy(feedback))
-            return deepcopy(self.ai_feedback[feedback["id"]])
+            return MemoryAccess(self).save("F", feedback)
 
     def list_ai_feedback(self, assessment_id: str) -> list[dict[str, Any]]:
-        return deepcopy(
-            sorted(
-                (
-                    feedback
-                    for feedback in self.ai_feedback.values()
-                    if feedback["assessment_id"] == assessment_id
-                ),
-                key=lambda feedback: feedback["created_at"],
-            )
-        )
+        from .historical_ai_descendants import MemoryAccess
+
+        with self._lock:
+            return MemoryAccess(self).list("F", assessment_id)
 
     def append_audit_event(self, kind: str, object_id: str, data: dict[str, Any]) -> None:
         with self._lock:
@@ -3789,6 +4146,12 @@ class MemoryRepository(
             for job_id, candidates in self.candidates.items():
                 for i, candidate in enumerate(candidates):
                     if candidate.get("id") == candidate_id:
+                        if job_id not in self.jobs:
+                            return None
+                        if ("id" in updates and updates["id"] != candidate_id) or (
+                            "job_id" in updates and updates["job_id"] != job_id
+                        ):
+                            raise ValueError("candidate identity is immutable")
                         # Create updated candidate
                         updated = deepcopy(candidate)
                         updates_copy = deepcopy(updates)
@@ -3824,6 +4187,8 @@ class MemoryRepository(
         """Delete a candidate by ID. Returns True if deleted."""
         with self._lock:
             for job_id, candidates in list(self.candidates.items()):
+                if job_id not in self.jobs:
+                    continue
                 original_len = len(candidates)
                 self.candidates[job_id] = [c for c in candidates if c.get("id") != candidate_id]
                 if len(self.candidates[job_id]) < original_len:
@@ -3831,7 +4196,8 @@ class MemoryRepository(
             return False
 
     def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]:
-        return deepcopy(self.candidates)
+        with self._lock:
+            return deepcopy(self.candidates)
 
     def get_integration_settings(self) -> dict[str, Any] | None:
         with self._lock:
@@ -4225,6 +4591,100 @@ class MemoryRepository(
 class SQLiteRepository(
     PostingIndexQueueRepositoryMixin, PostingIndexRepositoryMixin, LiveIndexQueueRepositoryMixin
 ):
+    def control_baseline_scope(
+        self, scope_id: str, request: baseline_values.ControlRequest, actor: str, now: datetime
+    ) -> baseline_values.ControlResult:
+        request, actor, now, digest = baseline_storage.control_arguments(
+            scope_id, request, actor, now
+        )
+        with self._lock:
+            return baseline_storage.sql_control(
+                baseline_storage.publication_connection(self, postgres=False),
+                scope_id,
+                request,
+                actor,
+                now,
+                digest,
+                postgres=False,
+            )
+
+    def page_baseline_control_events(
+        self, scope_id: str, offset: int = 0, limit: int = 20
+    ) -> baseline_values.ControlPage:
+        baseline_storage.control_page_arguments(scope_id, offset, limit)
+        with self._lock:
+            return baseline_storage.sql_events(
+                baseline_storage.publication_connection(self, postgres=False),
+                scope_id,
+                offset,
+                limit,
+                postgres=False,
+            )
+
+    def publish_baseline_source(
+        self,
+        scope_id: str,
+        request: baseline_values.ApprovalRequest,
+        actor: str,
+        now: datetime,
+        *,
+        admission: BaselineAdmission | None = None,
+    ) -> baseline_values.PublicationResult:
+        request, actor, now, digest = baseline_storage.approval_arguments(
+            scope_id, request, actor, now
+        )
+        with BaselineLease(admission) as lease, self._lock, baseline_storage.approval_errors():
+            return baseline_storage.sql_publish(
+                baseline_storage.publication_connection(self, postgres=False),
+                scope_id,
+                request,
+                actor,
+                now,
+                digest,
+                postgres=False,
+                admission=lease,
+            )
+
+    def page_baseline_sources(
+        self, scope_id: str, generation_id: str, offset: int = 0, limit: int = 20
+    ) -> baseline_values.SourcePage:
+        baseline_storage.source_page_arguments(scope_id, generation_id, offset, limit)
+        with self._lock:
+            return baseline_storage.sql_sources(
+                baseline_storage.publication_connection(self, postgres=False),
+                scope_id,
+                generation_id,
+                offset,
+                limit,
+                postgres=False,
+            )
+
+    def create_baseline_scope(
+        self, config: ScopeConfig, actor: str, now: datetime
+    ) -> tuple[baseline_values.ScopeView, bool]:
+        proposed = baseline_storage.new_scope(config, actor, now)
+        with self._lock:
+            return baseline_storage.sql_create(self.connection, proposed, postgres=False)
+
+    def get_baseline_scope(self, scope_id: str) -> baseline_values.ScopeView | None:
+        baseline_storage.scope_id(scope_id)
+        with self._lock:
+            return baseline_storage.sql_get(self.connection, scope_id, postgres=False)
+
+    def page_baseline_scopes(self, offset: int = 0, limit: int = 20) -> baseline_values.ScopePage:
+        baseline_storage.page_arguments(offset, limit)
+        with self._lock:
+            return baseline_storage.sql_page(self.connection, offset, limit, postgres=False)
+
+    def preview_baseline_source(
+        self, scope_id: str, job_id: str, expected_revision: int, purpose: historical_reader.Purpose
+    ) -> baseline_values.SourcePreview:
+        baseline_storage.preview_arguments(scope_id, job_id, expected_revision, purpose)
+        with self._lock:
+            return baseline_storage.sql_preview(
+                self.connection, scope_id, job_id, expected_revision, purpose, postgres=False
+            )
+
     """외부 서비스 없이 계약 테스트 가능한 SQLite adapter. 같은 경계로 PostgreSQL 교체 가능."""
 
     @property
@@ -4243,6 +4703,14 @@ class SQLiteRepository(
         self._lease_clock = _lease_clock or (lambda: datetime.now(UTC))
         self.connection = sqlite3.connect(self._path, check_same_thread=False)
         self.connection.execute("PRAGMA foreign_keys=ON")
+        try:
+            self.connection.executescript(baseline_storage.schema(postgres=False))
+        except BaseException:
+            try:
+                self.connection.close()
+            except BaseException:  # noqa: S110 -- preserve the initialization failure
+                pass
+            raise
         self._lock = threading.RLock()
         self.connection.executescript("""
             CREATE TABLE IF NOT EXISTS objects (
@@ -4510,10 +4978,17 @@ class SQLiteRepository(
             "excluded=CAST(COALESCE(json_extract(data,'$.excluded'),0) AS INTEGER)"
         )
         self.connection.commit()
-        self._migrate_embedded_job_flows()
-        self._migrate_embedded_job_signatures()
-        self._migrate_legacy_candidates()
-        self.connection.commit()
+        with self._lock, self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self._migrate_embedded_job_flows()
+            self._migrate_embedded_job_signatures()
+            self._migrate_legacy_candidates()
+        try:
+            with self._lock:
+                historical_sql.initialize_sqlite(self.connection)
+        except Exception:
+            self.connection.close()
+            raise
 
     def _migrate_stage11_posting_owner_schema(self) -> None:
         """Bind each posting owner to one exact source/parent generation identity."""
@@ -4664,33 +5139,29 @@ class SQLiteRepository(
         return json.dumps(value, separators=(",", ":"), default=str)
 
     def _migrate_legacy_candidates(self) -> None:
-        """Move legacy per-job candidate arrays into candidate-addressable rows exactly once."""
-        with self._lock:
-            try:
-                self.connection.execute("BEGIN IMMEDIATE")
-                rows = self.connection.execute("SELECT job_id,data FROM candidates").fetchall()
-                for job_id, raw_data in rows:
-                    candidates = json.loads(raw_data)
-                    for position, candidate in enumerate(candidates):
-                        self.connection.execute(
-                            "INSERT INTO candidate_records("
-                            "candidate_id,job_id,position,score,severity,excluded,data"
-                            ") VALUES(?,?,?,?,?,?,?) ON CONFLICT(candidate_id) DO NOTHING",
-                            (
-                                str(candidate["id"]),
-                                str(job_id),
-                                position,
-                                int(candidate.get("score", 0)),
-                                str(candidate.get("severity", "")),
-                                int(bool(candidate.get("excluded", False))),
-                                self._serialize(candidate),
-                            ),
-                        )
-                self.connection.execute("DELETE FROM candidates")
-                self.connection.commit()
-            except Exception:
-                self.connection.rollback()
-                raise
+        """Migrate only existing parents inside the initializer's write transaction."""
+        rows = self.connection.execute(
+            "SELECT c.job_id,c.data FROM candidates c JOIN objects j "
+            "ON j.kind='job' AND j.id=c.job_id ORDER BY c.job_id"
+        ).fetchall()
+        for job_id, raw_data in rows:
+            candidates = json.loads(raw_data)
+            for position, candidate in enumerate(candidates):
+                self.connection.execute(
+                    "INSERT INTO candidate_records("
+                    "candidate_id,job_id,position,score,severity,excluded,data"
+                    ") VALUES(?,?,?,?,?,?,?) ON CONFLICT(candidate_id) DO NOTHING",
+                    (
+                        str(candidate["id"]),
+                        str(job_id),
+                        position,
+                        int(candidate.get("score", 0)),
+                        str(candidate.get("severity", "")),
+                        int(bool(candidate.get("excluded", False))),
+                        self._serialize(candidate),
+                    ),
+                )
+        self.connection.execute("DELETE FROM candidates")
 
     def _put(self, kind: str, object_id: str, value: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -4752,27 +5223,57 @@ class SQLiteRepository(
                 (self._serialize(job), job_id),
             )
 
+    def read_historical_source(
+        self,
+        job_id: str,
+        *,
+        purpose: historical_reader.Purpose,
+        scope: ScopeConfig,
+        quality_review: QualityReview | None,
+    ) -> historical_reader.HistoricalReadSnapshot:
+        historical_reader.validate_arguments(job_id, purpose, scope, quality_review)
+        with self._lock:
+            try:
+                if self.connection.in_transaction or self.connection.autocommit is True:
+                    raise historical_reader.HistoricalReadError("BASELINE_BUSY")
+                self.connection.execute("BEGIN")
+                try:
+                    return historical_reader.sqlite_snapshot(
+                        self.connection, job_id, purpose, scope, quality_review
+                    )
+                finally:
+                    self.connection.rollback()
+            except sqlite3.Error as exc:
+                result_code = getattr(exc, "sqlite_errorcode", 0)
+                busy = (result_code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                raise historical_reader.HistoricalReadError(
+                    "BASELINE_BUSY" if busy else "BASELINE_STORAGE_UNAVAILABLE"
+                ) from None
+
     def _save_job_parts(self, job: dict[str, Any]) -> None:
+        """Write supplied job parts inside the public caller's transaction."""
         metadata = {
             key: value
             for key, value in job.items()
             if key not in {"flow_records", "payload_signatures"}
         }
-        self._put("job", job["id"], metadata)
+        self.connection.execute(
+            "INSERT INTO objects(kind,id,data) VALUES(?,?,?) "
+            "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+            ("job", job["id"], self._serialize(metadata)),
+        )
         if "flow_records" in job:
             self.connection.execute(
                 "INSERT INTO job_flow_records(job_id,data) VALUES(?,?) "
                 "ON CONFLICT(job_id) DO UPDATE SET data=excluded.data",
                 (job["id"], self._serialize(job["flow_records"])),
             )
-            self.connection.commit()
         if "payload_signatures" in job:
             self.connection.execute(
                 "INSERT INTO job_payload_signatures(job_id,data) VALUES(?,?) "
                 "ON CONFLICT(job_id) DO UPDATE SET data=excluded.data",
                 (job["id"], self._serialize(job["payload_signatures"])),
             )
-            self.connection.commit()
 
     def ready(self) -> bool:
         try:
@@ -5080,7 +5581,8 @@ class SQLiteRepository(
         return self._list("group")
 
     def create_job(self, job: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-        with self._lock:
+        with self._lock, self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
             row = self.connection.execute(
                 "SELECT job_id FROM idempotency WHERE key=?", (job["idempotency_key"],)
             ).fetchone()
@@ -5094,11 +5596,11 @@ class SQLiteRepository(
                 "INSERT INTO idempotency(key,job_id) VALUES(?,?)",
                 (job["idempotency_key"], job["id"]),
             )
-            self.connection.commit()
             return deepcopy(job), True
 
     def save_job(self, job: dict[str, Any]) -> dict[str, Any]:
-        with self._lock:
+        with self._lock, self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
             self._save_job_parts(job)
             return deepcopy(job)
 
@@ -5131,6 +5633,54 @@ class SQLiteRepository(
                 (self._serialize(metadata), str(job["id"])),
             )
             return cursor.rowcount == 1
+
+    def complete_job_with_candidates(
+        self, job: dict[str, Any], candidates: list[dict[str, Any]]
+    ) -> bool:
+        if job.get("status") not in {"COMPLETED", "PARTIALLY_COMPLETED"}:
+            raise ValueError("successful publication requires a successful terminal status")
+        if type(job.get("candidate_count")) is not int or job["candidate_count"] != len(candidates):
+            raise ValueError("candidate_count must match candidates")
+        metadata = {
+            key: value
+            for key, value in job.items()
+            if key not in {"flow_records", "payload_signatures"}
+        }
+        with self._lock, self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            row = self.connection.execute(
+                "SELECT data FROM objects WHERE kind='job' AND id=?", (str(job["id"]),)
+            ).fetchone()
+            if row is None or json.loads(row[0]).get("status") in _JOB_TERMINAL_STATUSES:
+                return False
+            self.connection.execute("DELETE FROM candidate_records WHERE job_id=?", (job["id"],))
+            self.connection.executemany(
+                "INSERT INTO candidate_records("
+                "candidate_id,job_id,position,score,severity,excluded,data"
+                ") VALUES(?,?,?,?,?,?,?)",
+                [
+                    (
+                        str(candidate["id"]),
+                        str(job["id"]),
+                        position,
+                        int(candidate.get("score", 0)),
+                        str(candidate.get("severity", "")),
+                        int(bool(candidate.get("excluded", False))),
+                        self._serialize(candidate),
+                    )
+                    for position, candidate in enumerate(candidates)
+                ],
+            )
+            self.connection.execute(
+                "UPDATE objects SET data=? WHERE kind='job' AND id=?",
+                (self._serialize(metadata), str(job["id"])),
+            )
+            for kind, value in (("job", metadata), ("candidates", candidates)):
+                self.connection.execute(
+                    "INSERT INTO audit_events(kind,object_id,occurred_at,data) VALUES(?,?,?,?)",
+                    (kind, str(job["id"]), datetime.now(UTC).isoformat(), self._serialize(value)),
+                )
+            return True
 
     def mark_analysis_started(
         self,
@@ -6074,6 +6624,13 @@ class SQLiteRepository(
         with self._lock:
             try:
                 self.connection.execute("BEGIN IMMEDIATE")
+                if (
+                    self.connection.execute(
+                        "SELECT 1 FROM objects WHERE kind='job' AND id=?", (job_id,)
+                    ).fetchone()
+                    is None
+                ):
+                    raise ValueError("candidate parent job not found")
                 self.connection.execute("DELETE FROM candidate_records WHERE job_id=?", (job_id,))
                 self.connection.executemany(
                     "INSERT INTO candidate_records("
@@ -6098,16 +6655,18 @@ class SQLiteRepository(
                 raise
 
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]:
-        rows = self.connection.execute(
-            "SELECT data FROM candidate_records WHERE job_id=? ORDER BY position", (job_id,)
-        ).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT data FROM candidate_records WHERE job_id=? ORDER BY position", (job_id,)
+            ).fetchall()
+            return [json.loads(row[0]) for row in rows]
 
     def get_candidate(self, candidate_id: str) -> tuple[str, dict[str, Any]] | None:
-        row = self.connection.execute(
-            "SELECT job_id,data FROM candidate_records WHERE candidate_id=?", (candidate_id,)
-        ).fetchone()
-        return (str(row[0]), json.loads(row[1])) if row else None
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT job_id,data FROM candidate_records WHERE candidate_id=?", (candidate_id,)
+            ).fetchone()
+            return (str(row[0]), json.loads(row[1])) if row else None
 
     def query_candidates(
         self,
@@ -6116,19 +6675,20 @@ class SQLiteRepository(
         severity: str | None = None,
         include_suppressed: bool = False,
     ) -> list[tuple[str, dict[str, Any]]]:
-        clauses = ["CAST(json_extract(data,'$.score') AS INTEGER)>=?"]
-        parameters: list[Any] = [minimum_score]
-        if severity is not None:
-            clauses.append("json_extract(data,'$.severity')=?")
-            parameters.append(severity)
-        if not include_suppressed:
-            clauses.append("COALESCE(json_extract(data,'$.excluded'),0)=0")
-        rows = self.connection.execute(
-            "SELECT job_id,data FROM candidate_records WHERE "  # noqa: S608 -- clauses are code-owned and values are bound
-            + " AND ".join(clauses),
-            parameters,
-        ).fetchall()
-        return [(str(row[0]), json.loads(row[1])) for row in rows]
+        with self._lock:
+            clauses = ["CAST(json_extract(data,'$.score') AS INTEGER)>=?"]
+            parameters: list[Any] = [minimum_score]
+            if severity is not None:
+                clauses.append("json_extract(data,'$.severity')=?")
+                parameters.append(severity)
+            if not include_suppressed:
+                clauses.append("COALESCE(json_extract(data,'$.excluded'),0)=0")
+            rows = self.connection.execute(
+                "SELECT job_id,data FROM candidate_records WHERE "  # noqa: S608 -- clauses are code-owned and values are bound
+                + " AND ".join(clauses),
+                parameters,
+            ).fetchall()
+            return [(str(row[0]), json.loads(row[1])) for row in rows]
 
     @staticmethod
     def _candidate_query_parts(
@@ -6153,51 +6713,52 @@ class SQLiteRepository(
         page: int,
         page_size: int,
     ) -> tuple[list[tuple[str, dict[str, Any]]], int]:
-        clauses, parameters = self._candidate_query_parts(
-            minimum_score, severity, include_suppressed
-        )
-        field = sort.removeprefix("-")
-        direction = "DESC" if sort.startswith("-") else "ASC"
-        columns = {
-            "score": "score",
-            "severity": "severity",
-            "candidate_ip": "json_extract(data,'$.candidate_ip')",
-            "first_seen": "json_extract(data,'$.first_seen')",
-            "last_seen": "json_extract(data,'$.last_seen')",
-        }
-        order_column = columns[field]
-        where = " AND ".join(clauses)
-        group_key = "COALESCE(NULLIF(json_extract(data,'$.candidate_ip'),''),candidate_id)"
-        total = int(
-            self.connection.execute(
-                f"SELECT COUNT(DISTINCT {group_key}) FROM candidate_records WHERE {where}",  # noqa: S608 -- expressions are code-owned
-                parameters,
-            ).fetchone()[0]
-        )
-        rows = self.connection.execute(
-            "WITH filtered AS ("  # noqa: S608 -- columns and clauses are code-owned
-            f"SELECT job_id,candidate_id,score,severity,data,{group_key} AS group_key "
-            f"FROM candidate_records WHERE {where}"
-            "), ranked AS ("
-            "SELECT job_id,candidate_id,score,severity,data,"
-            "COUNT(*) OVER (PARTITION BY group_key) AS occurrence_count,"
-            "ROW_NUMBER() OVER (PARTITION BY group_key "
-            "ORDER BY COALESCE(json_extract(data,'$.last_seen'),'') DESC,"
-            "candidate_id DESC) AS rank "
-            "FROM filtered) "
-            "SELECT job_id,data,occurrence_count FROM ranked WHERE rank=1 "
-            f"ORDER BY {order_column} {direction},candidate_id ASC LIMIT ? OFFSET ?",
-            [*parameters, page_size, (page - 1) * page_size],
-        ).fetchall()
-        result: list[tuple[str, dict[str, Any]]] = []
-        for row in rows:
-            candidate = json.loads(row[1])
-            occurrence_count = int(row[2])
-            if occurrence_count > 1:
-                candidate["occurrence_count"] = occurrence_count
-                candidate["duplicate_count"] = occurrence_count - 1
-            result.append((str(row[0]), candidate))
-        return result, total
+        with self._lock:
+            clauses, parameters = self._candidate_query_parts(
+                minimum_score, severity, include_suppressed
+            )
+            field = sort.removeprefix("-")
+            direction = "DESC" if sort.startswith("-") else "ASC"
+            columns = {
+                "score": "score",
+                "severity": "severity",
+                "candidate_ip": "json_extract(data,'$.candidate_ip')",
+                "first_seen": "json_extract(data,'$.first_seen')",
+                "last_seen": "json_extract(data,'$.last_seen')",
+            }
+            order_column = columns[field]
+            where = " AND ".join(clauses)
+            group_key = "COALESCE(NULLIF(json_extract(data,'$.candidate_ip'),''),candidate_id)"
+            total = int(
+                self.connection.execute(
+                    f"SELECT COUNT(DISTINCT {group_key}) FROM candidate_records WHERE {where}",  # noqa: S608 -- expressions are code-owned
+                    parameters,
+                ).fetchone()[0]
+            )
+            rows = self.connection.execute(
+                "WITH filtered AS ("  # noqa: S608 -- columns and clauses are code-owned
+                f"SELECT job_id,candidate_id,score,severity,data,{group_key} AS group_key "
+                f"FROM candidate_records WHERE {where}"
+                "), ranked AS ("
+                "SELECT job_id,candidate_id,score,severity,data,"
+                "COUNT(*) OVER (PARTITION BY group_key) AS occurrence_count,"
+                "ROW_NUMBER() OVER (PARTITION BY group_key "
+                "ORDER BY COALESCE(json_extract(data,'$.last_seen'),'') DESC,"
+                "candidate_id DESC) AS rank "
+                "FROM filtered) "
+                "SELECT job_id,data,occurrence_count FROM ranked WHERE rank=1 "
+                f"ORDER BY {order_column} {direction},candidate_id ASC LIMIT ? OFFSET ?",
+                [*parameters, page_size, (page - 1) * page_size],
+            ).fetchall()
+            result: list[tuple[str, dict[str, Any]]] = []
+            for row in rows:
+                candidate = json.loads(row[1])
+                occurrence_count = int(row[2])
+                if occurrence_count > 1:
+                    candidate["occurrence_count"] = occurrence_count
+                    candidate["duplicate_count"] = occurrence_count - 1
+                result.append((str(row[0]), candidate))
+            return result, total
 
     def query_candidate_refs(
         self,
@@ -6206,15 +6767,16 @@ class SQLiteRepository(
         severity: str | None,
         include_suppressed: bool,
     ) -> list[tuple[str, bool]]:
-        clauses, parameters = self._candidate_query_parts(
-            minimum_score, severity, include_suppressed
-        )
-        rows = self.connection.execute(
-            "SELECT candidate_id,excluded FROM candidate_records WHERE "  # noqa: S608 -- clauses are code-owned and values are bound
-            + " AND ".join(clauses),
-            parameters,
-        ).fetchall()
-        return [(str(row[0]), bool(row[1])) for row in rows]
+        with self._lock:
+            clauses, parameters = self._candidate_query_parts(
+                minimum_score, severity, include_suppressed
+            )
+            rows = self.connection.execute(
+                "SELECT candidate_id,excluded FROM candidate_records WHERE "  # noqa: S608 -- clauses are code-owned and values are bound
+                + " AND ".join(clauses),
+                parameters,
+            ).fetchall()
+            return [(str(row[0]), bool(row[1])) for row in rows]
 
     def candidate_workflow_counts(
         self,
@@ -6223,167 +6785,220 @@ class SQLiteRepository(
         severity: str | None,
         include_suppressed: bool,
     ) -> dict[str, int]:
-        clauses, parameters = self._candidate_query_parts(
-            minimum_score, severity, include_suppressed
-        )
-        where = " AND ".join(clauses)
-        group_key = "COALESCE(NULLIF(json_extract(data,'$.candidate_ip'),''),candidate_id)"
-        rows = self.connection.execute(
-            "WITH filtered AS ("  # noqa: S608 -- columns and clauses are code-owned
-            f"SELECT candidate_id,data,{group_key} AS group_key "
-            f"FROM candidate_records WHERE {where}"
-            "), ranked AS ("
-            "SELECT candidate_id,ROW_NUMBER() OVER (PARTITION BY group_key "
-            "ORDER BY COALESCE(json_extract(data,'$.last_seen'),'') DESC,"
-            "candidate_id DESC) AS rank FROM filtered) "
-            "SELECT candidate_id FROM ranked WHERE rank=1",
-            parameters,
-        ).fetchall()
-        candidate_ids = [str(row[0]) for row in rows]
-        records = self.list_candidate_workflow_records(candidate_ids)
-        return _candidate_workflow_counts_from_records(
-            candidate_ids,
-            records["decisions"],
-            records["actions"],
-        )
+        with self._lock:
+            clauses, parameters = self._candidate_query_parts(
+                minimum_score, severity, include_suppressed
+            )
+            where = " AND ".join(clauses)
+            group_key = "COALESCE(NULLIF(json_extract(data,'$.candidate_ip'),''),candidate_id)"
+            rows = self.connection.execute(
+                "WITH filtered AS ("  # noqa: S608 -- columns and clauses are code-owned
+                f"SELECT candidate_id,data,{group_key} AS group_key "
+                f"FROM candidate_records WHERE {where}"
+                "), ranked AS ("
+                "SELECT candidate_id,ROW_NUMBER() OVER (PARTITION BY group_key "
+                "ORDER BY COALESCE(json_extract(data,'$.last_seen'),'') DESC,"
+                "candidate_id DESC) AS rank FROM filtered) "
+                "SELECT candidate_id FROM ranked WHERE rank=1",
+                parameters,
+            ).fetchall()
+            candidate_ids = [str(row[0]) for row in rows]
+            records = self.list_candidate_workflow_records(candidate_ids)
+            return _candidate_workflow_counts_from_records(
+                candidate_ids,
+                records["decisions"],
+                records["actions"],
+            )
 
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-        with self._lock:
-            existing = self.connection.execute(
-                "SELECT data FROM ai_analysis_runs WHERE analysis_job_id=? AND idempotency_key=?",
-                (run["analysis_job_id"], run["idempotency_key"]),
-            ).fetchone()
-            if existing is not None:
-                return json.loads(existing[0]), False
-            self.connection.execute(
-                "INSERT INTO ai_analysis_runs"
-                "(run_id,analysis_job_id,idempotency_key,created_at,data) VALUES(?,?,?,?,?)",
-                (
-                    run["id"],
-                    run["analysis_job_id"],
-                    run["idempotency_key"],
-                    run["created_at"],
-                    self._serialize(run),
-                ),
-            )
-            self.connection.commit()
+        from .historical_ai_storage import reject_generic_historical
+
+        reject_generic_historical(run)
+        with self._historical_connection() as connection:
+            with historical_sql.transaction(connection, postgres=False, write=True) as cursor:
+                existing = historical_sql.RunSQL(cursor, False).get(
+                    "analysis_job_id=? AND idempotency_key=?",
+                    (run["analysis_job_id"], run["idempotency_key"]),
+                )
+                if existing is not None:
+                    historical_runs.require(
+                        historical_runs.OWNER_KEY not in existing, "BASELINE_IDEMPOTENCY_CONFLICT"
+                    )
+                    return existing, False
+                cursor.execute(
+                    "INSERT INTO ai_analysis_runs"
+                    "(run_id,analysis_job_id,idempotency_key,created_at,data) VALUES(?,?,?,?,?)",
+                    (
+                        run["id"],
+                        run["analysis_job_id"],
+                        run["idempotency_key"],
+                        run["created_at"],
+                        self._serialize(run),
+                    ),
+                )
             return deepcopy(run), True
 
-    def save_ai_run(self, run: dict[str, Any]) -> dict[str, Any]:
+    @contextmanager
+    def _historical_connection(self) -> Iterator[Any]:
         with self._lock:
-            row = self.connection.execute(
-                "SELECT data FROM ai_analysis_runs WHERE run_id=?", (run["id"],)
-            ).fetchone()
-            if row is not None:
-                existing = cast(dict[str, Any], json.loads(row[0]))
-                if existing.get("status") in {"COMPLETED", "FAILED", "CANCELLED"}:
-                    return existing
-            self.connection.execute(
-                "UPDATE ai_analysis_runs SET data=? WHERE run_id=?",
-                (self._serialize(run), run["id"]),
+            historical_runs.require(not getattr(self, "_historical_quarantined", False))
+            connection = self.connection
+            try:
+                yield connection
+            except historical_runs.HistoricalStorageOutcomeUnknown:
+                self._historical_quarantined = True
+                historical_sql.close_quarantined(connection)
+                raise
+
+    def save_ai_run(self, run: dict[str, Any]) -> dict[str, Any]:
+        with self._historical_connection() as connection:
+            with historical_sql.transaction(connection, postgres=False, write=True) as cursor:
+                historical_sql.sqlite_schema(cursor)
+                saved = historical_sql.RunSQL(cursor, False).save(run)
+                if historical_runs.OWNER_KEY in saved:
+                    uri = historical_sql.sqlite_readback_uri(cursor)
+            if historical_runs.OWNER_KEY in saved:
+                historical_sql.confirm_run(
+                    saved, lambda: sqlite3.connect(uri, uri=True), postgres=False
+                )
+            return deepcopy(saved)
+
+    def admit_historical_ai_run(
+        self,
+        request: historical_dto.HistoricalAdmissionRequest,
+        builder: historical_runs.Builder,
+        *,
+        admission: BaselineAdmission | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        request = historical_dto.checked_request(request)
+        with BaselineLease(admission) as lease, self._historical_connection() as connection:
+            with historical_sql.transaction(connection, postgres=False, write=True) as cursor:
+                historical_sql.sqlite_schema(cursor)
+                run, created = historical_sql.RunSQL(cursor, False).admit(request, builder, lease)
+                uri = historical_sql.sqlite_readback_uri(cursor)
+            historical_sql.confirm_run(run, lambda: sqlite3.connect(uri, uri=True), postgres=False)
+            return run, created
+
+    def get_ai_run_by_request(self, job_id: str, idempotency_key: str) -> dict[str, Any] | None:
+        with (
+            self._historical_connection() as connection,
+            historical_sql.transaction(connection, postgres=False) as cursor,
+        ):
+            historical_sql.sqlite_schema(cursor)
+            return historical_sql.RunSQL(cursor, False).get(
+                "analysis_job_id=? AND idempotency_key=?", (job_id, idempotency_key)
             )
-            self.connection.commit()
-            return deepcopy(run)
 
     def get_ai_run(self, run_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            row = self.connection.execute(
-                "SELECT data FROM ai_analysis_runs WHERE run_id=?", (run_id,)
-            ).fetchone()
-            return json.loads(row[0]) if row else None
+        with (
+            self._historical_connection() as connection,
+            historical_sql.transaction(connection, postgres=False) as cursor,
+        ):
+            historical_sql.sqlite_schema(cursor)
+            return historical_sql.RunSQL(cursor, False).get("run_id=?", (run_id,), compact=True)
 
     def list_ai_runs(self, job_id: str) -> list[dict[str, Any]]:
-        with self._lock:
-            rows = self.connection.execute(
-                "SELECT data FROM ai_analysis_runs WHERE analysis_job_id=? "
-                "ORDER BY created_at DESC",
+        with (
+            self._historical_connection() as connection,
+            historical_sql.transaction(connection, postgres=False) as cursor,
+        ):
+            historical_sql.sqlite_schema(cursor)
+            ids = cursor.execute(
+                "SELECT rowid FROM ai_analysis_runs WHERE "
+                "analysis_job_id=? ORDER BY created_at DESC",
                 (job_id,),
             ).fetchall()
-            return [json.loads(row[0]) for row in rows]
+            store = historical_sql.RunSQL(cursor, False)
+            return [
+                cast(dict[str, Any], store.get("rowid=?", (row[0],), compact=True)) for row in ids
+            ]
 
     def save_ai_assessment(self, assessment: dict[str, Any]) -> dict[str, Any]:
-        with self._lock:
-            self.connection.execute(
-                "INSERT OR IGNORE INTO ai_candidate_assessments"
-                "(assessment_id,ai_run_id,created_at,data) VALUES(?,?,?,?)",
-                (
-                    assessment["id"],
-                    assessment["ai_run_id"],
-                    assessment["created_at"],
-                    self._serialize(assessment),
-                ),
-            )
-            self.connection.commit()
-            stored = self.get_ai_assessment(assessment["id"])
-            if stored is None:
-                raise RuntimeError("AI assessment was not persisted")
-            return stored
+        from .historical_ai_descendants import SQLAccess, confirm_descendant
+
+        with self._historical_connection() as connection:
+            with historical_sql.transaction(connection, postgres=False, write=True) as cursor:
+                saved = SQLAccess(cursor, False).save("A", assessment)
+                if saved.get("baseline_mode") == "historical":
+                    uri = historical_sql.sqlite_readback_uri(cursor)
+            if saved.get("baseline_mode") == "historical":
+                confirm_descendant(
+                    "A", saved, lambda: sqlite3.connect(uri, uri=True), postgres=False
+                )
+            return saved
 
     def get_ai_assessment(self, assessment_id: str) -> dict[str, Any] | None:
-        row = self.connection.execute(
-            "SELECT data FROM ai_candidate_assessments WHERE assessment_id=?",
-            (assessment_id,),
-        ).fetchone()
-        return json.loads(row[0]) if row else None
+        from .historical_ai_descendants import SQLAccess
+
+        with (
+            self._historical_connection() as connection,
+            historical_sql.transaction(connection, postgres=False) as cursor,
+        ):
+            return SQLAccess(cursor, False).get("A", assessment_id)
 
     def list_ai_assessments(self, run_id: str) -> list[dict[str, Any]]:
-        rows = self.connection.execute(
-            "SELECT data FROM ai_candidate_assessments WHERE ai_run_id=? ORDER BY created_at",
-            (run_id,),
-        ).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        from .historical_ai_descendants import SQLAccess
+
+        with (
+            self._historical_connection() as connection,
+            historical_sql.transaction(connection, postgres=False) as cursor,
+        ):
+            return SQLAccess(cursor, False).list("A", run_id)
 
     def save_ai_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]:
-        with self._lock:
-            self.connection.execute(
-                "INSERT INTO ai_generated_artifacts"
-                "(artifact_id,assessment_id,created_at,data) VALUES(?,?,?,?) "
-                "ON CONFLICT(artifact_id) DO UPDATE SET data=excluded.data",
-                (
-                    artifact["id"],
-                    artifact["assessment_id"],
-                    artifact["created_at"],
-                    self._serialize(artifact),
-                ),
-            )
-            self.connection.commit()
-            return deepcopy(artifact)
+        from .historical_ai_descendants import SQLAccess, confirm_descendant
+
+        with self._historical_connection() as connection:
+            with historical_sql.transaction(connection, postgres=False, write=True) as cursor:
+                saved = SQLAccess(cursor, False).save("T", artifact)
+                if saved.get("baseline_mode") == "historical":
+                    uri = historical_sql.sqlite_readback_uri(cursor)
+            if saved.get("baseline_mode") == "historical":
+                confirm_descendant(
+                    "T", saved, lambda: sqlite3.connect(uri, uri=True), postgres=False
+                )
+            return saved
 
     def get_ai_artifact(self, artifact_id: str) -> dict[str, Any] | None:
-        row = self.connection.execute(
-            "SELECT data FROM ai_generated_artifacts WHERE artifact_id=?", (artifact_id,)
-        ).fetchone()
-        return json.loads(row[0]) if row else None
+        from .historical_ai_descendants import SQLAccess
+
+        with (
+            self._historical_connection() as connection,
+            historical_sql.transaction(connection, postgres=False) as cursor,
+        ):
+            return SQLAccess(cursor, False).get("T", artifact_id)
 
     def list_ai_artifacts(self, assessment_id: str) -> list[dict[str, Any]]:
-        rows = self.connection.execute(
-            "SELECT data FROM ai_generated_artifacts "
-            "WHERE assessment_id=? ORDER BY created_at,artifact_id",
-            (assessment_id,),
-        ).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        from .historical_ai_descendants import SQLAccess
+
+        with (
+            self._historical_connection() as connection,
+            historical_sql.transaction(connection, postgres=False) as cursor,
+        ):
+            return SQLAccess(cursor, False).list("T", assessment_id)
 
     def save_ai_feedback(self, feedback: dict[str, Any]) -> dict[str, Any]:
-        with self._lock:
-            self.connection.execute(
-                "INSERT OR IGNORE INTO ai_feedback"
-                "(feedback_id,assessment_id,created_at,data) VALUES(?,?,?,?)",
-                (
-                    feedback["id"],
-                    feedback["assessment_id"],
-                    feedback["created_at"],
-                    self._serialize(feedback),
-                ),
-            )
-            self.connection.commit()
-        return deepcopy(feedback)
+        from .historical_ai_descendants import SQLAccess, confirm_descendant
+
+        with self._historical_connection() as connection:
+            with historical_sql.transaction(connection, postgres=False, write=True) as cursor:
+                saved = SQLAccess(cursor, False).save("F", feedback)
+                if saved.get("baseline_mode") == "historical":
+                    uri = historical_sql.sqlite_readback_uri(cursor)
+            if saved.get("baseline_mode") == "historical":
+                confirm_descendant(
+                    "F", saved, lambda: sqlite3.connect(uri, uri=True), postgres=False
+                )
+            return saved
 
     def list_ai_feedback(self, assessment_id: str) -> list[dict[str, Any]]:
-        rows = self.connection.execute(
-            "SELECT data FROM ai_feedback WHERE assessment_id=? ORDER BY created_at,feedback_id",
-            (assessment_id,),
-        ).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        from .historical_ai_descendants import SQLAccess
+
+        with (
+            self._historical_connection() as connection,
+            historical_sql.transaction(connection, postgres=False) as cursor,
+        ):
+            return SQLAccess(cursor, False).list("F", assessment_id)
 
     def append_audit_event(self, kind: str, object_id: str, data: dict[str, Any]) -> None:
         with self._lock:
@@ -6394,13 +7009,14 @@ class SQLiteRepository(
             self.connection.commit()
 
     def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]:
-        rows = self.connection.execute(
-            "SELECT job_id,data FROM candidate_records ORDER BY job_id,position"
-        ).fetchall()
-        result: dict[str, list[dict[str, Any]]] = {}
-        for job_id, data in rows:
-            result.setdefault(str(job_id), []).append(json.loads(data))
-        return result
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT job_id,data FROM candidate_records ORDER BY job_id,position"
+            ).fetchall()
+            result: dict[str, list[dict[str, Any]]] = {}
+            for job_id, data in rows:
+                result.setdefault(str(job_id), []).append(json.loads(data))
+            return result
 
     def get_integration_settings(self) -> dict[str, Any] | None:
         return self._get("integration_settings", "global")
@@ -6504,12 +7120,19 @@ class SQLiteRepository(
 
     def update_candidate(self, candidate_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
         """Update a candidate by ID across all jobs."""
-        with self._lock:
+        with self._lock, self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
             row = self.connection.execute(
-                "SELECT data FROM candidate_records WHERE candidate_id=?", (candidate_id,)
+                "SELECT c.data,c.job_id FROM candidate_records c JOIN objects j "
+                "ON j.kind='job' AND j.id=c.job_id WHERE c.candidate_id=?",
+                (candidate_id,),
             ).fetchone()
             if row is None:
                 return None
+            if ("id" in updates and updates["id"] != candidate_id) or (
+                "job_id" in updates and updates["job_id"] != row[1]
+            ):
+                raise ValueError("candidate identity is immutable")
             from datetime import UTC
 
             updated = json.loads(row[0])
@@ -6534,16 +7157,17 @@ class SQLiteRepository(
                     candidate_id,
                 ),
             )
-            self.connection.commit()
             return cast(dict[str, Any], deepcopy(updated))
 
     def delete_candidate(self, candidate_id: str) -> bool:
         """Delete a candidate by ID across all jobs."""
-        with self._lock:
+        with self._lock, self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
             cursor = self.connection.execute(
-                "DELETE FROM candidate_records WHERE candidate_id=?", (candidate_id,)
+                "DELETE FROM candidate_records WHERE candidate_id=? AND EXISTS ("
+                "SELECT 1 FROM objects WHERE kind='job' AND id=candidate_records.job_id)",
+                (candidate_id,),
             )
-            self.connection.commit()
             return cursor.rowcount > 0
 
     def save_flow_label(self, label: dict[str, Any]) -> dict[str, Any]:
