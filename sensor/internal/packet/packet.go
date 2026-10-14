@@ -38,6 +38,8 @@ type Packet struct {
 	HopLimit                    uint8
 	HopLimitObserved            bool
 	TCPSequence                 uint32
+	IPLength                    uint32
+	EvidenceComplete            bool
 }
 
 func (p Packet) ForStorage(storePayload bool) Packet {

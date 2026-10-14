@@ -86,7 +86,7 @@ def test_inbound_syn_flood_reports_type_resource_goal_and_human_approved_respons
     )
 
     item = finding(report, "TCP_SYN_FLOOD")
-    assert report["version"] == "ddos-attack-report-v2"
+    assert report["version"] == "ddos-attack-report-v3"
     assert report["verdict"] == "suspicious_traffic"
     assert item["attack_role"] == "VICTIM_SIDE_INBOUND"
     assert item["target"] == {"ip": "10.0.0.10", "port": 443}
@@ -127,7 +127,7 @@ def test_outbound_udp_flood_is_participant_traffic_not_a_c2_candidate() -> None:
     assert "APPLY_EGRESS_RATE_LIMIT" in item["recommendation_codes"]
 
 
-def test_reflection_shape_is_possible_and_never_claims_a_measured_amplification_ratio() -> None:
+def test_port_size_only_is_unconfirmed_and_never_claims_a_measured_amplification_ratio() -> None:
     records = [
         record(
             second,
@@ -142,16 +142,21 @@ def test_reflection_shape_is_possible_and_never_claims_a_measured_amplification_
         for source in range(1, 5)
     ]
     report = analyze_ddos_attack(records, internal_cidrs=("10.0.0.0/8",), parameters=PARAMETERS)
-    item = finding(report, "POSSIBLE_REFLECTION_AMPLIFICATION")
+    item = finding(report, "UDP_FLOOD")
 
     assert item["likelihood"] == "POSSIBLE"
-    assert item["objective"] == "REFLECTED_BANDWIDTH_EXHAUSTION"
+    assert item["classification"]["delivery_mechanism"] == "UNKNOWN"
     assert item["metrics"]["dominant_reflection_source_port"] == 53
     assert item["metrics"]["amplification_ratio"] is None
-    assert "AMPLIFICATION_RATIO_UNOBSERVED" in item["uncertainty_codes"]
+    assert (
+        "RESPONSE_SEMANTICS_UNAVAILABLE"
+        in item["classification"]["axes"]["delivery_mechanism"]["unknown_codes"]
+    )
 
 
 def test_phase1_classifies_reflection_and_emits_bounded_signatures() -> None:
+    from c2hunter_analysis.ddos_packets import packet_sample
+
     records = [
         {
             **record(
@@ -166,6 +171,21 @@ def test_phase1_classifies_reflection_and_emits_bounded_signatures() -> None:
             "packet_count": 3,
             "total_bytes": 1800,
             "packet_sizes": [590, 600, 610],
+            "ddos_packet_evidence": {
+                "version": 1,
+                "omitted_samples": 0,
+                "samples": [
+                    packet_sample(
+                        START + timedelta(seconds=second),
+                        "UDP",
+                        600,
+                        0,
+                        b"\x12\x34\x81\x80\x00\x01\x00\x01\x00\x00\x00\x00\x01a\x00\x00\x01\x00\x01",
+                        53,
+                        53000,
+                    )
+                ],
+            },
             "payload_prefix_hash": "a" * 64,
         }
         for second in range(25)
@@ -177,11 +197,14 @@ def test_phase1_classifies_reflection_and_emits_bounded_signatures() -> None:
         "POSSIBLE_REFLECTION_AMPLIFICATION",
     )
 
-    assert item["classification"] == {
+    assert {
+        key: item["classification"][key]
+        for key in ("delivery_mechanism", "source_population", "source_authenticity", "confidence")
+    } == {
         "delivery_mechanism": "REFLECTION_AMPLIFICATION",
         "source_population": "REFLECTOR_SET",
         "source_authenticity": "SPOOFING_UNCONFIRMED",
-        "confidence": "medium",
+        "confidence": "low",
     }
     assert {pattern["type"] for pattern in item["common_patterns"]} >= {
         "REFLECTION_SERVICE_CONVERGENCE",
@@ -201,7 +224,7 @@ def test_phase1_classifies_reflection_and_emits_bounded_signatures() -> None:
     assert len(item["signature_candidates"]) <= 4
 
 
-def test_phase1_marks_outbound_distributed_sources_as_botnet_like_without_attribution() -> None:
+def test_outbound_role_and_profile_presence_alone_do_not_prove_coordination() -> None:
     records = [
         {
             **record(
@@ -226,15 +249,13 @@ def test_phase1_marks_outbound_distributed_sources_as_botnet_like_without_attrib
         "UDP_FLOOD",
     )
 
-    assert item["classification"]["delivery_mechanism"] == "DIRECT_DISTRIBUTED"
-    assert item["classification"]["source_population"] == "BOTNET_LIKE_COORDINATION"
-    assert item["classification"]["source_authenticity"] == "SOURCE_CONSISTENT"
-    assert "BOTNET_ATTRIBUTION_UNCONFIRMED" in item["uncertainty_codes"]
+    assert item["classification"]["delivery_mechanism"] == "UNKNOWN"
+    assert item["classification"]["source_population"] == "DISTRIBUTED_UNATTRIBUTED"
+    assert item["classification"]["source_authenticity"] == "SPOOFING_UNCONFIRMED"
+    assert "BOTNET_ATTRIBUTION_UNCONFIRMED" not in item["uncertainty_codes"]
 
 
-def test_phase2_network_identity_statistics_raise_spoofing_suspicion_without_claiming_proof() -> (
-    None
-):
+def test_identity_variation_remains_observation_without_spoofing_suspicion() -> None:
     records = [
         {
             **row,
@@ -255,14 +276,14 @@ def test_phase2_network_identity_statistics_raise_spoofing_suspicion_without_cla
         "TCP_SYN_FLOOD",
     )
 
-    assert item["classification"]["source_authenticity"] == "SPOOFING_SUSPECTED"
+    assert item["classification"]["source_authenticity"] == "SPOOFING_UNCONFIRMED"
     assert item["metrics"]["network_identity_anomaly_records"] == len(records)
-    assert "SOURCE_SPOOFING_NOT_CONFIRMED" in item["uncertainty_codes"]
+    assert "SOURCE_SPOOFING_NOT_CONFIRMED" not in item["uncertainty_codes"]
     assert {pattern["type"] for pattern in item["common_patterns"]} >= {
         "HOP_LIMIT_DIVERSITY",
         "IP_ID_INCONSISTENCY",
     }
-    assert any(
+    assert not any(
         signature["kind"] == "SPOOFING_HEURISTIC" for signature in item["signature_candidates"]
     )
 
@@ -684,7 +705,7 @@ def test_equal_reflection_port_counts_use_the_lowest_port_tiebreak(monkeypatch) 
     reverse = analyze_ddos_attack(
         list(reversed(rows)), internal_cidrs=("10.0.0.0/8",), parameters=PARAMETERS
     )
-    item = finding(forward, "POSSIBLE_REFLECTION_AMPLIFICATION")
+    item = finding(forward, "UDP_FLOOD")
     assert item["metrics"]["dominant_reflection_source_port"] == 53
     assert json.dumps(forward, sort_keys=True) == json.dumps(reverse, sort_keys=True)
 
@@ -696,7 +717,7 @@ def test_invalid_ddos_parameter_fails_closed_before_record_processing() -> None:
         analyze_ddos_attack([], parameters={"ddos_reflection_min_average_packet_bytes": 1})[
             "version"
         ]
-        == "ddos-attack-report-v2"
+        == "ddos-attack-report-v3"
     )
 
 
@@ -708,7 +729,7 @@ def test_internal_networks_are_precompiled_and_hard_bounded() -> None:
 
 def test_integer_policy_accepts_its_documented_maximum_without_float_loss() -> None:
     report = analyze_ddos_attack([], parameters={"ddos_min_packet_count": 2**63 - 1})
-    assert report["version"] == "ddos-attack-report-v2"
+    assert report["version"] == "ddos-attack-report-v3"
 
 
 def test_timestamp_interval_overflow_is_skipped_instead_of_crashing() -> None:

@@ -4,9 +4,13 @@
 from __future__ import annotations
 
 import json
+import ipaddress
+import struct
+from pathlib import Path
 from datetime import UTC, datetime, timedelta
 
 from c2hunter_analysis.ddos_attack import analyze_ddos_attack
+from c2hunter_analysis.pcap import parse_pcap
 
 START = datetime(2026, 9, 15, tzinfo=UTC)
 PARAMETERS = {
@@ -81,16 +85,76 @@ def analyze(rows: list[dict[str, object]], parameters: dict[str, object] | None 
     )
 
 
+def dns_packets():
+    content = bytearray(struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 101))
+    payload = bytes.fromhex(
+        "12348180000100010000000001610000010001c00c000100010000003c0004c0000201"
+    )
+    for index in range(1200):
+        udp = struct.pack("!HHHH", 53, 443, 8 + len(payload), 0) + payload
+        packet = (
+            struct.pack(
+                "!BBHHHBBH4s4s",
+                0x45,
+                0,
+                20 + len(udp),
+                index,
+                0,
+                64,
+                17,
+                0,
+                ipaddress.ip_address(f"198.51.100.{index % 100 + 1}").packed,
+                ipaddress.ip_address("10.0.0.10").packed,
+            )
+            + udp
+        )
+        content.extend(
+            struct.pack(
+                "<IIII",
+                int(START.timestamp()) + index // 40,
+                0,
+                len(packet),
+                len(packet),
+            )
+            + packet
+        )
+    return list(
+        parse_pcap(
+            bytes(content),
+            sensor_id="scenario-sensor",
+            internal_networks=["10.0.0.0/8"],
+            retain_packet_bytes=False,
+            retain_network_evidence=True,
+        ).records
+    )
+
+
 syn = flows("TCP", flags={"syn": 1})
 udp = flows("UDP")
+packet_fixture = json.loads(
+    (
+        Path(__file__).parents[2]
+        / "analysis/tests/fixtures/ddos-pcap-coordination.json"
+    ).read_text()
+)
 scenarios = {
+    "coordinated_packets": analyze(
+        packet_fixture,
+        {
+            **PARAMETERS,
+            "ddos_min_duration_seconds": 2,
+            "ddos_min_source_count": 3,
+            "ddos_min_packet_count": 6,
+            "ddos_min_packets_per_second": 2,
+        },
+    ),
     "tcp_syn_inbound": analyze(syn),
     "tcp_ack_inbound": analyze(flows("TCP", flags={"ack": 1})),
     "tcp_rst_inbound": analyze(flows("TCP", flags={"rst": 1})),
     "udp_outbound_participant": analyze(
         flows("UDP", direction="OUTBOUND", target="203.0.113.80")
     ),
-    "possible_reflection": analyze(flows("UDP", source_port=53, size=7200)),
+    "possible_reflection": analyze(dns_packets()),
     "icmp_echo": analyze(flows("ICMP", icmp_type=8)),
     "icmp_generic": analyze(flows("ICMP", icmp_type=3)),
     "multi_vector": analyze(syn + udp),

@@ -19,8 +19,11 @@ from datetime import UTC, datetime, timedelta
 from ipaddress import IPv4Network, IPv6Network, collapse_addresses, ip_address, ip_network
 from typing import Any, cast
 
-REPORT_VERSION = "ddos-attack-report-v2"
-CATALOG_VERSION = "ddos-taxonomy-v2"
+from .ddos_evidence import assess, empty_evidence
+from .ddos_packets import PacketEvidenceCollector, packet_interval_us, validate_packet_evidence
+
+REPORT_VERSION = "ddos-attack-report-v3"
+CATALOG_VERSION = "ddos-taxonomy-v3"
 REFLECTION_PORTS = frozenset({17, 19, 53, 123, 389, 1900, 11211})
 MAX_TARGETS = 4096
 MAX_BUCKETS_PER_TARGET = 3600
@@ -154,6 +157,7 @@ class Observation:
     ip_id_values_truncated: bool = False
     ip_id_monotonic_transitions: int = 0
     ip_id_transition_count: int = 0
+    ddos_packet_evidence: dict[str, Any] | None = None
 
 
 @dataclass
@@ -199,6 +203,7 @@ class Target:
     bucket_record_counts: dict[int, int] = field(default_factory=dict)
     bucket_heap: list[int] = field(default_factory=list)
     bucket_limited: bool = False
+    axis_evidence: dict[str, Any] = field(default_factory=empty_evidence)
 
 
 class InvalidRecord(ValueError):
@@ -533,7 +538,19 @@ def _normalize(record: Mapping[str, object], networks: NetworkIndex) -> Observat
         or ip_id_transition_count > max(0, ip_id_observed_count - 1)
     ):
         raise InvalidRecord("inconsistent IP ID statistics")
+    try:
+        packet_evidence = validate_packet_evidence(
+            record.get("ddos_packet_evidence"),
+            packets,
+            *packet_interval_us(timestamp, float(duration_value)),
+            protocol,
+            source_port,
+            destination_port,
+        )
+    except ValueError as error:
+        raise InvalidRecord(str(error)) from error
     return Observation(
+        ddos_packet_evidence=packet_evidence,
         sensor=str(sensor),
         timestamp=timestamp,
         source=source,
@@ -581,6 +598,9 @@ def _add_observation(target: Target, row: Observation, bucket_seconds: int) -> i
     target.last_seen = max(target.last_seen, row_end) if target.last_seen else row_end
     target.interval_end = max(target.interval_end, row_end) if target.interval_end else row_end
     target.sources.add(row.source)
+    target.axis_evidence["observed_sources"] = len(target.sources)
+    address = ip_address(row.source)
+    target.axis_evidence["invalid_source_records"] += int(address.is_multicast)
     target.sensors.add(row.sensor)
     target.direction_sources.add(row.direction_source)
     target.precisions.add(row.precision)
@@ -766,7 +786,8 @@ def _shape(
             target.role == "VICTIM_SIDE_INBOUND"
             and dominant_port in REFLECTION_PORTS
             and reflection_share >= _number(parameters, "ddos_reflection_port_share_threshold")
-            and average_size >= _number(parameters, "ddos_reflection_min_average_packet_bytes")
+            and target.axis_evidence["response_samples"]
+            > target.axis_evidence["matched_response_samples"]
         ):
             return (
                 "POSSIBLE_REFLECTION_AMPLIFICATION",
@@ -814,42 +835,9 @@ def _stable_id(prefix: str, *parts: object) -> str:
     return prefix + hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
-def _classification(attack_type: str, target: Target) -> dict[str, str]:
-    identity_anomaly_ratio = target.identity_anomaly_records / max(
-        1, target.identity_observed_records
-    )
-    spoofing_suspected = bool(target.identity_observed_records and identity_anomaly_ratio >= 0.20)
-    if attack_type == "POSSIBLE_REFLECTION_AMPLIFICATION":
-        return {
-            "delivery_mechanism": "REFLECTION_AMPLIFICATION",
-            "source_population": "REFLECTOR_SET",
-            "source_authenticity": (
-                "SPOOFING_SUSPECTED" if spoofing_suspected else "SPOOFING_UNCONFIRMED"
-            ),
-            "confidence": "medium",
-        }
-    if target.role == "PARTICIPANT_SIDE_OUTBOUND":
-        return {
-            "delivery_mechanism": "DIRECT_DISTRIBUTED",
-            "source_population": "BOTNET_LIKE_COORDINATION",
-            "source_authenticity": (
-                "SPOOFING_SUSPECTED" if spoofing_suspected else "SOURCE_CONSISTENT"
-            ),
-            "confidence": "medium",
-        }
-    if spoofing_suspected:
-        return {
-            "delivery_mechanism": "DIRECT_DISTRIBUTED",
-            "source_population": "DISTRIBUTED_UNATTRIBUTED",
-            "source_authenticity": "SPOOFING_SUSPECTED",
-            "confidence": "medium",
-        }
-    return {
-        "delivery_mechanism": "DIRECT_DISTRIBUTED",
-        "source_population": "DISTRIBUTED_UNATTRIBUTED",
-        "source_authenticity": "SPOOFING_UNCONFIRMED",
-        "confidence": "low",
-    }
+def _classification(attack_type: str, target: Target) -> dict[str, Any]:
+    target.axis_evidence["identity_variation_records"] = target.identity_anomaly_records
+    return assess(target.axis_evidence)
 
 
 def _common_patterns(target: Target, attack_type: str) -> list[dict[str, object]]:
@@ -956,7 +944,7 @@ def _signature_candidates(
         "requires_human_approval": True,
     }
     signatures: list[dict[str, object]] = [signature]
-    if target.identity_anomaly_records:
+    if classification["source_authenticity"] == "SPOOFING_SUSPECTED":
         signatures.append(
             {
                 **signature,
@@ -1129,19 +1117,21 @@ def _multi_vector(
         identity = f"{role}|{target_ip}|MULTI_VECTOR|{'|'.join(sorted(types))}"
         recommendations = _recommendation_codes("MULTI_VECTOR", role)
         all_likely = all(item["likelihood"] == "LIKELY" for item in selected)
-        dimensions = {
-            name: {item["classification"][name] for item in selected}
-            for name in ("delivery_mechanism", "source_population", "source_authenticity")
-        }
-        multi_classification = {
-            name: next(iter(values)) if len(values) == 1 else "MIXED"
-            for name, values in dimensions.items()
-        }
-        multi_classification["confidence"] = (
-            "low"
-            if any(item["classification"]["confidence"] == "low" for item in selected)
-            else "medium"
-        )
+        multi_evidence = empty_evidence()
+        for item in selected:
+            for name, value in item["classification"]["evidence"].items():
+                if name in {"coverage_limited"}:
+                    multi_evidence[name] |= value
+                elif name not in {
+                    "window_seconds",
+                    "amplification_ratio",
+                    "component_count",
+                    "coordinated_sources",
+                    "shared_buckets",
+                }:
+                    multi_evidence[name] += value
+        multi_evidence["component_count"] = len(selected)
+        multi_classification = assess(multi_evidence)
         multi_uncertainty = ["SHARED_TARGET_DOES_NOT_PROVE_SHARED_ACTOR"]
         if multi_classification["source_population"] == "BOTNET_LIKE_COORDINATION":
             multi_uncertainty.append("BOTNET_ATTRIBUTION_UNCONFIRMED")
@@ -1228,6 +1218,7 @@ def analyze_ddos_attack(
     compiled_networks = _compile_networks(internal_cidrs)
     bucket_seconds = int(_number(policy, "ddos_bucket_seconds"))
     targets: dict[tuple[str, str, int | None, str], Target] = {}
+    packet_collector = PacketEvidenceCollector()
     target_heap: list[tuple[int, int, int, int, int, tuple[str, str, int | None, str]]] = []
     reverse_syn_ack: dict[tuple[str, int | None], int] = {}
     response_heap: list[tuple[int, int, int, tuple[str, int | None]]] = []
@@ -1334,6 +1325,7 @@ def analyze_ddos_attack(
             else:
                 heapq.heappush(target_heap, _target_heap_entry(key))
             target = targets[key] = Target(*key)
+        packet_collector.add(key, row, target.axis_evidence)
         omitted_records = _add_observation(target, row, bucket_seconds)
         if omitted_records:
             incomplete += omitted_records
@@ -1356,6 +1348,7 @@ def analyze_ddos_attack(
         if target.role == "VICTIM_SIDE_INBOUND" and response_key in reverse_syn_ack:
             target.response_visible = True
             target.syn_ack += reverse_syn_ack[response_key]
+    packet_collector.finish(targets, bool(warnings) or skipped > 0 or incomplete > 0)
     findings = [item for target in targets.values() if (item := _finding(target, policy))]
     if not findings:
         for target in targets.values():
@@ -1414,6 +1407,14 @@ def analyze_ddos_attack(
     evidence_limited = not coverage_complete
     if evidence_limited:
         for finding in findings:
+            finding["classification"]["evidence"]["coverage_limited"] = True
+            finding["classification"] = assess(finding["classification"]["evidence"])
+            if finding["classification"]["source_population"] != "BOTNET_LIKE_COORDINATION":
+                finding["uncertainty_codes"] = [
+                    code
+                    for code in finding["uncertainty_codes"]
+                    if code != "BOTNET_ATTRIBUTION_UNCONFIRMED"
+                ]
             if finding["likelihood"] == "LIKELY":
                 finding["likelihood"] = "POSSIBLE"
                 finding["severity"] = (

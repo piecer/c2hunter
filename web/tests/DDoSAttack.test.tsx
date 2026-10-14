@@ -38,7 +38,7 @@ const asV1 = (source: DDoSAttackReport): DDoSAttackReport => {
 it('freezes deterministic bytes from the real DDoS producer', () => {
   expect(produce()).toBe(contractBytes);
   expect(produce()).toBe(contractBytes);
-  expect(report.version).toBe('ddos-attack-report-v2');
+  expect(report.version).toBe('ddos-attack-report-v3');
 });
 
 it('round-trips every attack family role and coverage outcome through the strict UI parser', () => {
@@ -63,7 +63,8 @@ it('round-trips every attack family role and coverage outcome through the strict
 });
 
 it('accepts a producer-valid mixed-authenticity multi-vector classification', () => {
-  const mixed = structuredClone(scenarios.multi_vector);
+  const legacyScenarios = JSON.parse(readFileSync('tests/fixtures/ddos-report-scenarios-v2.json', 'utf8'));
+  const mixed = structuredClone(legacyScenarios.multi_vector) as DDoSAttackReport;
   const finding = mixed.findings.find(item => item.attack_type === 'MULTI_VECTOR')!;
   finding.classification!.source_authenticity = 'MIXED';
   finding.classification!.confidence = 'medium';
@@ -272,6 +273,7 @@ it('rejects impossible multi-vector component cardinality', () => {
 it('accepts the analyzer maximum multi-vector component count', () => {
   const maximum = structuredClone(scenarios.multi_vector);
   maximum.findings[0].metrics.component_finding_count = 4096;
+  maximum.findings[0].classification!.evidence!.component_count = 4096;
   render(<DDoSAttackPanel report={maximum}/>);
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
@@ -371,4 +373,40 @@ it('renders the real DDoS report with its dedicated AI output and without C2 can
   expect(screen.queryByText('AI C2 분석')).not.toBeInTheDocument();
   expect(requests).not.toContain('/api/v1/analysis-jobs/ddos-job/candidates?page_size=200');
   expect(requests).toContain('/api/v1/analysis-jobs/ddos-job/ai-runs');
+});
+
+
+it('retains all frozen v2 report interpretations and refuses v3 reason mutations', () => {
+  const legacy = JSON.parse(readFileSync('tests/fixtures/ddos-report-scenarios-v2.json', 'utf8'));
+  for (const value of Object.values(legacy)) {
+    const { unmount } = render(<DDoSAttackPanel report={value as DDoSAttackReport}/>);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    unmount();
+  }
+  const mutations: Array<(v: DDoSAttackReport) => void> = [
+    v => { v.version = 'ddos-attack-report-v4'; },
+    v => { v.findings[0].classification!.evidence!.amplification_ratio = 0; },
+    v => { v.findings[0].classification!.evidence!.sample_count = true; },
+    v => { v.findings[0].classification!.evidence!.unknown_field = 0; },
+    v => { v.findings[0].classification!.evidence!.unobserved_packets = Number(v.findings[0].classification!.evidence!.unobserved_packets) + 1; },
+    v => { v.findings[0].classification!.axes!.source_population.unknown_codes = ['FUTURE']; },
+    v => { v.findings[0].classification!.axes!.source_population.confidence = 'high'; },
+    v => { v.findings[0].classification!.source_authenticity = 'SOURCE_CONSISTENT'; },
+  ];
+  for (const mutate of mutations) {
+    const value = structuredClone(report); mutate(value);
+    const { unmount } = render(<DDoSAttackPanel report={value}/>);
+    expect(screen.getByRole('alert')).toBeVisible();
+    unmount();
+  }
+});
+
+it('shows separate supporting counter and unknown reasons and bounded source support', () => {
+  const current = JSON.parse(produceScenarios()) as Record<string, DDoSAttackReport>;
+  render(<DDoSAttackPanel report={current.coordinated_packets}/>);
+  fireEvent.change(screen.getByRole('combobox', { name: /Report language/ }), { target: { value: 'en' } });
+  fireEvent.click(screen.getByRole('button', { name: /Show detailed evidence/ }));
+  expect(screen.getByText(/Eligible sources: 3; coordinated sources: 3/)).toBeVisible();
+  expect(screen.getAllByText(/Supporting evidence:/).length).toBeGreaterThan(0);
+  expect(screen.getByText(/Legitimate coordinated activity remains possible/)).toBeVisible();
 });

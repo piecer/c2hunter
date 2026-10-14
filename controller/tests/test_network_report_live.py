@@ -45,9 +45,11 @@ def test_live_network_worker_persists_real_grouped_report(tmp_path, monkeypatch)
     job_id = response.json()["id"]
     assert response.json()["status"] == "CAPTURING"
     assert queue.jobs == []
-    parsed = records(frame(), frame())
-    for index, record in enumerate(parsed):
-        record["timestamp"] = (now - timedelta(seconds=5 - index)).isoformat()
+    parsed = records(
+        frame(), frame(), start_time=now - timedelta(seconds=5), interval=timedelta(seconds=1)
+    )
+    for record in parsed:
+        record["timestamp"] = record["timestamp"].isoformat()
     uploaded = client.post(
         "/api/v1/sensors/s1/flow-batches",
         json={"batch_id": "live-pattern", "records": parsed},

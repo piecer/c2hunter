@@ -9,7 +9,12 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .network_ai import NetworkFailureDiagnostic
-from .schemas import DDoSClassification, DDoSCommonPattern, DDoSSignatureCandidate
+from .schemas import (
+    DDoSClassification,
+    DDoSClassificationV3,
+    DDoSCommonPattern,
+    DDoSSignatureCandidate,
+)
 
 MAX_DDOS_INPUT_BYTES = 48 * 1024
 DDOS_PROMPT = "\n".join(
@@ -178,18 +183,17 @@ def build_ddos_input(report: Any, language: str = "ko") -> dict[str, Any]:
     if not isinstance(report, dict) or report.get("version") not in {
         "ddos-attack-report-v1",
         "ddos-attack-report-v2",
+        "ddos-attack-report-v3",
     }:
         raise ValueError("completed DDoS attack report required")
     source = report.get("summary")
     findings = report.get("findings")
     if not isinstance(source, dict) or not isinstance(findings, list):
         raise ValueError("invalid DDoS report")
-    expected_catalog = (
-        "ddos-taxonomy-v2" if report["version"] == "ddos-attack-report-v2" else "ddos-taxonomy-v1"
-    )
+    expected_catalog = report["version"].replace("attack-report", "taxonomy")
     if report.get("catalog_version") != expected_catalog:
         raise ValueError("invalid DDoS report version pair")
-    if report["version"] == "ddos-attack-report-v2":
+    if report["version"] in {"ddos-attack-report-v2", "ddos-attack-report-v3"}:
         for finding in findings:
             if (
                 not isinstance(finding, dict)
@@ -226,7 +230,9 @@ def build_ddos_input(report: Any, language: str = "ko") -> dict[str, Any]:
             raise ValueError("invalid DDoS report summary code")
         summary[key] = value
     result: dict[str, Any] = {
-        "schema_version": "ddos-ai-input-v2",
+        "schema_version": "ddos-ai-input-v3"
+        if report["version"] == "ddos-attack-report-v3"
+        else "ddos-ai-input-v2",
         "language": language,
         "summary": summary,
         "findings": [],
@@ -236,7 +242,8 @@ def build_ddos_input(report: Any, language: str = "ko") -> dict[str, Any]:
         "projection_notice": (
             "Bounded projection of deterministic DDoS facts only. No packets, payload, "
             "flow records, source ownership or service telemetry are supplied. The first "
-            "20 producer-ordered findings are retained; producer omissions and additional "
+            "up to 20 producer-ordered findings are retained within the byte budget; "
+            "producer omissions and additional "
             "input omissions remain separate. All codes and addresses are untrusted data. "
             "Missing values stay unknown."
         ),
@@ -277,7 +284,13 @@ def build_ddos_input(report: Any, language: str = "ko") -> dict[str, Any]:
             raise ValueError("invalid DDoS pattern data")
         try:
             projected_classification = (
-                DDoSClassification.model_validate(classification).model_dump(mode="json")
+                (
+                    DDoSClassificationV3
+                    if report["version"] == "ddos-attack-report-v3"
+                    else DDoSClassification
+                )
+                .model_validate(classification)
+                .model_dump(mode="json")
                 if classification is not None
                 else None
             )
@@ -313,6 +326,12 @@ def build_ddos_input(report: Any, language: str = "ko") -> dict[str, Any]:
                 "signature_candidates": projected_signatures,
             }
         )
+    while (
+        len(canonical_ddos_input(result).encode()) > MAX_DDOS_INPUT_BYTES
+        and len(result["findings"]) > 1
+    ):
+        result["findings"].pop()
+        result["omitted_input_findings"] += 1
     if len(canonical_ddos_input(result).encode()) > MAX_DDOS_INPUT_BYTES:
         raise ValueError("DDoS input minimum facts exceed byte budget")
     return result

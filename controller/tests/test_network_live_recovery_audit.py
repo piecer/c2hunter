@@ -45,9 +45,11 @@ def test_live_saved_capture_recovers_with_empty_volatile_store(tmp_path, monkeyp
     assert posted.status_code == 201, posted.text
     identity = posted.json()["id"]
     assert posted.json()["status"] == "CAPTURING"
-    parsed = records(frame(), frame())
-    for index, record in enumerate(parsed):
-        record["timestamp"] = (now - timedelta(seconds=5 - index)).isoformat()
+    parsed = records(
+        frame(), frame(), start_time=now - timedelta(seconds=5), interval=timedelta(seconds=1)
+    )
+    for record in parsed:
+        record["timestamp"] = record["timestamp"].isoformat()
     ingested = client.post(
         "/api/v1/sensors/s1/flow-batches",
         headers=AGENT_HEADERS,

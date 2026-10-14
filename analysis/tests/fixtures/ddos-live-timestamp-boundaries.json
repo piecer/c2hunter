@@ -1,0 +1,702 @@
+{
+  "historical": {
+    "batch_id": "44a643285e8c07cc0fae13ed16212975516f6336a58fae6639ed3326c9a09ea3",
+    "flows": [
+      {
+        "ddos_packet_evidence": {
+          "version": 1,
+          "samples": [
+            {
+              "timestamp_us": 1104537600000002,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            },
+            {
+              "timestamp_us": 1104537600000002,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            }
+          ],
+          "omitted_samples": 0
+        },
+        "sensor_id": "fixture",
+        "timestamp": "2005-01-01T00:00:00.000002Z",
+        "source_ip": "198.51.100.1",
+        "destination_ip": "10.0.0.10",
+        "source_port": 40000,
+        "destination_port": 53000,
+        "protocol": "UDP",
+        "direction": "INBOUND",
+        "packet_count": 2,
+        "total_bytes": 120,
+        "duration_seconds": 0,
+        "tcp_flags": {
+          "fin": 0,
+          "syn": 0,
+          "rst": 0,
+          "psh": 0,
+          "ack": 0,
+          "urg": 0,
+          "ece": 0,
+          "cwr": 0,
+          "rst_ratio": 0
+        },
+        "payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "last_payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_prefix_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_length": 4,
+        "payload_entropy": 2,
+        "payload_printable_ratio": 1,
+        "payload_simhash": "e6ffbe195dddf7de",
+        "payload_feature_version": "1",
+        "packet_sizes": [
+          60
+        ],
+        "average_packet_size": 60,
+        "hop_limit_min": 64,
+        "hop_limit_max": 64,
+        "hop_limit_mode": 64,
+        "hop_limit_distinct_count": 1,
+        "ip_id_observed_count": 2,
+        "ip_id_distinct_count": 1,
+        "ip_id_transition_count": 1
+      }
+    ]
+  },
+  "micro": {
+    "batch_id": "3b517580940de3c7bb9d1f08cc1a450aaf23bca7ff121060f67579d9ecdec49e",
+    "flows": [
+      {
+        "ddos_packet_evidence": {
+          "version": 1,
+          "samples": [
+            {
+              "timestamp_us": 1784544000000000,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            },
+            {
+              "timestamp_us": 1784544001000000,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            }
+          ],
+          "omitted_samples": 0
+        },
+        "sensor_id": "fixture",
+        "timestamp": "2026-07-20T10:40:00Z",
+        "source_ip": "198.51.100.1",
+        "destination_ip": "10.0.0.10",
+        "source_port": 40000,
+        "destination_port": 53000,
+        "protocol": "UDP",
+        "direction": "INBOUND",
+        "packet_count": 2,
+        "total_bytes": 120,
+        "duration_seconds": 1,
+        "tcp_flags": {
+          "fin": 0,
+          "syn": 0,
+          "rst": 0,
+          "psh": 0,
+          "ack": 0,
+          "urg": 0,
+          "ece": 0,
+          "cwr": 0,
+          "rst_ratio": 0
+        },
+        "payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "last_payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_prefix_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_length": 4,
+        "payload_entropy": 2,
+        "payload_printable_ratio": 1,
+        "payload_simhash": "e6ffbe195dddf7de",
+        "payload_feature_version": "1",
+        "packet_sizes": [
+          60
+        ],
+        "average_packet_size": 60,
+        "hop_limit_min": 64,
+        "hop_limit_max": 64,
+        "hop_limit_mode": 64,
+        "hop_limit_distinct_count": 1,
+        "ip_id_observed_count": 2,
+        "ip_id_distinct_count": 1,
+        "ip_id_transition_count": 1
+      }
+    ]
+  },
+  "micro_rollover": {
+    "batch_id": "e638245d56ca43e20b421b30a1a7e08a9d05454e2b8532da5024ca1c20af444f",
+    "flows": [
+      {
+        "ddos_packet_evidence": {
+          "version": 1,
+          "samples": [
+            {
+              "timestamp_us": 1784544000000000,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            },
+            {
+              "timestamp_us": 1784544000000001,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            }
+          ],
+          "omitted_samples": 0
+        },
+        "sensor_id": "fixture",
+        "timestamp": "2026-07-20T10:40:00.000000999Z",
+        "source_ip": "198.51.100.1",
+        "destination_ip": "10.0.0.10",
+        "source_port": 40000,
+        "destination_port": 53000,
+        "protocol": "UDP",
+        "direction": "INBOUND",
+        "packet_count": 2,
+        "total_bytes": 120,
+        "duration_seconds": 2e-9,
+        "tcp_flags": {
+          "fin": 0,
+          "syn": 0,
+          "rst": 0,
+          "psh": 0,
+          "ack": 0,
+          "urg": 0,
+          "ece": 0,
+          "cwr": 0,
+          "rst_ratio": 0
+        },
+        "payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "last_payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_prefix_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_length": 4,
+        "payload_entropy": 2,
+        "payload_printable_ratio": 1,
+        "payload_simhash": "e6ffbe195dddf7de",
+        "payload_feature_version": "1",
+        "packet_sizes": [
+          60
+        ],
+        "average_packet_size": 60,
+        "hop_limit_min": 64,
+        "hop_limit_max": 64,
+        "hop_limit_mode": 64,
+        "hop_limit_distinct_count": 1,
+        "ip_id_observed_count": 2,
+        "ip_id_distinct_count": 1,
+        "ip_id_transition_count": 1
+      }
+    ]
+  },
+  "nano_long": {
+    "batch_id": "cc402465b939e1c981634356b5f5a7ffb1b062d0f29f322a026382e5ca2dcdb0",
+    "flows": [
+      {
+        "ddos_packet_evidence": {
+          "version": 1,
+          "samples": [
+            {
+              "timestamp_us": 1784544000000000,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            },
+            {
+              "timestamp_us": 1784544001000001,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            }
+          ],
+          "omitted_samples": 0
+        },
+        "sensor_id": "fixture",
+        "timestamp": "2026-07-20T10:40:00.0000009Z",
+        "source_ip": "198.51.100.1",
+        "destination_ip": "10.0.0.10",
+        "source_port": 40000,
+        "destination_port": 53000,
+        "protocol": "UDP",
+        "direction": "INBOUND",
+        "packet_count": 2,
+        "total_bytes": 120,
+        "duration_seconds": 1.0000002,
+        "tcp_flags": {
+          "fin": 0,
+          "syn": 0,
+          "rst": 0,
+          "psh": 0,
+          "ack": 0,
+          "urg": 0,
+          "ece": 0,
+          "cwr": 0,
+          "rst_ratio": 0
+        },
+        "payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "last_payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_prefix_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_length": 4,
+        "payload_entropy": 2,
+        "payload_printable_ratio": 1,
+        "payload_simhash": "e6ffbe195dddf7de",
+        "payload_feature_version": "1",
+        "packet_sizes": [
+          60
+        ],
+        "average_packet_size": 60,
+        "hop_limit_min": 64,
+        "hop_limit_max": 64,
+        "hop_limit_mode": 64,
+        "hop_limit_distinct_count": 1,
+        "ip_id_observed_count": 2,
+        "ip_id_distinct_count": 1,
+        "ip_id_transition_count": 1
+      }
+    ]
+  },
+  "nano_short": {
+    "batch_id": "eed999274f8a0656eab5b14a4ddbf0c1ca674eaf4831e8a3e8de0412a4a9ed6c",
+    "flows": [
+      {
+        "ddos_packet_evidence": {
+          "version": 1,
+          "samples": [
+            {
+              "timestamp_us": 1784544000000000,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            },
+            {
+              "timestamp_us": 1784544001000000,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            }
+          ],
+          "omitted_samples": 0
+        },
+        "sensor_id": "fixture",
+        "timestamp": "2026-07-20T10:40:00.0000009Z",
+        "source_ip": "198.51.100.1",
+        "destination_ip": "10.0.0.10",
+        "source_port": 40000,
+        "destination_port": 53000,
+        "protocol": "UDP",
+        "direction": "INBOUND",
+        "packet_count": 2,
+        "total_bytes": 120,
+        "duration_seconds": 0.9999992,
+        "tcp_flags": {
+          "fin": 0,
+          "syn": 0,
+          "rst": 0,
+          "psh": 0,
+          "ack": 0,
+          "urg": 0,
+          "ece": 0,
+          "cwr": 0,
+          "rst_ratio": 0
+        },
+        "payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "last_payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_prefix_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_length": 4,
+        "payload_entropy": 2,
+        "payload_printable_ratio": 1,
+        "payload_simhash": "e6ffbe195dddf7de",
+        "payload_feature_version": "1",
+        "packet_sizes": [
+          60
+        ],
+        "average_packet_size": 60,
+        "hop_limit_min": 64,
+        "hop_limit_max": 64,
+        "hop_limit_mode": 64,
+        "hop_limit_distinct_count": 1,
+        "ip_id_observed_count": 2,
+        "ip_id_distinct_count": 1,
+        "ip_id_transition_count": 1
+      }
+    ]
+  },
+  "outside_negative": {
+    "batch_id": "bb6e161aab3a02ff49919a9ebbb9f9cf19af130df3d1cc946e6de4fc91d74075",
+    "flows": [
+      {
+        "ddos_packet_evidence": {
+          "version": 1,
+          "samples": [],
+          "omitted_samples": 2
+        },
+        "sensor_id": "fixture",
+        "timestamp": "1684-07-28T00:12:25.259008Z",
+        "source_ip": "198.51.100.1",
+        "destination_ip": "10.0.0.10",
+        "source_port": 40000,
+        "destination_port": 53000,
+        "protocol": "UDP",
+        "direction": "INBOUND",
+        "packet_count": 2,
+        "total_bytes": 120,
+        "duration_seconds": 0,
+        "tcp_flags": {
+          "fin": 0,
+          "syn": 0,
+          "rst": 0,
+          "psh": 0,
+          "ack": 0,
+          "urg": 0,
+          "ece": 0,
+          "cwr": 0,
+          "rst_ratio": 0
+        },
+        "payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "last_payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_prefix_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_length": 4,
+        "payload_entropy": 2,
+        "payload_printable_ratio": 1,
+        "payload_simhash": "e6ffbe195dddf7de",
+        "payload_feature_version": "1",
+        "packet_sizes": [
+          60
+        ],
+        "average_packet_size": 60,
+        "hop_limit_min": 64,
+        "hop_limit_max": 64,
+        "hop_limit_mode": 64,
+        "hop_limit_distinct_count": 1,
+        "ip_id_observed_count": 2,
+        "ip_id_distinct_count": 1,
+        "ip_id_transition_count": 1
+      }
+    ]
+  },
+  "outside_positive": {
+    "batch_id": "4721f542cd2e8e6df07320d40df63a94ab9663bba23659f78bf083799b29849b",
+    "flows": [
+      {
+        "ddos_packet_evidence": {
+          "version": 1,
+          "samples": [],
+          "omitted_samples": 2
+        },
+        "sensor_id": "fixture",
+        "timestamp": "2255-06-05T23:47:34.740992Z",
+        "source_ip": "198.51.100.1",
+        "destination_ip": "10.0.0.10",
+        "source_port": 40000,
+        "destination_port": 53000,
+        "protocol": "UDP",
+        "direction": "INBOUND",
+        "packet_count": 2,
+        "total_bytes": 120,
+        "duration_seconds": 0,
+        "tcp_flags": {
+          "fin": 0,
+          "syn": 0,
+          "rst": 0,
+          "psh": 0,
+          "ack": 0,
+          "urg": 0,
+          "ece": 0,
+          "cwr": 0,
+          "rst_ratio": 0
+        },
+        "payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "last_payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_prefix_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_length": 4,
+        "payload_entropy": 2,
+        "payload_printable_ratio": 1,
+        "payload_simhash": "e6ffbe195dddf7de",
+        "payload_feature_version": "1",
+        "packet_sizes": [
+          60
+        ],
+        "average_packet_size": 60,
+        "hop_limit_min": 64,
+        "hop_limit_max": 64,
+        "hop_limit_mode": 64,
+        "hop_limit_distinct_count": 1,
+        "ip_id_observed_count": 2,
+        "ip_id_distinct_count": 1,
+        "ip_id_transition_count": 1
+      }
+    ]
+  },
+  "pre_epoch": {
+    "batch_id": "435a604a4e5e71442f5bb36818f318b7506e61647164df64b366aa9cd717e8db",
+    "flows": [
+      {
+        "ddos_packet_evidence": {
+          "version": 1,
+          "samples": [
+            {
+              "timestamp_us": -500000,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            },
+            {
+              "timestamp_us": -500000,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            }
+          ],
+          "omitted_samples": 0
+        },
+        "sensor_id": "fixture",
+        "timestamp": "1969-12-31T23:59:59.5Z",
+        "source_ip": "198.51.100.1",
+        "destination_ip": "10.0.0.10",
+        "source_port": 40000,
+        "destination_port": 53000,
+        "protocol": "UDP",
+        "direction": "INBOUND",
+        "packet_count": 2,
+        "total_bytes": 120,
+        "duration_seconds": 0,
+        "tcp_flags": {
+          "fin": 0,
+          "syn": 0,
+          "rst": 0,
+          "psh": 0,
+          "ack": 0,
+          "urg": 0,
+          "ece": 0,
+          "cwr": 0,
+          "rst_ratio": 0
+        },
+        "payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "last_payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_prefix_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_length": 4,
+        "payload_entropy": 2,
+        "payload_printable_ratio": 1,
+        "payload_simhash": "e6ffbe195dddf7de",
+        "payload_feature_version": "1",
+        "packet_sizes": [
+          60
+        ],
+        "average_packet_size": 60,
+        "hop_limit_min": 64,
+        "hop_limit_max": 64,
+        "hop_limit_mode": 64,
+        "hop_limit_distinct_count": 1,
+        "ip_id_observed_count": 2,
+        "ip_id_distinct_count": 1,
+        "ip_id_transition_count": 1
+      }
+    ]
+  },
+  "safe_negative": {
+    "batch_id": "5ae17177ad20531d65dff59cff2a30ce8d4bdc6c6d1ef6a10d4b951f0e3757aa",
+    "flows": [
+      {
+        "ddos_packet_evidence": {
+          "version": 1,
+          "samples": [
+            {
+              "timestamp_us": -9007199254740991,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            },
+            {
+              "timestamp_us": -9007199254740991,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            }
+          ],
+          "omitted_samples": 0
+        },
+        "sensor_id": "fixture",
+        "timestamp": "1684-07-28T00:12:25.259009Z",
+        "source_ip": "198.51.100.1",
+        "destination_ip": "10.0.0.10",
+        "source_port": 40000,
+        "destination_port": 53000,
+        "protocol": "UDP",
+        "direction": "INBOUND",
+        "packet_count": 2,
+        "total_bytes": 120,
+        "duration_seconds": 0,
+        "tcp_flags": {
+          "fin": 0,
+          "syn": 0,
+          "rst": 0,
+          "psh": 0,
+          "ack": 0,
+          "urg": 0,
+          "ece": 0,
+          "cwr": 0,
+          "rst_ratio": 0
+        },
+        "payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "last_payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_prefix_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_length": 4,
+        "payload_entropy": 2,
+        "payload_printable_ratio": 1,
+        "payload_simhash": "e6ffbe195dddf7de",
+        "payload_feature_version": "1",
+        "packet_sizes": [
+          60
+        ],
+        "average_packet_size": 60,
+        "hop_limit_min": 64,
+        "hop_limit_max": 64,
+        "hop_limit_mode": 64,
+        "hop_limit_distinct_count": 1,
+        "ip_id_observed_count": 2,
+        "ip_id_distinct_count": 1,
+        "ip_id_transition_count": 1
+      }
+    ]
+  },
+  "safe_positive": {
+    "batch_id": "fb2f05aa7df05c170357ea2519eb5f21a675d3d4742e218355a545469da5b7e0",
+    "flows": [
+      {
+        "ddos_packet_evidence": {
+          "version": 1,
+          "samples": [
+            {
+              "timestamp_us": 9007199254740991,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            },
+            {
+              "timestamp_us": 9007199254740991,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            }
+          ],
+          "omitted_samples": 0
+        },
+        "sensor_id": "fixture",
+        "timestamp": "2255-06-05T23:47:34.740991Z",
+        "source_ip": "198.51.100.1",
+        "destination_ip": "10.0.0.10",
+        "source_port": 40000,
+        "destination_port": 53000,
+        "protocol": "UDP",
+        "direction": "INBOUND",
+        "packet_count": 2,
+        "total_bytes": 120,
+        "duration_seconds": 0,
+        "tcp_flags": {
+          "fin": 0,
+          "syn": 0,
+          "rst": 0,
+          "psh": 0,
+          "ack": 0,
+          "urg": 0,
+          "ece": 0,
+          "cwr": 0,
+          "rst_ratio": 0
+        },
+        "payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "last_payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_prefix_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_length": 4,
+        "payload_entropy": 2,
+        "payload_printable_ratio": 1,
+        "payload_simhash": "e6ffbe195dddf7de",
+        "payload_feature_version": "1",
+        "packet_sizes": [
+          60
+        ],
+        "average_packet_size": 60,
+        "hop_limit_min": 64,
+        "hop_limit_max": 64,
+        "hop_limit_mode": 64,
+        "hop_limit_distinct_count": 1,
+        "ip_id_observed_count": 2,
+        "ip_id_distinct_count": 1,
+        "ip_id_transition_count": 1
+      }
+    ]
+  },
+  "second_rollover": {
+    "batch_id": "21fff06b48d3f49268f24d2d29de7695bcd68026407156f946d04fce2505e738",
+    "flows": [
+      {
+        "ddos_packet_evidence": {
+          "version": 1,
+          "samples": [
+            {
+              "timestamp_us": 1784544000999999,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            },
+            {
+              "timestamp_us": 1784544001000000,
+              "profile": "4ce78662ec2d20f741098ff7f554f8042ee0e1525c71e0aeba03b2d23a3902f5",
+              "semantic": "OTHER",
+              "transaction": null
+            }
+          ],
+          "omitted_samples": 0
+        },
+        "sensor_id": "fixture",
+        "timestamp": "2026-07-20T10:40:00.999999999Z",
+        "source_ip": "198.51.100.1",
+        "destination_ip": "10.0.0.10",
+        "source_port": 40000,
+        "destination_port": 53000,
+        "protocol": "UDP",
+        "direction": "INBOUND",
+        "packet_count": 2,
+        "total_bytes": 120,
+        "duration_seconds": 2e-9,
+        "tcp_flags": {
+          "fin": 0,
+          "syn": 0,
+          "rst": 0,
+          "psh": 0,
+          "ack": 0,
+          "urg": 0,
+          "ece": 0,
+          "cwr": 0,
+          "rst_ratio": 0
+        },
+        "payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "last_payload_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_prefix_hash": "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5",
+        "payload_length": 4,
+        "payload_entropy": 2,
+        "payload_printable_ratio": 1,
+        "payload_simhash": "e6ffbe195dddf7de",
+        "payload_feature_version": "1",
+        "packet_sizes": [
+          60
+        ],
+        "average_packet_size": 60,
+        "hop_limit_min": 64,
+        "hop_limit_max": 64,
+        "hop_limit_mode": 64,
+        "hop_limit_distinct_count": 1,
+        "ip_id_observed_count": 2,
+        "ip_id_distinct_count": 1,
+        "ip_id_transition_count": 1
+      }
+    ]
+  }
+}

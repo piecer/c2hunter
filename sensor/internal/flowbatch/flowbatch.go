@@ -13,6 +13,7 @@ import (
 )
 
 type FlowRecord struct {
+	DDoSPacketEvidence              *packet.DDoSEvidence     `json:"ddos_packet_evidence,omitempty"`
 	SensorID                        string                   `json:"sensor_id"`
 	Timestamp                       time.Time                `json:"timestamp"`
 	SourceIP                        string                   `json:"source_ip"`
@@ -130,7 +131,8 @@ func fromRecord(record flow.Record) FlowRecord {
 		durationSeconds = 0
 	}
 	out := FlowRecord{
-		SensorID: record.Key.SensorID, Timestamp: record.StartTime,
+		DDoSPacketEvidence: record.DDoSPacketEvidence,
+		SensorID:           record.Key.SensorID, Timestamp: record.StartTime,
 		SourceIP: record.Key.SourceIP.String(), DestinationIP: record.Key.DestinationIP.String(),
 		SourcePort: record.Key.SourcePort, DestinationPort: record.Key.DestinationPort,
 		Protocol: protocolName(record.Key.Protocol), Direction: record.Key.Direction.String(),

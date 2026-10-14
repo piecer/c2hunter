@@ -240,6 +240,7 @@ def evaluate_candidates(
             "icmp_code",
             "icmp_error",
             "icmp_quoted_flow",
+            "ddos_packet_evidence",
         ):
             record.pop(field, None)
         flows.append(Flow(**record))

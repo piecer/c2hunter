@@ -182,6 +182,8 @@ func (d *packetDecoder) Decode(data []byte, info gopacket.CaptureInfo, iface str
 		p.DestinationIP = netip.AddrFrom4([4]byte(d.ip4.DstIP))
 		p.IPID = d.ip4.Id
 		p.IPIDObserved = true
+		p.IPLength = uint32(d.ip4.Length)
+		p.EvidenceComplete = info.CaptureLength == info.Length && d.ip4.FragOffset == 0 && d.ip4.Flags&layers.IPv4MoreFragments == 0
 		p.HopLimit = d.ip4.TTL
 		p.HopLimitObserved = true
 	} else if decodedLayer(d.decoded, layers.LayerTypeIPv6) {
@@ -193,6 +195,8 @@ func (d *packetDecoder) Decode(data []byte, info gopacket.CaptureInfo, iface str
 		p.IPVersion = 6
 		p.SourceIP = src
 		p.DestinationIP = dst
+		p.IPLength = 40 + uint32(d.ip6.Length)
+		p.EvidenceComplete = info.CaptureLength == info.Length && d.ip6.Length > 0 && (d.ip6.NextHeader == layers.IPProtocolTCP || d.ip6.NextHeader == layers.IPProtocolUDP)
 		p.HopLimit = d.ip6.HopLimit
 		p.HopLimitObserved = true
 	} else {

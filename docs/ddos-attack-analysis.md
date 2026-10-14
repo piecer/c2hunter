@@ -14,7 +14,7 @@
 - `UDP_FLOOD`: 반사 형태로 한정되지 않는 분산 UDP 트래픽
 - `ICMP_ECHO_FLOOD`: packet-level ICMP type이 있는 echo request 중심 트래픽
 - `ICMP_FLOOD`: type metadata가 없거나 echo 중심이 아닌 ICMP 트래픽
-- `POSSIBLE_REFLECTION_AMPLIFICATION`: 알려진 reflection service source port와 큰 응답 크기가 관찰된 victim-side UDP 형태
+- `POSSIBLE_REFLECTION_AMPLIFICATION`: v3에서는 DNS/NTP 응답 의미가 관찰되고 일치하는 요청으로 설명되지 않는 victim-side UDP 형태 (반사 의심, 증폭 실측 아님)
 - `MULTI_VECTOR`: 같은 target에 겹쳐 관찰된 복수 flood 유형
 
 HTTP request flood와 TLS handshake flood는 현재 Flow 계약에 필요한 L7 요청 의미가 없어 분류하지 않는다.
@@ -116,3 +116,125 @@ make benchmark-ddos-analysis
 Benchmark는 양의 bounded record 수, 3회 실행 시간, source revision, runtime/host 정보, 실제 analyzer 상수와 effective threshold를 JSON/Markdown artifact에 기록한다.
 
 완료 판정에는 실제 Controller, compatible worker, Web UI와 bounded LIVE sensor 경로가 필요하다. fixture 또는 inline POC만으로 production path를 입증하지 않는다.
+
+
+## v3 independent evidence axes / 독립 근거 축
+
+New results use `ddos-attack-report-v3` with `ddos-taxonomy-v3`. Saved v1/v2
+reports retain their historical semantics and closed validators; they are not
+rewritten or relabelled. Unknown versions and malformed-present metadata fail
+closed. Classification adds `evidence` and `axes` to the four historical keys.
+Each axis contains `confidence`, `supporting_codes`, `counter_codes`, and
+`unknown_codes`; the backend and Web derive the exact labels/reasons from the
+bounded evidence. Confidence is qualitative support, not an attack probability.
+
+- Delivery: `UNKNOWN`, `DIRECT_DISTRIBUTED`, `REFLECTION_AMPLIFICATION`, or
+  `MIXED`. Reflection means **suspicion**, never measured amplification. Port and
+  average size alone do not select a reflection finding. The historical
+  `ddos_reflection_min_average_packet_bytes` setting remains accepted for saved
+  policy compatibility but is not a v3 response-semantic gate.
+- Population: `DISTRIBUTED_UNATTRIBUTED`, `REFLECTOR_SET`,
+  `BOTNET_LIKE_COORDINATION`, or component-level `MIXED`. Role and source count
+  alone are insufficient. Coordination requires at least three sources sharing
+  the same protocol, TCP flags, IP length, and first-64-payload-byte SHA256
+  profile in at least three common one-second buckets within a fixed ten-second
+  Unix epoch window. Each supporting source therefore contributes at least
+  three real packet times, spanning at least two bucket starts. Eligible,
+  coordinated and observed source counts, sample counts, shared buckets and
+  window width remain distinct denominators. Responses from reflectors do not
+  establish compromised-client coordination. Legitimate coordinated activity
+  remains possible; compromise/actor attribution are unconfirmed.
+- Authenticity: valid-looking addresses remain `SPOOFING_UNCONFIRMED` without
+  independent source validation. Only an actually observed multicast
+  source address supports `SPOOFING_SUSPECTED`; this is invalid
+  addressing evidence, not universal spoofing detection. Unspecified source
+  addresses have protocol-specific legitimate uses and remain unconfirmed. Random IP-ID,
+  nonmonotonic IDs and TTL diversity remain qualified observations and do not
+  produce either suspicion or `SOURCE_CONSISTENT`. No new trusted-spoofing flag
+  or fabricated transport-authentication evidence is introduced.
+
+### Real producer metadata
+
+`ddos_packet_evidence` is optional (`null` from legacy model serialization means
+absent) with exact keys `version: 1`, `samples`, `omitted_samples`. Each sample
+has a signed safe integer `timestamp_us` (−(2^53−1) through 2^53−1), a SHA256 `profile`, closed `semantic` and
+nullable SHA256 `transaction`. Semantics are `OTHER`, `UNKNOWN`,
+`DNS_REQUEST`, `DNS_RESPONSE`, `NTP_REQUEST`, `NTP_RESPONSE`.
+
+PCAP network-evidence opt-in and the LIVE packet decoder produce actual samples;
+aggregate start/end timestamps are never expanded into packet times. The LIVE
+transport serializes the sidecar through FlowBatch records; ingress, immutable
+job snapshots and workers preserve it. C2 projections discard the sidecar,
+including explicit-null defaults, and do not activate another analysis domain.
+PCAP defaults without network evidence are unchanged.
+
+Epoch conversion uses integer datetime differences, not floating-point Unix
+seconds. Pre-epoch PCAPNG interface offsets retain their negative timestamps.
+Complete packets outside the sample safe-integer range count as omitted samples;
+the original packet counts and flow timing remain admissible and unchanged.
+For nanosecond-origin LIVE data, samples floor to microseconds while datetime
+loses the start's nanosecond remainder. If that start is `S+r` microseconds
+(`S` integral, `0 <= r < 1`) and wire duration is `D` microseconds, sample
+admission uses `[S, S+ceil(D)]`: `floor(S+r+D) <= S+ceil(D)`. The upper
+allowance relative to `S+D` is strictly below one microsecond, and zero for
+integral-microsecond durations. Ingress and analysis share this conversion;
+negative samples, historical microseconds and rollover do not use a float epoch.
+This bound does not rewrite legacy start/duration or permit earlier samples.
+
+DNS parsing is deliberately bounded to standard-query headers and one
+uncompressed question (up to 128 label steps, with a bounded name offset).
+It identifies response **headers**, not complete answer validity, DNSSEC, or
+source authenticity. Compression, other opcodes and truncated headers abstain.
+NTP parsing accepts complete 48-byte-or-longer v3/v4 client/server headers;
+server mode 4 requires stratum 1–15. Other modes, including control/private-mode
+amplifiers, abstain rather than infer responses from port 123. UNKNOWN samples
+remain counted but cannot support affirmative non-reflector coordination.
+Replies from unsupported reflection-service ports 17, 19, 389, 1900 and 11211
+also abstain; no new application parser or port-only reflection claim is implied.
+OTHER direct packets and parsed DNS/NTP requests remain coordination-eligible.
+
+Matching requests use the same sensor, reversed endpoint tuple, bounded
+transaction token, and a preceding packet time within ten seconds. DNS tokens
+bind ID and question; NTP tokens bind request transmit/response origin fields
+(nonzero only). This is counterevidence, not authenticated one-to-one transaction
+accounting. Missing requests can reflect capture position or retention limits:
+absence is not proof. Amplification remains `null`. Observed reflector addresses
+are distinct from the upstream victim-IP spoofing hypothesis. Known omitted or
+unobserved request-direction samples qualify the dependent reverse-response
+assessment as coverage-limited, lowering axis confidence. They do not count as
+response omissions, prove benign traffic, or erase unmatched observed responses.
+A single analysis-wide set retains at most 4,096 loss scopes (sensor, client IP/
+port, server IP/port). Loss is conservative over the analysis interval; exceeding
+the set bound marks all parsed-response assessments coverage-limited without
+adding more keys. Matching still shares a sensor observation domain across
+capture interfaces; cross-interface identity is not established.
+
+Both v3 report consumers require `response_samples > matched_response_samples`
+for `POSSIBLE_REFLECTION_AMPLIFICATION`, in addition to closed counter and
+finding denominators. Non-MULTI_VECTOR findings require `component_count = 0`.
+These are v3-only invariants; frozen v1/v2 interpretation is unchanged.
+
+### Independent evidence-state budgets
+
+| Scope | Maximum retained packet samples |
+|---|---:|
+| One LIVE flow / wire bundle | 16 |
+| One source (LIVE capture; analyzer per target/source) | 32 |
+| One target | 2,048 |
+| One analyzer invocation / LIVE capture aggregator lifetime | 32,768 |
+
+LIVE admission maps acquire keys only with admitted samples; flush does not
+replenish the lifetime quota. Samples outside the original flow interval are
+omitted rather than rewriting legacy flow time semantics. Exact limits retain
+samples; limit+1 counts omissions. The analyzer additionally reports packets
+without sample evidence separately from omitted samples. No unbounded
+source-by-bucket matrix is retained. Sample omission, missing packet evidence,
+parser/drop/clock/partial/mirror qualifiers suppress coordinated-population
+claims and lower axis confidence. These sample-specific bounds are separate
+from the report's existing whole-record coverage counters.
+
+The AI projection preserves the v3 axes under `ddos-ai-input-v3`, retains at
+most 20 findings within its unchanged 48 KiB byte budget, and counts additional
+omitted findings. Existing detailed UI exposes ko/en reasons and bounded support
+counts; candidate matching improvements and presentation/export redesign are
+not part of this version.

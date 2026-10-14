@@ -46,9 +46,11 @@ def test_restart_fails_unsaved_live_capture(tmp_path, monkeypatch, status, modul
         created = client.post("/api/v1/analysis-jobs", json=body)
         assert created.status_code == 201, created.text
         identity = created.json()["id"]
-        parsed = records(frame(), frame())
+        parsed = records(
+            frame(), frame(), start_time=now - timedelta(seconds=5), interval=timedelta(0)
+        )
         for record in parsed:
-            record["timestamp"] = (now - timedelta(seconds=5)).isoformat()
+            record["timestamp"] = record["timestamp"].isoformat()
         response = client.post(
             "/api/v1/sensors/s1/flow-batches",
             headers=AGENT_HEADERS,

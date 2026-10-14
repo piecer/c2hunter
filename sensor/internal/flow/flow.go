@@ -68,8 +68,12 @@ type Record struct {
 	ipIDValues                             map[uint16]struct{}
 	lastIPID                               uint16
 	lastIPIDObserved                       bool
+	DDoSPacketEvidence                     *packet.DDoSEvidence
 }
 type Aggregator struct {
+	ddosSamples         int
+	ddosSources         map[netip.Addr]int
+	ddosTargets         map[ddosTarget]int
 	sensorID, jobID     string
 	idle                time.Duration
 	payloadPreviewBytes int
@@ -118,6 +122,7 @@ func (a *Aggregator) AddWithMetadata(p packet.Packet, protocolMetadata metadata.
 	}
 	r.PacketCount++
 	trackNetworkIdentity(r, p)
+	a.trackDDoS(r, p)
 	r.TotalBytes += uint64(p.WireLength)    // #nosec G115 -- negative lengths are rejected at this public boundary
 	r.packetSizeSum += uint64(p.WireLength) // #nosec G115 -- negative lengths are rejected at this public boundary
 	if wireLength < r.MinPacketSize {

@@ -1,6 +1,7 @@
 """Small genuine PCAP byte fixtures; no packet library or network required."""
 
 import struct
+from datetime import UTC, datetime, timedelta
 
 from c2hunter_analysis.pcap import parse_pcap
 
@@ -40,17 +41,23 @@ def frame(flags=2, seq=100, ack=0, payload=b"", reverse=False, protocol=6, windo
     return bytes.fromhex("00112233445566778899aabb0800") + ip + transport
 
 
-def capture(*frames):
+def capture(*frames, start_time=None, interval=timedelta(milliseconds=100)):
+    # Set packet headers before parsing so every derived timestamp stays aligned.
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    start_time = epoch + timedelta(seconds=1) if start_time is None else start_time
     result = struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1)
     for index, packet in enumerate(frames):
-        seconds, micros = divmod(index * 100000, 1000000)
-        result += struct.pack("<IIII", 1 + seconds, micros, len(packet), len(packet)) + packet
+        elapsed = start_time + index * interval - epoch
+        seconds = elapsed.days * 86400 + elapsed.seconds
+        result += (
+            struct.pack("<IIII", seconds, elapsed.microseconds, len(packet), len(packet)) + packet
+        )
     return result
 
 
-def records(*frames):
+def records(*frames, start_time=None, interval=timedelta(milliseconds=100)):
     return parse_pcap(
-        capture(*frames),
+        capture(*frames, start_time=start_time, interval=interval),
         sensor_id="s1",
         internal_networks=["10.0.0.0/8"],
         retain_packet_bytes=False,

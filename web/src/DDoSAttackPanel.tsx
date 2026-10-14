@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useState } from 'react';
 import ReportLanguageScope from './ReportLanguage';
+import { type Axis, type AxisEvidence, axisNames, axisReasons, validV3Classification } from './ddosEvidence';
 import { useReportLanguage } from './reportLanguageContext';
 import {
   attackTypes, choose, classificationConfidences, commonPatternTypes, deliveryMechanisms,
@@ -14,7 +15,7 @@ export type DDoSRecommendation = {
 };
 export type DDoSClassification = {
   delivery_mechanism: string; source_population: string; source_authenticity: string;
-  confidence: string;
+  confidence: string; evidence?: AxisEvidence; axes?: Record<string, Axis>;
 };
 export type DDoSCommonPattern = {
   id: string; type: string; support_count: number; support_ratio: number; values: string[];
@@ -186,9 +187,11 @@ function validMetrics(value: unknown): boolean {
 function isDDoSAttackReport(value: unknown): value is DDoSAttackReport {
   if (!plain(value) || !onlyKeys(value, reportKeys)) return false;
   const report = value as unknown as DDoSAttackReport;
+  const v3 = report.version === 'ddos-attack-report-v3' && report.catalog_version === 'ddos-taxonomy-v3';
   const v2 = report.version === 'ddos-attack-report-v2' && report.catalog_version === 'ddos-taxonomy-v2';
+  const modern = v2 || v3;
   const v1 = report.version === 'ddos-attack-report-v1' && report.catalog_version === 'ddos-taxonomy-v1';
-  if (!v1 && !v2) return false;
+  if (!v1 && !modern) return false;
   if (!['attack_likely', 'suspicious_traffic', 'no_clear_attack', 'insufficient_evidence'].includes(report.verdict)
     || !['high', 'medium', 'low', 'unknown'].includes(report.confidence)) return false;
   if (!plain(report.summary) || !onlyKeys(report.summary, summaryKeys)) return false;
@@ -211,8 +214,8 @@ function isDDoSAttackReport(value: unknown): value is DDoSAttackReport {
     || !knownArray(report.warnings, warnings, 16) || !knownArray(report.limitations, limitations, 8)
     || !safeInteger(report.omitted_finding_count) || report.omitted_finding_count > 6144) return false;
   const ids = new Set<string>();
-  if (!report.findings.every(item => plain(item) && onlyKeys(item, v2 ? findingKeysV2 : findingKeysV1)
-    && (!v2 || validClassification(item.classification)
+  if (!report.findings.every(item => plain(item) && onlyKeys(item, modern ? findingKeysV2 : findingKeysV1)
+    && (!modern || (v3 ? validV3Classification(item.classification) : validClassification(item.classification))
       && validCommonPatterns(item.common_patterns) && validSignatures(item.signature_candidates))
     && /^ddos-[0-9a-f]{16}$/.test(item.id) && !ids.has(item.id) && Boolean(ids.add(item.id))
     && Object.hasOwn(attackTypes, item.attack_type) && Object.hasOwn(roles, item.attack_role)
@@ -235,7 +238,7 @@ function isDDoSAttackReport(value: unknown): value is DDoSAttackReport {
       : item.attack_type.startsWith('TCP_') ? ['syn_only_ratio', 'ack_only_ratio', 'rst_ratio', 'fin_ratio', 'payload_packet_ratio', 'response_ratio']
         : ['UDP_FLOOD', 'POSSIBLE_REFLECTION_AMPLIFICATION'].includes(item.attack_type) ? ['dominant_reflection_source_port', 'reflection_source_port_ratio', 'average_packet_bytes', 'amplification_ratio']
           : ['icmp_type_observed_packets', 'icmp_echo_request_ratio'];
-    const expectedMetrics = [...(multi ? [] : baseMetrics), ...familyMetrics, ...(v2 && !multi ? identityMetrics : [])];
+    const expectedMetrics = [...(multi ? [] : baseMetrics), ...familyMetrics, ...(modern && !multi ? identityMetrics : [])];
     if (Object.keys(item.metrics).length !== expectedMetrics.length
       || !expectedMetrics.every(key => Object.hasOwn(item.metrics, key))) return false;
     if (!multi) {
@@ -290,6 +293,18 @@ function isDDoSAttackReport(value: unknown): value is DDoSAttackReport {
     if (!['VICTIM_SIDE_INBOUND', 'PARTICIPANT_SIDE_OUTBOUND'].includes(item.attack_role)
       || item.attack_type === 'POSSIBLE_REFLECTION_AMPLIFICATION'
         && (item.attack_role !== 'VICTIM_SIDE_INBOUND' || item.likelihood !== 'POSSIBLE')) return false;
+    if (v3) {
+      const c = item.classification!;
+      const e = c.evidence!;
+      if ((!multi && (e.observed_sources !== item.metrics.distinct_sources || Number(e.sample_count) + Number(e.omitted_samples) + Number(e.unobserved_packets) !== Number(item.metrics.packet_count)
+        || Number(e.invalid_source_records) > Number(item.metrics.record_count)
+        || e.identity_variation_records !== item.metrics.network_identity_anomaly_records || e.component_count !== 0))
+        || (multi && e.component_count !== item.metrics.component_finding_count)
+        || (item.attack_type === 'POSSIBLE_REFLECTION_AMPLIFICATION' && Number(e.response_samples) <= Number(e.matched_response_samples))
+        || item.uncertainty_codes.includes('BOTNET_ATTRIBUTION_UNCONFIRMED') !== (c.source_population === 'BOTNET_LIKE_COORDINATION')
+        || item.uncertainty_codes.includes('SOURCE_SPOOFING_NOT_CONFIRMED') !== (c.source_authenticity === 'SPOOFING_SUSPECTED')
+        || (!report.summary.coverage_complete && e.coverage_limited !== true)) return false;
+    }
     if (v2) {
       const classification = item.classification!;
       const observed = Number(item.metrics.network_identity_observed_records ?? 0);
@@ -481,6 +496,17 @@ function Content({ report, detailOwner, setDetailOwner, ownerPrefix }: {
         <button className="secondary" aria-expanded={open} onClick={() => setDetailOwner(open ? undefined : findingKey)}>{open ? t('Hide detailed evidence', '상세 근거 숨기기') : t('Show detailed evidence', '상세 근거 보기')} — {choose(language, attackTypes[item.attack_type])}</button>
         {open && <section role="region" aria-label={t('DDoS finding evidence', 'DDoS 발견 근거')}>
           <h5>{t('Measured facts', '측정 사실')}</h5><dl>{Object.entries(item.metrics).map(([key, value]) => <div key={key}><dt>{choose(language, metricLabels[key])}</dt><dd>{format(value, language)}</dd></div>)}</dl>
+          {item.classification?.axes && <div>{axisNames.map(name => {
+            const axis = item.classification!.axes![name];
+            return <div key={name}><p><strong>{t(name === 'delivery_mechanism' ? 'Delivery' : name === 'source_population' ? 'Source population' : 'Source authenticity', name === 'delivery_mechanism' ? '전달 방식' : name === 'source_population' ? 'Source 집단' : 'Source 진위')}</strong> — {choose(language, classificationConfidences[axis.confidence])}</p>
+              {(['supporting_codes', 'counter_codes', 'unknown_codes'] as const).map(kind => axis[kind].length > 0 && <p key={kind}>
+                {kind === 'supporting_codes' ? t('Supporting evidence: ', '지지 근거: ') : kind === 'counter_codes' ? t('Counterevidence: ', '반대 근거: ') : t('Unknowns: ', '미확인: ')}
+                {axis[kind].map(code => t(...axisReasons[code])).join(' ')}
+              </p>)}
+            </div>;
+          })}<p>{t(`Eligible sources: ${item.classification.evidence!.eligible_sources}; coordinated sources: ${item.classification.evidence!.coordinated_sources}; window: ${item.classification.evidence!.window_seconds} s; shared buckets: ${item.classification.evidence!.shared_buckets}.`, `적격 source: ${item.classification.evidence!.eligible_sources}; 조율 source: ${item.classification.evidence!.coordinated_sources}; 구간: ${item.classification.evidence!.window_seconds}초; 공통 버킷: ${item.classification.evidence!.shared_buckets}.`)}</p>
+            <p>{t(`Retained packet samples: ${item.classification.evidence!.sample_count}; omitted: ${item.classification.evidence!.omitted_samples}; packets without sample evidence: ${item.classification.evidence!.unobserved_packets}.`, `보존 패킷 표본: ${item.classification.evidence!.sample_count}; 생략: ${item.classification.evidence!.omitted_samples}; 표본 근거 없는 패킷: ${item.classification.evidence!.unobserved_packets}.`)}</p>
+          </div>}
           {item.classification && <><h5>{t('Classification', '공격 분류')}</h5><dl>
             <div><dt>{t('Delivery', '전달 방식')}</dt><dd>{choose(language, deliveryMechanisms[item.classification.delivery_mechanism])}</dd></div>
             <div><dt>{t('Source population', 'Source 집단')}</dt><dd>{choose(language, sourcePopulations[item.classification.source_population])}</dd></div>

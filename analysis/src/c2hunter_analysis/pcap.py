@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from typing import Any
 
+from .ddos_packets import packet_sample
 from .payload_features import extract_payload_features
 
 
@@ -526,6 +527,29 @@ def _decode_packet(
             record.get("packet_evidence_complete")
             and len(captured.data) == captured.original_length
         )
+    if retain_network_evidence:
+        flags_value = sum(
+            (1 << index) * int(bool((tcp_flags or {}).get(name)))
+            for index, name in enumerate(("fin", "syn", "rst", "psh", "ack", "urg", "ece", "cwr"))
+        )
+        sample = (
+            packet_sample(
+                captured.timestamp,
+                protocol,
+                decoded["ip_length"],
+                flags_value,
+                payload,
+                source_port,
+                destination_port,
+            )
+            if record["packet_evidence_complete"]
+            else None
+        )
+        record["ddos_packet_evidence"] = {
+            "version": 1,
+            "omitted_samples": int(record["packet_evidence_complete"] and sample is None),
+            "samples": [sample] if sample is not None else [],
+        }
     if features is not None:
         record.update(features.as_dict())
     if tcp_flags:
@@ -637,6 +661,7 @@ def _decode_ipv4(packet: bytes) -> dict[str, Any] | None:
         protocol_number, transport, fragment_offset == 0
     )
     result: dict[str, Any] = {
+        "ip_length": total_length,
         "source_ip": ip_address(packet[12:16]),
         "destination_ip": ip_address(packet[16:20]),
         "source_port": source_port,
@@ -652,6 +677,13 @@ def _decode_ipv4(packet: bytes) -> dict[str, Any] | None:
         transport,
         len(packet) >= total_length and not (int.from_bytes(packet[6:8], "big") & 0x3FFF),
         packet[8],
+    )
+    result["packet_evidence"].update(
+        {
+            "ip_id_observed_count": 1,
+            "ip_id_zero_count": int(packet[4:6] == b"\0\0"),
+            "ip_id_distinct_count": 1,
+        }
     )
     return result
 
@@ -693,6 +725,7 @@ def _decode_ipv6(packet: bytes) -> dict[str, Any] | None:
         next_header, packet[offset:end], first_fragment
     )
     result: dict[str, Any] = {
+        "ip_length": 40 + payload_length,
         "source_ip": ip_address(packet[8:24]),
         "destination_ip": ip_address(packet[24:40]),
         "source_port": source_port,
@@ -713,7 +746,14 @@ def _decode_ipv6(packet: bytes) -> dict[str, Any] | None:
 
 
 def _packet_evidence(protocol: int, transport: bytes, complete: bool, ttl: int) -> dict[str, Any]:
-    evidence: dict[str, Any] = {"ip_ttl": ttl, "packet_evidence_complete": complete}
+    evidence: dict[str, Any] = {
+        "ip_ttl": ttl,
+        "packet_evidence_complete": complete,
+        "hop_limit_min": ttl,
+        "hop_limit_max": ttl,
+        "hop_limit_mode": ttl,
+        "hop_limit_distinct_count": 1,
+    }
     if protocol == 6:
         header = (transport[12] >> 4) * 4 if len(transport) >= 20 else 0
         valid = 20 <= header <= len(transport)

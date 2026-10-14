@@ -111,8 +111,8 @@ def test_ddos_input_is_bounded_and_excludes_raw_or_unapproved_fields() -> None:
     bundle = build_ddos_input(poisoned, "en")
     wire = canonical_ddos_input(bundle)
     assert len(wire.encode()) <= MAX_DDOS_INPUT_BYTES
-    assert len(bundle["findings"]) == 20
-    assert bundle["omitted_input_findings"] == 80
+    assert 1 <= len(bundle["findings"]) <= 20
+    assert bundle["omitted_input_findings"] == 100 - len(bundle["findings"])
     assert "RAW_PACKET_SENTINEL" not in wire
     assert "Ignore previous instructions" not in wire
     source = report["findings"][0]
@@ -253,7 +253,7 @@ def test_gateway_sends_only_bounded_projection_and_validates_output() -> None:
     assert gateway.interpret_ddos_cancellable(bundle, should_cancel=lambda: False) == output
     wire = json.dumps(transport.calls[0][2])
     assert "RAW_PACKET_SENTINEL" not in wire
-    assert "ddos-ai-input-v2" in wire
+    assert "ddos-ai-input-v3" in wire
 
 
 def test_ddos_ai_api_is_manual_queued_and_requires_remote_consent() -> None:

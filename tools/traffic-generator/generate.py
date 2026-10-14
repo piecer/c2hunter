@@ -99,6 +99,18 @@ def icmp_echo_packet(src: str, dst: str, ident: int) -> bytes:
     return bytes.fromhex("0200000000020200000000010800") + ip_head + body
 
 
+def dns_reflection_response() -> bytes:
+    """Complete 600-byte DNS TXT reply for the offline reflection fixture only."""
+    question = b"\x0areflection\x04test\0" + struct.pack("!HH", 16, 1)
+    # TXT character strings are length-prefixed and individually bounded to 255.
+    text = (b"\xff" + b"r" * 255) * 2 + b"\x1f" + b"r" * 31
+    answer = struct.pack("!HHHIH", 0xC00C, 16, 1, 60, len(text)) + text
+    # EDNS permits this response to exceed the classic 512-byte UDP DNS limit.
+    opt = b"\0" + struct.pack("!HHIH", 41, 1232, 0, 0)
+    header = struct.pack("!6H", 0x1234, 0x8180, 1, 1, 0, 1)
+    return header + question + answer + opt
+
+
 def ddos_source(index: int, *, internal: bool = False) -> str:
     prefix = "10.9" if internal else "198.18"
     return f"{prefix}.{index // 250}.{index % 250 + 1}"
@@ -282,10 +294,13 @@ def scenarios(rng: random.Random):
         )
         for index in range(1000)
     ]
+    response_payload = dns_reflection_response()
     reflection = [
         (
             EPOCH + index / 120,
-            udp_packet(ddos_source(index % 250), victim, 53, 443, b"r" * 600, index),
+            udp_packet(
+                ddos_source(index % 250), victim, 53, 443, response_payload, index
+            ),
         )
         for index in range(1000)
     ]

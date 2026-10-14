@@ -73,6 +73,7 @@ def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
             "icmp_code",
             "icmp_error",
             "icmp_quoted_flow",
+            "ddos_packet_evidence",
         ):
             record.pop(field, None)
         flows.append(Flow(**record))

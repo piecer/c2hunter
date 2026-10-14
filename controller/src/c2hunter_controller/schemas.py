@@ -555,6 +555,19 @@ class DDoSClassification(BaseModel):
     confidence: Literal["high", "medium", "low"]
 
 
+class DDoSClassificationV3(DDoSClassification):
+    evidence: dict[str, Any]
+    axes: dict[str, Any]
+
+    @model_validator(mode="after")
+    def supported_axes(self) -> DDoSClassificationV3:
+        from c2hunter_analysis.ddos_evidence import assess
+
+        if self.model_dump() != assess(self.evidence):
+            raise ValueError("DDoS axes disagree with evidence")
+        return self
+
+
 class DDoSCommonPattern(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str = Field(pattern=r"^ddos-pattern-[0-9a-f]{16}$")
@@ -752,7 +765,7 @@ class DDoSFinding(BaseModel):
     evidence_codes: list[str] = Field(max_length=8)
     uncertainty_codes: list[str] = Field(max_length=8)
     recommendation_codes: list[str] = Field(max_length=8)
-    classification: DDoSClassification | None = None
+    classification: DDoSClassificationV3 | DDoSClassification | None = None
     common_patterns: list[DDoSCommonPattern] = Field(default_factory=list, max_length=8)
     signature_candidates: list[DDoSSignatureCandidate] = Field(default_factory=list, max_length=4)
 
@@ -990,7 +1003,36 @@ class DDoSFinding(BaseModel):
         expected_recommendations.extend(_DDOS_COMMON_RECOMMENDATIONS)
         if self.recommendation_codes != list(dict.fromkeys(expected_recommendations))[:8]:
             raise ValueError("DDoS finding recommendations are inconsistent")
-        if self.classification is not None:
+        if isinstance(self.classification, DDoSClassificationV3):
+            c = self.classification
+            e = c.evidence
+            if self.attack_type != "MULTI_VECTOR":
+                if (
+                    e["observed_sources"] != self.metrics.distinct_sources
+                    or e["sample_count"] + e["omitted_samples"] + e["unobserved_packets"]
+                    != self.metrics.packet_count
+                    or e["invalid_source_records"] > (self.metrics.record_count or 0)
+                    or e["identity_variation_records"]
+                    != self.metrics.network_identity_anomaly_records
+                    or e["component_count"] != 0
+                ):
+                    raise ValueError("DDoS axis evidence disagrees with finding metrics")
+            elif e["component_count"] != self.metrics.component_finding_count:
+                raise ValueError("DDoS component evidence disagrees")
+            if (
+                self.attack_type == "POSSIBLE_REFLECTION_AMPLIFICATION"
+                and e["response_samples"] <= e["matched_response_samples"]
+            ):
+                raise ValueError("DDoS reflection requires unmatched response samples")
+            if ("BOTNET_ATTRIBUTION_UNCONFIRMED" in uncertainty) != (
+                c.source_population == "BOTNET_LIKE_COORDINATION"
+            ) or ("SOURCE_SPOOFING_NOT_CONFIRMED" in uncertainty) != (
+                c.source_authenticity == "SPOOFING_SUSPECTED"
+            ):
+                raise ValueError("DDoS v3 mandatory uncertainty missing")
+        if self.classification is not None and not isinstance(
+            self.classification, DDoSClassificationV3
+        ):
             classification = self.classification
             if self.attack_type == "MULTI_VECTOR":
                 classification_component_types = set(self.metrics.component_types or [])
@@ -1125,8 +1167,8 @@ class DDoSSummary(BaseModel):
 
 class DDoSAttackReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    version: Literal["ddos-attack-report-v1", "ddos-attack-report-v2"]
-    catalog_version: Literal["ddos-taxonomy-v1", "ddos-taxonomy-v2"]
+    version: Literal["ddos-attack-report-v1", "ddos-attack-report-v2", "ddos-attack-report-v3"]
+    catalog_version: Literal["ddos-taxonomy-v1", "ddos-taxonomy-v2", "ddos-taxonomy-v3"]
     verdict: Literal[
         "attack_likely", "suspicious_traffic", "no_clear_attack", "insufficient_evidence"
     ]
@@ -1238,15 +1280,23 @@ class DDoSAttackReport(BaseModel):
 
     @model_validator(mode="after")
     def internally_consistent(self) -> DDoSAttackReport:
-        expected_catalog = (
-            "ddos-taxonomy-v2" if self.version == "ddos-attack-report-v2" else "ddos-taxonomy-v1"
-        )
+        expected_catalog = self.version.replace("attack-report", "taxonomy")
         if self.catalog_version != expected_catalog:
             raise ValueError("DDoS report and taxonomy versions are inconsistent")
         phase_fields = {"classification", "common_patterns", "signature_candidates"}
         for finding in self.findings:
+            if (
+                isinstance(finding.classification, DDoSClassificationV3)
+                and not self.summary.coverage_complete
+                and not finding.classification.evidence["coverage_limited"]
+            ):
+                raise ValueError("DDoS axis coverage disagrees with report")
             present = phase_fields & finding.model_fields_set
-            if self.version == "ddos-attack-report-v2":
+            if (self.version == "ddos-attack-report-v3") != isinstance(
+                finding.classification, DDoSClassificationV3
+            ):
+                raise ValueError("DDoS classification version mismatch")
+            if self.version in {"ddos-attack-report-v2", "ddos-attack-report-v3"}:
                 if present != phase_fields or finding.classification is None:
                     raise ValueError("DDoS v2 finding is missing classification or patterns")
                 if not finding.common_patterns or not finding.signature_candidates:
@@ -1444,6 +1494,7 @@ class ICMPQuotedFlow(BaseModel):
 
 class FlowRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    ddos_packet_evidence: dict[str, Any] | None = None
     sensor_id: str
     timestamp: datetime
     source_ip: str
@@ -1548,6 +1599,16 @@ class FlowRecord(BaseModel):
 
     @model_validator(mode="after")
     def valid_tcp_flag_metadata(self) -> FlowRecord:
+        from c2hunter_analysis.ddos_packets import packet_interval_us, validate_packet_evidence
+
+        validate_packet_evidence(
+            self.ddos_packet_evidence,
+            self.packet_count,
+            *packet_interval_us(self.timestamp, self.duration_seconds),
+            self.protocol.upper(),
+            self.source_port,
+            self.destination_port,
+        )
         counters = (
             self.tcp_syn_count,
             self.tcp_ack_count,
