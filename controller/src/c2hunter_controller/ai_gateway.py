@@ -8,6 +8,7 @@ from typing import Any, Protocol, cast
 from pydantic import ValidationError
 
 from .ai_evaluation import AssessmentCacheIdentity, BoundedAssessmentCache
+from .c2_diagnostics import C2Diagnostics
 from .integrations import CancellableJsonHttpClient, IntegrationError
 
 PROMPT_NAME = "candidate_system"
@@ -87,6 +88,7 @@ class StructuredLocalGateway:
         bundle: Any,
         *,
         should_cancel: Callable[[], bool],
+        diagnostics: C2Diagnostics | None = None,
     ) -> dict[str, Any]:
         from .ai_analysis import (
             AIAnalysisError,
@@ -95,6 +97,19 @@ class StructuredLocalGateway:
             validate_assessment_evidence,
         )
 
+        observed = diagnostics if diagnostics is not None else C2Diagnostics()
+        observed.attempt_count = 0
+        observed.repair_count = 0
+        observed.transport_attempt_count = 0
+        cancellation_check = should_cancel
+
+        def cancelled() -> bool:
+            result = cancellation_check()
+            if result:
+                observed.stage = "CANCELLED"
+            return result
+
+        should_cancel = cancelled
         if should_cancel():
             raise AIAnalysisCancelled("AI analysis was cancelled before the model request")
         bundle_json = canonical_bundle_json(bundle)
@@ -138,22 +153,19 @@ class StructuredLocalGateway:
                 "content": f"Candidate evidence bundle JSON:\n{bundle_json}",
             },
         ]
-        last_error = ""
         for repair_attempt in range(2):
             if should_cancel():
                 raise AIAnalysisCancelled("AI analysis was cancelled before the model request")
-            raw = self._complete(messages, schema, should_cancel)
+            raw = self._complete(messages, schema, should_cancel, diagnostics=observed)
             if should_cancel():
                 raise AIAnalysisCancelled("AI analysis was cancelled during the model request")
             try:
+                observed.stage = "JSON_PARSE"
                 parsed = self._parse_content(raw)
+                observed.stage = "SCHEMA"
                 assessment = CandidateAssessment.model_validate(parsed)
+                observed.stage = "EVIDENCE_VALIDATION"
                 validate_assessment_evidence(assessment, bundle)
-                if should_cancel():
-                    raise AIAnalysisCancelled("AI analysis was cancelled during output validation")
-                result = cast(dict[str, Any], assessment.model_dump(mode="json"))
-                self.assessment_cache.put(identity, bundle_hash, result)
-                return result
             except (
                 AIAnalysisError,
                 ValidationError,
@@ -161,22 +173,28 @@ class StructuredLocalGateway:
                 ValueError,
                 json.JSONDecodeError,
             ) as exc:
-                last_error = str(exc)[:1000]
+                if observed.stage == "JSON_PARSE" and not isinstance(exc, json.JSONDecodeError):
+                    observed.stage = "SCHEMA"
                 if repair_attempt:
                     break
-                messages.extend(
-                    [
-                        {"role": "assistant", "content": raw[:2048]},
-                        {
-                            "role": "user",
-                            "content": (
-                                "The previous response was invalid structured output. "
-                                f"Validation error: {last_error}. Return corrected JSON only."
-                            ),
-                        },
-                    ]
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": f"Invalid output category: {observed.stage}. "
+                        "Return corrected JSON matching the schema; cite only supplied "
+                        "Evidence IDs. Do not add fields.",
+                    }
                 )
-        raise AIAnalysisError(f"invalid structured output after one repair: {last_error}")
+            else:
+                # Repository-bearing callbacks are not model-output validation.
+                if should_cancel():
+                    raise AIAnalysisCancelled("AI analysis was cancelled during output validation")
+                result = cast(dict[str, Any], assessment.model_dump(mode="json"))
+                self.assessment_cache.put(identity, bundle_hash, result)
+                return result
+        raise AIAnalysisError(
+            f"invalid structured output after one repair: {observed.stage}"
+        ) from None
 
     def interpret_network_cancellable(
         self, bundle: dict[str, Any], *, should_cancel: Callable[[], bool]
@@ -328,17 +346,36 @@ class StructuredLocalGateway:
         should_cancel: Callable[[], bool],
         *,
         on_response: Callable[[dict[str, Any]], None] | None = None,
+        diagnostics: C2Diagnostics | None = None,
     ) -> str:
         last_error: Exception | None = None
         for _attempt in range(self.retries + 1):
             if should_cancel():
                 raise AIAnalysisCancelled("AI analysis was cancelled before the model request")
             try:
+                if diagnostics is not None:
+                    diagnostics.stage = "TRANSPORT"
+                    if _attempt == 0:
+                        diagnostics.attempt_count = (diagnostics.attempt_count or 0) + 1
+                        diagnostics.repair_count = diagnostics.attempt_count - 1
+                    diagnostics.transport_attempt_count = (
+                        diagnostics.transport_attempt_count or 0
+                    ) + 1
+                    diagnostics.output_bytes = None
+                    diagnostics.provider_finish_reason = None
                 response = self._request_completion(messages, schema, should_cancel)
                 if on_response is not None:
                     on_response(response)
-                return self._extract_content(response)
+                if diagnostics is not None:
+                    diagnostics.stage = "RESPONSE_ENVELOPE"
+                    diagnostics.observe_response(response, self.provider)
+                raw = self._extract_content(response)
+                if diagnostics is not None:
+                    diagnostics.output_bytes = len(raw.encode("utf-8", errors="replace"))
+                return raw
             except InterruptedError as exc:
+                if diagnostics is not None:
+                    diagnostics.stage = "CANCELLED"
                 raise AIAnalysisCancelled(
                     "AI analysis was cancelled during the model request"
                 ) from exc
@@ -398,6 +435,22 @@ class StructuredLocalGateway:
 
     def ready(self) -> bool:
         raise NotImplementedError
+
+
+def assess_candidate(
+    gateway: Any,
+    bundle: Any,
+    should_cancel: Callable[[], bool],
+    diagnostics: C2Diagnostics,
+) -> Any:
+    """Keep custom gateways compatible; their unobserved call counts stay unknown."""
+    cancellable = getattr(gateway, "assess_cancellable", None)
+    if callable(cancellable):
+        # Subclasses may override the public method with its original signature.
+        if getattr(cancellable, "__func__", None) is StructuredLocalGateway.assess_cancellable:
+            return cancellable(bundle, should_cancel=should_cancel, diagnostics=diagnostics)
+        return cancellable(bundle, should_cancel=should_cancel)
+    return gateway.assess(bundle)
 
 
 def _ollama_schema(value: Any) -> Any:

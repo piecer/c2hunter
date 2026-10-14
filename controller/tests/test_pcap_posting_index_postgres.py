@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -9,6 +11,7 @@ from typing import Any, cast
 
 import pytest
 from c2hunter_analysis.pcap_postings import PostingQueryLimits
+from psycopg.pq import TransactionStatus as TS
 from test_pcap_posting_index_repository import _prepare
 
 from c2hunter_controller.pcap_posting_index import (
@@ -228,6 +231,26 @@ def test_postgres_runtime_sql_validator_ignores_from_inside_set_subquery() -> No
     )
 
 
+class _TransactionState:
+    """Driver-status contract only; this is not a PostgreSQL engine emulator."""
+
+    def __init__(self) -> None:
+        self.info = SimpleNamespace(transaction_status=TS.IDLE)
+
+    @contextmanager
+    def _statement(self) -> Iterator[None]:
+        if self.info.transaction_status == TS.INERROR:
+            raise RuntimeError("aborted transaction requires rollback")
+        if not self.autocommit:
+            self.info.transaction_status = TS.INTRANS
+        try:
+            yield
+        except BaseException:
+            if not self.autocommit:
+                self.info.transaction_status = TS.INERROR
+            raise
+
+
 class MigrationCursor:
     def __init__(self, connection: MigrationConnection) -> None:
         self.connection = connection
@@ -240,14 +263,16 @@ class MigrationCursor:
         return None
 
     def execute(self, query: str, params: object = None) -> None:
-        self.connection.calls.append((query, params))
+        with self.connection._statement():
+            self.connection.calls.append((query, params))
 
     def fetchall(self) -> list[tuple[Any, ...]]:
         return []
 
 
-class MigrationConnection:
+class MigrationConnection(_TransactionState):
     def __init__(self) -> None:
+        super().__init__()
         self.closed = False
         self.autocommit = False
         self.calls: list[tuple[str, object]] = []
@@ -258,6 +283,7 @@ class MigrationConnection:
 
     def commit(self) -> None:
         self.commits += 1
+        self.info.transaction_status = TS.IDLE
 
     def close(self) -> None:
         self.closed = True
@@ -379,9 +405,10 @@ class ScriptedCursor(MigrationCursor):
         self.rows: list[tuple[Any, ...]] = []
 
     def execute(self, query: str, params: object = None) -> None:
-        _validate_postgres_sql(query, params)
-        self.connection.calls.append((query, params))
-        self.rows, self.rowcount = self.connection.respond(query, params)
+        with self.connection._statement():
+            _validate_postgres_sql(query, params)
+            self.connection.calls.append((query, params))
+            self.rows, self.rowcount = self.connection.respond(query, params)
 
     def fetchone(self) -> tuple[Any, ...] | None:
         return self.rows[0] if self.rows else None
@@ -395,9 +422,10 @@ class ScriptedCursor(MigrationCursor):
         return rows
 
     def executemany(self, query: str, params: object) -> None:
-        _validate_postgres_sql(query, params, many=True)
-        self.connection.calls.append((query, params))
-        self.rows, self.rowcount = self.connection.respond(query, params)
+        with self.connection._statement():
+            _validate_postgres_sql(query, params, many=True)
+            self.connection.calls.append((query, params))
+            self.rows, self.rowcount = self.connection.respond(query, params)
 
 
 class ScriptedConnection(MigrationConnection):
@@ -411,6 +439,7 @@ class ScriptedConnection(MigrationConnection):
 
     def rollback(self) -> None:
         self.rollbacks += 1
+        self.info.transaction_status = TS.IDLE
 
 
 def _runtime_repository(connection: ScriptedConnection) -> PostgresRepository:
@@ -419,6 +448,115 @@ def _runtime_repository(connection: ScriptedConnection) -> PostgresRepository:
     )
     repository._connection = connection
     return repository
+
+
+@pytest.mark.parametrize("many", [False, True])
+def test_posting_double_transaction_status(many: bool) -> None:
+    failed = False
+
+    def respond(_query: str, _params: object) -> tuple[list[tuple[Any, ...]], int]:
+        if failed:
+            raise RuntimeError("injected SQL failure")
+        return [], 1
+
+    connection = ScriptedConnection(respond)
+    assert connection.info.transaction_status == TS.IDLE
+    with connection.cursor() as cursor:
+        operation = cursor.executemany if many else cursor.execute
+        operation("SELECT %s", [(1,)] if many else (1,))
+    assert connection.info.transaction_status == TS.INTRANS
+    assert connection.commits == connection.rollbacks == 0
+    connection.commit()
+    assert connection.info.transaction_status == TS.IDLE
+    failed = True
+    with pytest.raises(RuntimeError, match="injected SQL failure"):
+        operation("SELECT %s", [(1,)] if many else (1,))
+    assert connection.info.transaction_status == TS.INERROR
+    failed = False
+    with pytest.raises(RuntimeError, match="aborted transaction"):
+        operation("SELECT %s", [(1,)] if many else (1,))
+    connection.rollback()
+    assert connection.info.transaction_status == TS.IDLE
+    operation("SELECT %s", [(1,)] if many else (1,))
+    assert connection.info.transaction_status == TS.INTRANS
+    connection.rollback()
+    assert connection.info.transaction_status == TS.IDLE
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("failed", [False, True])
+def test_posting_double_audit_transaction_ownership(nested: bool, failed: bool) -> None:
+    def respond(query: str, _params: object) -> tuple[list[tuple[Any, ...]], int]:
+        if failed and "INSERT INTO audit_events" in query:
+            raise RuntimeError("injected SQL failure")
+        return [], 1
+
+    connection = ScriptedConnection(respond)
+    repository = _runtime_repository(connection)
+    if nested:
+        connection.cursor().execute("SELECT 1")
+        assert connection.info.transaction_status == TS.INTRANS
+    if failed:
+        with pytest.raises(RuntimeError, match="injected SQL failure"):
+            repository._audit("probe", "owned", {})
+    else:
+        repository._audit("probe", "owned", {})
+    assert any("INSERT INTO audit_events" in query for query, _ in connection.calls)
+    if nested:
+        assert connection.commits == connection.rollbacks == 0
+        assert connection.info.transaction_status == (TS.INERROR if failed else TS.INTRANS)
+        connection.rollback()
+    else:
+        assert connection.commits == int(not failed)
+        assert connection.rollbacks == int(failed)
+    assert connection.info.transaction_status == TS.IDLE
+
+
+def _observe_deletion_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    connection: Any,
+    repository: PostgresRepository,
+) -> list[tuple[Any, ...]]:
+    events: list[tuple[Any, ...]] = []
+    commit, rollback, audit = connection.commit, connection.rollback, repository._audit
+
+    def observed_commit() -> None:
+        events.append(("commit", connection.info.transaction_status, list(connection.calls)))
+        commit()
+
+    def observed_rollback() -> None:
+        events.append(("rollback", connection.info.transaction_status))
+        rollback()
+
+    def observed_audit(*args: Any) -> None:
+        events.append(("audit-enter", connection.info.transaction_status, connection.commits))
+        audit(*args)
+        events.append(("audit-exit", connection.info.transaction_status, connection.commits))
+
+    monkeypatch.setattr(connection, "commit", observed_commit)
+    monkeypatch.setattr(connection, "rollback", observed_rollback)
+    monkeypatch.setattr(repository, "_audit", observed_audit)
+    return events
+
+
+def _assert_deletion_boundaries(events: list[tuple[Any, ...]], object_key: str) -> None:
+    assert [event[0] for event in events] == [
+        "audit-enter",
+        "audit-exit",
+        "commit",
+        "blob",
+        "commit",
+    ]
+    assert events[:2] == [("audit-enter", TS.INTRANS, 0), ("audit-exit", TS.INTRANS, 0)]
+    assert events[2][1] == events[4][1] == TS.INTRANS
+    committed_queries = [query for query, _params in events[2][2]]
+    assert any("VALUES('pcap_export_cleanup'" in query for query in committed_queries)
+    assert committed_queries[-2].startswith("DELETE FROM controller_objects WHERE kind='job'")
+    assert committed_queries[-1].startswith("INSERT INTO audit_events")
+    assert events[3] == ("blob", object_key)
+    ack_queries = [query for query, _params in events[4][2]][len(committed_queries) :]
+    assert len(ack_queries) == 1
+    assert "WHERE kind='pcap_export_cleanup'" in ack_queries[0]
 
 
 def _spec_values(spec: PostingIndexTaskSpec) -> tuple[Any, ...]:
@@ -1408,6 +1546,7 @@ def test_postgres_job_deletion_removes_exact_posting_lifecycle_before_blob_clean
     mode: str,
     live_rows: list[tuple[str, str]],
     expected_sources: list[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     job_id = "delete-job"
     upload_object_key = f"captures/{job_id}/immutable-generation.pcap"
@@ -1437,13 +1576,21 @@ def test_postgres_job_deletion_removes_exact_posting_lifecycle_before_blob_clean
 
         def delete(self, object_key: str) -> None:
             assert connection.commits >= 1, "blob deletion ran inside the posting/job transaction"
+            events.append(("blob", object_key))
+            assert connection.info.transaction_status == TS.IDLE
             self.deleted.append(object_key)
 
     blob = BlobTracker()
     repository = _runtime_repository(connection)
     repository.blob_store = cast(MinioBlobStore, blob)
+    events = _observe_deletion_boundaries(monkeypatch, connection, repository)
 
     assert repository.delete_job(job_id)
+    _assert_deletion_boundaries(
+        events, upload_object_key if mode == "PCAP_UPLOAD" else live_rows[0][1]
+    )
+    assert connection.info.transaction_status == TS.IDLE
+    assert connection.commits == 2 and connection.rollbacks == 0
 
     source_cases: list[tuple[str, list[str], tuple[Any, ...]]] = [
         ("PCAP_UPLOAD", [job_id], (job_id,))

@@ -8,7 +8,7 @@ import re
 import secrets
 import threading
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, suppress
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -2355,23 +2355,18 @@ class PostgresRepository(Repository):
 
     @classmethod
     def _replace_job_flow_records(cls, cursor: Any, job_id: str, records: list[Any] | None) -> None:
-        try:
-            cursor.execute("DELETE FROM job_flow_record_chunks WHERE job_id=%s", (job_id,))
-            cursor.execute("DELETE FROM job_flow_records WHERE job_id=%s", (job_id,))
-            # Omission still clears replacement callers' parts, but is not an
-            # observed empty array. Only explicit input earns an empty chunk.
-            chunks = [] if records is None else cls._json_array_chunks(records) or [""]
-            for chunk_no, chunk in enumerate(chunks):
-                cursor.execute(
-                    "INSERT INTO job_flow_record_chunks(job_id,chunk_no,data) "
-                    "VALUES(%s,%s,('[' || %s || ']')::jsonb)",
-                    (job_id, chunk_no, chunk),
-                )
-        except Exception:
-            # A failed statement leaves a PostgreSQL transaction aborted until rollback.
-            # Roll back here because both create_job() and save_job() call this helper.
-            cursor.connection.rollback()
-            raise
+        # The enclosing operation owns finishing; this helper only borrows its cursor.
+        cursor.execute("DELETE FROM job_flow_record_chunks WHERE job_id=%s", (job_id,))
+        cursor.execute("DELETE FROM job_flow_records WHERE job_id=%s", (job_id,))
+        # Omission still clears replacement callers' parts, but is not an
+        # observed empty array. Only explicit input earns an empty chunk.
+        chunks = [] if records is None else cls._json_array_chunks(records) or [""]
+        for chunk_no, chunk in enumerate(chunks):
+            cursor.execute(
+                "INSERT INTO job_flow_record_chunks(job_id,chunk_no,data) "
+                "VALUES(%s,%s,('[' || %s || ']')::jsonb)",
+                (job_id, chunk_no, chunk),
+            )
 
     @staticmethod
     def _load_job_flow_records(cursor: Any, job_id: str) -> list[Any]:
@@ -2800,15 +2795,14 @@ ORDER BY source_kind,source_id
     def get_posting_index_intent(
         self, source_kind: PostingSourceKind, source_id: str
     ) -> PostingIndexIntent | None:
-        with self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 f"SELECT {self._POSTING_INTENT_COLUMNS} FROM pcap_posting_index_intents "  # noqa: S608 -- fixed internal columns
                 "WHERE source_kind=%s AND source_id=%s",
                 (source_kind, source_id),
             )
             row = cursor.fetchone()
-        self.connection.commit()
-        return self._posting_intent(row) if row is not None else None
+            return self._posting_intent(row) if row is not None else None
 
     @_serialize_shared_connection
     def admit_posting_index(
@@ -2894,7 +2888,7 @@ ORDER BY source_kind,source_id
     def get_posting_index_task(
         self, source_kind: PostingSourceKind, source_id: str
     ) -> PostingIndexTask | None:
-        with self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 f"SELECT {self._POSTING_TASK_PROJECTION} "  # noqa: S608 -- fixed internal projection
                 "FROM pcap_posting_index_jobs AS task "
@@ -2903,8 +2897,7 @@ ORDER BY source_kind,source_id
                 (source_kind, source_id),
             )
             row = cursor.fetchone()
-        self.connection.commit()
-        return self._posting_task(row) if row is not None else None
+            return self._posting_task(row) if row is not None else None
 
     @_serialize_shared_connection
     def claim_posting_index(self, *, lease_seconds: int) -> PostingIndexTask | None:
@@ -3177,12 +3170,11 @@ ORDER BY source_kind,source_id
 
     @_serialize_shared_connection
     def get_posting_index_queue_depth(self) -> dict[str, int]:
-        with self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute("SELECT status,COUNT(*) FROM pcap_posting_index_jobs GROUP BY status")
             rows = cursor.fetchall()
-        self.connection.commit()
-        counts = {str(status): int(count) for status, count in rows}
-        return {status.value: counts.get(status.value, 0) for status in PostingIndexTaskStatus}
+            counts = {str(status): int(count) for status, count in rows}
+            return {status.value: counts.get(status.value, 0) for status in PostingIndexTaskStatus}
 
     @_serialize_shared_connection
     def cleanup_terminal_posting_indexes(self, *, max_age_seconds: int, limit: int) -> int:
@@ -3897,51 +3889,78 @@ ORDER BY source_kind,source_id
             raise
 
     def database_ready(self) -> bool:
-        try:
-            with self.connection.cursor() as cursor:
-                cursor.execute("SELECT 1")
-                return bool(cursor.fetchone() == (1,))
-        except Exception:
-            return False
+        with self._lock:
+            try:
+                with baseline_storage.transaction(
+                    self.connection, postgres=True, snapshot=False
+                ) as cursor:
+                    cursor.execute("SELECT 1")
+                    return bool(cursor.fetchone() == (1,))
+            except Exception:
+                return False
+
+    @contextmanager
+    def _shared_cursor(self) -> Iterator[Any]:
+        """Fence legacy SQL and finish only transactions started by this operation.
+
+        Nested helpers (notably audit writes) borrow their caller's transaction;
+        the caller remains responsible for committing or rolling it back.
+        Materialize results inside this context, before the owning commit.
+        """
+        from psycopg.pq import TransactionStatus
+
+        with self._lock:
+            connection = self.connection
+            owned = (
+                connection.info.transaction_status == TransactionStatus.IDLE
+                and not connection.autocommit
+            )
+            try:
+                with connection.cursor() as cursor:
+                    yield cursor
+                if owned:
+                    connection.commit()
+            except BaseException:
+                if owned:
+                    # Cleanup is best effort; keep the operation's original error.
+                    with suppress(BaseException):
+                        connection.rollback()
+                raise
 
     def _audit(self, kind: str, object_id: str, value: Any) -> None:
-        with self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "INSERT INTO audit_events(kind,object_id,occurred_at,data) "
                 "VALUES(%s,%s,%s,%s::jsonb)",
                 (kind, object_id, datetime.now(UTC), self._json(value)),
             )
-            self.connection.commit()
 
     def _put(self, kind: str, object_id: str, value: dict[str, Any]) -> dict[str, Any]:
-        with self._lock, self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "INSERT INTO controller_objects(kind,id,data) VALUES(%s,%s,%s::jsonb) "
                 "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
                 (kind, object_id, self._json(value)),
             )
             self._audit(kind, object_id, value)
-            self.connection.commit()
-        return deepcopy(value)
+            return deepcopy(value)
 
     def _get(self, kind: str, object_id: str) -> dict[str, Any] | None:
-        with self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "SELECT data FROM controller_objects WHERE kind=%s AND id=%s", (kind, object_id)
             )
             row = cursor.fetchone()
-            self.connection.commit()
-        if not row:
-            return None
-        value = row[0]
-        return value if isinstance(value, dict) else json.loads(value)
+            if not row:
+                return None
+            value = row[0]
+            return value if isinstance(value, dict) else json.loads(value)
 
     def _list(self, kind: str) -> list[dict[str, Any]]:
-        with self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute("SELECT data FROM controller_objects WHERE kind=%s ORDER BY id", (kind,))
             rows = cursor.fetchall()
-            self.connection.commit()
-        return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
+            return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
 
     def upsert_sensor(self, sensor: dict[str, Any]) -> dict[str, Any]:
         return self._put("sensor", sensor["sensor_id"], sensor)
@@ -4129,7 +4148,7 @@ ORDER BY source_kind,source_id
             for key, value in job.items()
             if key not in {"flow_records", "payload_signatures"}
         }
-        with self._lock, self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "INSERT INTO job_idempotency(idempotency_key,job_id) VALUES(%s,%s) "
                 "ON CONFLICT(idempotency_key) DO NOTHING RETURNING job_id",
@@ -4142,7 +4161,6 @@ ORDER BY source_kind,source_id
                     (job["idempotency_key"],),
                 )
                 row = cursor.fetchone()
-                self.connection.commit()
                 if row is None:
                     raise RuntimeError("idempotency ledger row disappeared")
                 existing = self.get_job(str(row[0]))
@@ -4161,7 +4179,6 @@ ORDER BY source_kind,source_id
                 (job["id"], self._json(job.get("payload_signatures", []))),
             )
             self._audit("job", job["id"], metadata)
-            self.connection.commit()
             return deepcopy(job), True
 
     def save_job(self, job: dict[str, Any]) -> dict[str, Any]:
@@ -4170,7 +4187,7 @@ ORDER BY source_kind,source_id
             for key, value in job.items()
             if key not in {"flow_records", "payload_signatures"}
         }
-        with self._lock, self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "INSERT INTO controller_objects(kind,id,data) VALUES('job',%s,%s::jsonb) "
                 "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
@@ -4185,8 +4202,7 @@ ORDER BY source_kind,source_id
                     (job["id"], self._json(job["payload_signatures"])),
                 )
             self._audit("job", job["id"], metadata)
-            self.connection.commit()
-        return deepcopy(job)
+            return deepcopy(job)
 
     def save_job_metadata(self, job: dict[str, Any]) -> dict[str, Any]:
         metadata = {
@@ -4194,15 +4210,14 @@ ORDER BY source_kind,source_id
             for key, value in job.items()
             if key not in {"flow_records", "payload_signatures"}
         }
-        with self._lock, self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "INSERT INTO controller_objects(kind,id,data) VALUES('job',%s,%s::jsonb) "
                 "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
                 (job["id"], self._json(metadata)),
             )
             self._audit("job", job["id"], metadata)
-            self.connection.commit()
-        return deepcopy(metadata)
+            return deepcopy(metadata)
 
     def transition_job_terminal(self, job: dict[str, Any]) -> bool:
         if job.get("status") not in _JOB_TERMINAL_STATUSES:
@@ -4350,22 +4365,22 @@ ORDER BY source_kind,source_id
                 raise
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
-        job = self.get_job_summary(job_id)
-        if job is None:
-            return None
-        with self.connection.cursor() as cursor:
-            job["flow_records"] = self._load_job_flow_records(cursor, job_id)
-            self.connection.commit()
-        with self.connection.cursor() as cursor:
-            cursor.execute("SELECT data FROM job_payload_signatures WHERE job_id=%s", (job_id,))
-            row = cursor.fetchone()
-            self.connection.commit()
-        if row is None:
-            job["payload_signatures"] = []
-        else:
-            value = row[0]
-            job["payload_signatures"] = value if isinstance(value, list) else json.loads(value)
-        return job
+        with self._lock:
+            job = self.get_job_summary(job_id)
+            if job is None:
+                return None
+            with self._shared_cursor() as cursor:
+                job["flow_records"] = self._load_job_flow_records(cursor, job_id)
+                cursor.execute("SELECT data FROM job_payload_signatures WHERE job_id=%s", (job_id,))
+                row = cursor.fetchone()
+                if row is None:
+                    job["payload_signatures"] = []
+                else:
+                    value = row[0]
+                    job["payload_signatures"] = (
+                        value if isinstance(value, list) else json.loads(value)
+                    )
+                return job
 
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None:
         return self._get("job", job_id)
@@ -4644,29 +4659,29 @@ ORDER BY source_kind,source_id
         selected = list(dict.fromkeys(job_ids))
         if not selected:
             return {}
-        with self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "SELECT id,data FROM controller_objects WHERE kind='job' AND id=ANY(%s)",
                 (selected,),
             )
             rows = cursor.fetchall()
-        return {
-            str(row[0]): row[1] if isinstance(row[1], dict) else json.loads(row[1]) for row in rows
-        }
+            return {
+                str(row[0]): row[1] if isinstance(row[1], dict) else json.loads(row[1])
+                for row in rows
+            }
 
     def list_jobs(self) -> list[dict[str, Any]]:
         return self._list("job")
 
     def list_active_live_jobs(self) -> list[dict[str, Any]]:
-        with self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "SELECT data FROM controller_objects "
                 "WHERE kind='job' AND data->>'mode'='LIVE' "
                 "AND data->>'status' IN ('CAPTURING','UPLOADING') ORDER BY id"
             )
             rows = cursor.fetchall()
-            self.connection.commit()
-        return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
+            return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
 
     def delete_job(self, job_id: str) -> bool:
         with self._lock, self._rollback_on_error(), self.connection.cursor() as cursor:
@@ -6483,25 +6498,23 @@ ORDER BY source_kind,source_id
                 raise
 
     def get_candidates(self, job_id: str) -> list[dict[str, Any]]:
-        with self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "SELECT data FROM candidate_records WHERE job_id=%s ORDER BY position", (job_id,)
             )
             rows = cursor.fetchall()
-            self.connection.commit()
-        return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
+            return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
 
     def get_candidate(self, candidate_id: str) -> tuple[str, dict[str, Any]] | None:
-        with self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "SELECT job_id,data FROM candidate_records WHERE candidate_id=%s", (candidate_id,)
             )
             row = cursor.fetchone()
-            self.connection.commit()
-        if row is None:
-            return None
-        data = row[1] if isinstance(row[1], dict) else json.loads(row[1])
-        return str(row[0]), data
+            if row is None:
+                return None
+            data = row[1] if isinstance(row[1], dict) else json.loads(row[1])
+            return str(row[0]), data
 
     def query_candidates(
         self,
@@ -6517,18 +6530,17 @@ ORDER BY source_kind,source_id
             parameters.append(severity)
         if not include_suppressed:
             clauses.append("excluded = false")
-        with self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "SELECT job_id,data FROM candidate_records WHERE "  # noqa: S608 -- clauses are code-owned and values are bound
                 + " AND ".join(clauses),
                 parameters,
             )
             rows = cursor.fetchall()
-            self.connection.commit()
-        return [
-            (str(row[0]), row[1] if isinstance(row[1], dict) else json.loads(row[1]))
-            for row in rows
-        ]
+            return [
+                (str(row[0]), row[1] if isinstance(row[1], dict) else json.loads(row[1]))
+                for row in rows
+            ]
 
     @staticmethod
     def _candidate_query_parts(
@@ -6568,7 +6580,7 @@ ORDER BY source_kind,source_id
         order_column = columns[field]
         where = " AND ".join(clauses)
         group_key = "COALESCE(NULLIF(data->>'candidate_ip',''),candidate_id)"
-        with self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 f"SELECT COUNT(DISTINCT {group_key}) FROM candidate_records WHERE {where}",  # noqa: S608 -- code-owned expressions
                 parameters,
@@ -6592,18 +6604,17 @@ ORDER BY source_kind,source_id
                 [*parameters, page_size, (page - 1) * page_size],
             )
             rows = cursor.fetchall()
-            self.connection.commit()
-        total = int(total_row[0]) if total_row is not None else 0
-        result: list[tuple[str, dict[str, Any]]] = []
-        for row in rows:
-            candidate = row[1] if isinstance(row[1], dict) else json.loads(row[1])
-            candidate = deepcopy(candidate)
-            occurrence_count = int(row[2])
-            if occurrence_count > 1:
-                candidate["occurrence_count"] = occurrence_count
-                candidate["duplicate_count"] = occurrence_count - 1
-            result.append((str(row[0]), candidate))
-        return result, total
+            total = int(total_row[0]) if total_row is not None else 0
+            result: list[tuple[str, dict[str, Any]]] = []
+            for row in rows:
+                candidate = row[1] if isinstance(row[1], dict) else json.loads(row[1])
+                candidate = deepcopy(candidate)
+                occurrence_count = int(row[2])
+                if occurrence_count > 1:
+                    candidate["occurrence_count"] = occurrence_count
+                    candidate["duplicate_count"] = occurrence_count - 1
+                result.append((str(row[0]), candidate))
+            return result, total
 
     def query_candidate_refs(
         self,
@@ -6615,15 +6626,14 @@ ORDER BY source_kind,source_id
         clauses, parameters = self._candidate_query_parts(
             minimum_score, severity, include_suppressed
         )
-        with self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "SELECT candidate_id,excluded FROM candidate_records WHERE "  # noqa: S608 -- code-owned clauses
                 + " AND ".join(clauses),
                 parameters,
             )
             rows = cursor.fetchall()
-            self.connection.commit()
-        return [(str(row[0]), bool(row[1])) for row in rows]
+            return [(str(row[0]), bool(row[1])) for row in rows]
 
     def candidate_workflow_counts(
         self,
@@ -6685,26 +6695,25 @@ ORDER BY source_kind,source_id
             LEFT JOIN current_decision d USING(candidate_id)
             LEFT JOIN current_action a USING(candidate_id)
         """  # noqa: S608 -- where is assembled from code-owned clauses
-        with self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(query, parameters)
             row = cursor.fetchone()
-            self.connection.commit()
-        values = row or (0, 0, 0, 0, 0, 0, 0)
-        return dict(
-            zip(
-                (
-                    "needs_review",
-                    "in_review",
-                    "action_required",
-                    "action_in_progress",
-                    "action_completed",
-                    "false_positive",
-                    "done",
-                ),
-                (int(value) for value in values),
-                strict=True,
+            values = row or (0, 0, 0, 0, 0, 0, 0)
+            return dict(
+                zip(
+                    (
+                        "needs_review",
+                        "in_review",
+                        "action_required",
+                        "action_in_progress",
+                        "action_completed",
+                        "false_positive",
+                        "done",
+                    ),
+                    (int(value) for value in values),
+                    strict=True,
+                )
             )
-        )
 
     def create_ai_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         from .historical_ai_storage import reject_generic_historical
@@ -6929,16 +6938,15 @@ ORDER BY source_kind,source_id
         self._audit(kind, object_id, data)
 
     def list_candidate_sets(self) -> dict[str, list[dict[str, Any]]]:
-        with self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute("SELECT job_id,data FROM candidate_records ORDER BY job_id,position")
             rows = cursor.fetchall()
-            self.connection.commit()
-        result: dict[str, list[dict[str, Any]]] = {}
-        for job_id, data in rows:
-            result.setdefault(str(job_id), []).append(
-                data if isinstance(data, dict) else json.loads(data)
-            )
-        return result
+            result: dict[str, list[dict[str, Any]]] = {}
+            for job_id, data in rows:
+                result.setdefault(str(job_id), []).append(
+                    data if isinstance(data, dict) else json.loads(data)
+                )
+            return result
 
     def get_integration_settings(self) -> dict[str, Any] | None:
         return self._get("integration_settings", "global")
@@ -7046,19 +7054,18 @@ ORDER BY source_kind,source_id
             "candidate-ti-lookup": "lookups",
             "candidate-misp-action": "misp_actions",
         }
-        with self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "SELECT kind,data FROM controller_objects "
                 "WHERE kind=ANY(%s) AND data->>'candidate_id'=ANY(%s)",
                 (list(kinds), selected),
             )
             rows = cursor.fetchall()
-            self.connection.commit()
-        for kind, value in rows:
-            records[kinds[str(kind)]].append(
-                value if isinstance(value, dict) else json.loads(value)
-            )
-        return records
+            for kind, value in rows:
+                records[kinds[str(kind)]].append(
+                    value if isinstance(value, dict) else json.loads(value)
+                )
+            return records
 
     @staticmethod
     def _lock_candidate_parent_first(cursor: Any, candidate_id: str) -> tuple[str, Any] | None:
@@ -7157,18 +7164,16 @@ ORDER BY source_kind,source_id
 
     def list_flow_labels(self, job_id: str | None = None) -> list[dict[str, Any]]:
         if job_id is None:
-            labels = self._list("flow_label")
-        else:
-            with self.connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT data FROM controller_objects "
-                    "WHERE kind='flow_label' AND data->>'job_id'=%s ORDER BY id",
-                    (job_id,),
-                )
-                rows = cursor.fetchall()
-                self.connection.commit()
+            return sorted(self._list("flow_label"), key=lambda item: str(item["created_at"]))
+        with self._shared_cursor() as cursor:
+            cursor.execute(
+                "SELECT data FROM controller_objects "
+                "WHERE kind='flow_label' AND data->>'job_id'=%s ORDER BY id",
+                (job_id,),
+            )
+            rows = cursor.fetchall()
             labels = [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
-        return sorted(labels, key=lambda item: str(item["created_at"]))
+            return sorted(labels, key=lambda item: str(item["created_at"]))
 
     def save_payload_signature(self, signature: dict[str, Any]) -> dict[str, Any]:
         return self._put("payload_signature", signature["id"], signature)
@@ -7183,7 +7188,7 @@ ORDER BY source_kind,source_id
         )
 
     def delete_payload_signature(self, signature_id: str) -> bool:
-        with self._lock, self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "DELETE FROM controller_objects WHERE kind='payload_signature' AND id=%s",
                 (signature_id,),
@@ -7191,8 +7196,7 @@ ORDER BY source_kind,source_id
             deleted = bool(cursor.rowcount > 0)
             if deleted:
                 self._audit("payload_signature-delete", signature_id, {"id": signature_id})
-                self.connection.commit()
-        return deleted
+            return deleted
 
     def save_allowlist(self, entry: dict[str, Any]) -> dict[str, Any]:
         return self._put("allowlist", entry["id"], entry)
@@ -7201,14 +7205,13 @@ ORDER BY source_kind,source_id
         return self._list("allowlist")
 
     def delete_allowlist(self, entry_id: str) -> bool:
-        with self._lock, self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "DELETE FROM controller_objects WHERE kind='allowlist' AND id=%s", (entry_id,)
             )
             deleted = cursor.rowcount > 0
             if deleted:
                 self._audit("allowlist-delete", entry_id, {"id": entry_id})
-            self.connection.commit()
             return bool(deleted)
 
     def save_export(self, export: dict[str, Any], content: bytes) -> dict[str, Any] | None:
@@ -7608,15 +7611,14 @@ ORDER BY source_kind,source_id
         return self._list("sensor_pcap")
 
     def list_sensor_pcaps_for_job(self, job_id: str) -> list[dict[str, Any]]:
-        with self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "SELECT data FROM controller_objects WHERE kind='sensor_pcap' "
                 "AND data->>'analysis_job_id'=%s ORDER BY data->>'uploaded_at',id",
                 (job_id,),
             )
             rows = cursor.fetchall()
-            self.connection.commit()
-        return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
+            return [row[0] if isinstance(row[0], dict) else json.loads(row[0]) for row in rows]
 
     def create_enrollment(self, enrollment: dict[str, Any]) -> dict[str, Any]:
         return self._put("enrollment", enrollment["enrollment_id"], enrollment)
@@ -7632,7 +7634,7 @@ ORDER BY source_kind,source_id
 
     def claim_enrollment(self, token_hash: str, now: datetime) -> tuple[dict[str, Any] | None, str]:
         """Claim inside one row lock/transaction so a token can succeed only once."""
-        with self._lock, self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "SELECT id,data FROM controller_objects "
                 "WHERE kind='enrollment' AND data->>'token_hash'=%s FOR UPDATE",
@@ -7640,18 +7642,14 @@ ORDER BY source_kind,source_id
             )
             row = cursor.fetchone()
             if row is None:
-                self.connection.commit()
                 return None, "NOT_FOUND"
             value = row[1]
             enrollment = value if isinstance(value, dict) else json.loads(value)
             if enrollment.get("revoked_at") is not None:
-                self.connection.commit()
                 return enrollment, "REVOKED"
             if enrollment.get("claimed_at") is not None:
-                self.connection.commit()
                 return enrollment, "CLAIMED"
             if datetime.fromisoformat(enrollment["expires_at"]) <= now:
-                self.connection.commit()
                 return enrollment, "EXPIRED"
             enrollment["claimed_at"] = now.isoformat()
             cursor.execute(
@@ -7659,7 +7657,6 @@ ORDER BY source_kind,source_id
                 (self._json(enrollment), row[0]),
             )
             self._audit("enrollment-claim", str(row[0]), {"claimed_at": now.isoformat()})
-            self.connection.commit()
             return deepcopy(enrollment), "OK"
 
     def save_sensor_credential(self, credential: dict[str, Any]) -> dict[str, Any]:
@@ -7671,19 +7668,17 @@ ORDER BY source_kind,source_id
     def update_sensor_configuration(
         self, sensor_id: str, expected_version: int, configuration: dict[str, Any]
     ) -> tuple[dict[str, Any] | None, str]:
-        with self._lock, self.connection.cursor() as cursor:
+        with self._shared_cursor() as cursor:
             cursor.execute(
                 "SELECT data FROM controller_objects WHERE kind='sensor' AND id=%s FOR UPDATE",
                 (sensor_id,),
             )
             row = cursor.fetchone()
             if row is None:
-                self.connection.commit()
                 return None, "NOT_FOUND"
             value = row[0]
             sensor = value if isinstance(value, dict) else json.loads(value)
             if sensor.get("config_version") != expected_version:
-                self.connection.commit()
                 return sensor, "CONFLICT"
             sensor.update(configuration)
             sensor["config_version"] = expected_version + 1
@@ -7692,5 +7687,4 @@ ORDER BY source_kind,source_id
                 (self._json(sensor), sensor_id),
             )
             self._audit("sensor-configuration", sensor_id, configuration)
-            self.connection.commit()
             return deepcopy(sensor), "OK"

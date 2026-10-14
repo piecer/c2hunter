@@ -29,7 +29,8 @@ from pydantic import (
 
 from .ai_discovery import MAX_SELECTION_CANDIDATES
 from .ai_feedback import REVIEW_PRIORITY_VERSION, calculate_review_priority
-from .ai_gateway import AIAnalysisCancelled
+from .ai_gateway import AIAnalysisCancelled, assess_candidate
+from .c2_diagnostics import C2Diagnostics
 from .ddos_ai import DDoSOutputError
 from .historical_evidence import HistoricalReference
 from .network_ai import NetworkOutputError
@@ -1199,20 +1200,23 @@ class AIAnalysisService:
             bundles = [build_evidence_bundle(item, job=job) for item in selected]
             run = self._transition(run, AIAnalysisState.ANALYZING, "calling model gateway")
             for bundle in bundles:
-                cancellable = getattr(self.gateway, "assess_cancellable", None)
-                if callable(cancellable):
-                    response = cancellable(
+                diagnostics = C2Diagnostics()
+                with diagnostics.capture(run_id):
+                    response = assess_candidate(
+                        self.gateway,
                         bundle,
                         should_cancel=lambda: (
                             (latest := self.repository.get_ai_run(run_id)) is not None
                             and latest.get("status") == AIAnalysisState.CANCELLED
                         ),
+                        diagnostics=diagnostics,
                     )
-                else:
-                    response = self.gateway.assess(bundle)
                 run = self._transition(run, AIAnalysisState.VALIDATING, "validating model output")
-                assessment = CandidateAssessment.model_validate(response)
-                validate_assessment_evidence(assessment, bundle)
+                with diagnostics.capture(run_id):
+                    diagnostics.stage = "SCHEMA"
+                    assessment = CandidateAssessment.model_validate(response)
+                    diagnostics.stage = "EVIDENCE_VALIDATION"
+                    validate_assessment_evidence(assessment, bundle)
                 now = _now()
                 stored_assessment = self.repository.save_ai_assessment(
                     {
@@ -1253,13 +1257,16 @@ class AIAnalysisService:
                 )
                 from .ai_artifacts import build_ai_artifacts
 
-                for artifact in build_ai_artifacts(
-                    assessment_id=stored_assessment["id"],
-                    ai_run_id=run_id,
-                    analysis_job_id=run["analysis_job_id"],
-                    assessment=assessment,
-                    bundle=bundle,
-                ):
+                with diagnostics.capture(run_id):
+                    diagnostics.stage = "ARTIFACT_PREPARATION"
+                    artifacts = build_ai_artifacts(
+                        assessment_id=stored_assessment["id"],
+                        ai_run_id=run_id,
+                        analysis_job_id=run["analysis_job_id"],
+                        assessment=assessment,
+                        bundle=bundle,
+                    )
+                for artifact in artifacts:
                     self.repository.save_ai_artifact(artifact)
                 if bundle is not bundles[-1]:
                     run = self._transition(

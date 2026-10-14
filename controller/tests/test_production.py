@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from psycopg.pq import TransactionStatus
 
 import c2hunter_controller.production as production
 from c2hunter_controller.pcap_export_queue import ExportQueueStorageError
@@ -78,7 +79,10 @@ class FakeCursor:
 
     def execute(self, query: str, params: tuple | None = None) -> None:
         connection = cast(FakeConnection, self.connection)
+        if not connection.autocommit:
+            connection.info.transaction_status = TransactionStatus.INTRANS
         if getattr(connection, "execute_error", None) is not None:
+            connection.info.transaction_status = TransactionStatus.INERROR
             raise connection.execute_error
         self.connection.queries.append(query)
         if "RETURNING job_id" in query:
@@ -97,6 +101,7 @@ class FakeConnection:
     def __init__(self, *, execute_error: Exception | None = None) -> None:
         self.closed = False
         self.autocommit = False
+        self.info = SimpleNamespace(transaction_status=TransactionStatus.IDLE)
         self.execute_error = execute_error
         self.queries: list[str] = []
         self.rolled_back = False
@@ -105,10 +110,11 @@ class FakeConnection:
         return FakeCursor(self)
 
     def commit(self) -> None:
-        return None
+        self.info.transaction_status = TransactionStatus.IDLE
 
     def rollback(self) -> None:
         self.rolled_back = True
+        self.info.transaction_status = TransactionStatus.IDLE
 
     def close(self) -> None:
         self.closed = True

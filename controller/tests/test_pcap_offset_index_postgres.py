@@ -11,7 +11,13 @@ from typing import Any, cast
 
 import pytest
 from c2hunter_analysis.pcap_index import StructuralInterfaceEntry, StructuralPacketEntry
-from test_pcap_posting_index_postgres import _validate_postgres_sql
+from psycopg.pq import TransactionStatus as TS
+from test_pcap_posting_index_postgres import (
+    _assert_deletion_boundaries,
+    _observe_deletion_boundaries,
+    _TransactionState,
+    _validate_postgres_sql,
+)
 
 from c2hunter_controller.pcap_offset_index import (
     CaptureSourceVersion,
@@ -38,22 +44,24 @@ class RecordingCursor:
         return None
 
     def execute(self, query: str, params: object = None) -> None:
-        if "MAX(packet_index)" in query and "FOR UPDATE" in query:
-            raise AssertionError("PostgreSQL cannot lock an aggregate query")
-        self.connection.calls.append((query, params))
-        if self.connection.fail_query_contains and self.connection.fail_query_contains in query:
-            raise RuntimeError("forced transactional deletion failure")
-        if (
-            self.connection.fail_source_version_upsert
-            and "INSERT INTO pcap_capture_source_versions" in query
-        ):
-            raise RuntimeError("forced durable version persistence failure")
+        with self.connection._statement():
+            if "MAX(packet_index)" in query and "FOR UPDATE" in query:
+                raise AssertionError("PostgreSQL cannot lock an aggregate query")
+            self.connection.calls.append((query, params))
+            if self.connection.fail_query_contains and self.connection.fail_query_contains in query:
+                raise RuntimeError("forced transactional deletion failure")
+            if (
+                self.connection.fail_source_version_upsert
+                and "INSERT INTO pcap_capture_source_versions" in query
+            ):
+                raise RuntimeError("forced durable version persistence failure")
 
     def executemany(self, query: str, params: object) -> None:
-        self.connection.calls.append((query, params))
-        if "INSERT INTO pcap_offset_index_packets" in query:
-            rows = list(params)  # type: ignore[arg-type]
-            self.connection.next_packet_index += len(rows)
+        with self.connection._statement():
+            RecordingCursor.execute(self, query, params)
+            if "INSERT INTO pcap_offset_index_packets" in query:
+                rows = list(params)  # type: ignore[arg-type]
+                self.connection.next_packet_index += len(rows)
 
     def fetchone(self) -> tuple[Any, ...] | None:
         if self.connection.calls:
@@ -106,8 +114,9 @@ class RecordingCursor:
         return []
 
 
-class RecordingConnection:
+class RecordingConnection(_TransactionState):
     def __init__(self) -> None:
+        super().__init__()
         self.closed = False
         self.autocommit = False
         self.calls: list[tuple[str, object]] = []
@@ -131,9 +140,11 @@ class RecordingConnection:
 
     def commit(self) -> None:
         self.commits += 1
+        self.info.transaction_status = TS.IDLE
 
     def rollback(self) -> None:
         self.rollbacks += 1
+        self.info.transaction_status = TS.IDLE
 
     def close(self) -> None:
         self.closed = True
@@ -141,10 +152,11 @@ class RecordingConnection:
 
 class StatefulUploadCursor(RecordingCursor):
     def execute(self, query: str, params: object = None) -> None:
-        super().execute(query, params)
-        if query.startswith("INSERT INTO pcap_capture_source_versions"):
-            values = cast(tuple[Any, ...], params)
-            cast(StatefulUploadConnection, self.connection).pending_source_version = values[:6]
+        with self.connection._statement():
+            super().execute(query, params)
+            if query.startswith("INSERT INTO pcap_capture_source_versions"):
+                values = cast(tuple[Any, ...], params)
+                cast(StatefulUploadConnection, self.connection).pending_source_version = values[:6]
 
 
 class StatefulUploadConnection(RecordingConnection):
@@ -161,7 +173,7 @@ class StatefulUploadConnection(RecordingConnection):
         self.pending_source_version = None
         if pending is not None:
             self.source_version_row = pending
-        self.commits += 1
+        super().commit()
         if pending is not None and self.raise_ambiguous_commit:
             self.raise_ambiguous_commit = False
             raise RuntimeError("commit outcome unknown")
@@ -177,6 +189,125 @@ def _repository(connection: RecordingConnection) -> PostgresRepository:
     )
     repository._connection = connection
     return repository
+
+
+def _contract_connection(kind: str) -> RecordingConnection:
+    if kind == "scripted":
+
+        def respond(query: str, _params: object) -> tuple[list[tuple[Any, ...]], int]:
+            if connection.fail_query_contains and connection.fail_query_contains in query:
+                raise RuntimeError("forced transactional deletion failure")
+            return [], 1
+
+        connection = ScriptedConnection(respond)
+        return connection
+    return {
+        "recording": RecordingConnection,
+        "upload": StatefulUploadConnection,
+        "sensor": _SensorRaceConnection,
+    }[kind]()
+
+
+@pytest.mark.parametrize("kind", ["recording", "upload", "scripted", "sensor"])
+@pytest.mark.parametrize("many", [False, True])
+def test_offset_double_transaction_status(kind: str, many: bool) -> None:
+    connection = _contract_connection(kind)
+    assert connection.info.transaction_status == TS.IDLE
+    with connection.cursor() as cursor:
+        operation = cursor.executemany if many else cursor.execute
+        operation("SELECT %s", [(1,)] if many else (1,))
+    assert connection.info.transaction_status == TS.INTRANS
+    assert connection.commits == connection.rollbacks == 0
+    connection.commit()
+    assert connection.info.transaction_status == TS.IDLE
+    connection.fail_query_contains = "SELECT"
+    with pytest.raises(RuntimeError, match="transactional deletion failure"):
+        operation("SELECT %s", [(1,)] if many else (1,))
+    assert connection.info.transaction_status == TS.INERROR
+    connection.fail_query_contains = None
+    with pytest.raises(RuntimeError, match="aborted transaction"):
+        operation("SELECT %s", [(1,)] if many else (1,))
+    assert connection.info.transaction_status == TS.INERROR
+    connection.rollback()
+    assert connection.info.transaction_status == TS.IDLE
+    operation("SELECT %s", [(1,)] if many else (1,))
+    assert connection.info.transaction_status == TS.INTRANS
+    connection.rollback()
+    assert connection.info.transaction_status == TS.IDLE
+
+
+@pytest.mark.parametrize("kind", ["recording", "upload", "scripted", "sensor"])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("failed", [False, True])
+def test_offset_double_audit_transaction_ownership(kind: str, nested: bool, failed: bool) -> None:
+    connection = _contract_connection(kind)
+    repository = _repository(connection)
+    if nested:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+        assert connection.info.transaction_status == TS.INTRANS
+    if failed:
+        connection.fail_query_contains = "INSERT INTO audit_events"
+        with pytest.raises(RuntimeError, match="transactional deletion failure"):
+            repository._audit("probe", "owned", {})
+    else:
+        repository._audit("probe", "owned", {})
+    assert any("INSERT INTO audit_events" in query for query, _ in connection.calls)
+    if nested:
+        assert connection.commits == connection.rollbacks == 0
+        assert connection.info.transaction_status == (TS.INERROR if failed else TS.INTRANS)
+        connection.rollback()
+    else:
+        assert connection.commits == int(not failed)
+        assert connection.rollbacks == int(failed)
+    assert connection.info.transaction_status == TS.IDLE
+
+
+def test_offset_double_ambiguous_commit_preserves_committed_upload() -> None:
+    connection = StatefulUploadConnection()
+    values = _source_version_row(_binding())
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO pcap_capture_source_versions VALUES (%s,%s,%s,%s,%s,%s)", values
+        )
+    assert connection.info.transaction_status == TS.INTRANS
+    connection.raise_ambiguous_commit = True
+    with pytest.raises(RuntimeError, match="commit outcome unknown"):
+        connection.commit()
+    assert connection.info.transaction_status == TS.IDLE
+    assert connection.source_version_row == values
+    assert connection.pending_source_version is None
+    assert connection.commits == 1
+    connection.rollback()
+    assert connection.source_version_row == values
+    assert connection.info.transaction_status == TS.IDLE
+
+
+@pytest.mark.parametrize("failure_query", [None, "INSERT INTO audit_events"])
+def test_offset_deletion_transaction_precedes_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_query: str | None,
+) -> None:
+    connection = RecordingConnection()
+    connection.job_data = {"id": "live-1", "mode": "LIVE", "status": "COMPLETED"}
+    connection.sensor_pcaps = [("segment-1", "sensor-pcaps/exact.pcap")]
+    connection.fail_query_contains = failure_query
+    repository = _repository(connection)
+    events = _observe_deletion_boundaries(monkeypatch, connection, repository)
+    repository.blob_store = cast(
+        MinioBlobStore, SimpleNamespace(delete=lambda key: events.append(("blob", key)))
+    )
+    if failure_query:
+        with pytest.raises(RuntimeError, match="transactional deletion failure"):
+            repository.delete_job("live-1")
+        assert [event[0] for event in events] == ["audit-enter", "rollback"]
+        assert events[-1][1] == TS.INERROR
+        assert connection.commits == 0 and connection.rollbacks == 1
+    else:
+        assert repository.delete_job("live-1")
+        _assert_deletion_boundaries(events, "sensor-pcaps/exact.pcap")
+        assert connection.commits == 2 and connection.rollbacks == 0
+    assert connection.info.transaction_status == TS.IDLE
 
 
 def _binding() -> SourceIndexBinding:
@@ -866,13 +997,14 @@ class ScriptedCursor(RecordingCursor):
         self.result: list[tuple[Any, ...]] = []
 
     def execute(self, query: str, params: object = None) -> None:
-        _validate_postgres_sql(query, params)
-        if params not in (None, ()):
-            assert "%s" in query
-        if "SKIP LOCKED" in query:
-            assert "FOR UPDATE SKIP LOCKED" in query
-        self.connection.calls.append((query, params))
-        self.result, self.rowcount = self.connection.respond(query, params)
+        with self.connection._statement():
+            _validate_postgres_sql(query, params)
+            if params not in (None, ()):
+                assert "%s" in query
+            if "SKIP LOCKED" in query:
+                assert "FOR UPDATE SKIP LOCKED" in query
+            super().execute(query, params)
+            self.result, self.rowcount = self.connection.respond(query, params)
 
     def fetchone(self) -> tuple[Any, ...] | None:
         return self.result[0] if self.result else None
@@ -1126,13 +1258,14 @@ def test_postgres_sensor_upload_uses_immutable_key_without_repository_lock() -> 
 
 class _SensorRaceCursor(RecordingCursor):
     def execute(self, query: str, params: object = None) -> None:
-        super().execute(query, params)
-        if "VALUES('sensor_pcap',%s,%s::jsonb)" in query:
-            values = cast(tuple[Any, ...], params)
-            with self.connection.state_lock:  # type: ignore[attr-defined]
-                if self.connection.sensor_pcap_data is not None:
-                    raise RuntimeError("duplicate sensor PCAP")
-                self.connection.sensor_pcap_data = json.loads(str(values[1]))
+        with self.connection._statement():
+            super().execute(query, params)
+            if "VALUES('sensor_pcap',%s,%s::jsonb)" in query:
+                values = cast(tuple[Any, ...], params)
+                with self.connection.state_lock:  # type: ignore[attr-defined]
+                    if self.connection.sensor_pcap_data is not None:
+                        raise RuntimeError("duplicate sensor PCAP")
+                    self.connection.sensor_pcap_data = json.loads(str(values[1]))
 
 
 class _SensorRaceConnection(RecordingConnection):

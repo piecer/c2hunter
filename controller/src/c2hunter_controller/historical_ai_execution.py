@@ -21,8 +21,9 @@ from .ai_analysis import (
 )
 from .ai_artifacts import build_ai_artifacts
 from .ai_feedback import REVIEW_PRIORITY_VERSION, calculate_review_priority
-from .ai_gateway import AIAnalysisCancelled
+from .ai_gateway import AIAnalysisCancelled, assess_candidate
 from .baseline_admission import BaselineAdmission
+from .c2_diagnostics import C2Diagnostics
 from .historical_ai_builder import build_historical_target_snapshot
 
 if TYPE_CHECKING:
@@ -134,20 +135,22 @@ def execute_saved(service: AIAnalysisService, run: dict[str, Any]) -> dict[str, 
             run = service._transition(run, AIAnalysisState.ANALYZING, "analyzing next candidate")
             if run["status"] in custody.TERMINAL:
                 return run
+        diagnostics = C2Diagnostics()
         try:
-            cancellable = getattr(service.gateway, "assess_cancellable", None)
-            if callable(cancellable):
-                response = cancellable(
-                    bundle,
-                    should_cancel=lambda: (
-                        (latest := service.repository.get_ai_run(run_id)) is not None
-                        and latest["status"] == "CANCELLED"
-                    ),
-                )
-            else:
-                response = service.gateway.assess(bundle)
+            response = assess_candidate(
+                service.gateway,
+                bundle,
+                should_cancel=lambda: (
+                    (latest := service.repository.get_ai_run(run_id)) is not None
+                    and latest["status"] == "CANCELLED"
+                ),
+                diagnostics=diagnostics,
+            )
+            diagnostics.stage = "SCHEMA"
             assessment = CandidateAssessment.model_validate(response)
+            diagnostics.stage = "EVIDENCE_VALIDATION"
             validate_assessment_evidence(assessment, bundle)
+            diagnostics.stage = "ARTIFACT_PREPARATION"
             build_ai_artifacts(
                 assessment_id=assessment_id,
                 ai_run_id=run["id"],
@@ -158,12 +161,19 @@ def execute_saved(service: AIAnalysisService, run: dict[str, Any]) -> dict[str, 
         except (BaselineStorageError, custody.HistoricalStorageError):
             raise
         except AIAnalysisCancelled:
+            diagnostics.stage = "CANCELLED"
+            diagnostics.report(run_id)
             return service._transition(run, AIAnalysisState.CANCELLED, "model request cancelled")
         except TimeoutError:
+            if diagnostics.stage == "GATEWAY":
+                diagnostics.stage = "TRANSPORT"
+            diagnostics.report(run_id)
             return _failure(service, run, "MODEL_TIMEOUT", "model timeout")
         except (AIAnalysisError, ValidationError, TypeError, ValueError):
+            diagnostics.report(run_id)
             return _failure(service, run, "MODEL_OUTPUT_INVALID", "model output rejected")
         except Exception:
+            diagnostics.report(run_id)
             return _failure(service, run, "AI_ANALYSIS_FAILED", "AI analysis failed")
         # Persistence errors deliberately escape execute: an uncertain write is
         # not a validated FAILED outcome and must not be acknowledged by a worker.

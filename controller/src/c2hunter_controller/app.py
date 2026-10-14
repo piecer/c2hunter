@@ -1351,6 +1351,7 @@ def create_app(
     app.state.pcap_export_executor = pcap_export_executor
     app.state.metrics_registry = registry
     app.include_router(operations_router(repo, flows, work_queue, registry))
+    from ._baseline_storage import BaselineStorageError
     from .baseline_admission import BaselineAdmission
     from .historical_ai import HistoricalAIError
     from .historical_ai_access import HistoricalAccessDenied, public_ai_access
@@ -1461,6 +1462,7 @@ def create_app(
     ) -> JSONResponse:
         return _error(request, exc.status_code, exc.code, exc.message)
 
+    @app.exception_handler(BaselineStorageError)
     @app.exception_handler(HistoricalStorageError)
     @app.exception_handler(HistoricalAIError)
     async def historical_storage_error(request: Request, exc: Exception) -> JSONResponse:

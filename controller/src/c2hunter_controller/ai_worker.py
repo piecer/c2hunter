@@ -6,10 +6,11 @@ import logging
 import os
 import signal
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Event
+from threading import Event, RLock, Thread, current_thread
 from time import perf_counter
 from typing import Any, Protocol
 from urllib.parse import urlsplit
@@ -20,9 +21,11 @@ from .ai_analysis import AIAnalysisService
 from .ai_gateway import create_model_gateway
 from .ai_queueing import RedisAIAnalysisWorkerQueue
 from .config import Settings
+from .historical_ai_storage import HISTORICAL_STORAGE_ERRORS
 from .production import MinioBlobStore, PostgresRepository
 
 logger = logging.getLogger(__name__)
+HEARTBEAT_INTERVAL_SECONDS = 5.0
 
 
 class WorkerQueue(Protocol):
@@ -75,7 +78,10 @@ class AIWorkerMetrics:
             operation()
         except Exception:
             # Telemetry must never alter Run state or queue acknowledgement.
-            logger.debug("AI metric update failed", exc_info=True)
+            try:
+                logger.debug("AI metric update failed")
+            except Exception:  # noqa: S110 -- a failed telemetry sink cannot change queue outcomes
+                pass
 
     def observe_execution(self, duration: float, run: dict[str, Any]) -> None:
         status = str(run.get("status") or "UNKNOWN")
@@ -122,8 +128,26 @@ class AIAnalysisWorker:
         )
         self.processed_runs = 0
         self.last_error: str | None = None
+        self._health_lock = RLock()
+        self._health_status = "RUNNING"
+        self._stopped: Event | None = None
+        # Liveness is not progress. Stop claiming freshness for a wedged pass
+        # after the configured model-call envelope plus 30s bookkeeping grace:
+        # at most five candidates, two completions, and configured retries.
+        # Custom gateways without transport metadata use the default envelope.
+        timeout = float(getattr(getattr(gateway, "http", None), "timeout_seconds", 120))
+        retries = int(getattr(gateway, "retries", 1))
+        self._liveness_seconds = 5 * 2 * (retries + 1) * timeout + 30
+        self._heartbeat_deadline = 0.0
 
     def run_once(self, timeout: int = 1) -> bool:
+        with self._heartbeat():
+            return self._run_once(timeout)
+
+    def _run_once(self, timeout: int) -> bool:
+        with self._health_lock:
+            self._heartbeat_deadline = perf_counter() + self._liveness_seconds
+            self._write_health("RUNNING")
         self._update_queue_depth()
         message = self.queue.claim(timeout)
         if message is None:
@@ -144,17 +168,70 @@ class AIAnalysisWorker:
             return True
         except Exception as exc:
             self.metrics.observe_exception(perf_counter() - started, exc)
-            self.last_error = str(exc)
+            self.last_error = "AI_WORKER_EXECUTION_FAILED"
+            if isinstance(exc, HISTORICAL_STORAGE_ERRORS):
+                # Keep the public storage code without trusting exception text
+                # or arbitrary codes accepted by storage error constructors.
+                code = exc.code
+                if type(code) is str and code == "BASELINE_STORAGE_UNAVAILABLE":
+                    self.last_error = "BASELINE_STORAGE_UNAVAILABLE"
             self._write_health("DEGRADED")
             return False
         finally:
             self._update_queue_depth()
 
     def run(self, stopped: Event) -> None:
-        self._write_health("RUNNING")
-        while not stopped.is_set():
-            self.run_once(timeout=1)
-        self._write_health("STOPPED")
+        try:
+            with self._heartbeat(stopped):
+                while not stopped.is_set():
+                    self._run_once(timeout=1)
+        finally:
+            self._write_health("STOPPED")
+
+    @contextmanager
+    def _heartbeat(self, stopped: Event | None = None) -> Iterator[None]:
+        """One helper per worker loop (or standalone pass), never per candidate.
+
+        It owns no service/repository resources. It ends on shutdown, scope exit
+        or owner-thread death, and is joined before the owner publishes STOPPED.
+        A pass exceeding its liveness envelope becomes UNRESPONSIVE; model
+        cancellation/deadlines and queue ACK semantics are deliberately unchanged.
+        """
+        self._stopped = stopped
+        with self._health_lock:
+            self._health_status = "RUNNING"
+            self._heartbeat_deadline = perf_counter() + self._liveness_seconds
+        if self.health_path is None:
+            yield
+            return
+        finished = Event()
+        owner = current_thread()
+
+        def refresh() -> None:
+            while not finished.wait(HEARTBEAT_INTERVAL_SECONDS):
+                if not owner.is_alive():
+                    return
+                if stopped is not None and stopped.is_set():
+                    self._write_health("STOPPING")
+                    return
+                with self._health_lock:
+                    self._write_health(
+                        "UNRESPONSIVE"
+                        if perf_counter() >= self._heartbeat_deadline
+                        else self._health_status
+                    )
+
+        try:
+            thread = Thread(target=refresh, name="ai-worker-heartbeat", daemon=True)
+            thread.start()
+        except Exception:
+            self._write_health("STOPPED")
+            raise
+        try:
+            yield
+        finally:
+            finished.set()
+            thread.join()
 
     def _update_queue_depth(self) -> None:
         try:
@@ -164,6 +241,18 @@ class AIAnalysisWorker:
         self.metrics.set_queue_depth(waiting, processing)
 
     def _write_health(self, status: str) -> None:
+        with self._health_lock:
+            if self._stopped is not None and self._stopped.is_set() and status != "STOPPED":
+                status = "STOPPING"
+            self._health_status = status
+            try:
+                self._publish_health(status)
+            except OSError:
+                # Unwritable health becomes stale/unhealthy, never a failed run
+                # or a lost ACK. Do not log filesystem/provider exception text.
+                pass
+
+    def _publish_health(self, status: str) -> None:
         if self.health_path is None:
             return
         payload = {
