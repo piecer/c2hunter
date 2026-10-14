@@ -15,6 +15,40 @@ const pages = JSON.parse(execFileSync(python, ['tests/network_report_fixture.py'
 const largeBytes = () => execFileSync(python, ['tests/network_report_fixture.py', '--glance'], { encoding: 'utf8' });
 const large = JSON.parse(largeBytes()) as Record<string, NetworkAnomalyReport>;
 beforeEach(() => localStorage.setItem('c2hunter-report-language', 'en'));
+it('shows peers up front and opens only the chosen observation with keyboard focus', () => {
+  const report = large.many;
+  render(<NetworkAnomalyPanel report={report}/>);
+  const glance = screen.getByRole('region', { name: 'At a glance' });
+  const cards = within(glance).getAllByTestId('top-observation');
+  cards.forEach((card, index) => {
+    expect(card).toHaveTextContent(report.issues![index].scope.peer.ip);
+    expect(card).toHaveTextContent(report.issues![index].scope.protocol);
+  });
+  fireEvent.click(within(cards[1]).getByRole('button', { name: /Inspect evidence/ }));
+  expect(screen.getAllByRole('article')).toHaveLength(1);
+  const evidence = screen.getByRole('region', { name: 'Representative flow evidence' });
+  expect(evidence).toHaveFocus();
+  expect(evidence.id).toBe('network-evidence-1');
+  expect(within(screen.getByRole('article')).getByRole('heading', { level: 4 })).toHaveTextContent(patternLabel('en', report.issues![1].pattern));
+  expect(screen.getByRole('button', { name: 'View all anomaly items' })).toHaveAttribute('aria-expanded', 'false');
+});
+
+it('separates report totals from group counts and keeps the first action and qualified cause compact', () => {
+  render(<NetworkAnomalyPanel report={fixtures.supporting}/>);
+  const glance = screen.getByRole('region', { name: 'At a glance' });
+  const totals = within(glance).getByRole('group', { name: 'Report totals' });
+  expect(totals).toHaveTextContent('suspect flows');
+  expect(totals).toHaveTextContent('flows scanned');
+  expect(totals).toHaveTextContent('issue groups');
+  expect(within(glance).getByRole('region', { name: 'Next action' })).toHaveTextContent('Priority next check');
+  expect(glance).toHaveTextContent('Low confidence · Not confirmed');
+  expect(glance).not.toHaveTextContent('Compare the pattern evidence and representative measurements below');
+  fireEvent.change(screen.getByRole('combobox'), { target: { value: 'ko' } });
+  expect(screen.getByRole('region', { name: '다음 행동' })).toHaveTextContent('우선 확인 사항');
+  expect(screen.getByRole('group', { name: '보고서 전체 수치' })).toHaveTextContent('의심 흐름');
+  expect(screen.getByRole('region', { name: '한눈에 보기' })).toHaveTextContent('낮은 신뢰도 · 원인 미확정');
+});
+
 it.each([...Object.entries(fixtures), ...Object.entries(large), ['twenty', pages[23]]] as [string, NetworkAnomalyReport][])('starts concise and preserves producer-ordered observations for %s', (_name, report) => {
   const { container } = render(<NetworkAnomalyPanel report={report}/>);
   const glance = screen.getByRole('region', { name: 'At a glance' });

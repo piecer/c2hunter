@@ -97,6 +97,10 @@ it('supports Tab, Enter and Space with focus on page status and only live aria-c
   openGroups();
   await user.tab();
   expect(screen.getByRole('combobox')).toHaveFocus();
+  for (const shortcut of screen.getAllByRole('button', { name: /Inspect evidence/ })) {
+    await user.tab();
+    expect(shortcut).toHaveFocus();
+  }
   await user.tab(); // Coverage disclosure
   await user.tab(); // All groups disclosure
   await user.tab();

@@ -38,6 +38,7 @@ export default function NetworkPatternReport({ report }: { report: PatternReport
   const coverageOpen = coverageExpanded && (!detail || detail.owner === 'coverage');
   const pageStatus = useRef<HTMLParagraphElement>(null);
   const groupsHeading = useRef<HTMLHeadingElement>(null);
+  const focusEvidence = useRef(false);
   const retainFocus = useCallback((node: HTMLElement | null) => {
     if (!node) return;
     // Ref cleanup runs before removal; do not strand focus in a deleted page.
@@ -60,7 +61,15 @@ export default function NetworkPatternReport({ report }: { report: PatternReport
   const issues = Array.isArray(report.issues) ? report.issues : [];
   const pages = Math.max(1, Math.ceil(issues.length / 8));
   const current = Math.min(page, pages - 1);
-  const visibleIssues = issues.slice(current * 8, current * 8 + 8);
+  const selectedIndex = expanded?.report === report ? expanded.index : undefined;
+  const visibleIssues = groupsOpen ? issues.slice(current * 8, current * 8 + 8) : selectedIndex === undefined ? [] : issues.slice(selectedIndex, selectedIndex + 1);
+  const inspectIssue = (index: number) => {
+    setGroupsOpen(false);
+    setCoverageOpen(false);
+    detail?.claim('evidence');
+    setExpanded({ report, index });
+    focusEvidence.current = true;
+  };
   const changePage = (next: number) => {
     setPage(next);
     setExpanded(undefined);
@@ -74,17 +83,32 @@ export default function NetworkPatternReport({ report }: { report: PatternReport
   const safeClear = complete && summary.issue_count === 0 && issues.length === 0 && summary.omitted_issue_count === 0 && summary.truncated === false;
   const heading = recognized && verdict === 'anomaly_observed' ? t('Anomaly observed', '이상 징후 관찰됨') : recognized && verdict === 'no_clear_anomaly' && safeClear ? t('No clear anomaly observed', '뚜렷한 이상 징후가 관찰되지 않음') : t('Insufficient data', '데이터 부족');
   return <section className="panel network-report" aria-labelledby="overall-network-heading">
-    <section aria-label={t('At a glance', '한눈에 보기')} className="network-glance">
+    <section aria-label={t('At a glance', '한눈에 보기')} className="network-glance" data-tone={recognized && verdict === 'anomaly_observed' ? 'observed' : safeClear && verdict === 'no_clear_anomaly' ? 'clear' : 'insufficient'}>
       <p className="eyebrow">{t('OVERALL NETWORK REPORT', '전체 네트워크 보고서')}</p><h2 id="overall-network-heading">{heading}</h2>
       <p data-testid="network-verdict">{heading === t('Anomaly observed', '이상 징후 관찰됨') ? t('Observable anomaly patterns need review; this does not establish a root cause or C2 activity.', '관찰된 이상 패턴을 확인해야 하며, 원인이나 C2 활동이 확정된 것은 아닙니다.') : safeClear && verdict === 'no_clear_anomaly' ? t('No supported anomaly pattern was observed in the evaluated evidence; this does not prove a healthy network.', '평가한 증거에서 지원되는 이상 패턴이 관찰되지 않았지만 네트워크가 정상임을 입증하지는 않습니다.') : t('Available evidence cannot support an overall conclusion; check coverage first.', '현재 증거로 종합 결론을 내릴 수 없으므로 분석 범위를 먼저 확인하세요.')}</p>
-      <p>{number(summary.suspect_flow_count)} {t('suspect flows', '개 의심 흐름')} / {number(summary.flow_count)} {t('flows scanned', '개 흐름 검사')} · {number(summary.issue_count)} {t('issue groups', '개 문제 그룹')}</p>
+      <div role="group" aria-label={t('Report totals', '보고서 전체 수치')} className="network-totals">
+        <div><strong>{number(summary.suspect_flow_count)}</strong><span>{t('suspect flows', '의심 흐름')}</span></div>
+        <div><strong>{number(summary.flow_count)}</strong><span>{t('flows scanned', '검사한 흐름')}</span></div>
+        <div><strong>{number(summary.issue_count)}</strong><span>{t('issue groups', '문제 그룹')}</span></div>
+      </div>
       {!complete && <p className="warning">{t('Incomplete or unknown coverage — absence of findings cannot establish a healthy network.', '분석 범위가 불완전하거나 알려지지 않았습니다. 발견 사항이 없더라도 네트워크가 정상이라고 단정할 수 없습니다.')} {warnings.length} {t('coverage warnings', '개 범위 경고')} · {number(summary.skipped_records)} {t('skipped', '개 건너뜀')} · {number(summary.incomplete_records)} {t('incomplete', '개 불완전')}</p>}
       {summary.counts_are_lower_bounds === true && <p className="warning">{t('Counts are lower bounds, not complete capture totals.', '수치는 하한값이며 전체 캡처의 총계가 아닙니다.')} {number(summary.tracking_limited_records)} {t('records exceeded tracking limits; additional anomalies may be missing.', '개 레코드가 추적 한도를 초과하여 추가 이상 징후가 누락되었을 수 있습니다.')}</p>}
       {summary.truncated === true && <p className="warning">{t('Report truncated: retained evidence is not the complete result.', '보고서 일부 생략: 보존된 증거는 전체 결과가 아닙니다.')} {number(summary.omitted_issue_count)} {t('groups omitted by producer', '개 그룹 분석기에서 생략')}</p>}
-      {recognized && issues.length > 0 && <><h3>{t('First observations to inspect', '먼저 확인할 관찰 결과')}</h3><p className="muted">{t('Up to three retained groups in producer order, not a risk ranking; counts below apply to each group, not unique totals.', '분석기 순서의 보존된 그룹 최대 3개이며 위험도 순위가 아닙니다. 아래 수치는 그룹별 값이며 고유 총계가 아닙니다.')}</p>
-        <ol>{issues.slice(0, 3).map((issue, i) => <li data-testid="top-observation" key={i}><strong>{patternLabel(language, issue.pattern)}</strong> — {number(issue.event_count)} {t('events', '건')} · {number(issue.affected_flow_count)} {t('affected flows', '개 영향받은 흐름')} · {number(issue.affected_host_count)} {t('affected hosts', '개 영향받은 호스트')}</li>)}</ol>
-        <p><strong>{t('Priority next check', '우선 확인 사항')}</strong> — {choose(language, ...diagnostics[issues[0].pattern][2])}</p>
-        {measurementsSupported && summary.suspected_cause != null && <CauseHypothesis value={summary.suspected_cause} leading/>}
+      <div className="network-guidance">
+        <section aria-label={t('Next action', '다음 행동')} className="network-next-action">
+          <h3>{t('Priority next check', '우선 확인 사항')}</h3>
+          <p>{recognized && issues.length ? choose(language, ...diagnostics[issues[0].pattern][2]) : safeClear && verdict === 'no_clear_anomaly' ? t('If symptoms persist, compare another observation period or capture point.', '증상이 지속되면 다른 관찰 기간이나 캡처 지점과 비교하세요.') : t('Check capture coverage and missing evidence before drawing conclusions.', '결론을 내리기 전에 캡처 범위와 누락된 증거를 확인하세요.')}</p>
+        </section>
+        {recognized && issues.length > 0 && measurementsSupported && summary.suspected_cause != null && <div className="network-cause"><CauseHypothesis value={summary.suspected_cause} leading compact/></div>}
+      </div>
+      {recognized && issues.length > 0 && <><h3>{t('First observations to inspect', '먼저 확인할 관찰 결과')}</h3>
+        <ol className="network-key-patterns">{issues.slice(0, 3).map((issue, i) => <li data-testid="top-observation" key={i}>
+          <strong>{patternLabel(language, issue.pattern)}</strong>
+          <span className="network-peer">{endpoint(issue.scope?.peer)} <small>{text(issue.scope?.protocol, 12)}</small></span>
+          <span className="network-group-counts">{number(issue.event_count)} {t('events', '건')} · {number(issue.affected_flow_count)} {t('affected flows', '개 영향받은 흐름')} · {number(issue.affected_host_count)} {t('affected hosts', '개 영향받은 호스트')}</span>
+          <button type="button" className="secondary" onClick={() => inspectIssue(i)}>{t('Inspect evidence', '근거 확인')}<span className="sr-only"> — {patternLabel(language, issue.pattern)} · {endpoint(issue.scope?.peer)}</span><span aria-hidden="true"> →</span></button>
+        </li>)}</ol>
+        <p className="network-order-note muted">{t('Up to 3 groups · producer order, not a risk ranking · group counts may overlap.', '최대 3개 그룹 · 분석기 순서이며 위험도 순위 아님 · 그룹별 수치는 중복될 수 있음')}</p>
       </>}
     </section>
     <button type="button" className="secondary" aria-expanded={coverageOpen} aria-controls={coverageOpen ? 'network-coverage' : undefined} onClick={() => { setCoverageOpen(!coverageOpen); detail?.claim('coverage'); setExpanded(undefined); }}>{t('Coverage details and limitations', '분석 범위 상세 및 한계')}</button>
@@ -108,8 +132,8 @@ export default function NetworkPatternReport({ report }: { report: PatternReport
       <p ref={pageStatus} role="status" aria-live="polite" aria-atomic="true" tabIndex={-1}>{t(`Page ${current + 1} of ${pages}`, `${pages}페이지 중 ${current + 1}페이지`)}</p>
       <button type="button" className="secondary" disabled={current === pages - 1} onClick={() => changePage(current + 1)}>{t('Next groups', '다음 그룹')}</button>
     </nav>}
-    {groupsOpen && recognized && visibleIssues.map((issue, offset) => {
-      const index = current * 8 + offset;
+    {recognized && visibleIssues.map((issue, offset) => {
+      const index = groupsOpen ? current * 8 + offset : selectedIndex!;
       const open = expanded?.report === report && expanded.index === index && (!detail || detail.owner === 'evidence');
       const examples = Array.isArray(issue.examples) ? issue.examples : [];
       return <article ref={retainFocus} className="panel compact" key={index}>
@@ -118,7 +142,7 @@ export default function NetworkPatternReport({ report }: { report: PatternReport
         <p>{number(issue.event_count)} {t('events', '건')} · {number(issue.affected_flow_count)} {t('affected flows', '개 영향받은 흐름')} · {number(issue.affected_host_count)} {t('affected hosts', '개 영향받은 호스트')}</p>
         <p>{t('Affected range:', '영향 범위:')} {text(issue.scope?.sensor_id, 80)} · {t('interface', '인터페이스')} {issue.scope?.interface_id == null ? t('unknown', '알 수 없음') : number(issue.scope.interface_id)} · {text(issue.scope?.protocol, 12)} · {t('peer', '상대')} {endpoint(issue.scope?.peer)}</p>
         <button className="secondary" aria-expanded={open} aria-controls={open ? `network-evidence-${index}` : undefined} onClick={() => { setCoverageOpen(false); detail?.claim('evidence'); setExpanded(open ? undefined : { report, index }); }}>{open ? t('Hide', '숨기기') : t('Show', '보기')} {t('representative evidence', '대표 증거')} — {patternLabel(language, issue.pattern)}</button>
-        {open && <section id={`network-evidence-${index}`} aria-label={t('Representative flow evidence', '대표 흐름 증거')}>
+        {open && <section id={`network-evidence-${index}`} tabIndex={-1} ref={node => { if (node && focusEvidence.current) { focusEvidence.current = false; node.focus(); } }} aria-label={t('Representative flow evidence', '대표 흐름 증거')}>
         <p>{t('Observed time:', '관찰 시간:')} {text(issue.first_seen, 40)} → {text(issue.last_seen, 40)}</p>
         {measurementsSupported && <CauseHypothesis value={issue.suspected_cause}/>}
         <h5>{t('Representative proof', '대표 증거')}</h5><Notes values={issue.evidence} issue={issue}/>

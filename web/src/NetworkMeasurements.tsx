@@ -19,12 +19,12 @@ const reasons: Record<string, [string, string]> = {
   NOT_TCP: ['TCP RTT is not applicable to this protocol.', '이 프로토콜에는 TCP RTT가 적용되지 않습니다.'],
   ONE_DIRECTION_OBSERVED: ['Only one direction was observed.', '한 방향만 관찰되었습니다.'],
 };
-export function CauseHypothesis({ value, leading = false }: { value: unknown; leading?: boolean }) {
+export function CauseHypothesis({ value, leading = false, compact = false }: { value: unknown; leading?: boolean; compact?: boolean }) {
   const language = useReportLanguage();
   const t = (en: string, ko: string) => choose(language, en, ko);
   const cause = object(value);
   const pair = typeof cause.code === 'string' && Object.hasOwn(causes, cause.code) ? causes[cause.code] : undefined;
-  return <>{leading ? <h3>{t('Leading possible cause — hypothesis', '주요 가능한 원인 — 가설')}</h3> : <h5>{t('Possible cause — hypothesis', '가능한 원인 — 가설')}</h5>}<p>{pair && cause.confidence === 'low' ? choose(language, ...pair) : t('Unknown — no supported cause hypothesis was reported.', '알 수 없음 — 지원되는 원인 가설이 보고되지 않았습니다.')}</p>{pair && cause.confidence === 'low' && <p className="muted">{t('Low causal confidence. Compare the pattern evidence and representative measurements below; these are alternatives, not a confirmed diagnosis.', '원인에 대한 신뢰도는 낮습니다. 아래 패턴 증거와 대표 측정값을 비교하세요. 이는 대안적 설명이며 확정 진단이 아닙니다.')}</p>}</>;
+  return <>{leading ? <h3>{t('Leading possible cause — hypothesis', '주요 가능한 원인 — 가설')}</h3> : <h5>{t('Possible cause — hypothesis', '가능한 원인 — 가설')}</h5>}<p>{pair && cause.confidence === 'low' ? choose(language, ...pair) : t('Unknown — no supported cause hypothesis was reported.', '알 수 없음 — 지원되는 원인 가설이 보고되지 않았습니다.')}</p>{pair && cause.confidence === 'low' && <p className="muted">{compact ? t('Low confidence · Not confirmed', '낮은 신뢰도 · 원인 미확정') : t('Low causal confidence. Compare the pattern evidence and representative measurements below; these are alternatives, not a confirmed diagnosis.', '원인에 대한 신뢰도는 낮습니다. 아래 패턴 증거와 대표 측정값을 비교하세요. 이는 대안적 설명이며 확정 진단이 아닙니다.')}</p>}</>;
 }
 export default function NetworkMeasurements({ value }: { value: unknown }) {
   const language = useReportLanguage();
