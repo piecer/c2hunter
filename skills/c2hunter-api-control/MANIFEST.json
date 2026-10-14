@@ -1,0 +1,70 @@
+{
+  "files": {
+    "SKILL.md": {
+      "sha256": "e870cf7d4d1de4175ba86672a2c8c3342997541899f1c30d986c81c790fdfa6c",
+      "bytes": 8656,
+      "mode": 420
+    },
+    "README.md": {
+      "sha256": "2fc41352a12ae7b4730d727bde068912436ae52707ef638b2c8cbe6863e45698",
+      "bytes": 2306,
+      "mode": 420
+    },
+    "references/workflows.md": {
+      "sha256": "9784f69757871cba0b11cef6104c3dce9a2a079bf9c087aa3f0b581659ceefa5",
+      "bytes": 11986,
+      "mode": 420
+    },
+    "references/operations.json": {
+      "sha256": "85ba885bc5bcecdb577ef65d06abdc3e7be09fe12249869f7dc2836034d2c81d",
+      "bytes": 13838,
+      "mode": 420
+    },
+    "references/openapi.json": {
+      "sha256": "729ad81fd600ed5f1e26506c9153f1384405be76c9c2b508fbd0037466a854eb",
+      "bytes": 265852,
+      "mode": 420
+    },
+    "examples/pcap-initiate.json": {
+      "sha256": "0e6c3e58ed52747dec6a3d1dd1d7183e0fa7c63b3c24e1c0cabc653852c2196b",
+      "bytes": 321,
+      "mode": 420
+    },
+    "examples/ai-create.json": {
+      "sha256": "7cf93878b6d225f0d28133e99360c6709ee2b05f946c9c43498c179bd075952d",
+      "bytes": 228,
+      "mode": 420
+    },
+    "examples/cancel.json": {
+      "sha256": "1d97b1574060d0560b46a2d9f8787031a5ff6ddf60da136f5364cdc0ff6c4457",
+      "bytes": 68,
+      "mode": 420
+    },
+    "scripts/client.py": {
+      "sha256": "dbf0820360c68eb2c0d3a8346c0aee4d7248115f96430f96d9413c411b8bc609",
+      "bytes": 18714,
+      "mode": 493
+    },
+    "scripts/export_contract.py": {
+      "sha256": "bb30ef8d1b329620fcf5d55d0a0fa428a482ecdfded19b33bcac435e41b9bfde",
+      "bytes": 6835,
+      "mode": 420
+    },
+    "tests/test_client.py": {
+      "sha256": "d82cbf29d62774059404b11fdb4ce60e86738503d341ecc56c34850b458f1880",
+      "bytes": 40204,
+      "mode": 420
+    },
+    "tests/test_producer_contract.py": {
+      "sha256": "c6801b8e90fe1cf8badb2ae57a9c9fb0aa1bd87a90ba02962c6d2e1a82131f4f",
+      "bytes": 8373,
+      "mode": 420
+    },
+    "VERIFICATION.json": {
+      "sha256": "3de144149f80887652f7e01a9fca9d98fef4c4de60521f824343820c5dc12313",
+      "bytes": 556,
+      "mode": 420
+    }
+  },
+  "excludes_self_hash": true
+}

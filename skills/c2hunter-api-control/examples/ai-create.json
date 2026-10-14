@@ -1,0 +1,9 @@
+{
+  "idempotency_key": "replace-with-one-unique-ai-key-per-approved-intent",
+  "candidate_limit": 1,
+  "analysis_kind": "C2",
+  "language": "ko",
+  "allow_remote": false,
+  "discovery_mode": "shadow",
+  "baseline_mode": "off"
+}

@@ -1,0 +1,16 @@
+{
+  "source_commit": "776033537b73c4ab650c51c441daa8e0dfdd942c",
+  "client_tests": 35,
+  "producer_tests": 8,
+  "operations": 24,
+  "independent_review": "ACCEPT",
+  "source_schema_parity": true,
+  "real_deployment_tested": false,
+  "installed_into_agent": false,
+  "limitations": [
+    "No actual TLS handshake or Windows/macOS runtime test",
+    "DNS resolution has no hard global deadline",
+    "Source API snapshot may differ from deployed server",
+    "SKILL requires the receiving agent to have a Python/terminal tool; it is not an MCP server"
+  ]
+}

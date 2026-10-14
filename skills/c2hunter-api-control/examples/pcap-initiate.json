@@ -1,0 +1,9 @@
+{
+  "name": "Operator-authorized capture analysis",
+  "filename": "capture.pcap",
+  "description": "Replace with the approved investigation context",
+  "idempotency_key": "replace-with-one-unique-key-per-approved-intent",
+  "analysis_module": "c2",
+  "internal_networks": ["10.0.0.0/8"],
+  "analysis": {"module": "c2"}
+}

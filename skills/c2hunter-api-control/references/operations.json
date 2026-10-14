@@ -1,0 +1,555 @@
+{
+  "authentication": "Bearer token checked by middleware; OpenAPI omission is not permission to bypass auth",
+  "manual_supplements": {
+    "baseline-scopes": "offset integer 0..16, limit 1..20; canonical ASCII decimal without leading zeros"
+  },
+  "openapi_sha256": "729ad81fd600ed5f1e26506c9153f1384405be76c9c2b508fbd0037466a854eb",
+  "operations": {
+    "ai-assessments": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "VIEWER",
+      "path": "/api/v1/ai-runs/{run_id}/assessments",
+      "path_parameters": [
+        "run_id"
+      ],
+      "query_parameters": [
+        "page",
+        "page_size"
+      ],
+      "request_body": null,
+      "response_statuses": [
+        "200",
+        "422"
+      ],
+      "write": false
+    },
+    "ai-cancel": {
+      "body": "json",
+      "method": "POST",
+      "minimum_role": "ANALYST",
+      "path": "/api/v1/ai-runs/{run_id}/cancel",
+      "path_parameters": [
+        "run_id"
+      ],
+      "query_parameters": [],
+      "request_body": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AIAnalysisRunCancel"
+            }
+          }
+        },
+        "required": true
+      },
+      "response_statuses": [
+        "200",
+        "422"
+      ],
+      "write": true
+    },
+    "ai-create": {
+      "body": "json",
+      "method": "POST",
+      "minimum_role": "ANALYST",
+      "path": "/api/v1/analysis-jobs/{job_id}/ai-runs",
+      "path_parameters": [
+        "job_id"
+      ],
+      "query_parameters": [],
+      "request_body": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": false,
+              "properties": {
+                "allow_remote": {
+                  "default": false,
+                  "title": "Allow Remote",
+                  "type": "boolean"
+                },
+                "analysis_kind": {
+                  "default": "C2",
+                  "enum": [
+                    "C2",
+                    "NETWORK_ANOMALY",
+                    "DDOS_ATTACK"
+                  ],
+                  "title": "Analysis Kind",
+                  "type": "string"
+                },
+                "baseline_mode": {
+                  "default": "off",
+                  "enum": [
+                    "off",
+                    "historical"
+                  ],
+                  "title": "Baseline Mode",
+                  "type": "string"
+                },
+                "baseline_reference": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Baseline Reference"
+                },
+                "candidate_limit": {
+                  "default": 5,
+                  "maximum": 5,
+                  "minimum": 1,
+                  "title": "Candidate Limit",
+                  "type": "integer"
+                },
+                "discovery_mode": {
+                  "default": "legacy",
+                  "enum": [
+                    "legacy",
+                    "shadow"
+                  ],
+                  "title": "Discovery Mode",
+                  "type": "string"
+                },
+                "idempotency_key": {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "title": "Idempotency Key",
+                  "type": "string"
+                },
+                "language": {
+                  "default": "ko",
+                  "enum": [
+                    "ko",
+                    "en"
+                  ],
+                  "title": "Language",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "idempotency_key"
+              ],
+              "title": "AIAnalysisRunCreate",
+              "type": "object"
+            }
+          }
+        },
+        "required": true
+      },
+      "response_statuses": [
+        "201",
+        "422"
+      ],
+      "write": true
+    },
+    "ai-get": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "VIEWER",
+      "path": "/api/v1/ai-runs/{run_id}",
+      "path_parameters": [
+        "run_id"
+      ],
+      "query_parameters": [],
+      "request_body": null,
+      "response_statuses": [
+        "200",
+        "422"
+      ],
+      "write": false
+    },
+    "ai-list": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "VIEWER",
+      "path": "/api/v1/analysis-jobs/{job_id}/ai-runs",
+      "path_parameters": [
+        "job_id"
+      ],
+      "query_parameters": [
+        "page",
+        "page_size"
+      ],
+      "request_body": null,
+      "response_statuses": [
+        "200",
+        "422"
+      ],
+      "write": false
+    },
+    "ai-selection": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "VIEWER",
+      "path": "/api/v1/ai-runs/{run_id}/selection",
+      "path_parameters": [
+        "run_id"
+      ],
+      "query_parameters": [
+        "offset",
+        "limit"
+      ],
+      "request_body": null,
+      "response_statuses": [
+        "200",
+        "422"
+      ],
+      "write": false
+    },
+    "assessment-evidence": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "ANALYST",
+      "path": "/api/v1/ai-assessments/{assessment_id}/evidence-bundle",
+      "path_parameters": [
+        "assessment_id"
+      ],
+      "query_parameters": [],
+      "request_body": null,
+      "response_statuses": [
+        "200",
+        "422"
+      ],
+      "write": false
+    },
+    "assessment-get": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "VIEWER",
+      "path": "/api/v1/ai-assessments/{assessment_id}",
+      "path_parameters": [
+        "assessment_id"
+      ],
+      "query_parameters": [],
+      "request_body": null,
+      "response_statuses": [
+        "200",
+        "422"
+      ],
+      "write": false
+    },
+    "baseline-comparisons": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "ANALYST",
+      "path": "/api/v1/ai-runs/{run_id}/baseline-comparisons",
+      "path_parameters": [
+        "run_id"
+      ],
+      "query_parameters": [
+        "offset",
+        "limit"
+      ],
+      "request_body": null,
+      "response_statuses": [
+        "200",
+        "422"
+      ],
+      "write": false
+    },
+    "baseline-scope": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "VIEWER",
+      "path": "/api/v1/historical-baselines/scopes/{scope_id}",
+      "path_parameters": [
+        "scope_id"
+      ],
+      "query_parameters": [],
+      "request_body": null,
+      "response_statuses": [
+        "200",
+        "422"
+      ],
+      "write": false
+    },
+    "baseline-scopes": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "VIEWER",
+      "path": "/api/v1/historical-baselines/scopes",
+      "path_parameters": [],
+      "query_parameters": [
+        "offset",
+        "limit"
+      ],
+      "request_body": null,
+      "response_statuses": [
+        "200"
+      ],
+      "write": false
+    },
+    "baseline-sources": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "ANALYST",
+      "path": "/api/v1/ai-runs/{run_id}/baseline-sources",
+      "path_parameters": [
+        "run_id"
+      ],
+      "query_parameters": [
+        "offset",
+        "limit"
+      ],
+      "request_body": null,
+      "response_statuses": [
+        "200",
+        "422"
+      ],
+      "write": false
+    },
+    "capabilities": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "VIEWER",
+      "path": "/api/v1/ai-capabilities",
+      "path_parameters": [],
+      "query_parameters": [],
+      "request_body": null,
+      "response_statuses": [
+        "200"
+      ],
+      "write": false
+    },
+    "health": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "PUBLIC",
+      "path": "/api/v1/health",
+      "path_parameters": [],
+      "query_parameters": [],
+      "request_body": null,
+      "response_statuses": [
+        "200"
+      ],
+      "write": false
+    },
+    "job-cancel": {
+      "body": "json",
+      "method": "POST",
+      "minimum_role": "ANALYST",
+      "path": "/api/v1/analysis-jobs/{job_id}/cancel",
+      "path_parameters": [
+        "job_id"
+      ],
+      "query_parameters": [],
+      "request_body": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/CancelRequest"
+            }
+          }
+        },
+        "required": true
+      },
+      "response_statuses": [
+        "200",
+        "422"
+      ],
+      "write": true
+    },
+    "job-candidates": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "VIEWER",
+      "path": "/api/v1/analysis-jobs/{job_id}/candidates",
+      "path_parameters": [
+        "job_id"
+      ],
+      "query_parameters": [
+        "page",
+        "page_size",
+        "severity",
+        "verdict",
+        "workflow_status",
+        "ti_filter",
+        "minimum_score",
+        "include_suppressed",
+        "sort"
+      ],
+      "request_body": null,
+      "response_statuses": [
+        "200",
+        "422"
+      ],
+      "write": false
+    },
+    "job-create": {
+      "body": "json",
+      "method": "POST",
+      "minimum_role": "ANALYST",
+      "path": "/api/v1/analysis-jobs",
+      "path_parameters": [],
+      "query_parameters": [],
+      "request_body": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AnalysisJobCreate"
+            }
+          }
+        },
+        "required": true
+      },
+      "response_statuses": [
+        "201",
+        "422"
+      ],
+      "write": true
+    },
+    "job-get": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "VIEWER",
+      "path": "/api/v1/analysis-jobs/{job_id}",
+      "path_parameters": [
+        "job_id"
+      ],
+      "query_parameters": [],
+      "request_body": null,
+      "response_statuses": [
+        "200",
+        "422"
+      ],
+      "write": false
+    },
+    "jobs-list": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "VIEWER",
+      "path": "/api/v1/analysis-jobs",
+      "path_parameters": [],
+      "query_parameters": [
+        "page",
+        "page_size",
+        "status",
+        "source_type",
+        "search",
+        "sort"
+      ],
+      "request_body": null,
+      "response_statuses": [
+        "200",
+        "422"
+      ],
+      "write": false
+    },
+    "openapi-get": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "VIEWER",
+      "path": "/openapi.json",
+      "path_parameters": [],
+      "query_parameters": [],
+      "request_body": null,
+      "response_statuses": [
+        "200"
+      ],
+      "source": "FastAPI.openapi_url; discovery route is not listed inside OpenAPI paths",
+      "write": false
+    },
+    "pcap-initiate": {
+      "body": "json",
+      "method": "POST",
+      "minimum_role": "ANALYST",
+      "path": "/api/v1/pcap-analysis-jobs/initiate",
+      "path_parameters": [],
+      "query_parameters": [],
+      "request_body": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PcapAnalysisJobCreate"
+            }
+          }
+        },
+        "required": true
+      },
+      "response_statuses": [
+        "201",
+        "422"
+      ],
+      "write": true
+    },
+    "pcap-upload": {
+      "body": "binary",
+      "method": "PUT",
+      "minimum_role": "ANALYST",
+      "path": "/api/v1/pcap-analysis-jobs/{job_id}/capture",
+      "path_parameters": [
+        "job_id"
+      ],
+      "query_parameters": [],
+      "request_body": null,
+      "response_statuses": [
+        "202",
+        "422"
+      ],
+      "write": true
+    },
+    "ready": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "PUBLIC",
+      "path": "/api/v1/ready",
+      "path_parameters": [],
+      "query_parameters": [],
+      "request_body": null,
+      "response_statuses": [
+        "200"
+      ],
+      "write": false
+    },
+    "sensors-list": {
+      "body": "none",
+      "method": "GET",
+      "minimum_role": "VIEWER",
+      "path": "/api/v1/sensors",
+      "path_parameters": [],
+      "query_parameters": [
+        "page",
+        "page_size",
+        "status",
+        "enabled",
+        "sort"
+      ],
+      "request_body": null,
+      "response_statuses": [
+        "200",
+        "422"
+      ],
+      "write": false
+    }
+  },
+  "schema_version": 1,
+  "scope": "allowlisted analyst workflow; not all administrative API routes",
+  "source_commit": "776033537b73c4ab650c51c441daa8e0dfdd942c",
+  "source_hashes": {
+    "controller/src/c2hunter_controller/app.py": "0f53a9138582bf44c1d203359f23cacea8108c4c6dad5ab1ec3a3c9eb73d6e47",
+    "controller/src/c2hunter_controller/historical_ai_http.py": "03f6796f24461b5ca0c6410e8f212cd7087bd341057fedc48f241e8203ff3175",
+    "controller/src/c2hunter_controller/historical_baseline_api.py": "f77b507230e89cb332bf5badf6a833b2422a6adb24babe532f0fb884d638e534",
+    "controller/src/c2hunter_controller/jobs.py": "38a9a4c7f569b2e02fc92e0122f1df32ae2bb58ba574b419a978c1eb63caee74",
+    "controller/src/c2hunter_controller/schemas.py": "da40a2b4f5a34c228e242110db406606f3816b63b24e3a3fc861a53fa310e086",
+    "controller/src/c2hunter_controller/security.py": "614d50e5cc9f703ed0f99305d1582bff9766b3f0c416766195bc15d90fd8f4ba"
+  },
+  "terminal_states": {
+    "ai-get": [
+      "COMPLETED",
+      "FAILED",
+      "CANCELLED"
+    ],
+    "job-get": [
+      "COMPLETED",
+      "PARTIALLY_COMPLETED",
+      "FAILED",
+      "CANCELLED"
+    ]
+  }
+}
