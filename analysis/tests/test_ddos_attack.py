@@ -86,7 +86,7 @@ def test_inbound_syn_flood_reports_type_resource_goal_and_human_approved_respons
     )
 
     item = finding(report, "TCP_SYN_FLOOD")
-    assert report["version"] == "ddos-attack-report-v3"
+    assert report["version"] == "ddos-attack-report-v4"
     assert report["verdict"] == "suspicious_traffic"
     assert item["attack_role"] == "VICTIM_SIDE_INBOUND"
     assert item["target"] == {"ip": "10.0.0.10", "port": 443}
@@ -717,7 +717,7 @@ def test_invalid_ddos_parameter_fails_closed_before_record_processing() -> None:
         analyze_ddos_attack([], parameters={"ddos_reflection_min_average_packet_bytes": 1})[
             "version"
         ]
-        == "ddos-attack-report-v3"
+        == "ddos-attack-report-v4"
     )
 
 
@@ -729,7 +729,7 @@ def test_internal_networks_are_precompiled_and_hard_bounded() -> None:
 
 def test_integer_policy_accepts_its_documented_maximum_without_float_loss() -> None:
     report = analyze_ddos_attack([], parameters={"ddos_min_packet_count": 2**63 - 1})
-    assert report["version"] == "ddos-attack-report-v3"
+    assert report["version"] == "ddos-attack-report-v4"
 
 
 def test_timestamp_interval_overflow_is_skipped_instead_of_crashing() -> None:

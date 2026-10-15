@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .ddos_signature_schema import SignatureReportContext
 from .network_ai import NetworkFailureDiagnostic
 from .schemas import (
     DDoSClassification,
     DDoSClassificationV3,
     DDoSCommonPattern,
     DDoSSignatureCandidate,
+    DDoSSignatureCandidateV4,
 )
 
 MAX_DDOS_INPUT_BYTES = 48 * 1024
@@ -184,6 +186,7 @@ def build_ddos_input(report: Any, language: str = "ko") -> dict[str, Any]:
         "ddos-attack-report-v1",
         "ddos-attack-report-v2",
         "ddos-attack-report-v3",
+        "ddos-attack-report-v4",
     }:
         raise ValueError("completed DDoS attack report required")
     source = report.get("summary")
@@ -193,7 +196,11 @@ def build_ddos_input(report: Any, language: str = "ko") -> dict[str, Any]:
     expected_catalog = report["version"].replace("attack-report", "taxonomy")
     if report.get("catalog_version") != expected_catalog:
         raise ValueError("invalid DDoS report version pair")
-    if report["version"] in {"ddos-attack-report-v2", "ddos-attack-report-v3"}:
+    if report["version"] in {
+        "ddos-attack-report-v2",
+        "ddos-attack-report-v3",
+        "ddos-attack-report-v4",
+    }:
         for finding in findings:
             if (
                 not isinstance(finding, dict)
@@ -204,6 +211,28 @@ def build_ddos_input(report: Any, language: str = "ko") -> dict[str, Any]:
                 or not finding["signature_candidates"]
             ):
                 raise ValueError("invalid DDoS report v2 projection fields")
+    if report["version"] == "ddos-attack-report-v4":
+        if "normal_reference" not in report or len(findings) > 100:
+            raise ValueError("invalid DDoS report signature context")
+        context = SignatureReportContext(
+            cast(int, source.get("evaluated_records")),
+            cast(int, source.get("packet_count")),
+            report["normal_reference"],
+        )
+        for finding in findings:
+            target = finding.get("target")
+            if not isinstance(target, dict) or len(finding["signature_candidates"]) > 4:
+                raise ValueError("invalid DDoS finding context")
+            for value in finding["signature_candidates"]:
+                signature = DDoSSignatureCandidateV4.model_validate(value)
+                context.accept(
+                    signature.evaluation,
+                    target_ip=cast(str, target.get("ip")),
+                    target_port=target.get("port"),
+                    role=finding.get("attack_role"),
+                    attack_type=finding.get("attack_type"),
+                    protocol=finding.get("protocol"),
+                )
     if report.get("verdict") not in {
         "attack_likely",
         "suspicious_traffic",
@@ -230,7 +259,9 @@ def build_ddos_input(report: Any, language: str = "ko") -> dict[str, Any]:
             raise ValueError("invalid DDoS report summary code")
         summary[key] = value
     result: dict[str, Any] = {
-        "schema_version": "ddos-ai-input-v3"
+        "schema_version": "ddos-ai-input-v4"
+        if report["version"] == "ddos-attack-report-v4"
+        else "ddos-ai-input-v3"
         if report["version"] == "ddos-attack-report-v3"
         else "ddos-ai-input-v2",
         "language": language,
@@ -248,6 +279,8 @@ def build_ddos_input(report: Any, language: str = "ko") -> dict[str, Any]:
             "Missing values stay unknown."
         ),
     }
+    if report["version"] == "ddos-attack-report-v4":
+        result["normal_reference"] = report["normal_reference"]
     seen: set[str] = set()
     for finding in findings[:20]:
         if not isinstance(finding, dict):
@@ -286,7 +319,7 @@ def build_ddos_input(report: Any, language: str = "ko") -> dict[str, Any]:
             projected_classification = (
                 (
                     DDoSClassificationV3
-                    if report["version"] == "ddos-attack-report-v3"
+                    if report["version"] in {"ddos-attack-report-v3", "ddos-attack-report-v4"}
                     else DDoSClassification
                 )
                 .model_validate(classification)
@@ -299,7 +332,13 @@ def build_ddos_input(report: Any, language: str = "ko") -> dict[str, Any]:
                 for pattern in patterns[:4]
             ]
             projected_signatures = [
-                DDoSSignatureCandidate.model_validate(signature).model_dump(mode="json")
+                (
+                    DDoSSignatureCandidateV4
+                    if report["version"] == "ddos-attack-report-v4"
+                    else DDoSSignatureCandidate
+                )
+                .model_validate(signature)
+                .model_dump(mode="json")
                 for signature in signatures[:4]
             ]
         except ValidationError as error:

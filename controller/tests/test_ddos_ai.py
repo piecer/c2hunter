@@ -253,7 +253,7 @@ def test_gateway_sends_only_bounded_projection_and_validates_output() -> None:
     assert gateway.interpret_ddos_cancellable(bundle, should_cancel=lambda: False) == output
     wire = json.dumps(transport.calls[0][2])
     assert "RAW_PACKET_SENTINEL" not in wire
-    assert "ddos-ai-input-v3" in wire
+    assert "ddos-ai-input-v4" in wire
 
 
 def test_ddos_ai_api_is_manual_queued_and_requires_remote_consent() -> None:

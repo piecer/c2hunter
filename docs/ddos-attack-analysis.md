@@ -1,5 +1,104 @@
 # DDoS 공격 트래픽 분석
 
+## v4: 평가한 방어 시그니처 후보
+
+현재 새 분석은 `ddos-attack-report-v4` / `ddos-taxonomy-v4`를 생성한다.
+v1/v2/v3 저장 보고서는 해당 계약 그대로 읽으며 다시 해석하지 않는다.
+v3의 보수적인 3축 분류는 변경하지 않는다. 새 `signature_candidates[].evaluation`은
+실제로 실행한 AND predicate, 공격 데이터의 평가 결과, 별도 정상 참조의 결과를 담는다.
+기존 pattern support histogram은 rule 일치율이 아니다.
+
+- 대상 IP는 destination, 방향은 관찰된 INBOUND/OUTBOUND, protocol/port/flags를
+  명시한다. 포트의 `null`은 명시적 무제약이다. 관측 누락은 wildcard가 아니다.
+- flag conjunction은 완전한 단일 packet 관측에서만 평가한다. 집계 flag 카운터를
+  packet별 conjunction으로 바꾸지 않는다. 판정은 match/nonmatch/unknown 3값이다.
+- 길이 조건은 `CAPTURED_FRAME_BYTES`, `IP_BYTES`, `TRANSPORT_PAYLOAD_BYTES`를
+  구별한다. 현재 생산 후보는 길이를 제한하지 않는다. matcher는 완전한 단일 packet의
+  frame/payload 관측만 사용하며 관측되지 않은 IP 길이는 UNKNOWN이다.
+  protocol field는 단일 packet의 ICMP type만 지원한다. payload/hash로 bytes를 복원하지 않는다.
+- `matched/eligible/unknown_records`와 `matched/eligible/unknown_packets`는 별도다.
+  비율은 각각 matched/eligible이며 분모가 0이면 null이다. 집계 tuple만으로 확인되는
+  predicate에는 그 record의 packet 수를 사용할 수 있지만 flag/길이는 UNKNOWN이다.
+- 공격 근거는 canonical JSON 순서의 최대 512 records, 256 KiB 완전 prefix이다.
+  순서 변경에도 동일한 표본을 선택한다. 누락 record 수, 실제 bytes, 한도, sample digest와
+  최대 8개의 `canonical-index:record-sha256` 근거 참조를 보존한다. 시간/sensor ID도
+  근거 digest에 포함한다. 무작위 표본이나 전체 packet coverage라는 주장은 하지 않는다.
+- 후보 confidence는 분류 confidence와 별개로 항상 low이며 보정된 공격 확률이 아니다.
+  정상 공용 서비스 제외, 대상 소유권 확인, 정상 트래픽 검토, 운영자 승인이 필요하다.
+  데이터셋/토폴로지 변경 시와 매 사용 전에 재검증한다. 자동 적용은 없다.
+  `STRUCTURED_JSON`은 지원 가능한 표현 목표이며 다운로드/filter exporter는 후속 단계다.
+- evaluation별 8192 bytes, 모든 공개 signature 배열 합계 1 MiB를 초과하면 부분 성공을
+  반환하지 않고 분석 실패로 처리한다. 기존 finding/record 한도는 유지한다.
+
+### 운영자가 별도 정상 참조 선택
+
+`POST /api/v1/analysis-jobs`, `POST /api/v1/pcap-analysis-jobs/initiate` 및
+`POST /api/v1/analysis-jobs/{id}/reanalyze`에 다음 선택을 명시한다:
+
+```json
+{"ddos_normal_reference":{"job_id":"existing-job-id","dataset_id":"its-dataset-id"}}
+```
+
+기존 단일 binary PCAP 업로드는 query의 `ddos_normal_reference_job_id`와
+`ddos_normal_reference_dataset_id`를 함께 사용한다. C2 요청은 이 필드를 허용하지 않는다.
+재분석에서 생략하면 부모의 저장된 snapshot을 상속하고 명시적 null이면 해제한다.
+같은 idempotency key에 다른 참조를 지정하면 409이며 기존 작업을 수정하지 않는다.
+
+기존 global job RBAC(분석 생성 ANALYST, 조회 VIEWER)를 그대로 사용한다. 새로운
+per-user tenant 소유권 모델이나 C2 baseline 승인 권한을 도입하지 않는다. 선택한 job과
+그 job의 dataset ID가 일치하고 COMPLETED 상태여야 한다. 부분/손실 capture,
+미완료/없는 job, 잘못된 dataset, 같은 분석 dataset, 과도한 입력은 명시적으로 거절한다.
+SQL은 raw flow body를 가져오기 전에 최대 512 records / 1 MiB source bytes를 검사한다.
+메모리 adapter는 전체 flow deepcopy 없이 제한된 필드만 취득한다. 서버 측 SQL 길이
+preflight 비용 자체가 상수 시간이라는 주장은 하지 않는다.
+
+선택 시점에 최대 256 KiB matcher 근거 projection, content digest, job/dataset identity,
+선택자와 선택 시각을 작업 metadata에 영속 저장한다. 별도 request binding을 worker에서
+검증하며, queue에는 ID/lease만 전달해도 실제 PostgresJobLoader가 저장 snapshot을 읽는다.
+원본 변경/삭제 및 재시작 이후에도 저장 snapshot만 비교한다. 삭제된 원본의 재선택은 실패한다.
+원본 job의 전체 raw payload가 아니라 matcher projection의 content identity이다.
+
+정상성은 운영자의 선택이지 분석기의 인증이 아니다. 참조 결과는 항상 retained-evidence
+coverage limited이며 전체 정상 트래픽의 오탐률로 일반화하지 않는다. 정상 참조가 없으면
+`UNMEASURED`, result/reference는 null이며 오탐 0으로 표시하지 않는다. 참조가 있어도
+UNKNOWN 근거는 eligible 분모에서 제외하고 분모 0이면 rate는 null이다. private snapshot은
+일반 job get/list와 AI 입력에 노출되지 않는다. AI는 bounded predicate/result/provenance만 받는다.
+
+### v4 integrity and retry boundaries
+
+- Every v4 report carries required `normal_reference`: the approved bounded public
+  provenance object, or explicit `null`. It is present even with zero findings.
+  Each candidate must agree with it. Result ingestion compares it with the persisted
+  job's independently bound snapshot before completion/ACK; missing or foreign
+  provenance fails `INVALID_DDOS_RESULT`. Legacy v1–v3 do not acquire this field.
+- API and saved-report AI admission share finding/report context checks. Ordinary
+  predicates bind destination IP, role/direction, protocol and destination port;
+  MULTI_VECTOR retains component predicates. Spoofing heuristics may omit flags and
+  source ports, not change the finding's destination. AI validates before truncation.
+- Every eligible nonmatching record has positive packet weight. Record and packet
+  complements are zero together. The global attack sample's sampled + omitted
+  records equal `summary.evaluated_records`; sampled packets cannot exceed report
+  packets and equal them without omissions. Candidates share the same global sample
+  digest, byte count and totals; this is not a per-finding population denominator.
+  Evidence indices use canonical decimal spelling (`0`, `1`, …), never `00`.
+- Known parser skips, sensor drops, discarded packets and interrupted captures reject
+  reference admission across C2/DDoS modules and inherited dataset quality. Scalar
+  SQL preflight does not hydrate source/capture JSON bodies. Missing legacy quality
+  facts remain unknown, not a fabricated zero; `coverage_limited` stays true.
+- Staged uploads compare the computed capture digest with the selected normal dataset
+  before capture publication. Preparation rechecks the derived dataset binding before
+  queueing, including resumed preparation. Distinct captures remain allowed.
+- New DDoS requests persist a private normalized request commitment. Ordinary creation,
+  staged initiation, binary upload and reanalysis resolve matching idempotency winners
+  before reacquiring a live normal source. Exact replay uses the frozen snapshot after
+  source deletion/mutation; a different reference or payload returns 409. The existing
+  atomic repository winner still arbitrates concurrent creates. This does not make a
+  new request selecting a deleted source admissible.
+- `ddos_reference_snapshot`, `ddos_reference_binding`, and `ddos_request_binding` are
+  private job metadata, excluded from ordinary create/get/list/reanalysis/cancel/replay
+  responses and AI input. Public `normal_reference` is provenance, not the private
+  integrity commitment or retained records. No model calls or enforcement are implied.
+
 ## 목적
 
 `ddos_attack`은 C2Hunter의 독립 분석 도메인이다. 관찰된 TCP/UDP/ICMP 트래픽에서 DDoS 형태를 분류하고, 보호 대상 또는 내부 참여 호스트 관점의 역할, 방어 대상 자원에 대한 목적 가설, 운영자 승인이 필요한 대응 항목을 생성한다.

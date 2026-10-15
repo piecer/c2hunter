@@ -33,6 +33,7 @@ def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
         }
     if module == "ddos_attack":
         from c2hunter_analysis.ddos_attack import analyze_ddos_attack
+        from c2hunter_analysis.ddos_signatures import load_reference
 
         return {
             "candidates": [],
@@ -41,6 +42,7 @@ def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
                 internal_cidrs=payload.get("internal_networks", ()),
                 parameters=payload.get("analysis", {}),
                 coverage_context=payload.get("ddos_coverage_context", {}),
+                normal_reference=load_reference(payload),
             ),
         }
     if module != "c2":

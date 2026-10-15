@@ -84,6 +84,10 @@ class PostgresJobLoader:
                 if isinstance(raw_signatures, list)
                 else json.loads(raw_signatures)
             )
+        if metadata.get("analysis", {}).get("module") == "ddos_attack":
+            from c2hunter_analysis.ddos_signatures import load_reference
+
+            load_reference(metadata)
         return metadata
 
     def claim_analysis(

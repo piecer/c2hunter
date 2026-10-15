@@ -21,9 +21,10 @@ from typing import Any, cast
 
 from .ddos_evidence import assess, empty_evidence
 from .ddos_packets import PacketEvidenceCollector, packet_interval_us, validate_packet_evidence
+from .ddos_signatures import EvidenceSample, attach_evaluations
 
-REPORT_VERSION = "ddos-attack-report-v3"
-CATALOG_VERSION = "ddos-taxonomy-v3"
+REPORT_VERSION = "ddos-attack-report-v4"
+CATALOG_VERSION = "ddos-taxonomy-v4"
 REFLECTION_PORTS = frozenset({17, 19, 53, 123, 389, 1900, 11211})
 MAX_TARGETS = 4096
 MAX_BUCKETS_PER_TARGET = 3600
@@ -1212,6 +1213,7 @@ def analyze_ddos_attack(
     internal_cidrs: Sequence[object] = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"),
     parameters: Mapping[str, object] | None = None,
     coverage_context: Mapping[str, object] | None = None,
+    normal_reference: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Classify bounded DDoS-shaped traffic and publish a deterministic report."""
     policy = _validated_policy(parameters)
@@ -1219,6 +1221,7 @@ def analyze_ddos_attack(
     bucket_seconds = int(_number(policy, "ddos_bucket_seconds"))
     targets: dict[tuple[str, str, int | None, str], Target] = {}
     packet_collector = PacketEvidenceCollector()
+    signature_sample = EvidenceSample()
     target_heap: list[tuple[int, int, int, int, int, tuple[str, str, int | None, str]]] = []
     reverse_syn_ack: dict[tuple[str, int | None], int] = {}
     response_heap: list[tuple[int, int, int, tuple[str, int | None]]] = []
@@ -1280,6 +1283,7 @@ def analyze_ddos_attack(
             numeric_overflow = True
             continue
         evaluated += 1
+        signature_sample.add(entry, packet_count=row.packets)
         packet_total += row.packets
         byte_total += row.size_bytes
         first_seen = min(first_seen, row.timestamp) if first_seen else row.timestamp
@@ -1438,10 +1442,14 @@ def analyze_ddos_attack(
         verdict, confidence = "no_clear_attack", "low"
     else:
         verdict, confidence = "insufficient_evidence", "unknown"
+    attach_evaluations(findings, signature_sample, normal_reference)
     primary = findings[0] if findings else None
     codes = [code for item in findings for code in item["recommendation_codes"]]
     return {
         "version": REPORT_VERSION,
+        "normal_reference": dict(normal_reference["reference"])
+        if normal_reference is not None
+        else None,
         "catalog_version": CATALOG_VERSION,
         "verdict": verdict,
         "confidence": confidence,

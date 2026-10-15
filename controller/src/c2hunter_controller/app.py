@@ -11,6 +11,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -147,6 +148,7 @@ from .schemas import (
     CandidateVerdictCreate,
     CaptureParameters,
     DDoSAttackReport,
+    DDoSNormalReference,
     DevLoginRequest,
     EnrollmentClaim,
     EnrollmentClaimResponse,
@@ -232,6 +234,9 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
             "receipt",
             "preparation_attempt",
             "preparation_lease_token",
+            "ddos_reference_snapshot",
+            "ddos_reference_binding",
+            "ddos_request_binding",
         }
     }
     processing = public.get("processing")
@@ -255,9 +260,24 @@ def _public_ai_run(run: dict[str, Any]) -> dict[str, Any]:
     return public_run(run)
 
 
-def _validated_ddos_report(value: object) -> dict[str, Any]:
+def _validated_ddos_report(value: object, job: dict[str, Any] | None = None) -> dict[str, Any]:
     report = DDoSAttackReport.model_validate(value)
-    return report.model_dump(mode="json", exclude_unset=True)
+    result = report.model_dump(mode="json", exclude_unset=True)
+    if job is not None:
+        from c2hunter_analysis.ddos_signatures import load_reference
+
+        snapshot = load_reference(job)
+        expected = snapshot["reference"] if snapshot is not None else None
+        if expected is not None and report.version != "ddos-attack-report-v4":
+            raise ValueError("selected reference requires an evaluated report")
+        if report.version == "ddos-attack-report-v4" and result["normal_reference"] != expected:
+            raise ValueError("report reference disagrees with admitted snapshot")
+        for finding in result["findings"]:
+            for candidate in finding.get("signature_candidates", []):
+                actual = candidate.get("evaluation", {}).get("normal", {}).get("reference")
+                if actual != expected:
+                    raise ValueError("report reference disagrees with admitted snapshot")
+    return result
 
 
 def _ddos_summary(report: dict[str, Any]) -> dict[str, Any]:
@@ -2828,7 +2848,7 @@ def create_app(
                 candidates = []
             elif module == "ddos_attack":
                 try:
-                    report = _validated_ddos_report(result["result"]["ddos_attack"])
+                    report = _validated_ddos_report(result["result"]["ddos_attack"], job)
                 except (KeyError, TypeError, ValueError, ValidationError):
                     job["error_code"] = "INVALID_DDOS_RESULT"
                     job["error"] = "worker returned an invalid DDoS report"
@@ -3040,6 +3060,7 @@ def create_app(
             candidates = []
         elif module == "ddos_attack":
             from c2hunter_analysis.ddos_attack import analyze_ddos_attack
+            from c2hunter_analysis.ddos_signatures import load_reference
 
             try:
                 report = analyze_ddos_attack(
@@ -3047,8 +3068,9 @@ def create_app(
                     internal_cidrs=job.get("internal_networks", ()),
                     parameters=job.get("analysis", {}),
                     coverage_context=job.get("ddos_coverage_context", {}),
+                    normal_reference=load_reference(job),
                 )
-                job["ddos_attack"] = _validated_ddos_report(report)
+                job["ddos_attack"] = _validated_ddos_report(report, job)
             except Exception as exc:
                 job["error"] = "DDoS analyzer returned an invalid result"
                 job["error_code"] = "INVALID_DDOS_RESULT"
@@ -3080,8 +3102,131 @@ def create_app(
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
         return winner
 
+    def check_reference_replay(saved: dict[str, Any], snapshot: dict[str, Any] | None) -> None:
+        from c2hunter_analysis.ddos_signatures import load_reference
+
+        previous = load_reference(saved)
+
+        def selection(value: dict[str, Any] | None) -> Any:
+            return (
+                (value["reference"]["job_id"], value["reference"]["dataset_id"]) if value else None
+            )
+
+        if selection(previous) != selection(snapshot):
+            raise ApiError(
+                409, "DDOS_REFERENCE_IDEMPOTENCY_CONFLICT", "동일 요청 키의 정상 참조가 다릅니다"
+            )
+
+    def job_request_intent(
+        payload: AnalysisJobCreate | PcapAnalysisJobCreate, *, inherit_detector_weights: bool
+    ) -> dict[str, Any]:
+        intent = payload.model_dump(mode="json")
+        # None denotes selection of the configured default, not its mutable value.
+        # Explicit maps have already passed AnalysisParameters normalization.
+        if inherit_detector_weights:
+            intent["analysis"]["detector_weights"] = None
+        return intent
+
+    def request_binding(route: str, intent: dict[str, Any]) -> str:
+        from c2hunter_analysis.ddos_signatures import digest
+
+        return digest({"route": route, "request": intent})
+
+    def check_request_replay(
+        saved: dict[str, Any],
+        binding: str | None,
+        selection: Any,
+        *,
+        inherit_reference: bool = False,
+    ) -> None:
+        from c2hunter_analysis.ddos_signatures import load_reference
+
+        previous = load_reference(saved)
+        selected = selection.model_dump(mode="json") if selection is not None else None
+        expected = (
+            {key: previous["reference"][key] for key in ("job_id", "dataset_id")}
+            if previous is not None
+            else None
+        )
+        if not inherit_reference and selected != expected:
+            raise ApiError(
+                409, "DDOS_REFERENCE_IDEMPOTENCY_CONFLICT", "동일 요청 키의 정상 참조가 다릅니다"
+            )
+        if (
+            saved.get("ddos_request_binding") is not None
+            and saved["ddos_request_binding"] != binding
+        ):
+            raise ApiError(
+                409, "DDOS_REQUEST_IDEMPOTENCY_CONFLICT", "동일 요청 키의 분석 요청이 다릅니다"
+            )
+
+    def replay_request(
+        key: str | None, binding: str | None, selection: Any, *, inherit_reference: bool = False
+    ) -> dict[str, Any] | None:
+        if key is None or binding is None:
+            return None
+        saved = repo.get_job_by_idempotency(key)
+        if saved is not None and saved.get("ddos_request_binding") is not None:
+            check_request_replay(saved, binding, selection, inherit_reference=inherit_reference)
+            return _public_job(saved)
+        return None
+
+    def bind_ddos_reference(job: dict[str, Any], snapshot: dict[str, Any] | None) -> None:
+        from c2hunter_analysis.ddos_signatures import digest, reference_sample
+
+        if snapshot is not None:
+            reference_sample(snapshot)
+            job["ddos_reference_snapshot"] = snapshot
+            job["ddos_reference_binding"] = digest(snapshot)
+
+    def selected_ddos_reference(
+        selection: Any, request: Request, source: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        from .ddos_reference import ReferenceError
+
+        if selection is None:
+            return None
+        if source is not None and (
+            selection.job_id == source["id"] or selection.dataset_id == source["dataset_id"]
+        ):
+            raise ApiError(
+                422, "DDOS_REFERENCE_SAME_DATASET", "별도 정상 참조 데이터셋이 필요합니다"
+            )
+        try:
+            admitted = repo.read_ddos_reference(selection.job_id, selection.dataset_id)
+        except ReferenceError as exc:
+            raise ApiError(422, str(exc), "정상 참조 근거를 사용할 수 없습니다") from exc
+        return {
+            "version": "ddos-normal-reference-v1",
+            "reference": {
+                "job_id": selection.job_id,
+                "dataset_id": selection.dataset_id,
+                "content_digest": admitted["content_digest"],
+                "record_count": len(admitted["records"]),
+                "coverage_limited": admitted["coverage_limited"],
+                "selected_by": _request_actor(request),
+                "selected_at": datetime.now(UTC).isoformat(),
+            },
+            "records": admitted["records"],
+        }
+
     @app.post("/api/v1/analysis-jobs", status_code=201)
-    def create_analysis_job(payload: AnalysisJobCreate) -> dict[str, Any]:
+    def create_analysis_job(payload: AnalysisJobCreate, request: Request) -> dict[str, Any]:
+        binding = (
+            request_binding(
+                "ordinary",
+                job_request_intent(
+                    payload,
+                    inherit_detector_weights="detector_weights"
+                    not in payload.analysis.model_fields_set,
+                ),
+            )
+            if payload.analysis.module == "ddos_attack"
+            else None
+        )
+        replay = replay_request(payload.idempotency_key, binding, payload.ddos_normal_reference)
+        if replay is not None:
+            return replay
         missing = [
             sensor_id for sensor_id in payload.sensor_ids if repo.get_sensor(sensor_id) is None
         ]
@@ -3100,11 +3245,17 @@ def create_app(
             if configured_default is not None:
                 payload.analysis.detector_weights = configured_default
         ensure_live_capture_bpf_compatible(payload)
+        reference_snapshot = selected_ddos_reference(payload.ddos_normal_reference, request)
         requested_job = build_job(payload)
+        if binding is not None:
+            requested_job["ddos_request_binding"] = binding
+        bind_ddos_reference(requested_job, reference_snapshot)
         requested_job["payload_signatures"] = payload_signature_snapshot()
         requested_job["allowlist"] = allowlist_snapshot()
         job, created = repo.create_job(requested_job)
         if not created:
+            check_reference_replay(job, reference_snapshot)
+            check_request_replay(job, binding, payload.ddos_normal_reference)
             return _public_job(job)
         if payload.flow_records:
             job = execute_analysis(job)
@@ -3113,7 +3264,18 @@ def create_app(
         return _public_job(job)
 
     @app.post("/api/v1/pcap-analysis-jobs/initiate", status_code=201)
-    def initiate_pcap_analysis_job(payload: PcapAnalysisJobCreate) -> dict[str, Any]:
+    def initiate_pcap_analysis_job(
+        payload: PcapAnalysisJobCreate, request: Request
+    ) -> dict[str, Any]:
+        binding = (
+            request_binding("initiate", job_request_intent(payload, inherit_detector_weights=False))
+            if payload.analysis_module == "ddos_attack"
+            else None
+        )
+        replay = replay_request(payload.idempotency_key, binding, payload.ddos_normal_reference)
+        if replay is not None:
+            return replay
+        reference_snapshot = selected_ddos_reference(payload.ddos_normal_reference, request)
         now = datetime.now(UTC)
         analysis = payload.analysis.model_dump(mode="json")
         if (
@@ -3140,6 +3302,9 @@ def create_app(
             }
         )
         job = build_job(requested)
+        if binding is not None:
+            job["ddos_request_binding"] = binding
+        bind_ddos_reference(job, reference_snapshot)
         job["payload_signatures"] = payload_signature_snapshot()
         job["allowlist"] = allowlist_snapshot()
         job["description"] = payload.description
@@ -3152,7 +3317,10 @@ def create_app(
             "phase_started_at": now.isoformat(),
             "updated_at": now.isoformat(),
         }
-        saved, _ = repo.create_job(job)
+        saved, created = repo.create_job(job)
+        if not created:
+            check_reference_replay(saved, reference_snapshot)
+            check_request_replay(saved, binding, payload.ddos_normal_reference)
         return _public_job(saved)
 
     @app.put("/api/v1/pcap-analysis-jobs/{job_id}/capture", status_code=202)
@@ -3195,6 +3363,18 @@ def create_app(
         current = repo.get_job(job_id)
         if current is None:
             raise ApiError(404, "JOB_NOT_FOUND", "PCAP 분석 작업을 찾을 수 없습니다")
+        from c2hunter_analysis.ddos_signatures import load_reference
+
+        try:
+            reference = load_reference(current)
+        except ValueError as exc:
+            raise ApiError(
+                422, "DDOS_REFERENCE_INVALID", "정상 참조 근거를 사용할 수 없습니다"
+            ) from exc
+        if reference is not None and reference["reference"]["dataset_id"] == f"pcap:{digest}":
+            raise ApiError(
+                422, "DDOS_REFERENCE_SAME_DATASET", "별도 정상 참조 데이터셋이 필요합니다"
+            )
         source = dict(current.get("source", {}))
         if source.get("packet_bytes_retained") is True:
             if source.get("sha256") != digest or int(source.get("size_bytes", -1)) != len(content):
@@ -3299,12 +3479,31 @@ def create_app(
         ddos_reflection_port_share_threshold: float = Query(default=0.6, ge=0.5, le=1),
         ddos_reflection_min_average_packet_bytes: int = Query(default=256, ge=1, le=65535),
         ddos_overlap_window_seconds: int = Query(default=10, ge=1, le=300),
+        ddos_normal_reference_job_id: str | None = Query(
+            default=None, min_length=1, max_length=200
+        ),
+        ddos_normal_reference_dataset_id: str | None = Query(
+            default=None, min_length=1, max_length=200
+        ),
     ) -> dict[str, Any]:
+        selection = None
+        if ddos_normal_reference_job_id is not None or ddos_normal_reference_dataset_id is not None:
+            if (
+                analysis_module != "ddos_attack"
+                or ddos_normal_reference_job_id is None
+                or ddos_normal_reference_dataset_id is None
+            ):
+                raise ApiError(
+                    422,
+                    "INVALID_DDOS_REFERENCE_SELECTION",
+                    "DDoS 참조 작업과 데이터셋 ID가 필요합니다",
+                )
+            selection = DDoSNormalReference(
+                job_id=ddos_normal_reference_job_id, dataset_id=ddos_normal_reference_dataset_id
+            )
         try:
             if detector_weights is None:
-                normalized_detector_weights = (
-                    default_detector_weights() or AnalysisParameters().detector_weights
-                )
+                normalized_detector_weights = AnalysisParameters().detector_weights
             else:
                 raw_detector_weights = json.loads(detector_weights)
                 normalized_detector_weights = AnalysisParameters(
@@ -3365,6 +3564,74 @@ def create_app(
             raise ApiError(422, "INVALID_FILENAME", "PCAP 파일명이 유효하지 않습니다")
         cidrs = [value.strip() for value in internal_networks.split(",") if value.strip()]
         digest = hashlib.sha256(uploaded_bytes).hexdigest()
+        analysis_parameters = {
+            "profile": "ddos_botnet",
+            "module": analysis_module,
+            "minimum_candidate_score": minimum_candidate_score,
+            "minimum_distinct_clients": minimum_distinct_clients,
+            "periodicity_min_samples": periodicity_min_samples,
+            "detector_weights": normalized_detector_weights,
+            "ml_anomaly_enabled": ml_anomaly_enabled,
+            "ml_anomaly_allow_standalone": ml_anomaly_allow_standalone,
+            "ml_anomaly_min_population": ml_anomaly_min_population,
+            "ml_anomaly_min_candidate_samples": ml_anomaly_min_candidate_samples,
+            "ml_anomaly_z_threshold": ml_anomaly_z_threshold,
+            "ml_anomaly_feature_z_floor": ml_anomaly_feature_z_floor,
+            "ml_anomaly_min_directional_features": ml_anomaly_min_directional_features,
+            "ml_anomaly_contribution_cap": ml_anomaly_contribution_cap,
+            "ddos_min_source_count": ddos_min_source_count,
+            "ddos_min_packet_count": ddos_min_packet_count,
+            "ddos_min_packets_per_second": ddos_min_packets_per_second,
+            "ddos_min_bits_per_second": ddos_min_bits_per_second,
+            "ddos_bucket_seconds": ddos_bucket_seconds,
+            "ddos_min_duration_seconds": ddos_min_duration_seconds,
+            "ddos_baseline_min_buckets": ddos_baseline_min_buckets,
+            "ddos_baseline_ratio": ddos_baseline_ratio,
+            "ddos_mad_z_threshold": ddos_mad_z_threshold,
+            "ddos_protocol_share_threshold": ddos_protocol_share_threshold,
+            "ddos_tcp_flag_share_threshold": ddos_tcp_flag_share_threshold,
+            "ddos_response_ratio_max": ddos_response_ratio_max,
+            "ddos_reflection_port_share_threshold": ddos_reflection_port_share_threshold,
+            "ddos_reflection_min_average_packet_bytes": (ddos_reflection_min_average_packet_bytes),
+            "ddos_overlap_window_seconds": ddos_overlap_window_seconds,
+        }
+        binding = None
+        if analysis_module == "ddos_attack":
+            try:
+                intent_payload = PcapAnalysisJobCreate.model_validate(
+                    {
+                        "name": normalized_name,
+                        "filename": safe_filename,
+                        "description": description,
+                        "idempotency_key": idempotency_key or "pcap-upload",
+                        "analysis_module": analysis_module,
+                        "analysis": analysis_parameters,
+                        "internal_networks": cidrs,
+                        "ddos_normal_reference": selection,
+                    }
+                )
+            except ValidationError as exc:
+                raise ApiError(
+                    422, "INVALID_PCAP_ANALYSIS_PARAMETER", "PCAP 분석 설정이 유효하지 않습니다"
+                ) from exc
+            cidrs = intent_payload.internal_networks
+            binding = request_binding(
+                "binary",
+                {
+                    **job_request_intent(
+                        intent_payload, inherit_detector_weights=detector_weights is None
+                    ),
+                    "capture_sha256": digest,
+                },
+            )
+        replay = replay_request(idempotency_key, binding, selection)
+        if replay is not None:
+            return replay
+        if detector_weights is None:
+            analysis_parameters["detector_weights"] = (
+                default_detector_weights() or normalized_detector_weights
+            )
+        reference_snapshot = selected_ddos_reference(selection, request)
         sensor_id = f"pcap-upload:{digest[:12]}"
         try:
             parsed = await run_in_threadpool(
@@ -3396,44 +3663,22 @@ def create_app(
                     "directions": ["INBOUND", "OUTBOUND", "UNKNOWN"],
                     "store_pcap": True,
                 },
-                "analysis": {
-                    "profile": "ddos_botnet",
-                    "module": analysis_module,
-                    "minimum_candidate_score": minimum_candidate_score,
-                    "minimum_distinct_clients": minimum_distinct_clients,
-                    "periodicity_min_samples": periodicity_min_samples,
-                    "detector_weights": normalized_detector_weights,
-                    "ml_anomaly_enabled": ml_anomaly_enabled,
-                    "ml_anomaly_allow_standalone": ml_anomaly_allow_standalone,
-                    "ml_anomaly_min_population": ml_anomaly_min_population,
-                    "ml_anomaly_min_candidate_samples": ml_anomaly_min_candidate_samples,
-                    "ml_anomaly_z_threshold": ml_anomaly_z_threshold,
-                    "ml_anomaly_feature_z_floor": ml_anomaly_feature_z_floor,
-                    "ml_anomaly_min_directional_features": ml_anomaly_min_directional_features,
-                    "ml_anomaly_contribution_cap": ml_anomaly_contribution_cap,
-                    "ddos_min_source_count": ddos_min_source_count,
-                    "ddos_min_packet_count": ddos_min_packet_count,
-                    "ddos_min_packets_per_second": ddos_min_packets_per_second,
-                    "ddos_min_bits_per_second": ddos_min_bits_per_second,
-                    "ddos_bucket_seconds": ddos_bucket_seconds,
-                    "ddos_min_duration_seconds": ddos_min_duration_seconds,
-                    "ddos_baseline_min_buckets": ddos_baseline_min_buckets,
-                    "ddos_baseline_ratio": ddos_baseline_ratio,
-                    "ddos_mad_z_threshold": ddos_mad_z_threshold,
-                    "ddos_protocol_share_threshold": ddos_protocol_share_threshold,
-                    "ddos_tcp_flag_share_threshold": ddos_tcp_flag_share_threshold,
-                    "ddos_response_ratio_max": ddos_response_ratio_max,
-                    "ddos_reflection_port_share_threshold": ddos_reflection_port_share_threshold,
-                    "ddos_reflection_min_average_packet_bytes": (
-                        ddos_reflection_min_average_packet_bytes
-                    ),
-                    "ddos_overlap_window_seconds": ddos_overlap_window_seconds,
-                },
+                "analysis": analysis_parameters,
                 "internal_networks": cidrs,
                 "flow_records": list(parsed.records),
             }
         )
+        if (
+            reference_snapshot is not None
+            and reference_snapshot["reference"]["dataset_id"] == f"pcap:{digest}"
+        ):
+            raise ApiError(
+                422, "DDOS_REFERENCE_SAME_DATASET", "별도 정상 참조 데이터셋이 필요합니다"
+            )
         job = build_job(payload, dataset_id=f"pcap:{digest}")
+        if binding is not None:
+            job["ddos_request_binding"] = binding
+        bind_ddos_reference(job, reference_snapshot)
         job["payload_signatures"] = payload_signature_snapshot()
         job["allowlist"] = allowlist_snapshot()
         job["description"] = description
@@ -3451,6 +3696,8 @@ def create_app(
         attach_ddos_coverage_context(job)
         job, created = repo.create_job(job)
         if not created:
+            check_reference_replay(job, reference_snapshot)
+            check_request_replay(job, binding, selection)
             return _public_job(job)
         try:
             repo.save_job_capture(job["id"], uploaded_bytes)
@@ -4352,7 +4599,24 @@ def create_app(
         raise ApiError(409, "INVALID_JOB_STATE", "작업 상태가 이미 종료되었습니다")
 
     @app.post("/api/v1/analysis-jobs/{job_id}/reanalyze", status_code=201)
-    def reanalyze(job_id: str, payload: ReanalysisRequest) -> dict[str, Any]:
+    def reanalyze(job_id: str, payload: ReanalysisRequest, http_request: Request) -> dict[str, Any]:
+        inherit_reference = "ddos_normal_reference" not in payload.model_fields_set
+        binding = request_binding(
+            "reanalyze",
+            {
+                "parent_job_id": job_id,
+                "inherit_reference": inherit_reference,
+                "payload": payload.model_dump(mode="json"),
+            },
+        )
+        replay = replay_request(
+            payload.idempotency_key,
+            binding,
+            payload.ddos_normal_reference,
+            inherit_reference=inherit_reference,
+        )
+        if replay is not None:
+            return replay
         source = repo.get_job(job_id)
         if source is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
@@ -4424,6 +4688,17 @@ def create_app(
                     parameters[field] = value
             if payload.detector_weights is not None:
                 parameters["detector_weights"] = payload.detector_weights
+        from c2hunter_analysis.ddos_signatures import load_reference
+
+        reference_snapshot = load_reference(source)
+        if "ddos_normal_reference" in payload.model_fields_set:
+            if module != "ddos_attack":
+                raise ApiError(
+                    422, "INVALID_C2_REANALYSIS_PARAMETER", "정상 참조는 DDoS 전용입니다"
+                )
+            reference_snapshot = selected_ddos_reference(
+                payload.ddos_normal_reference, http_request, source
+            )
         request = AnalysisJobCreate.model_validate(
             {
                 "name": f"{source['name']}-reanalyze",
@@ -4439,11 +4714,24 @@ def create_app(
             }
         )
         reanalysis_job = build_job(request, parent_job_id=job_id, dataset_id=source["dataset_id"])
+        if module == "ddos_attack":
+            reanalysis_job["ddos_request_binding"] = binding
+        bind_ddos_reference(reanalysis_job, reference_snapshot)
         reanalysis_job["payload_signatures"] = payload_signature_snapshot()
         reanalysis_job["allowlist"] = allowlist_snapshot()
         reanalysis_job["source_type"] = source.get("source_type", "SENSOR_CAPTURE")
         if source.get("source"):
             reanalysis_job["source"] = dict(source["source"])
+        for quality_key in (
+            "capture_quality",
+            "capture_limit",
+            "capture_incomplete",
+            "ddos_coverage_context",
+        ):
+            if quality_key in source:
+                reanalysis_job[quality_key] = deepcopy(source[quality_key])
+        if source.get("error_code") == "LIVE_CAPTURE_RESTART_INCOMPLETE":
+            reanalysis_job["capture_incomplete"] = True
         if module == "ddos_attack":
             source_coverage = dict(source)
             attach_ddos_coverage_context(source_coverage)
@@ -4451,6 +4739,10 @@ def create_app(
         attach_ddos_coverage_context(reanalysis_job)
         job, created = repo.create_job(reanalysis_job)
         if not created:
+            check_reference_replay(job, reference_snapshot)
+            check_request_replay(
+                job, binding, payload.ddos_normal_reference, inherit_reference=inherit_reference
+            )
             return _public_job(job)
         if not config.inline_flow_records_enabled:
             for state, reason in (

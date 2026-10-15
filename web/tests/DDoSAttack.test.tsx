@@ -1,5 +1,4 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -26,6 +25,7 @@ const asV1 = (source: DDoSAttackReport): DDoSAttackReport => {
   const legacy = structuredClone(source);
   legacy.version = 'ddos-attack-report-v1';
   legacy.catalog_version = 'ddos-taxonomy-v1';
+  delete legacy.normal_reference;
   for (const finding of legacy.findings) {
     delete finding.classification;
     delete finding.common_patterns;
@@ -38,7 +38,7 @@ const asV1 = (source: DDoSAttackReport): DDoSAttackReport => {
 it('freezes deterministic bytes from the real DDoS producer', () => {
   expect(produce()).toBe(contractBytes);
   expect(produce()).toBe(contractBytes);
-  expect(report.version).toBe('ddos-attack-report-v3');
+  expect(report.version).toBe('ddos-attack-report-v4');
 });
 
 it('round-trips every attack family role and coverage outcome through the strict UI parser', () => {
@@ -287,21 +287,7 @@ it('preserves finite measured numeric facts without three-digit rounding', () =>
 });
 
 it('keeps the maximum report paged under a global DOM ceiling with one evidence owner', () => {
-  const maximum = structuredClone(report);
-  maximum.findings = Array.from({ length: 100 }, (_, index) => {
-    const item = structuredClone(report.findings[0]);
-    item.target.ip = `10.0.1.${index + 1}`;
-    const identity = `${item.attack_role}|${item.target.ip}|${item.target.port}|${item.protocol}|${item.attack_type}`;
-    item.id = `ddos-${createHash('sha256').update(identity).digest('hex').slice(0, 16)}`;
-    return item;
-  });
-  maximum.primary_finding_id = maximum.findings[0].id;
-  maximum.summary.target_count = 100;
-  maximum.summary.finding_count = 100;
-  maximum.summary.displayed_finding_count = 100;
-  maximum.summary.packet_count = Number(report.findings[0].metrics.packet_count) * 100;
-  maximum.summary.byte_count = Number(report.findings[0].metrics.byte_count) * 100;
-  maximum.omitted_finding_count = 0;
+  const maximum = JSON.parse(execFileSync(python, ['tests/ddos_maximum_fixture.py'], { encoding: 'utf8', maxBuffer: 2 * 1024 * 1024 }));
   render(<DDoSAttackPanel report={maximum}/>);
   expect(document.querySelectorAll('*').length).toBeLessThan(500);
   fireEvent.click(screen.getAllByRole('button', { name: /상세 근거 보기/ })[0]);
@@ -384,7 +370,7 @@ it('retains all frozen v2 report interpretations and refuses v3 reason mutations
     unmount();
   }
   const mutations: Array<(v: DDoSAttackReport) => void> = [
-    v => { v.version = 'ddos-attack-report-v4'; },
+    v => { v.version = 'ddos-attack-report-v5'; },
     v => { v.findings[0].classification!.evidence!.amplification_ratio = 0; },
     v => { v.findings[0].classification!.evidence!.sample_count = true; },
     v => { v.findings[0].classification!.evidence!.unknown_field = 0; },

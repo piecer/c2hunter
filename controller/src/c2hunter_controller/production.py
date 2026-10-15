@@ -4364,6 +4364,23 @@ ORDER BY source_kind,source_id
                 self.connection.rollback()
                 raise
 
+    def read_ddos_reference(self, job_id: str, dataset_id: str) -> dict[str, Any]:
+        from psycopg.pq import TransactionStatus
+
+        from .ddos_reference import ReferenceError, postgres_read
+
+        with self._lock:
+            connection = self.connection
+            if (
+                connection.info.transaction_status != TransactionStatus.IDLE
+                or connection.autocommit
+            ):
+                raise ReferenceError("DDOS_REFERENCE_BUSY")
+            with self._shared_cursor() as cursor:
+                cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                cursor.execute("SET LOCAL statement_timeout='5s'")
+                return postgres_read(cursor, job_id, dataset_id)
+
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
             job = self.get_job_summary(job_id)
@@ -4381,6 +4398,18 @@ ORDER BY source_kind,source_id
                         value if isinstance(value, list) else json.loads(value)
                     )
                 return job
+
+    def get_job_by_idempotency(self, key: str) -> dict[str, Any] | None:
+        with self._shared_cursor() as cursor:
+            cursor.execute(
+                "SELECT o.data FROM job_idempotency i JOIN controller_objects o ON o.id=i.job_id "
+                "AND o.kind='job' WHERE i.idempotency_key=%s",
+                (key,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return row[0] if isinstance(row[0], dict) else json.loads(row[0])
 
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None:
         return self._get("job", job_id)

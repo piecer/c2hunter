@@ -11,6 +11,7 @@ from typing import Any, Literal
 from c2hunter_analysis.scoring import DEFAULT_DETECTOR_WEIGHTS, MAX_DETECTOR_WEIGHT
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .ddos_signature_schema import Reference, SignatureEvaluation, SignatureReportContext
 from .network_ai import NetworkFailureDiagnostic
 
 
@@ -691,6 +692,35 @@ class DDoSSignatureCandidate(BaseModel):
         return value
 
 
+class DDoSSignatureCandidateV4(DDoSSignatureCandidate):
+    evaluation: SignatureEvaluation
+
+    @field_validator("requires_human_approval", mode="before")
+    @classmethod
+    def approval_boolean(cls, value: object) -> object:
+        if value is not True:
+            raise ValueError("human approval must be the JSON boolean true")
+        return value
+
+    @model_validator(mode="after")
+    def evaluated(self) -> DDoSSignatureCandidateV4:
+        from c2hunter_analysis.ddos_signatures import FLAG_CONDITIONS, digest
+
+        predicate = self.evaluation.predicate
+        if (
+            self.confidence != "low"
+            or self.packet_size_range is not None
+            or self.payload_prefix_hashes
+            or self.protocol != predicate.protocol
+            or predicate.tcp_flags != FLAG_CONDITIONS.get(self.tcp_flag_profile or "")
+            or self.source_ports != (predicate.source_ports or [])
+            or self.destination_ports != (predicate.destination_ports or [])
+            or self.id != "ddos-sig-" + digest(predicate.model_dump())[:16]
+        ):
+            raise ValueError("evaluated signature projection disagrees")
+        return self
+
+
 class DDoSMetrics(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -767,7 +797,9 @@ class DDoSFinding(BaseModel):
     recommendation_codes: list[str] = Field(max_length=8)
     classification: DDoSClassificationV3 | DDoSClassification | None = None
     common_patterns: list[DDoSCommonPattern] = Field(default_factory=list, max_length=8)
-    signature_candidates: list[DDoSSignatureCandidate] = Field(default_factory=list, max_length=4)
+    signature_candidates: list[DDoSSignatureCandidateV4 | DDoSSignatureCandidate] = Field(
+        default_factory=list, max_length=4
+    )
 
     @model_validator(mode="after")
     def ordered_time(self) -> DDoSFinding:
@@ -1167,13 +1199,21 @@ class DDoSSummary(BaseModel):
 
 class DDoSAttackReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    version: Literal["ddos-attack-report-v1", "ddos-attack-report-v2", "ddos-attack-report-v3"]
-    catalog_version: Literal["ddos-taxonomy-v1", "ddos-taxonomy-v2", "ddos-taxonomy-v3"]
+    version: Literal[
+        "ddos-attack-report-v1",
+        "ddos-attack-report-v2",
+        "ddos-attack-report-v3",
+        "ddos-attack-report-v4",
+    ]
+    catalog_version: Literal[
+        "ddos-taxonomy-v1", "ddos-taxonomy-v2", "ddos-taxonomy-v3", "ddos-taxonomy-v4"
+    ]
     verdict: Literal[
         "attack_likely", "suspicious_traffic", "no_clear_attack", "insufficient_evidence"
     ]
     confidence: Literal["high", "medium", "low", "unknown"]
     primary_finding_id: str | None
+    normal_reference: Reference | None = None
     summary: DDoSSummary
     findings: list[DDoSFinding] = Field(max_length=100)
     recommendations: list[DDoSRecommendation] = Field(max_length=100)
@@ -1283,7 +1323,18 @@ class DDoSAttackReport(BaseModel):
         expected_catalog = self.version.replace("attack-report", "taxonomy")
         if self.catalog_version != expected_catalog:
             raise ValueError("DDoS report and taxonomy versions are inconsistent")
+        if (self.version == "ddos-attack-report-v4") != (
+            "normal_reference" in self.model_fields_set
+        ):
+            raise ValueError("DDoS report reference version mismatch")
         phase_fields = {"classification", "common_patterns", "signature_candidates"}
+        signature_context = (
+            SignatureReportContext(
+                self.summary.evaluated_records, self.summary.packet_count, self.normal_reference
+            )
+            if self.version == "ddos-attack-report-v4"
+            else None
+        )
         for finding in self.findings:
             if (
                 isinstance(finding.classification, DDoSClassificationV3)
@@ -1292,11 +1343,31 @@ class DDoSAttackReport(BaseModel):
             ):
                 raise ValueError("DDoS axis coverage disagrees with report")
             present = phase_fields & finding.model_fields_set
-            if (self.version == "ddos-attack-report-v3") != isinstance(
+            if (self.version in {"ddos-attack-report-v3", "ddos-attack-report-v4"}) != isinstance(
                 finding.classification, DDoSClassificationV3
             ):
                 raise ValueError("DDoS classification version mismatch")
-            if self.version in {"ddos-attack-report-v2", "ddos-attack-report-v3"}:
+            for signature in finding.signature_candidates:
+                if (self.version == "ddos-attack-report-v4") != isinstance(
+                    signature, DDoSSignatureCandidateV4
+                ):
+                    raise ValueError("DDoS signature version mismatch")
+                if isinstance(signature, DDoSSignatureCandidateV4):
+                    if signature_context is None:
+                        raise ValueError("DDoS signature context missing")
+                    signature_context.accept(
+                        signature.evaluation,
+                        target_ip=finding.target.ip,
+                        target_port=finding.target.port,
+                        role=finding.attack_role,
+                        attack_type=finding.attack_type,
+                        protocol=finding.protocol,
+                    )
+            if self.version in {
+                "ddos-attack-report-v2",
+                "ddos-attack-report-v3",
+                "ddos-attack-report-v4",
+            }:
                 if present != phase_fields or finding.classification is None:
                     raise ValueError("DDoS v2 finding is missing classification or patterns")
                 if not finding.common_patterns or not finding.signature_candidates:
@@ -1693,6 +1764,12 @@ class FlowBatchCreate(BaseModel):
         return self
 
 
+class DDoSNormalReference(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    job_id: str = Field(min_length=1, max_length=200)
+    dataset_id: str = Field(min_length=1, max_length=200)
+
+
 class AnalysisJobCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=200)
@@ -1706,6 +1783,7 @@ class AnalysisJobCreate(BaseModel):
     analysis: AnalysisParameters
     internal_networks: list[str] = Field(min_length=1, max_length=256)
     flow_records: list[FlowRecord] = Field(default_factory=list)
+    ddos_normal_reference: DDoSNormalReference | None = None
 
     @field_validator("internal_networks")
     @classmethod
@@ -1719,6 +1797,11 @@ class AnalysisJobCreate(BaseModel):
 
     @model_validator(mode="after")
     def valid_range(self) -> AnalysisJobCreate:
+        if (
+            "ddos_normal_reference" in self.model_fields_set
+            and self.analysis.module != "ddos_attack"
+        ):
+            raise ValueError("normal references are DDoS-only")
         if self.end_time <= self.start_time:
             raise ValueError("end_time must be after start_time")
         if len(self.sensor_ids) != len(set(self.sensor_ids)):
@@ -1737,6 +1820,7 @@ class PcapAnalysisJobCreate(BaseModel):
     analysis_module: Literal["c2", "network_anomaly", "ddos_attack"] = "c2"
     internal_networks: list[str] = Field(min_length=1, max_length=256)
     analysis: AnalysisParameters = Field(default_factory=AnalysisParameters)
+    ddos_normal_reference: DDoSNormalReference | None = None
 
     @field_validator("name", "filename")
     @classmethod
@@ -1766,6 +1850,11 @@ class PcapAnalysisJobCreate(BaseModel):
 
     @model_validator(mode="after")
     def matching_analysis_module(self) -> PcapAnalysisJobCreate:
+        if (
+            "ddos_normal_reference" in self.model_fields_set
+            and self.analysis_module != "ddos_attack"
+        ):
+            raise ValueError("normal references are DDoS-only")
         if self.analysis.module != self.analysis_module:
             raise ValueError("analysis module does not match analysis parameters")
         return self
@@ -1809,6 +1898,7 @@ class CancelRequest(BaseModel):
 
 class ReanalysisRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    ddos_normal_reference: DDoSNormalReference | None = None
     idempotency_key: str = Field(min_length=1, max_length=200)
     minimum_candidate_score: int | None = Field(default=None, ge=0, le=100)
     minimum_distinct_clients: int | None = Field(default=None, ge=2)

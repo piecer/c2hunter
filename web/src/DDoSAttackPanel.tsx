@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useState } from 'react';
 import ReportLanguageScope from './ReportLanguage';
+import { type Evaluation, validEvaluation, canonicalPredicate, validFlagProfile, validReference } from './ddosSignatures';
 import { type Axis, type AxisEvidence, axisNames, axisReasons, validV3Classification } from './ddosEvidence';
 import { useReportLanguage } from './reportLanguageContext';
 import {
@@ -23,6 +24,7 @@ export type DDoSCommonPattern = {
 export type DDoSSignatureCandidate = {
   id: string; kind: string; protocol: string; source_ports: number[]; destination_ports: number[];
   packet_size_range: [number, number] | null; payload_prefix_hashes: string[];
+  evaluation?: Evaluation;
   tcp_flag_profile: string | null; confidence: string; false_positive_codes: string[];
   requires_human_approval: boolean;
 };
@@ -39,6 +41,7 @@ export type DDoSAttackReport = {
   primary_finding_id: string | null; summary: Record<string, unknown>; findings: DDoSFinding[];
   recommendations: DDoSRecommendation[]; warnings: string[]; limitations: string[];
   omitted_finding_count: number;
+  normal_reference?: Evaluation['normal']['reference'];
 };
 
 const evidenceCodes = new Set(['VOLUME_GATE_MET', 'DISTRIBUTED_SOURCE_GATE_MET', 'OVERLAPPING_ATTACK_VECTORS']);
@@ -51,7 +54,7 @@ const onlyKeys = (value: Record<string, unknown>, allowed: readonly string[]) =>
 const knownArray = (value: unknown, registry: Record<string, unknown>, maximum: number) => Array.isArray(value)
   && value.length <= maximum && value.every(code => typeof code === 'string' && Object.hasOwn(registry, code));
 const timestamps = (value: unknown) => typeof value === 'string' && value.length <= 40 && Number.isFinite(Date.parse(value));
-const reportKeys = ['version', 'catalog_version', 'verdict', 'confidence', 'primary_finding_id', 'summary', 'findings', 'recommendations', 'warnings', 'limitations', 'omitted_finding_count'] as const;
+const reportKeys = ['version', 'catalog_version', 'verdict', 'confidence', 'primary_finding_id', 'summary', 'findings', 'recommendations', 'warnings', 'limitations', 'omitted_finding_count', 'normal_reference'] as const;
 const findingKeysV1 = ['id', 'attack_type', 'attack_role', 'target', 'protocol', 'objective', 'likelihood', 'severity', 'confidence', 'first_seen', 'last_seen', 'metrics', 'evidence_codes', 'uncertainty_codes', 'recommendation_codes'] as const;
 const findingKeysV2 = [...findingKeysV1, 'classification', 'common_patterns', 'signature_candidates'] as const;
 const classificationKeys = ['delivery_mechanism', 'source_population', 'source_authenticity', 'confidence'] as const;
@@ -152,9 +155,16 @@ function validPorts(value: unknown): value is number[] {
   return Array.isArray(value) && value.length <= 16
     && value.every(port => safeInteger(port) && port <= 65_535);
 }
-function validSignatures(value: unknown): value is DDoSSignatureCandidate[] {
+function validSignatures(value: unknown, v4 = false): value is DDoSSignatureCandidate[] {
   return Array.isArray(value) && value.length <= 4 && value.every(item => plain(item)
-    && onlyKeys(item, signatureKeys) && /^ddos-sig-[0-9a-f]{16}$/.test(String(item.id))
+    && onlyKeys(item, v4 ? [...signatureKeys, 'evaluation'] : signatureKeys)
+    && (!v4 || validEvaluation(item.evaluation) && item.confidence === 'low'
+      && item.packet_size_range === null && Array.isArray(item.payload_prefix_hashes) && !item.payload_prefix_hashes.length
+      && item.protocol === item.evaluation.predicate.protocol
+      && validFlagProfile(item.tcp_flag_profile, item.evaluation.predicate.tcp_flags)
+      && JSON.stringify(item.source_ports) === JSON.stringify(item.evaluation.predicate.source_ports ?? [])
+      && JSON.stringify(item.destination_ports) === JSON.stringify(item.evaluation.predicate.destination_ports ?? [])
+      && item.id === `ddos-sig-${sha256(canonicalPredicate(item.evaluation.predicate)).slice(0, 16)}`) && /^ddos-sig-[0-9a-f]{16}$/.test(String(item.id))
     && Object.hasOwn(signatureKinds, String(item.kind)) && ['TCP', 'UDP', 'ICMP', 'ICMPV6', 'MULTIPLE'].includes(String(item.protocol))
     && validPorts(item.source_ports) && validPorts(item.destination_ports)
     && (item.packet_size_range === null || Array.isArray(item.packet_size_range)
@@ -187,11 +197,13 @@ function validMetrics(value: unknown): boolean {
 function isDDoSAttackReport(value: unknown): value is DDoSAttackReport {
   if (!plain(value) || !onlyKeys(value, reportKeys)) return false;
   const report = value as unknown as DDoSAttackReport;
-  const v3 = report.version === 'ddos-attack-report-v3' && report.catalog_version === 'ddos-taxonomy-v3';
+  const v4 = report.version === 'ddos-attack-report-v4' && report.catalog_version === 'ddos-taxonomy-v4';
+  const v3 = v4 || report.version === 'ddos-attack-report-v3' && report.catalog_version === 'ddos-taxonomy-v3';
   const v2 = report.version === 'ddos-attack-report-v2' && report.catalog_version === 'ddos-taxonomy-v2';
   const modern = v2 || v3;
   const v1 = report.version === 'ddos-attack-report-v1' && report.catalog_version === 'ddos-taxonomy-v1';
   if (!v1 && !modern) return false;
+  if (v4 !== Object.hasOwn(report, 'normal_reference') || v4 && !validReference(report.normal_reference)) return false;
   if (!['attack_likely', 'suspicious_traffic', 'no_clear_attack', 'insufficient_evidence'].includes(report.verdict)
     || !['high', 'medium', 'low', 'unknown'].includes(report.confidence)) return false;
   if (!plain(report.summary) || !onlyKeys(report.summary, summaryKeys)) return false;
@@ -216,7 +228,11 @@ function isDDoSAttackReport(value: unknown): value is DDoSAttackReport {
   const ids = new Set<string>();
   if (!report.findings.every(item => plain(item) && onlyKeys(item, modern ? findingKeysV2 : findingKeysV1)
     && (!modern || (v3 ? validV3Classification(item.classification) : validClassification(item.classification))
-      && validCommonPatterns(item.common_patterns) && validSignatures(item.signature_candidates))
+      && validCommonPatterns(item.common_patterns) && validSignatures(item.signature_candidates, v4)
+      && (!v4 || item.signature_candidates!.every(s => s.evaluation!.predicate.target_ip === item.target?.ip
+        && s.evaluation!.predicate.direction === (item.attack_role === 'VICTIM_SIDE_INBOUND' ? 'INBOUND' : 'OUTBOUND')
+        && (item.attack_type === 'MULTI_VECTOR' || s.evaluation!.predicate.protocol === item.protocol
+          && JSON.stringify(s.evaluation!.predicate.destination_ports) === JSON.stringify(item.target?.port === null ? null : [item.target?.port])))))
     && /^ddos-[0-9a-f]{16}$/.test(item.id) && !ids.has(item.id) && Boolean(ids.add(item.id))
     && Object.hasOwn(attackTypes, item.attack_type) && Object.hasOwn(roles, item.attack_role)
     && Object.hasOwn(objectives, item.objective) && ['TCP', 'UDP', 'ICMP', 'ICMPV6', 'MULTIPLE'].includes(item.protocol)
@@ -229,6 +245,21 @@ function isDDoSAttackReport(value: unknown): value is DDoSAttackReport {
     && timestamps(item.first_seen) && timestamps(item.last_seen) && Date.parse(item.first_seen) <= Date.parse(item.last_seen)
     && validMetrics(item.metrics) && Array.isArray(item.evidence_codes) && item.evidence_codes.length <= 8 && item.evidence_codes.every(evidenceKnown)
     && knownArray(item.uncertainty_codes, uncertainties, 8) && knownArray(item.recommendation_codes, recommendations, 8))) return false;
+  if (v4) {
+    let sample: string | undefined;
+    for (const finding of report.findings) for (const signature of finding.signature_candidates!) {
+      if (canonicalPredicate(signature.evaluation!.normal.reference) !== canonicalPredicate(report.normal_reference)) return false;
+      const a = signature.evaluation!.attack;
+      const packets = a.eligible_packets + a.unknown_packets;
+      if (a.sampled_records + a.omitted_records !== report.summary.evaluated_records
+        || packets > Number(report.summary.packet_count)
+        || Number(report.summary.packet_count) - packets < a.omitted_records
+        || (a.omitted_records === 0 && packets !== report.summary.packet_count)) return false;
+      const identity = JSON.stringify([a.sampled_records, a.omitted_records, a.sample_bytes, a.evidence_digest, packets]);
+      if (sample !== undefined && sample !== identity) return false;
+      sample = identity;
+    }
+  }
   const baseMetrics = ['packet_count', 'byte_count', 'record_count', 'duration_seconds', 'average_packets_per_second', 'average_bits_per_second', 'peak_packets_per_second', 'peak_bits_per_second', 'peak_is_lower_bound', 'measurement_precision', 'baseline_packets_per_second', 'baseline_ratio', 'robust_z_score', 'distinct_sources', 'distinct_sensors', 'direction_source'];
   const identityMetrics = ['hop_limit_min', 'hop_limit_max', 'network_identity_observed_records', 'network_identity_anomaly_records', 'ip_id_observed_count', 'ip_id_distinct_count', 'ip_id_monotonic_ratio', 'network_identity_values_truncated'];
   const sampleLimited = new Set<string>();
@@ -513,7 +544,7 @@ function Content({ report, detailOwner, setDetailOwner, ownerPrefix }: {
             <div><dt>{t('Source authenticity', 'Source 진위')}</dt><dd>{choose(language, sourceAuthenticities[item.classification.source_authenticity])}</dd></div>
           </dl></>}
           {item.common_patterns && item.common_patterns.length > 0 && <><h5>{t('Common patterns', '공통 패턴')}</h5><ul>{item.common_patterns.map(pattern => <li key={pattern.id}>{choose(language, commonPatternTypes[pattern.type])} — {format(pattern.support_count, language)} {t('records', '레코드')} · {format(pattern.support_ratio, language)}{pattern.values.length ? ` · ${pattern.values.join(', ')}` : ''}</li>)}</ul></>}
-          {item.signature_candidates && item.signature_candidates.length > 0 && <><h5>{t('Signature candidates', '시그니처 후보')}</h5><ul>{item.signature_candidates.map(signature => <li key={signature.id}><strong>{choose(language, signatureKinds[signature.kind])}</strong> — {signature.protocol}{signature.destination_ports.length ? ` · dst ${signature.destination_ports.join(', ')}` : ''}{signature.packet_size_range ? ` · ${signature.packet_size_range[0]}–${signature.packet_size_range[1]} bytes` : ''}<ul>{signature.false_positive_codes.map(code => <li key={code}>{choose(language, falsePositiveCodes[code])}</li>)}</ul><small>{t('Candidate only; review and human approval are required before enforcement.', '후보일 뿐이며 적용 전 검토와 운영자 승인이 필요합니다.')}</small></li>)}</ul></>}
+          {item.signature_candidates && item.signature_candidates.length > 0 && <><h5>{t('Signature candidates', '시그니처 후보')}</h5><ul>{item.signature_candidates.map(signature => <li key={signature.id}><strong>{choose(language, signatureKinds[signature.kind])}</strong> — {signature.protocol}{signature.destination_ports.length ? ` · dst ${signature.destination_ports.join(', ')}` : ''}{signature.packet_size_range ? ` · ${signature.packet_size_range[0]}–${signature.packet_size_range[1]} bytes` : ''}{signature.evaluation && <div><p>{t('Evaluated conditions (AND):', '평가한 조건 (AND):')}</p><pre>{JSON.stringify(signature.evaluation.predicate, null, 2)}</pre><p>{t('Matched / eligible records; unknown:', '일치 / 평가 가능 레코드; 미확인:')} {signature.evaluation.attack.matched_records} / {signature.evaluation.attack.eligible_records}; {signature.evaluation.attack.unknown_records}</p><p>{t('Matched / eligible packets; unknown:', '일치 / 평가 가능 패킷; 미확인:')} {signature.evaluation.attack.matched_packets} / {signature.evaluation.attack.eligible_packets}; {signature.evaluation.attack.unknown_packets}</p><p>{t('Normal reference:', '정상 참조:')} {signature.evaluation.normal.status === 'UNMEASURED' ? t('Unmeasured, not zero false positives', '미측정 — 오탐 0이 아님') : `${signature.evaluation.normal.result!.matched_records} / ${signature.evaluation.normal.result!.eligible_records}`}</p><p>{t('Bounded retained evidence only, not a calibrated attack probability. Revalidate after dataset or topology changes and before each use. Exclude legitimate shared services and review incomplete observations.', '보존된 제한 근거이며 보정된 공격 확률이 아닙니다. 데이터·토폴로지 변경 및 매 사용 전 재검증하세요. 정상 공용 서비스와 불완전 관측을 검토하세요.')}</p><p>{t('Omitted records:', '생략 레코드:')} {signature.evaluation.attack.omitted_records}</p></div>}<ul>{signature.false_positive_codes.map(code => <li key={code}>{choose(language, falsePositiveCodes[code])}</li>)}</ul><small>{t('Candidate only; review and human approval are required before enforcement.', '후보일 뿐이며 적용 전 검토와 운영자 승인이 필요합니다.')}</small></li>)}</ul></>}
           <h5>{t('Uncertainty', '불확실성')}</h5><ul>{item.uncertainty_codes.map(code => <li key={code}>{choose(language, uncertainties[code])}</li>)}</ul>
           <h5>{t('Recommended responses', '권장 대응')}</h5><ul>{item.recommendation_codes.map(code => { const action = actionByCode.get(code)!; return <li key={code}>{choose(language, recommendations[code])} — {choose(language, recommendationScopes[action.scope])} — {choose(language, recommendationCaveats[code])} — {t('Human approval required', '운영자 승인 필요')}</li>; })}</ul>
           <p>{t('Observed time', '관찰 시각')}: {item.first_seen} → {item.last_seen}</p>

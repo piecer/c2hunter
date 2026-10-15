@@ -814,6 +814,9 @@ class Repository(Protocol):
 
     def get_job(self, job_id: str) -> dict[str, Any] | None: ...
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None: ...
+
+    def read_ddos_reference(self, job_id: str, dataset_id: str) -> dict[str, Any]: ...
+    def get_job_by_idempotency(self, key: str) -> dict[str, Any] | None: ...
     def get_job_summaries(self, job_ids: list[str]) -> dict[str, dict[str, Any]]: ...
     def list_jobs(self) -> list[dict[str, Any]]: ...
     def list_active_live_jobs(self) -> list[dict[str, Any]]: ...
@@ -3138,10 +3141,27 @@ class MemoryRepository(
             current["updated_at"] = occurred_at
             return True
 
+    def read_ddos_reference(self, job_id: str, dataset_id: str) -> dict[str, Any]:
+        from .ddos_reference import ReferenceError, eligible, projected
+
+        with self._lock:
+            value = self.jobs.get(job_id)
+            if value is None:
+                raise ReferenceError("DDOS_REFERENCE_NOT_FOUND")
+            eligible(value, job_id, dataset_id)
+            result = projected(value.get("flow_records"))
+            result["coverage_limited"] = True
+            return result
+
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
             value = self.jobs.get(job_id)
             return deepcopy(value) if value else None
+
+    def get_job_by_idempotency(self, key: str) -> dict[str, Any] | None:
+        with self._lock:
+            job_id = self.idempotency_keys.get(key)
+            return self.get_job_summary(job_id) if job_id is not None else None
 
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -5728,6 +5748,18 @@ class SQLiteRepository(
             )
             return cursor.rowcount == 1
 
+    def read_ddos_reference(self, job_id: str, dataset_id: str) -> dict[str, Any]:
+        from .ddos_reference import ReferenceError, sqlite_read
+
+        with self._lock:
+            if self.connection.in_transaction:
+                raise ReferenceError("DDOS_REFERENCE_BUSY")
+            self.connection.execute("BEGIN")
+            try:
+                return sqlite_read(self.connection, job_id, dataset_id)
+            finally:
+                self.connection.rollback()
+
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         job = self._get("job", job_id)
         if job is None:
@@ -5741,6 +5773,15 @@ class SQLiteRepository(
         ).fetchone()
         job["payload_signatures"] = json.loads(row[0]) if row else []
         return job
+
+    def get_job_by_idempotency(self, key: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT o.data FROM idempotency i JOIN objects o ON o.id=i.job_id "
+                "AND o.kind='job' WHERE i.key=?",
+                (key,),
+            ).fetchone()
+            return json.loads(row[0]) if row is not None else None
 
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None:
         return self._get("job", job_id)

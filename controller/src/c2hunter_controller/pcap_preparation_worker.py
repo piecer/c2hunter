@@ -7,6 +7,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
+from c2hunter_analysis.ddos_signatures import load_reference
 from c2hunter_analysis.pcap import PcapParseError, parse_pcap
 
 from .jobs import JobState, StateMachine
@@ -144,6 +145,8 @@ class PcapPreparationWorker:
             if lease_lost.is_set():
                 return True
             self._apply_parsed_capture(job, parsed, digest=digest, sensor_id=sensor_id)
+            if not self._valid_reference(job, attempt=attempt, lease_token=lease_token):
+                return True
             self.machine.transition(job, JobState.ANALYZING, "prepared upload awaiting queue")
             occurred_at = datetime.now(UTC).isoformat()
             processing = dict(job["processing"])
@@ -236,6 +239,8 @@ class PcapPreparationWorker:
     ) -> bool:
         if lease_lost.is_set():
             return True
+        if not self._valid_reference(job, attempt=attempt, lease_token=lease_token):
+            return True
         queued = deepcopy(job)
         occurred_at = datetime.now(UTC).isoformat()
         processing = dict(queued["processing"])
@@ -262,6 +267,20 @@ class PcapPreparationWorker:
         )
         return True
 
+    def _valid_reference(self, job: dict[str, Any], *, attempt: int, lease_token: str) -> bool:
+        try:
+            load_reference(job)
+        except ValueError:
+            self._fail(
+                job,
+                "DDOS_REFERENCE_INVALID",
+                "normal reference binding is invalid",
+                attempt=attempt,
+                lease_token=lease_token,
+            )
+            return False
+        return True
+
     def _fail(
         self,
         job: dict[str, Any],
@@ -271,6 +290,7 @@ class PcapPreparationWorker:
         attempt: int,
         lease_token: str,
     ) -> None:
+        enqueued_phase = job.get("processing", {}).get("phase") == "ANALYSIS_ENQUEUE_PENDING"
         job["error_code"] = code
         job["error"] = message
         self.machine.transition(job, JobState.FAILED, message)
@@ -280,4 +300,9 @@ class PcapPreparationWorker:
             "phase_started_at": occurred_at,
             "updated_at": occurred_at,
         }
-        self.repository.fail_pcap_preparation(job, attempt=attempt, lease_token=lease_token)
+        publish = (
+            self.repository.complete_pcap_preparation
+            if enqueued_phase
+            else self.repository.fail_pcap_preparation
+        )
+        publish(job, attempt=attempt, lease_token=lease_token)

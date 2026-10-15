@@ -108,7 +108,7 @@ def test_inline_ddos_analysis_persists_independent_report_without_candidates() -
     assert job["status"] == "COMPLETED"
     assert job["analysis"]["module"] == "ddos_attack"
     assert job["candidate_count"] == 0
-    assert job["ddos_attack"]["version"] == "ddos-attack-report-v3"
+    assert job["ddos_attack"]["version"] == "ddos-attack-report-v4"
     assert job["ddos_attack"]["findings"][0]["attack_type"] == "TCP_SYN_FLOOD"
     assert job["ddos_attack_summary"] == {
         "verdict": "suspicious_traffic",
@@ -266,7 +266,7 @@ def test_pcap_upload_accepts_ddos_module_and_retains_packet_evidence() -> None:
     assert job["analysis"]["ddos_min_packet_count"] == 6
     assert job["analysis"]["ddos_bucket_seconds"] == 10
     assert job["analysis"]["ddos_overlap_window_seconds"] == 20
-    assert job["ddos_attack"]["version"] == "ddos-attack-report-v3"
+    assert job["ddos_attack"]["version"] == "ddos-attack-report-v4"
     assert job["ddos_attack"]["summary"]["evaluated_records"] > 0
     finding = job["ddos_attack"]["findings"][0]
     assert finding["attack_type"] == "UDP_FLOOD"
@@ -303,7 +303,7 @@ def test_durable_worker_result_is_validated_and_persisted() -> None:
         job["flow_records"] = syn_records()
         result = execute_analysis(job)
         assert result["candidates"] == []
-        assert result["ddos_attack"]["version"] == "ddos-attack-report-v3"
+        assert result["ddos_attack"]["version"] == "ddos-attack-report-v4"
         queue.results.append(
             {
                 "receipt": "ddos-result",

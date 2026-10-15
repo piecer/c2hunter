@@ -223,7 +223,7 @@ def test_outbound_aggregate_abstains_and_v3_roundtrips():
     classification = report["findings"][0]["classification"]
     assert classification["source_population"] == "DISTRIBUTED_UNATTRIBUTED"
     assert classification["source_authenticity"] == "SPOOFING_UNCONFIRMED"
-    assert report["version"] == "ddos-attack-report-v3"
+    assert report["version"] == "ddos-attack-report-v4"
     assert (
         "PACKET_TIMING_OR_PROFILE_UNAVAILABLE"
         in classification["axes"]["source_population"]["unknown_codes"]
