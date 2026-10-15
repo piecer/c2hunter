@@ -1,10 +1,14 @@
-import { Fragment, FormEvent, ReactNode, useEffect, useRef, useState } from 'react';
+import { Fragment, FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { api } from './api';
 import NetworkAIInterpretation from './NetworkAIInterpretation';
 import NetworkAnomalyPanel, { type NetworkAnomalyReport } from './NetworkAnomalyPanel';
 import DDoSAttackPanel, { type DDoSAttackReport } from './DDoSAttackPanel';
+import { useDDoSSubmission } from './useDDoSSubmission';
+import { usePcapSubmission, type PcapInvocation } from './usePcapSubmission';
+import DDoSNormalReference from './DDoSNormalReference';
+import { ddosReferenceParameters } from './ddosReferenceRequest';
 import DDoSAIInterpretation from './DDoSAIInterpretation';
 import ReportLanguageScope from './ReportLanguage';
 import C2DiscoverySelection, { type SelectionSummary } from './C2DiscoverySelection';
@@ -469,35 +473,55 @@ function PcapUpload() {
   const [analysisModule, setAnalysisModule] = useState('c2');
   const isC2 = analysisModule === 'c2';
   const isDDoS = analysisModule === 'ddos_attack';
+  const submission = usePcapSubmission<Job>();
+  const formRef = useRef<HTMLFormElement>(null);
   const [file, setFile] = useState<File>();
   const [validationError, setValidationError] = useState('');
   const [uploadStage, setUploadStage] = useState<'CREATING' | 'UPLOADING' | 'SENT' | 'ACCEPTED'>();
   const [uploadProgress, setUploadProgress] = useState({ loaded: 0, total: 0 });
   const [createdJob, setCreatedJob] = useState<Job>();
   const [detectorWeights, setDetectorWeights] = useState<DetectorWeights>({ ...defaultDetectorWeights });
-  const mutation = useMutation<Job, Error, { file: File; body: Record<string, unknown>; job?: Job }>({
-    mutationFn: async ({ file: selected, body, job }) => {
-      let created = job;
+  const mutation = useMutation<Job | undefined, Error, PcapInvocation<Job>>({
+    mutationFn: async invocation => {
+      if (!submission.current(invocation)) return;
+      const { file: selected, body } = invocation.intent;
+      let created = invocation.job;
       if (!created) {
         setUploadStage('CREATING');
         created = await api.post<Job>('/pcap-analysis-jobs/initiate', body);
+        if (!submission.admit(invocation, created)) return created;
         setCreatedJob(created);
       }
+      if (!submission.current(invocation)) return created;
       const type = selected.name.toLowerCase().endsWith('.pcapng') ? 'application/x-pcapng' : 'application/vnd.tcpdump.pcap';
       setUploadStage('UPLOADING');
       return api.uploadWithProgress<Job>(`/pcap-analysis-jobs/${encodeURIComponent(created.id)}/capture`, selected, type, progress => {
+        if (!submission.current(invocation)) return;
         setUploadProgress(progress);
         setUploadStage(progress.total > 0 && progress.loaded >= progress.total ? 'SENT' : 'UPLOADING');
       });
     },
-    onSuccess: job => { setUploadStage('ACCEPTED'); navigate(`/analyses/${job.id}`); },
+    onSuccess: (job, invocation) => { if (job && submission.current(invocation)) { setUploadStage('ACCEPTED'); navigate(`/analyses/${job.id}`); } },
+    onSettled: (_job, _error, invocation) => submission.settled(invocation),
   });
-  const submit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const { retire } = submission;
+  const { reset } = mutation;
+  const retireUpload = useCallback(() => {
+    retire();
+    reset();
+    setCreatedJob(undefined);
+    setUploadStage(undefined);
+    setUploadProgress({ loaded: 0, total: 0 });
+  }, [retire, reset]);
+  const updateDetectorWeights = useCallback((value: DetectorWeights) => {
+    retireUpload();
+    setDetectorWeights(value);
+  }, [retireUpload]);
+  const start = (element: HTMLFormElement, retry?: PcapInvocation<Job>) => {
     setValidationError('');
     if (!file) { setValidationError('Select a PCAP or PCAPNG file.'); return; }
     if (file.size > PCAP_UPLOAD_MAX_BYTES) { setValidationError('PCAP files must be 500 MiB or smaller.'); return; }
-    const form = new FormData(event.currentTarget);
+    const form = new FormData(element);
     const analysis: Record<string, unknown> = {
       module: analysisModule,
       ...(isC2 ? {
@@ -514,13 +538,19 @@ function PcapUpload() {
     const body = {
       name: String(form.get('name')),
       description: String(form.get('description') ?? ''),
+      ...(isDDoS ? ddosReferenceParameters(form) : {}),
       filename: file.name,
       analysis_module: analysisModule,
       internal_networks: String(form.get('internal_networks')).split(',').map(value => value.trim()).filter(Boolean),
       analysis,
       idempotency_key: idempotencyKey(),
     };
-    mutation.mutate({ file, body, job: createdJob });
+    const invocation = submission.begin(body, file, retry);
+    if (invocation) mutation.mutate(invocation);
+  };
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    start(event.currentTarget);
   };
   const stageLabel = uploadStage === 'CREATING'
     ? '분석 작업을 생성하는 중…'
@@ -533,20 +563,24 @@ function PcapUpload() {
           : '';
   return <>
     <header className="header-actions"><div><p className="eyebrow">OFFLINE INVESTIGATION</p><h1>Upload PCAP</h1><p className="muted">Analyze an existing capture for C2 detection or independent network observations.</p></div><Link to="/analyses">View analysis history</Link></header>
-    <form className="panel form" onSubmit={submit}>
+    <form ref={formRef} className="panel form" onSubmit={submit} onChange={event => {
+      const target = event.target as HTMLInputElement;
+      // The unnamed preset selector also changes explicit/default wire policy.
+      if (target.name || target.matches('.detector-weights select')) retireUpload();
+    }}>
       <label>Analysis name<input name="name" required maxLength={200} /></label>
       <label>Analysis module<select name="analysis_module" value={analysisModule} onChange={event => setAnalysisModule(event.target.value)}><option value="c2">C2 detection</option><option value="ddos_attack">DDoS attack analysis</option><option value="network_anomaly">Network anomaly</option></select></label>
       {analysisModule === 'network_anomaly' && <NetworkObservationHelp/>}
-      {isDDoS && <><DDoSAnalysisHelp/><DDoSThresholdFields/></>}
+      {isDDoS && <><DDoSAnalysisHelp/><DDoSThresholdFields/><DDoSNormalReference disabled={mutation.isPending}/></>}
       <label>Analyst note<textarea name="description" rows={3} maxLength={5000} placeholder="Case, ticket, or collection context" /></label>
-      <label>Capture file<input name="pcap" type="file" accept=".pcap,.pcapng,.cap,application/vnd.tcpdump.pcap,application/octet-stream" onChange={event => { const selected = event.currentTarget.files?.[0]; mutation.reset(); setCreatedJob(undefined); setUploadStage(undefined); setUploadProgress({ loaded: 0, total: 0 }); setValidationError(''); if (selected && selected.size > PCAP_UPLOAD_MAX_BYTES) { event.currentTarget.value = ''; setFile(undefined); setValidationError('PCAP files must be 500 MiB or smaller.'); return; } setFile(selected); }} required /></label>
+      <label>Capture file<input name="pcap" type="file" accept=".pcap,.pcapng,.cap,application/vnd.tcpdump.pcap,application/octet-stream" onChange={event => { const selected = event.currentTarget.files?.[0]; retireUpload(); setValidationError(''); if (selected && selected.size > PCAP_UPLOAD_MAX_BYTES) { event.currentTarget.value = ''; setFile(undefined); setValidationError('PCAP files must be 500 MiB or smaller.'); return; } setFile(selected); }} required /></label>
       {file && <div className="file-summary" role={uploadStage ? undefined : 'status'}><strong>{file.name}</strong><span>{formatBytes(file.size)}</span></div>}
       {uploadStage && <section className="upload-progress-panel" role="status" aria-live="polite"><strong>{stageLabel}</strong>{uploadStage === 'UPLOADING' && uploadProgress.total > 0 && <progress aria-label="PCAP upload progress" max={uploadProgress.total} value={uploadProgress.loaded}/>}</section>}
       <div className="grid"><label>Internal networks<input name="internal_networks" defaultValue="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" required /></label></div>
       <fieldset hidden={!isC2} disabled={!isC2} style={!isC2 ? { display: 'none' } : undefined}><legend>C2 candidate thresholds</legend><div className="grid"><label>Minimum score<input name="score" type="number" min="0" max="100" defaultValue="0" required /></label><label>Minimum internal hosts<input name="hosts" type="number" min="2" defaultValue="3" required /></label><label>Beacon minimum samples<input name="samples" type="number" min="3" defaultValue="5" required /></label></div></fieldset>
-      <fieldset hidden={!isC2} disabled={!isC2} style={!isC2 ? { display: 'none' } : undefined}><DetectorWeightFields weights={detectorWeights} setWeights={setDetectorWeights} enabled={isC2}/><fieldset><legend>모집단 이상 탐지</legend><label className="check"><input type="checkbox" name="ml_anomaly_enabled"/>후보군 대비 이상 통신 탐지 사용</label><label className="check"><input type="checkbox" name="ml_anomaly_allow_standalone"/>이상 탐지만으로 후보 생성 허용</label><p className="muted">기본값은 사용 안 함입니다. 단독 후보 생성은 실험 기능이며, 허용하지 않으면 다른 탐지 근거가 있는 후보의 점수만 보강합니다.</p></fieldset></fieldset>
+      <fieldset hidden={!isC2} disabled={!isC2} style={!isC2 ? { display: 'none' } : undefined}><DetectorWeightFields weights={detectorWeights} setWeights={updateDetectorWeights} enabled={isC2}/><fieldset><legend>모집단 이상 탐지</legend><label className="check"><input type="checkbox" name="ml_anomaly_enabled"/>후보군 대비 이상 통신 탐지 사용</label><label className="check"><input type="checkbox" name="ml_anomaly_allow_standalone"/>이상 탐지만으로 후보 생성 허용</label><p className="muted">기본값은 사용 안 함입니다. 단독 후보 생성은 실험 기능이며, 허용하지 않으면 다른 탐지 근거가 있는 후보의 점수만 보강합니다.</p></fieldset></fieldset>
       <p className="muted">Supported containers: classic PCAP and PCAPNG. Supported packet links include Ethernet, raw IP, Linux cooked capture v1/v2, and loopback. The upload limit is 500 MiB and 2,000,000 packets.</p>
-      {(validationError || mutation.error) && <div role="alert" className="error-text"><p>{validationError || mutation.error?.message}</p>{createdJob && mutation.variables && <div className="actions"><Link to={`/analyses/${createdJob.id}`}>생성된 작업 보기</Link><button type="button" className="secondary" disabled={mutation.isPending} onClick={() => mutation.mutate({ ...mutation.variables!, job: createdJob })}>기존 작업으로 업로드 재시도</button></div>}</div>}
+      {(validationError || mutation.error) && <div role="alert" className="error-text"><p>{validationError || mutation.error?.message}</p>{createdJob && mutation.variables && <div className="actions"><Link to={`/analyses/${createdJob.id}`}>생성된 작업 보기</Link><button type="button" className="secondary" disabled={mutation.isPending} onClick={() => { if (formRef.current) start(formRef.current, mutation.variables); }}>기존 작업으로 업로드 재시도</button></div>}</div>}
       <button disabled={mutation.isPending}>{mutation.isPending ? 'Uploading and analyzing…' : 'Upload and analyze'}</button>
     </form>
   </>;
@@ -557,16 +591,19 @@ function NewAnalysis() {
   const [analysisModule, setAnalysisModule] = useState('c2');
   const isC2 = analysisModule === 'c2';
   const isDDoS = analysisModule === 'ddos_attack';
+  const submission = useDDoSSubmission(analysisModule);
   const [detectorWeights, setDetectorWeights] = useState<DetectorWeights>({ ...defaultDetectorWeights });
   const sensors = useQuery<List<Sensor>, Error>({ queryKey: ['sensors'], queryFn: () => api.get('/sensors') });
-  const mutation = useMutation({ mutationFn: (body: unknown) => api.post<Job>('/analysis-jobs', body), onSuccess: job => navigate(`/analyses/${job.id}`) });
+  const mutation = useMutation({ mutationFn: (body: unknown) => api.post<Job>('/analysis-jobs', body), onSuccess: (job, body) => { const module = (body as { analysis: { module: string } }).analysis.module; if (submission.owns(module) && (module !== 'ddos_attack' || submission.current(body))) navigate(`/analyses/${job.id}`); }, onSettled: () => submission.settled() });
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (mutation.isPending) return;
     const form = new FormData(event.currentTarget);
     const start = new Date();
     const end = new Date(start.getTime() + Number(form.get('duration')) * 1000);
-    mutation.mutate({
+    const body = {
       name: form.get('name'),
+      ...(isDDoS ? ddosReferenceParameters(form) : {}),
       idempotency_key: idempotencyKey(),
       sensor_ids: form.getAll('sensor_ids'),
       mode: form.get('mode'),
@@ -575,9 +612,11 @@ function NewAnalysis() {
       internal_networks: String(form.get('internal_networks')).split(',').map(value => value.trim()).filter(Boolean),
       capture: { duration_seconds: Number(form.get('duration')), max_packets: Number(form.get('max_packets')), directions: form.getAll('directions'), bpf_filter: form.get('bpf'), store_pcap: form.get('store_pcap') === 'on' },
       analysis: form.get('analysis_module') === 'network_anomaly' ? { module: 'network_anomaly' } : isDDoS ? { module: 'ddos_attack', ...ddosParameters(form) } : { module: 'c2', profile: 'ddos_botnet', minimum_candidate_score: Number(form.get('score')), minimum_distinct_clients: Number(form.get('hosts')), ...(form.has('detector_weights_explicit') ? { detector_weights: detectorWeights } : {}), ml_anomaly_enabled: form.get('ml_anomaly_enabled') === 'on', ml_anomaly_allow_standalone: form.get('ml_anomaly_allow_standalone') === 'on' },
-    });
+    };
+    const intent = isDDoS ? submission.prepare(form, () => body) : body;
+    if (intent) mutation.mutate(intent);
   };
-  return <><header><p className="eyebrow">INVESTIGATION</p><h1>New analysis</h1></header><form className="panel form" onSubmit={submit}><label>Analysis name<input name="name" required /></label><label>Analysis module<select name="analysis_module" value={analysisModule} onChange={event => setAnalysisModule(event.target.value)}><option value="c2">C2 detection</option><option value="ddos_attack">DDoS attack analysis</option><option value="network_anomaly">Network anomaly</option></select></label>{analysisModule === 'network_anomaly' && <NetworkObservationHelp/>}{isDDoS && <><DDoSAnalysisHelp/><DDoSThresholdFields/></>}<fieldset><legend>Sensors</legend><AsyncState query={sensors}>{data => <>{items(data).map(sensor => <label className="check" key={sensor.sensor_id}><input type="checkbox" name="sensor_ids" value={sensor.sensor_id} aria-label={sensor.name}/>{sensor.name}</label>)}</>}</AsyncState></fieldset><div className="grid"><label>Data source<select name="mode"><option value="LIVE">Live capture</option><option value="HISTORICAL">Historical</option></select></label><label>Duration (seconds)<input name="duration" type="number" min="1" defaultValue="300" /></label><label>Internal networks<input name="internal_networks" defaultValue="10.0.0.0/8" required /></label><label>Maximum packets<input name="max_packets" type="number" min="1" defaultValue="2000000" /></label><label>BPF filter<input name="bpf" defaultValue="ip" /></label></div><fieldset hidden={!isC2} disabled={!isC2} style={!isC2 ? { display: 'none' } : undefined}><legend>C2 candidate thresholds</legend><div className="grid"><label>Minimum score<input name="score" type="number" min="0" max="100" defaultValue="50" /></label><label>Minimum internal hosts<input name="hosts" type="number" min="2" defaultValue="3" /></label></div></fieldset><fieldset><legend>Directions</legend>{['INBOUND','OUTBOUND'].map(value => <label className="check" key={value}><input type="checkbox" name="directions" value={value} defaultChecked/>{value}</label>)}</fieldset><fieldset hidden={!isC2} disabled={!isC2} style={!isC2 ? { display: 'none' } : undefined}><DetectorWeightFields weights={detectorWeights} setWeights={setDetectorWeights} enabled={isC2}/><fieldset><legend>모집단 이상 탐지</legend><label className="check"><input type="checkbox" name="ml_anomaly_enabled"/>후보군 대비 이상 통신 탐지 사용</label><label className="check"><input type="checkbox" name="ml_anomaly_allow_standalone"/>이상 탐지만으로 후보 생성 허용</label><p className="muted">기본값은 사용 안 함입니다. 단독 후보 생성은 실험 기능이며, 허용하지 않으면 다른 탐지 근거가 있는 후보의 점수만 보강합니다.</p></fieldset></fieldset><label className="check"><input type="checkbox" name="store_pcap" defaultChecked/>Store PCAP</label>{mutation.error && <p role="alert">{mutation.error.message}</p>}<button disabled={mutation.isPending}>{mutation.isPending ? 'Starting…' : 'Start analysis'}</button></form></>;
+  return <><header><p className="eyebrow">INVESTIGATION</p><h1>New analysis</h1></header><form className="panel form" onSubmit={submit} onChange={event => { if (mutation.isPending && (event.target as HTMLInputElement).name) submission.invalidate(); }}><label>Analysis name<input name="name" required /></label><label>Analysis module<select name="analysis_module" value={analysisModule} onChange={event => setAnalysisModule(event.target.value)}><option value="c2">C2 detection</option><option value="ddos_attack">DDoS attack analysis</option><option value="network_anomaly">Network anomaly</option></select></label>{analysisModule === 'network_anomaly' && <NetworkObservationHelp/>}{isDDoS && <><DDoSAnalysisHelp/><DDoSThresholdFields/><DDoSNormalReference disabled={mutation.isPending}/></>}<fieldset><legend>Sensors</legend><AsyncState query={sensors}>{data => <>{items(data).map(sensor => <label className="check" key={sensor.sensor_id}><input type="checkbox" name="sensor_ids" value={sensor.sensor_id} aria-label={sensor.name}/>{sensor.name}</label>)}</>}</AsyncState></fieldset><div className="grid"><label>Data source<select name="mode"><option value="LIVE">Live capture</option><option value="HISTORICAL">Historical</option></select></label><label>Duration (seconds)<input name="duration" type="number" min="1" defaultValue="300" /></label><label>Internal networks<input name="internal_networks" defaultValue="10.0.0.0/8" required /></label><label>Maximum packets<input name="max_packets" type="number" min="1" defaultValue="2000000" /></label><label>BPF filter<input name="bpf" defaultValue="ip" /></label></div><fieldset hidden={!isC2} disabled={!isC2} style={!isC2 ? { display: 'none' } : undefined}><legend>C2 candidate thresholds</legend><div className="grid"><label>Minimum score<input name="score" type="number" min="0" max="100" defaultValue="50" /></label><label>Minimum internal hosts<input name="hosts" type="number" min="2" defaultValue="3" /></label></div></fieldset><fieldset><legend>Directions</legend>{['INBOUND','OUTBOUND'].map(value => <label className="check" key={value}><input type="checkbox" name="directions" value={value} defaultChecked/>{value}</label>)}</fieldset><fieldset hidden={!isC2} disabled={!isC2} style={!isC2 ? { display: 'none' } : undefined}><DetectorWeightFields weights={detectorWeights} setWeights={setDetectorWeights} enabled={isC2}/><fieldset><legend>모집단 이상 탐지</legend><label className="check"><input type="checkbox" name="ml_anomaly_enabled"/>후보군 대비 이상 통신 탐지 사용</label><label className="check"><input type="checkbox" name="ml_anomaly_allow_standalone"/>이상 탐지만으로 후보 생성 허용</label><p className="muted">기본값은 사용 안 함입니다. 단독 후보 생성은 실험 기능이며, 허용하지 않으면 다른 탐지 근거가 있는 후보의 점수만 보강합니다.</p></fieldset></fieldset><label className="check"><input type="checkbox" name="store_pcap" defaultChecked/>Store PCAP</label>{mutation.error && <p role="alert">{mutation.error.message}</p>}<button disabled={mutation.isPending}>{mutation.isPending ? 'Starting…' : 'Start analysis'}</button></form></>;
 }
 
 function JobReanalysis({ job }: { job: Job }) {
@@ -598,19 +637,23 @@ function JobReanalysis({ job }: { job: Job }) {
 
 function DDoSJobReanalysis({ job }: { job: Job }) {
   const navigate = useNavigate();
+  const submission = useDDoSSubmission(job.id);
   const reanalyze = useMutation({
     mutationFn: (body: Record<string, unknown>) => api.post<Job>(`/analysis-jobs/${job.id}/reanalyze`, body),
-    onSuccess: created => navigate(`/analyses/${created.id}`),
+    onSuccess: (created, body) => { if (submission.current(body)) navigate(`/analyses/${created.id}`); },
+    onSettled: () => submission.settled(),
   });
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    reanalyze.mutate({
+    const body = submission.prepare(form, () => ({
       idempotency_key: idempotencyKey(),
       ...ddosParameters(form),
-    });
+      ...ddosReferenceParameters(form),
+    }));
+    if (body) reanalyze.mutate(body);
   };
-  return <form className="panel compact form" onSubmit={submit}><h2>DDoS threshold 재분석</h2><p className="muted">원본 dataset {job.dataset_id}을 다시 수집하거나 파싱하지 않고 DDoS threshold snapshot만 변경합니다.</p><DDoSThresholdFields analysis={job.analysis}/>{reanalyze.error && <p role="alert" className="error-text">{reanalyze.error.message}</p>}<button disabled={reanalyze.isPending}>{reanalyze.isPending ? '재분석 생성 중…' : 'DDoS threshold로 재분석'}</button></form>;
+  return <form className="panel compact form" onSubmit={submit} onChange={event => { if (reanalyze.isPending && (event.target as HTMLInputElement).name) submission.invalidate(); }}><h2>DDoS threshold 재분석</h2><p className="muted">원본 dataset {job.dataset_id}을 다시 수집하거나 파싱하지 않고 DDoS threshold snapshot만 변경합니다.</p><DDoSThresholdFields analysis={job.analysis}/><DDoSNormalReference inherit datasetId={job.dataset_id} disabled={reanalyze.isPending}/>{reanalyze.error && <p role="alert" className="error-text">{reanalyze.error.message}</p>}<button disabled={reanalyze.isPending}>{reanalyze.isPending ? '재분석 생성 중…' : 'DDoS threshold로 재분석'}</button></form>;
 }
 
 function AIArtifactPanel({ assessmentId }: { assessmentId: string }) {
@@ -822,7 +865,7 @@ function JobDetail() {
         {!terminal && <button className="danger" disabled={cancel.isPending} onClick={() => cancel.mutate()}>{cancel.isPending ? 'Cancelling…' : 'Cancel analysis'}</button>}
         {cancel.error && <p role="alert" className="error-text">{cancel.error.message}</p>}{notice && <p role="status">{notice}</p>}
       </section>}
-      {module === 'network_anomaly' ? <NetworkAnomalyPanel key={j.id} report={j.network_anomaly}><NetworkAIInterpretation key={j.id} jobId={j.id} completed={j.status === 'COMPLETED' && Boolean(j.network_anomaly)}/></NetworkAnomalyPanel> : module === 'ddos_attack' && j.ddos_attack ? <DDoSAttackPanel key={`${j.id}:${j.ddos_attack.primary_finding_id ?? 'none'}:${String(j.ddos_attack.summary?.finding_count ?? 'unknown')}`} report={j.ddos_attack} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}><DDoSAIInterpretation jobId={j.id} completed={j.status === 'COMPLETED'}/></DDoSAttackPanel> : module === 'c2' ? <ReportLanguageScope key={`c2-ai-${j.id}`}><AIAnalysisPanel job={j} knownCandidateIds={items(candidates.data).map(candidate => candidate.id)}/></ReportLanguageScope> : <p role="alert">Unsupported analysis module.</p>}
+      {module === 'network_anomaly' ? <NetworkAnomalyPanel key={j.id} report={j.network_anomaly}><NetworkAIInterpretation key={j.id} jobId={j.id} completed={j.status === 'COMPLETED' && Boolean(j.network_anomaly)}/></NetworkAnomalyPanel> : module === 'ddos_attack' && j.ddos_attack ? <DDoSAttackPanel key={`${j.id}:${j.ddos_attack.primary_finding_id ?? 'none'}:${String(j.ddos_attack.summary?.finding_count ?? 'unknown')}`} report={j.ddos_attack} job={{ id: j.id, dataset_id: j.dataset_id, source_type: j.source_type, source: j.source, internal_networks: j.internal_networks }} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}><DDoSAIInterpretation jobId={j.id} completed={j.status === 'COMPLETED'}/></DDoSAttackPanel> : module === 'c2' ? <ReportLanguageScope key={`c2-ai-${j.id}`}><AIAnalysisPanel job={j} knownCandidateIds={items(candidates.data).map(candidate => candidate.id)}/></ReportLanguageScope> : <p role="alert">Unsupported analysis module.</p>}
       {module !== 'c2' && <button type="button" className="secondary" aria-expanded={detailsOwner === j.id} onClick={() => setDetailsOwner(detailsOwner === j.id ? undefined : j.id)}>작업 상세 / Job details</button>}
       {(module === 'c2' || detailsOwner === j.id) && <>
       {module !== 'c2' && <><section className="metrics compact"><article><strong>{(j.packet_count ?? 0).toLocaleString()}</strong><span>Packets</span></article><article><strong>{(j.flow_count ?? 0).toLocaleString()}</strong><span>Flows</span></article>{j.analysis?.module === 'network_anomaly' ? <article><strong>{j.network_anomaly?.version === 'network-pattern-report-v1' ? (typeof j.network_anomaly.summary?.flow_count === 'number' ? j.network_anomaly.summary.flow_count.toLocaleString() : '—') : j.network_anomaly?.flows?.length.toLocaleString() ?? '—'}</strong><span>Observed bidirectional flows</span></article> : String(module) === 'ddos_attack' ? <article><strong>{Number(j.ddos_attack?.summary.finding_count ?? 0).toLocaleString()}</strong><span>DDoS findings</span></article> : <article><strong>{(j.candidate_count ?? 0).toLocaleString()}</strong><span>Candidates</span></article>}<article><strong>{strings(j.sensor_ids).length}</strong><span>Sensors</span></article></section></>}

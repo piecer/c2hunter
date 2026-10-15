@@ -57,6 +57,25 @@
 .network-report .warning{font-size:.82rem;line-height:1.5}
 @media(max-width:600px){.network-totals{gap:.35rem}.network-totals>div{padding:.6rem .45rem;display:grid;gap:.25rem}.network-totals strong{font-size:1.35rem}.network-totals span{font-size:.7rem}.network-glance>h2{font-size:1.3rem}.network-key-patterns>li{gap:.4rem;padding:.75rem}}
 
+/* DDoS review: bounded disclosures, independent axes, complete wrapping. */
+.content:has(.ddos-report),.content:has(.ddos-normal-reference){min-width:0;overflow-wrap:anywhere}
+.ddos-report,.ddos-report section,.ddos-report article,.ddos-report li,.ddos-normal-reference,.ddos-normal-reference label,.ddos-normal-reference span{min-width:0;overflow-wrap:anywhere}
+.ddos-report pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:.78rem;padding:.8rem;background:#081117;border-radius:6px}
+.ddos-report button{white-space:normal;overflow-wrap:anywhere}
+.ddos-classification{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.65rem;margin:.5rem 0}
+.ddos-classification h3{grid-column:1/-1;font-size:.9rem}
+.ddos-classification>p{padding:.75rem;border:1px solid var(--border);border-radius:8px;background:#0b181f;font-size:.9rem}
+.ddos-classification strong,.ddos-classification small{display:block;margin-bottom:.3rem}
+.ddos-top-patterns{padding-left:1.2rem;font-size:.85rem;line-height:1.5}
+.ddos-next{border-left:3px solid var(--accent);background:#0b181f;padding:.7rem 1rem;margin:.8rem 0}
+.ddos-next h3{font-size:.95rem}.ddos-next p,.ddos-next ol{font-size:.85rem}.ddos-next small{display:block;color:var(--muted)}
+.ddos-normal-reference select{width:100%;min-width:0}.ddos-normal-reference code{display:block;white-space:normal}
+.ddos-normal-reference .ddos-reference-entry{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:start;gap:.7rem;margin:.7rem 0;padding:.6rem;border:1px solid var(--border);border-radius:6px}
+.ddos-normal-reference input[type=radio]{width:auto;margin:.2rem}.ddos-normal-reference nav{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem;margin:.8rem 0}
+.content:has(.ddos-normal-reference) .form,.content:has(.ddos-normal-reference) fieldset{min-width:0}
+.content:has(.ddos-normal-reference) .grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr))}
+@media(max-width:640px){.ddos-classification{grid-template-columns:minmax(0,1fr);gap:.3rem}.ddos-classification>p{padding:.5rem}.ddos-report{padding:.75rem}.content:has(.ddos-report)>.header-actions{flex-wrap:wrap}.content:has(.ddos-report) h1{font-size:1.3rem}}
+
 /* Candidate validation: keep analyst decisions, TI evidence, and MISP exports readable. */
 .ddos-report{display:grid;gap:1rem}.ddos-glance{border-left:4px solid var(--danger);padding-left:1rem}.ddos-primary{display:grid;gap:.35rem}.ddos-primary h3,.ddos-primary p,.ddos-primary ol{margin:.25rem 0}.ddos-primary small{color:var(--muted);display:block}.ddos-report dl>div{display:grid;grid-template-columns:minmax(12rem,1fr) minmax(8rem,2fr);gap:1rem;padding:.35rem 0;border-bottom:1px solid var(--border)}.ddos-report dt{color:var(--muted)}.ddos-report dd{margin:0;overflow-wrap:anywhere}@media(max-width:640px){.ddos-report dl>div{grid-template-columns:1fr;gap:.2rem}.ddos-glance{padding-left:.7rem}}
 .candidate-enrichment{display:grid;gap:1rem}.candidate-enrichment .grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,26rem),1fr))}.candidate-enrichment .subpanel{display:grid;align-content:start;gap:.8rem;min-width:0;padding:1rem;border:1px solid var(--border);border-radius:10px;background:#0b181f}.candidate-enrichment .subpanel h3{margin:0}.candidate-enrichment .subpanel label{display:grid;gap:.35rem;color:var(--muted);font-size:.85rem}.candidate-enrichment textarea{min-height:6rem;resize:vertical}.ti-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(12rem,1fr));gap:.7rem}.ti-card{min-width:0;padding:.8rem;border:1px solid var(--border);border-radius:8px;background:#08141a}.ti-card dl{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.35rem .8rem;margin:.65rem 0 0}.ti-card dt{color:var(--muted)}.ti-card dd{margin:0;font-weight:700}.history-list{display:grid;gap:.65rem;margin:0;padding:0;list-style:none}.history-list li{display:grid;gap:.25rem;padding:.75rem;border-left:3px solid var(--accent);background:#08141a}.history-list span{color:var(--muted);font-size:.8rem;overflow-wrap:anywhere}.history-list p{margin:.25rem 0 0;overflow-wrap:anywhere}.verdict-confirmed_c2{background:#153e35;color:#8df3d0}.verdict-false_positive{background:#3b2830;color:#ffabb7}.verdict-under_review{background:#3b351d;color:#f6d365}.notice{color:var(--accent)}.error-text{color:var(--danger);overflow-wrap:anywhere}@media(max-width:600px){.candidate-enrichment .section-heading{align-items:stretch;flex-direction:column}.candidate-enrichment button{width:100%}}

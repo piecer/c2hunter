@@ -1,5 +1,62 @@
 # DDoS 공격 트래픽 분석
 
+## Web review and passive exports / 검토 UI와 수동 내보내기
+
+The existing DDoS result screen presents the validated **whole-report verdict** first.
+The three independent axes and up to three common patterns are explicitly scoped
+to the producer-selected primary target, not presented as a classification of every
+finding. Per-axis confidence, unknown authenticity, coverage/drop/clock warnings and
+omission counts remain visible. Details are mounted lazily: eight findings per page,
+one finding and one candidate at a time. All retained findings remain reachable;
+collapse and cached owner replacement remove the old evidence subtree. Stored
+v1/v2/v3 reports retain their historical interpretation; missing evaluations are not
+fabricated. Facts, deterministic hypotheses and optional AI interpretation stay separate.
+
+A normal-reference picker is available on ordinary DDoS creation, staged PCAP
+initiation and DDoS reanalysis. It requests 20 completed jobs per page through the
+existing authenticated listing API. Selecting a radio control explicitly asserts
+normality; it is not an attack-window recommendation. The server, not the public
+summary, determines eligibility and private record/byte limits. Reanalysis defaults
+to **keep frozen reference**, including after source deletion. **Clear** sends explicit
+`null`; a new selection sends both job and dataset identifiers. C2/network requests
+contain no reference fields. Identical retries retain their exact request and idempotency
+key; changed intent receives a new key, and pending/retired owners cannot publish a
+success into another job.
+
+Explicit download buttons produce at most **65,536 UTF-8 bytes** per file. The
+`ddos-review-export-v1` JSON envelope includes report/catalog/job/dataset/finding/
+candidate identity, a SHA-256 of the validated report encoded with UTF-8 JSON.stringify
+(an identity checksum, not authentication), the complete predicate and both evaluations, public provenance,
+coverage qualifiers, approval conditions, exclusions and invalidation guidance.
+It never includes private normal-reference rows, credentials or storage paths.
+Exports revalidate the current owner and closed report before creating a Blob URL;
+every created URL is revoked. JSON is data, not HTML or a command.
+
+`ddos-packet-selection-v1` is a separate context-derived capability. It does **not**
+change the frozen v4 producer `supported_export_targets: ["STRUCTURED_JSON"]`.
+When exact translation is available, a second download contains a passive `.bpf`
+filter with the complete JSON envelope in inert `# ` comments. No server execution,
+automatic application, blocking or IDS-rule export exists.
+
+Exact subset: **IPv4 UDP**, uploaded PCAP with a SHA-256 identity, one Ethernet (1)
+or raw-IP (101) link type, and at most 32 explicit IPv4 internal networks. Ethernet
+translation includes the parser's zero/one/two VLAN-tag cases. Destination address,
+source/destination port sets, IPv4 header/fragment/truncation admission and direction
+are translated together. Direction is derived from source/destination CIDR membership,
+**not** the BPF `inbound` keyword. TCP observation eligibility, length conditions,
+protocol-specific fields, IPv6 targets, mixed/unsupported link types and LIVE/unknown
+contexts are refused with structured JSON still available. Unsupported fields are
+never silently removed. Verify capture SHA-256, link type and network context before
+using the filter on that identical offline capture. Filter matches refer to decoded
+packets of that capture; evaluation counts describe bounded retained evidence, not
+necessarily all captured packets. Neither the filter nor a match proves maliciousness.
+
+Verification includes actual Chromium desktop/mobile ko/en UI, exact downloaded JSON
+and BPF bytes, native libpcap/tcpdump offline selection versus independent predicate
+replay, and browser-produced payloads through real ASGI/SQLite admission, preparation,
+worker and readback. Browser HTTP fixtures and the explicit offline queue are not
+claims of deployed PostgreSQL, physical sensor or LIVE acceptance.
+
 ## v4: 평가한 방어 시그니처 후보
 
 현재 새 분석은 `ddos-attack-report-v4` / `ddos-taxonomy-v4`를 생성한다.
@@ -26,7 +83,8 @@ v3의 보수적인 3축 분류는 변경하지 않는다. 새 `signature_candida
 - 후보 confidence는 분류 confidence와 별개로 항상 low이며 보정된 공격 확률이 아니다.
   정상 공용 서비스 제외, 대상 소유권 확인, 정상 트래픽 검토, 운영자 승인이 필요하다.
   데이터셋/토폴로지 변경 시와 매 사용 전에 재검증한다. 자동 적용은 없다.
-  `STRUCTURED_JSON`은 지원 가능한 표현 목표이며 다운로드/filter exporter는 후속 단계다.
+  v4 생산자의 표현 목표는 `STRUCTURED_JSON`이다. Web의 별도 버전 검토용 다운로드와
+  문맥 기반 수동 filter는 위의 Web review 절을 따른다.
 - evaluation별 8192 bytes, 모든 공개 signature 배열 합계 1 MiB를 초과하면 부분 성공을
   반환하지 않고 분석 실패로 처리한다. 기존 finding/record 한도는 유지한다.
 
