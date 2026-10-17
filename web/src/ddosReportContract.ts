@@ -1,3 +1,4 @@
+import { parseDDoSTimestamp } from './ddosReportTime';
 import { type Evaluation, validEvaluation, canonicalPredicate, validFlagProfile, validReference } from './ddosSignatures';
 import { type Axis, type AxisEvidence, validV3Classification } from './ddosEvidence';
 import { attackTypes, classificationConfidences, commonPatternTypes, deliveryMechanisms,
@@ -47,7 +48,7 @@ const plain = (value: unknown): value is Record<string, unknown> => typeof value
 const onlyKeys = (value: Record<string, unknown>, allowed: readonly string[]) => Object.keys(value).every(key => allowed.includes(key));
 const knownArray = (value: unknown, registry: Record<string, unknown>, maximum: number) => Array.isArray(value)
   && value.length <= maximum && value.every(code => typeof code === 'string' && Object.hasOwn(registry, code));
-const timestamps = (value: unknown) => typeof value === 'string' && value.length <= 40 && Number.isFinite(Date.parse(value));
+const timestamps = (value: unknown) => parseDDoSTimestamp(value) !== null;
 const reportKeys = ['version', 'catalog_version', 'verdict', 'confidence', 'primary_finding_id', 'summary', 'findings', 'recommendations', 'warnings', 'limitations', 'omitted_finding_count', 'normal_reference'] as const;
 const findingKeysV1 = ['id', 'attack_type', 'attack_role', 'target', 'protocol', 'objective', 'likelihood', 'severity', 'confidence', 'first_seen', 'last_seen', 'metrics', 'evidence_codes', 'uncertainty_codes', 'recommendation_codes'] as const;
 const findingKeysV2 = [...findingKeysV1, 'classification', 'common_patterns', 'signature_candidates'] as const;
@@ -215,6 +216,14 @@ export function isDDoSAttackReport(value: unknown): value is DDoSAttackReport {
     || !(report.summary.last_seen === null || timestamps(report.summary.last_seen))
     || !(report.summary.primary_attack_type === null || typeof report.summary.primary_attack_type === 'string' && Object.hasOwn(attackTypes, report.summary.primary_attack_type))
     || !(report.summary.primary_objective === null || typeof report.summary.primary_objective === 'string' && Object.hasOwn(objectives, report.summary.primary_objective))) return false;
+  const reportStart = parseDDoSTimestamp(report.summary.first_seen);
+  const reportEnd = parseDDoSTimestamp(report.summary.last_seen);
+  if (reportStart !== null && reportEnd !== null && reportStart > reportEnd) return false;
+  const inReportWindow = (first: unknown, last: unknown): boolean => {
+    const start = parseDDoSTimestamp(first), end = parseDDoSTimestamp(last);
+    return start !== null && end !== null && reportStart !== null && reportEnd !== null
+      && start <= end && start >= reportStart && end <= reportEnd;
+  };
   if (!Array.isArray(report.findings) || report.findings.length > 100
     || !Array.isArray(report.recommendations) || report.recommendations.length > 18
     || !knownArray(report.warnings, warnings, 16) || !knownArray(report.limitations, limitations, 8)
@@ -236,7 +245,7 @@ export function isDDoSAttackReport(value: unknown): value is DDoSAttackReport {
     && onlyKeys(item.target, ['ip', 'port']) && Object.hasOwn(item.target, 'ip')
     && Object.hasOwn(item.target, 'port') && validIp(item.target.ip)
     && (item.target.port === null || safeInteger(item.target.port) && item.target.port <= 65535)
-    && timestamps(item.first_seen) && timestamps(item.last_seen) && Date.parse(item.first_seen) <= Date.parse(item.last_seen)
+    && inReportWindow(item.first_seen, item.last_seen)
     && validMetrics(item.metrics) && Array.isArray(item.evidence_codes) && item.evidence_codes.length <= 8 && item.evidence_codes.every(evidenceKnown)
     && knownArray(item.uncertainty_codes, uncertainties, 8) && knownArray(item.recommendation_codes, recommendations, 8))) return false;
   if (v4) {
@@ -418,10 +427,7 @@ export function isDDoSAttackReport(value: unknown): value is DDoSAttackReport {
   const baseTargets = new Set(baseFindings.map(item => `${item.attack_role}|${item.target.ip}|${item.target.port}|${item.protocol}`));
   if (baseTargets.size > Number(report.summary.target_count)
     || baseFindings.reduce((total, item) => total + Number(item.metrics.packet_count), 0) > Number(report.summary.packet_count)
-    || baseFindings.reduce((total, item) => total + Number(item.metrics.byte_count), 0) > Number(report.summary.byte_count)
-    || report.findings.length > 0 && (report.summary.first_seen === null || report.summary.last_seen === null
-      || report.findings.some(item => Date.parse(item.first_seen) < Date.parse(String(report.summary.first_seen))
-        || Date.parse(item.last_seen) > Date.parse(String(report.summary.last_seen))))) return false;
+    || baseFindings.reduce((total, item) => total + Number(item.metrics.byte_count), 0) > Number(report.summary.byte_count)) return false;
   const warningCodes = new Set(report.warnings);
   const lowerBoundCodes = new Set(['INPUT_RECORD_LIMIT_REACHED', 'TARGET_LIMIT_REACHED', 'BUCKET_LIMIT_REACHED', 'FINDING_LIMIT_REACHED', 'PARSER_SKIPPED_PACKETS', 'SENSOR_DROPS_REPORTED', 'PARTIAL_CAPTURE']);
   const coverageCodes = new Set([...lowerBoundCodes, 'SENSOR_CLOCK_SKEW', 'SENSOR_CAPTURE_QUALITY_UNAVAILABLE', 'DUPLICATE_CAPTURE_NOT_EXCLUDED']);
