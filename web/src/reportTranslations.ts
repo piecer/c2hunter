@@ -11,6 +11,12 @@ export const patterns: Record<string, [string, string]> = {
   udp_duplicate_candidates: ['UDP duplicate candidates', 'UDP 중복 후보'],
 };
 export const warnings: Record<string, [string, string]> = {
+  PARSER_SKIPPED_PACKETS: ['The source capture contains packets the parser skipped; additional patterns may be unobserved.', '원본 캡처에 파서가 건너뛴 패킷이 있어 추가 패턴이 관찰되지 않았을 수 있습니다.'],
+  CAPTURE_PACKET_LIMIT_REACHED: ['The capture packet limit excluded source traffic from analysis.', '캡처 패킷 한도로 원본 트래픽 일부가 분석에서 제외되었습니다.'],
+  SENSOR_DROPS_REPORTED: ['The sensor reported dropped packets; the capture is incomplete.', '센서가 패킷 드롭을 보고하여 캡처가 불완전합니다.'],
+  SENSOR_CLOCK_SKEW: ['Sensor clock skew was reported; capture timing requires qualification.', '센서 시계 오차가 보고되어 캡처 시간 해석에 주의가 필요합니다.'],
+  PARTIAL_CAPTURE: ['The capture was interrupted or is explicitly incomplete; additional traffic may be missing.', '캡처가 중단되었거나 불완전한 것으로 기록되어 추가 트래픽이 누락되었을 수 있습니다.'],
+  SENSOR_CAPTURE_QUALITY_UNAVAILABLE: ['Sensor capture quality was not fully observed; missing quality data does not mean a clean capture.', '센서 캡처 품질을 완전히 관측하지 못했습니다. 품질 정보가 없다고 정상 캡처를 의미하지는 않습니다.'],
   ICMP_QUOTE_LIMIT_REACHED: ['The ICMP quotation matching budget was reached; additional relationships may be unobserved.', 'ICMP 인용 패킷 연결 한도에 도달하여 추가 연관 관계가 관찰되지 않았을 수 있습니다.'],
   OBSERVATION_LIMIT_REACHED: ['The observation tracking budget was reached; additional patterns may be unobserved.', '관찰 추적 한도에 도달하여 추가 패턴이 관찰되지 않았을 수 있습니다.'],
   FLOW_TRACKING_LIMIT_REACHED: ['The flow tracking budget was reached; some traffic was not correlated.', '흐름 추적 한도에 도달하여 일부 트래픽의 연관 관계를 분석하지 못했습니다.'],

@@ -25,11 +25,11 @@ _DETECTOR_REGISTRY = DetectorRegistryCache(DEFAULT_DETECTORS)
 def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
     module = payload.get("analysis", {}).get("module", "c2")
     if module == "network_anomaly":
-        from c2hunter_analysis.network_report import analyze_network_report
+        from c2hunter_analysis.network_coverage import analyze_network_job
 
         return {
             "candidates": [],
-            "network_anomaly": analyze_network_report(payload.get("flow_records", [])),
+            "network_anomaly": analyze_network_job(payload),
         }
     if module == "ddos_attack":
         from c2hunter_analysis.ddos_attack import analyze_ddos_attack

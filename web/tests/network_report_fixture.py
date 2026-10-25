@@ -242,6 +242,7 @@ if __name__ == "__main__":
     elif "--contract" in sys.argv:
         import ast
         from c2hunter_analysis import network_report
+        from c2hunter_analysis.network_coverage import SOURCE_WARNINGS
 
         tree = ast.parse(Path(network_report.__file__).read_text())
         warning_codes = sorted(
@@ -264,7 +265,7 @@ if __name__ == "__main__":
                     "diagnostics": network_report._DIAGNOSTICS,
                     "patterns": sorted(network_report._TITLES),
                     "facts": network_report._FACT_FIELDS,
-                    "warnings": warning_codes,
+                    "warnings": sorted(set(warning_codes) | set(SOURCE_WARNINGS)),
                 },
                 sort_keys=True,
             )

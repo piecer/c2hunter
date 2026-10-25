@@ -12,6 +12,8 @@ from ipaddress import ip_address
 from statistics import pstdev
 from typing import Any
 
+from .network_tcp import TCPClosure, TCPSequenceSpace
+
 _COUNTERS = (
     "syn_retransmissions",
     "data_retransmissions",
@@ -47,22 +49,38 @@ def _tcp_data(
         return
     own, reverse = state["data"][direction], state["data"][1 - direction]
     control = any(flags.get(f) for f in ("syn", "fin", "rst", "urg"))
-    if flags.get("ack") and not control:
+    if flags.get("syn") and not flags.get("rst"):
+        state["sequence"][direction].observe((seq + 1) % 2**32, length)
+    if flags.get("fin") and not flags.get("syn") and not flags.get("rst"):
+        state["sequence"][direction].observe(seq, length + 1)
+    if flags.get("ack") and not any(flags.get(f) for f in ("rst", "urg")):
         signature = (seq, ack, record.get("tcp_window"))
-        outstanding = any(not v["acked"] and k[0] >= ack for k, v in reverse.items())
+        ack_position = state["sequence"][1 - direction].acknowledge(ack)
+        outstanding = ack_position is not None and any(
+            not v["acked"] and v["position"] is not None and v["position"] >= ack_position
+            for v in reverse.values()
+        )
         if (
-            length == 0
+            not control
+            and length == 0
             and isinstance(signature[2], int)
             and signature[2] > 0
             and outstanding
             and state["last_ack"][direction] == signature
         ):
             metrics["duplicate_acks"] += 1
-        state["last_ack"][direction] = signature if length == 0 else None
-        covered = [(k, v) for k, v in reverse.items() if not v["acked"] and k[0] + k[1] <= ack]
-        if len(covered) == 1:
+        state["last_ack"][direction] = signature if length == 0 and not control else None
+        covered = [
+            (k, v)
+            for k, v in reverse.items()
+            if ack_position is not None
+            and not v["acked"]
+            and v["position"] is not None
+            and v["position"] + k[1] <= ack_position
+        ]
+        if len(covered) == 1 and not control:
             k, v = covered[0]
-            if k[0] + k[1] == ack and not v["ambiguous"] and time > v["time"]:
+            if v["position"] + k[1] == ack_position and not v["ambiguous"] and time > v["time"]:
                 state["rtt"].append(round((time - v["time"]) * 1000, 6))
         for _, value in covered:
             value["acked"] = True
@@ -74,13 +92,22 @@ def _tcp_data(
             metrics["data_retransmissions"] += 1
             own[identity]["ambiguous"] = True
         else:
-            overlapping = [v for k, v in own.items() if seq < k[0] + k[1] and seq + length > k[0]]
+            position = state["sequence"][direction].observe(seq, length)
+            overlapping = [
+                v
+                for k, v in own.items()
+                if position is not None
+                and v["position"] is not None
+                and position < v["position"] + k[1]
+                and position + length > v["position"]
+            ]
             for value in overlapping:
                 value["ambiguous"] = True
             own[identity] = {
+                "position": position,
                 "time": time,
                 "acked": False,
-                "ambiguous": bool(overlapping) or seq + length >= 2**32,
+                "ambiguous": position is None or bool(overlapping) or seq + length >= 2**32,
             }
 
 
@@ -165,6 +192,8 @@ def analyze_network_anomalies(
                 "rtt": [],
                 "warnings": set(),
                 "data": [{}, {}],
+                "sequence": [TCPSequenceSpace(), TCPSequenceSpace()],
+                "closure": TCPClosure(),
                 "last_ack": [None, None],
                 "udp": set(),
                 "last_time": [None, None],
@@ -180,6 +209,8 @@ def analyze_network_anomalies(
             state["warnings"].add("INCOMPLETE_PACKET_EVIDENCE")
             state["last_time"][direction] = None
             state["data"] = [{}, {}]
+            state["sequence"] = [TCPSequenceSpace(), TCPSequenceSpace()]
+            state["closure"] = TCPClosure()
             state["syn"].clear()
             state["udp"].clear()
             state["last_ack"] = [None, None]
@@ -192,6 +223,8 @@ def analyze_network_anomalies(
         latest = max((t for t in state["last_time"] if t is not None), default=time)
         if time - latest > 60:
             state["data"] = [{}, {}]
+            state["sequence"] = [TCPSequenceSpace(), TCPSequenceSpace()]
+            state["closure"] = TCPClosure()
             state["syn"].clear()
             state["udp"].clear()
             state["last_ack"] = [None, None]
@@ -222,12 +255,16 @@ def analyze_network_anomalies(
             ):
                 state["warnings"].add("INCOMPLETE_PACKET_EVIDENCE")
                 state["data"] = [{}, {}]
+                state["sequence"] = [TCPSequenceSpace(), TCPSequenceSpace()]
+                state["closure"] = TCPClosure()
                 state["syn"].clear()
                 state["last_ack"] = [None, None]
                 continue
             syns = state["syn"]
             if flags.get("syn") and not flags.get("ack") and (direction, seq) not in syns:
                 state["data"] = [{}, {}]
+                state["sequence"] = [TCPSequenceSpace(), TCPSequenceSpace()]
+                state["closure"] = TCPClosure()
                 state["last_ack"] = [None, None]
                 syns.clear()
             if flags.get("syn") and not flags.get("ack") and not flags.get("rst"):
@@ -245,8 +282,13 @@ def analyze_network_anomalies(
                     elif not match[1] and time > match[0]:
                         state["rtt"].append(round((time - match[0]) * 1000, 6))
             _tcp_data(record, state, flow["metrics"], direction, time)
-            if flags.get("rst") or flags.get("fin"):
+            closed = state["closure"].observe(
+                direction, seq, ack, length, fin=bool(flags.get("fin")), ack=bool(flags.get("ack"))
+            )
+            if flags.get("rst") or closed:
                 state["data"] = [{}, {}]
+                state["sequence"] = [TCPSequenceSpace(), TCPSequenceSpace()]
+                state["closure"] = TCPClosure()
                 state["syn"].clear()
                 state["last_ack"] = [None, None]
         elif protocol == "UDP" and record.get("payload_hash"):

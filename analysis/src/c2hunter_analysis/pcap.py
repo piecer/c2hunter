@@ -73,6 +73,7 @@ _CLASSIC_MAGIC: dict[bytes, tuple[str, float]] = {
 }
 _PCAPNG_SECTION = b"\x0a\x0d\x0d\x0a"
 _MAX_CAPTURED_PACKET_BYTES = 16 * 1024 * 1024
+_MAX_SLL2_INTERFACES = 65_536
 
 
 def bounded_pcap_prefix(
@@ -205,6 +206,11 @@ def parse_pcap(
     captured_timestamps: list[datetime] = []
     link_types: set[int] = set()
     truncated = False
+    # Every PCAPNG IDB occupies at least 20 bytes, including IDBs not yet
+    # encountered and those in later sections. Reserve their entire possible
+    # ordinal range without a second scan or an unbounded container-ID set.
+    container_interface_bound = len(content) // 20 if capture_format == "PCAPNG" else 1
+    capture_interfaces: dict[tuple[int, int], int] = {}
     for packet in packets:
         if truncate_at_max_packets and captured_packet_count >= max_packets:
             truncated = True
@@ -222,6 +228,15 @@ def parse_pcap(
             retain_network_evidence,
         )
         if decoded is not None:
+            if retain_network_evidence:
+                interface_id = _capture_interface_id(
+                    packet, capture_interfaces, container_interface_bound
+                )
+                decoded["capture_interface_id"] = interface_id
+                if interface_id is None:
+                    # Unknown/exhausted provenance cannot support correlation.
+                    # Raw bytes and packet-local DDoS samples remain intact.
+                    decoded["packet_evidence_complete"] = False
             records.append(decoded)
     if captured_packet_count == 0:
         raise PcapParseError("capture does not contain timestamped packets", "EMPTY_PCAP")
@@ -241,6 +256,36 @@ def parse_pcap(
         max(captured_timestamps),
         truncated,
     )
+
+
+def _capture_interface_id(
+    packet: _CapturedPacket,
+    interfaces: dict[tuple[int, int], int],
+    container_interface_bound: int,
+) -> int | None:
+    """Return a capture-local opaque uint32, NOT an original OS ifindex.
+
+    Non-SLL2 IDs and raw export container ordinals are unchanged. SLL2
+    identities include the globally numbered IDB (which spans sections),
+    while sensor_id remains the caller-owned source namespace. Allocation is
+    deterministic in packet order, collision-free, and capped independently
+    of the caller's packet limit. Never recycle an exhausted identity.
+    """
+    if packet.link_type != 276:
+        return packet.interface_id
+    if len(packet.data) < 20:
+        return None
+    ifindex = int.from_bytes(packet.data[4:8], "big")
+    if ifindex == 0:  # SLL2 specifies a 1-based interface index.
+        return None
+    key = packet.interface_id, ifindex
+    if key in interfaces:
+        return interfaces[key]
+    identity = (2**32 - 1) - len(interfaces)
+    if len(interfaces) >= _MAX_SLL2_INTERFACES or identity < container_interface_bound:
+        return None
+    interfaces[key] = identity
+    return identity
 
 
 def find_pcap_record(

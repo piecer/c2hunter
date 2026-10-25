@@ -392,12 +392,24 @@ def build_network_input(report: Any, language: str = "ko") -> dict[str, Any]:
             )
         return _texts(value)
 
+    from c2hunter_analysis.network_coverage import SOURCE_WARNINGS
+
+    warning_texts = texts(report.get("warnings"))
+    # Upstream qualifiers are mandatory coverage facts, not optional prose.
+    # Reserve this finite set before allocating issue details under the byte cap.
+    raw_warnings = report.get("warnings")
+    if isinstance(raw_warnings, list):
+        for code in sorted(SOURCE_WARNINGS):
+            if code in raw_warnings and code not in warning_texts:
+                warning_texts.append(code)
+                detail_counts["capped_diagnostic_entries"] -= 1
+
     result: dict[str, Any] = {
         "schema_version": "network-ai-input-v1",
         "language": language,
         "summary": summary,
         "issues": [],
-        "warnings": texts(report.get("warnings")),
+        "warnings": warning_texts,
         "limitations": texts(report.get("limitations")),
         "omitted_input_issues": max(0, len(report["issues"]) - 20),
         "input_detail_counts": detail_counts,
@@ -405,7 +417,8 @@ def build_network_input(report: Any, language: str = "ko") -> dict[str, Any]:
         "All minimum facts for the first 20 issues precede optional details. "
         "Optional priority: numeric facts, uncertainty, measurements, evidence, causes, "
         "analysis, checks; each field is allocated round-robin in report order. "
-        "At most two examples and four 400-character strings per diagnostic list. "
+        "At most two examples and four 400-character strings per optional diagnostic list. "
+        "Known source coverage warnings are additionally retained within the byte budget. "
         "Each measurement entry is a representative flow, not an issue-wide aggregate. "
         "summary.omitted_issue_count counts producer omissions; omitted_input_issues "
         "counts additional whole issues outside this projection's 20-issue cap. "

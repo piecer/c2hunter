@@ -78,6 +78,17 @@ export default function NetworkPatternReport({ report }: { report: PatternReport
   const verdict = summary.verdict;
   const measurementsSupported = report.measurement_version === 'network-supporting-measurements-v1';
   const warnings = Array.isArray(report.warnings) ? report.warnings : [];
+  // The closed registry, not an arbitrary prefix, bounds the warning DOM.
+  const knownWarnings = new Set<string>();
+  let unsupportedCount = 0;
+  let firstUnsupported = '';
+  for (const warning of warnings) {
+    if (Object.hasOwn(warningCodes, warning)) knownWarnings.add(warning);
+    else {
+      if (unsupportedCount === 0) firstUnsupported = warning;
+      unsupportedCount++;
+    }
+  }
   const recognized = Array.isArray(report.issues) && Array.isArray(report.warnings) && summaryCounts.every(key => count(summary[key]) !== undefined) && warnings.every(warning => Object.hasOwn(warningCodes, warning)) && issues.every(issue => issue && Object.hasOwn(patterns, issue.pattern));
   const complete = recognized && warnings.length === 0 && summary.coverage_complete === true && summary.skipped_records === 0 && summary.incomplete_records === 0 && (count(summary.evaluated_records) ?? 0) > 0;
   const safeClear = complete && summary.issue_count === 0 && issues.length === 0 && summary.omitted_issue_count === 0 && summary.truncated === false;
@@ -120,7 +131,7 @@ export default function NetworkPatternReport({ report }: { report: PatternReport
       {!measurementsSupported && <p className="warning">{t('RTT/latency, interarrival dispersion and TTL measurements are not computed by this pattern-first producer. Existing saved legacy reports retain their original measurements behind the legacy toggle.', '이 패턴 우선 분석기는 RTT/지연 시간, 도착 간격 산포 및 TTL 측정값을 계산하지 않습니다. 이전에 저장된 보고서의 원래 측정값은 이전 형식 보기에서 확인할 수 있습니다.')}</p>}
       <p>{number(summary.scanned_records)} {t('records scanned', '개 레코드 검사')} · {number(summary.evaluated_records)} {t('evaluated', '개 평가')} · {number(summary.skipped_records)} {t('skipped', '개 건너뜀')} · {number(summary.incomplete_records)} {t('incomplete', '개 불완전')}</p>
       <p>{number(summary.detailed_flow_count)} {t('representative flows analyzed in detail', '개 대표 흐름 상세 분석')}</p>
-      <ul>{warnings.slice(0, 8).map((warning, index) => <li key={index}>{warningLabel(language, warning)}</li>)}{warnings.length > 8 && <li>{warnings.length - 8} {t('additional coverage warnings omitted from this view.', '개의 추가 분석 범위 경고가 이 화면에서 생략되었습니다.')}</li>}</ul><Notes values={report.limitations} limit={8}/>
+      <ul>{Array.from(knownWarnings, warning => <li key={warning}>{warningLabel(language, warning)}</li>)}{unsupportedCount > 0 && <li>{warningLabel(language, firstUnsupported)}</li>}{unsupportedCount > 1 && <li>{unsupportedCount - 1} {t('additional unsupported warnings omitted from this view.', '개의 추가 미지원 경고가 이 화면에서 생략되었습니다.')}</li>}</ul><Notes values={report.limitations} limit={8}/>
     </section>}
     <h3 ref={groupsHeading} tabIndex={-1}>{t('Grouped observations', '그룹별 관찰 결과')}</h3>
     <button type="button" className="secondary" aria-expanded={groupsOpen} onClick={() => { setGroupsOpen(!groupsOpen); setExpanded(undefined); }}>{t('View all anomaly items', '전체 이상 항목 보기')}</button>

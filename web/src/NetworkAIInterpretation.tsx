@@ -9,6 +9,17 @@ type Interpretation = { schema_version: 'network-interpretation-v1'; kind: 'MODE
 type FailureDiagnostic = { stage: 'MODEL_OUTPUT'; type: 'JSON_PARSE' | 'SCHEMA' | 'INVALID_CITATION' | 'LANGUAGE'; attempt_count: number; repair_count: number; output_bytes: number; provider_finish_reason?: 'stop' | 'length' | 'load' | 'unload' | 'tool_calls' | 'content_filter' | null };
 type Run = { id: string; analysis_kind: string; status: string; language: 'ko' | 'en'; created_at?: string; completed_at?: string; provider?: string; model_name?: string; progress_percent?: number; error_code?: string; error_message?: string; failure_diagnostic?: FailureDiagnostic | null; network_interpretation?: Interpretation };
 const activeStatuses = new Set(['QUEUED', 'PREPARING', 'ANALYZING', 'VALIDATING']);
+function newerRun(candidate: Run, previous?: Run, orderedRuns?: Run[]) {
+  if (!previous || candidate.id === previous.id) return candidate;
+  const candidateTime = Date.parse(candidate.created_at ?? '');
+  const previousTime = Date.parse(previous.created_at ?? '');
+  if (Number.isFinite(candidateTime) && Number.isFinite(previousTime) && candidateTime !== previousTime) {
+    return candidateTime > previousTime ? candidate : previous;
+  }
+  // For legacy/matching timestamps, list order proves precedence only when it
+  // includes the known run. A POST may arrive before any list contains its ID.
+  return !orderedRuns || orderedRuns.some(run => run.id === previous.id) ? candidate : previous;
+}
 const boundedText = (value: unknown) => typeof value === 'string' ? (value.length > 2000 ? `${value.slice(0, 2000)}…` : value) : '';
 const boundedItems = <T,>(value: T[]) => Array.isArray(value) ? value.slice(0, 20) : [];
 type Capabilities = { network_interpretation: boolean; available: boolean; provider: string; model_name: string; destination: string | null; remote: boolean; reason: string | null };
@@ -27,9 +38,12 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
   const runs = useQuery<{ items: Run[] }, Error>({
     queryKey: ['ai-runs', jobId], queryFn: () => api.get(`/analysis-jobs/${jobId}/ai-runs`), retry: false,
   });
-  const [submittedRun, setSubmittedRun] = useState<Run>();
-  const saved = runs.data?.items?.find(run => run.analysis_kind === 'NETWORK_ANOMALY');
-  const latest = submittedRun ?? saved;
+  const [knownRun, setKnownRun] = useState<Run>();
+  const saved = runs.isSuccess ? runs.data.items?.find(run => run.analysis_kind === 'NETWORK_ANOMALY') : undefined;
+  // Keep the newest observed identity through lagging/failed lists, while letting
+  // the authoritative list supersede a POST response as soon as it knows more.
+  const latest = saved ? newerRun(saved, knownRun, runs.data?.items) : knownRun;
+  if (latest !== knownRun) setKnownRun(latest);
   const run = useQuery<Run, Error>({
     queryKey: ['ai-run', latest?.id], queryFn: () => api.get(`/ai-runs/${latest?.id}`), enabled: Boolean(latest?.id), retry: false,
     refetchInterval: query => !query.state.error && activeStatuses.has(query.state.data?.status ?? latest?.status ?? '') ? 2000 : false,
@@ -38,8 +52,16 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
   const active = Boolean(current && activeStatuses.has(current.status));
   const canStart = completed && config?.available === true && config.network_interpretation === true && (!config.remote || allowRemote) && !capabilities.isError && runs.isSuccess && !runs.isFetching && !run.isError && !run.isFetching && !active;
   const start = useMutation({
+    onMutate: () => ({ knownRunId: latest?.id }),
     mutationFn: () => api.post<Run>(`/analysis-jobs/${jobId}/ai-runs`, { idempotency_key: `web-${jobId}-${Date.now()}`, analysis_kind: 'NETWORK_ANOMALY', language, allow_remote: allowRemote }),
-    onSuccess: async created => { setSubmittedRun(created); await client.invalidateQueries({ queryKey: ['ai-runs', jobId] }); },
+    onSuccess: async (created, _variables, context) => {
+      // A different identity observed during this request wins ambiguous timestamps.
+      // Otherwise a deliberate new POST may supersede the previously completed run.
+      setKnownRun(previous => previous && previous.id !== context.knownRunId
+        ? newerRun(previous, created)
+        : newerRun(created, previous));
+      await client.invalidateQueries({ queryKey: ['ai-runs', jobId] });
+    },
   });
   const cancel = useMutation({
     mutationFn: () => api.post(`/ai-runs/${current?.id}/cancel`, { reason: 'operator requested from web console' }),

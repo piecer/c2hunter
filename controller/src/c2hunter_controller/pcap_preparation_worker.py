@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from c2hunter_analysis.ddos_signatures import load_reference
+from c2hunter_analysis.network_coverage import attach_network_coverage_context
 from c2hunter_analysis.pcap import PcapParseError, parse_pcap
 
 from .jobs import JobState, StateMachine
@@ -228,6 +229,7 @@ class PcapPreparationWorker:
             "link_types": list(parsed.link_types),
         }
         attach_ddos_coverage_context(job)
+        attach_network_coverage_context(job)
 
     def _enqueue_prepared(
         self,

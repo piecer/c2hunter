@@ -19,6 +19,10 @@ from time import perf_counter, sleep
 from typing import Annotated, Any, Literal, cast
 from urllib.parse import urlsplit
 
+from c2hunter_analysis.network_coverage import (
+    attach_network_coverage_context,
+    network_coverage_context,
+)
 from c2hunter_analysis.pcap import (
     PcapParseError,
     bounded_pcap_prefix,
@@ -2321,6 +2325,7 @@ def create_app(
         job["flow_records"] = [dict(record) for record in snapshot.records]
         apply_job_packet_limit(job)
         attach_ddos_coverage_context(job)
+        attach_network_coverage_context(job)
         job["flow_count"] = len(job["flow_records"])
         job["packet_count"] = sum(
             int(record.get("packet_count", 1)) for record in job["flow_records"]
@@ -3043,6 +3048,7 @@ def create_app(
     def execute_analysis(job: dict[str, Any]) -> dict[str, Any]:
         apply_job_packet_limit(job)
         attach_ddos_coverage_context(job)
+        attach_network_coverage_context(job)
         for state, reason in (
             (JobState.WAITING_FOR_SENSOR, "sensors selected"),
             (JobState.CAPTURING, "dataset selected"),
@@ -3054,9 +3060,9 @@ def create_app(
         module = job.get("analysis", {}).get("module", "c2")
         candidates: list[dict[str, Any]]
         if module == "network_anomaly":
-            from c2hunter_analysis.network_report import analyze_network_report
+            from c2hunter_analysis.network_coverage import analyze_network_job
 
-            job["network_anomaly"] = analyze_network_report(job.get("flow_records", []))
+            job["network_anomaly"] = analyze_network_job(job)
             candidates = []
         elif module == "ddos_attack":
             from c2hunter_analysis.ddos_attack import analyze_ddos_attack
@@ -3694,6 +3700,7 @@ def create_app(
             "link_types": list(parsed.link_types),
         }
         attach_ddos_coverage_context(job)
+        attach_network_coverage_context(job)
         job, created = repo.create_job(job)
         if not created:
             check_reference_replay(job, reference_snapshot)
@@ -4727,6 +4734,7 @@ def create_app(
             "capture_limit",
             "capture_incomplete",
             "ddos_coverage_context",
+            "network_coverage_context",
         ):
             if quality_key in source:
                 reanalysis_job[quality_key] = deepcopy(source[quality_key])
@@ -4736,7 +4744,10 @@ def create_app(
             source_coverage = dict(source)
             attach_ddos_coverage_context(source_coverage)
             reanalysis_job["ddos_coverage_context"] = source_coverage["ddos_coverage_context"]
+        if module == "network_anomaly":
+            reanalysis_job["network_coverage_context"] = network_coverage_context(source)
         attach_ddos_coverage_context(reanalysis_job)
+        attach_network_coverage_context(reanalysis_job)
         job, created = repo.create_job(reanalysis_job)
         if not created:
             check_reference_replay(job, reference_snapshot)

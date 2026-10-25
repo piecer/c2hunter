@@ -20,6 +20,7 @@ from .network_measurements import (
     describe,
     hypothesis,
 )
+from .network_tcp import TCPClosure, TCPSequenceSpace
 
 Record = Mapping[str, object]
 MAX_TRACKED_FLOWS = 8192
@@ -123,6 +124,7 @@ DataKey = tuple[int, int, str]
 
 @dataclass(slots=True)
 class TCPDirection:
+    sequence: TCPSequenceSpace = field(default_factory=TCPSequenceSpace)
     seen: set[DataKey] = field(default_factory=set)
     outstanding: set[DataKey] = field(default_factory=set)
     starts: list[tuple[int, DataKey]] = field(default_factory=list)
@@ -132,7 +134,13 @@ class TCPDirection:
     highest_end: int = 0
     rtt_ambiguous: bool = False
 
-    def acknowledge(self, ack: int, time: float, measurements: SupportingMeasurements) -> bool:
+    def acknowledge(
+        self, ack: int, time: float, measurements: SupportingMeasurements, *, sample: bool = True
+    ) -> bool:
+        position = self.sequence.acknowledge(ack)
+        if position is None:
+            return False
+        ack = position
         covered = 0
         start = 0.0
         end = 0
@@ -141,7 +149,7 @@ class TCPDirection:
             start = self.sent_times.pop(identity)
             covered += 1
             self.outstanding.discard(identity)
-        if covered:
+        if covered and sample:
             if self.rtt_ambiguous:
                 measurements.excluded["ambiguous"] += 1
             elif covered != 1 or end != ack:
@@ -172,6 +180,7 @@ class Flow:
     )
     udp: set[tuple[int, int, str]] = field(default_factory=set)
     syn: dict[tuple[int, int], tuple[float, bool]] = field(default_factory=dict)
+    closure: TCPClosure = field(default_factory=TCPClosure)
     measurements: SupportingMeasurements = field(default_factory=SupportingMeasurements)
     last_time: float | None = None
     clock_invalid: bool = False
@@ -186,6 +195,7 @@ class Flow:
         self.budget.correlations -= sum(len(d.seen) for d in self.tcp)
         self.syn.clear()
         self.tcp = TCPDirection(), TCPDirection()
+        self.closure = TCPClosure()
 
     def reserve(self) -> None:
         size = len(self.udp) + sum(len(d.seen) for d in self.tcp)
@@ -387,12 +397,22 @@ def _scan_tcp(record: Record, flow: Flow, direction: int, key: FlowKey, time: fl
     )
     control = any(flags.get(f) for f in ("syn", "fin", "rst", "urg"))
     if type(length) is int and type(window) is int:
-        if flags.get("ack") and not control:
-            outstanding = reverse.acknowledge(ack, time, flow.measurements)
+        if flags.get("syn") and not flags.get("rst"):
+            own.sequence.observe((seq + 1) % 2**32, length)
+        if flags.get("fin") and not flags.get("syn") and not flags.get("rst"):
+            own.sequence.observe(seq, length + 1)
+        if flags.get("ack") and not any(flags.get(f) for f in ("rst", "urg")):
+            outstanding = reverse.acknowledge(ack, time, flow.measurements, sample=not control)
             signature = seq, ack, window
-            if length == 0 and window > 0 and outstanding and own.last_ack == signature:
+            if (
+                not control
+                and length == 0
+                and window > 0
+                and outstanding
+                and own.last_ack == signature
+            ):
                 flow.observe("duplicate_acks", source, time, record)
-            own.last_ack = signature if length == 0 else None
+            own.last_ack = signature if length == 0 and not control else None
         else:
             own.last_ack = None
         if length > 0 and not control and isinstance(digest, str) and digest:
@@ -402,16 +422,24 @@ def _scan_tcp(record: Record, flow: Flow, direction: int, key: FlowKey, time: fl
                 flow.observe("data_retransmissions", dest, time, record)
             else:
                 flow.reserve()
+                position = own.sequence.observe(seq, length)
                 # Conservative O(1) Karn guard: sequence regression, overlap,
                 # reuse and wrap poison this direction until the epoch resets.
-                own.rtt_ambiguous |= seq < own.highest_end or seq + length >= 2**32
-                own.highest_end = max(own.highest_end, seq + length)
-                own.sent_times[data_key] = time
+                own.rtt_ambiguous |= (
+                    position is None or position < own.highest_end or seq + length >= 2**32
+                )
                 own.seen.add(data_key)
+                if position is None:
+                    return
+                own.highest_end = max(own.highest_end, position + length)
+                own.sent_times[data_key] = time
                 own.outstanding.add(data_key)
-                heappush(own.starts, (-seq, data_key))
-                heappush(own.ends, (seq + length, data_key))
-    if flags.get("rst") or flags.get("fin"):
+                heappush(own.starts, (-position, data_key))
+                heappush(own.ends, (position + length, data_key))
+    closed = type(length) is int and flow.closure.observe(
+        direction, seq, ack, length, fin=bool(flags.get("fin")), ack=bool(flags.get("ack"))
+    )
+    if flags.get("rst") or closed:
         flow.clear_tcp()
 
 

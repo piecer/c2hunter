@@ -12,6 +12,31 @@ measurement tracking/gap/availability reasons. It does **not** assert enough RTT
 spacing or TTL samples. A complete-coverage flow can have one SYN/ACK RTT sample,
 zero data/ACK samples and an ambiguous excluded candidate.
 
+Report-wide source coverage is a separate contract. Controller and worker job
+entry points preserve six bounded dataset qualifiers through
+`network_coverage.analyze_network_job`: `PARSER_SKIPPED_PACKETS`,
+`CAPTURE_PACKET_LIMIT_REACHED`, `SENSOR_DROPS_REPORTED`, `SENSOR_CLOCK_SKEW`,
+`PARTIAL_CAPTURE`, and `SENSOR_CAPTURE_QUALITY_UNAVAILABLE`. Parser omissions,
+job limits, sensor quality and interrupted captures therefore cannot become
+complete coverage merely because every supplied analysis record was inspected.
+Previously recorded qualifiers survive child and grandchild reanalysis; they
+are booleans, not additive counts of the same omitted packets.
+
+Known omissions make report counts lower bounds and mark truncation. Clock skew
+or unobserved sensor quality alone mark coverage incomplete without inventing a
+known omission count. Reports without findings then remain insufficient evidence;
+valid positive findings, issue identities and representative measurements remain
+intact. Analysis-record counters do not include upstream skipped-packet totals.
+Pure `analyze_network_report(records)` calls remain independent of job provenance.
+This does not add packet-level capability to native LIVE aggregate records.
+
+The Web warning registry includes both packet-local and upstream source codes;
+every known unique code is accessible within a registry-bounded warning list.
+AI projection reserves the source qualifiers before optional issue details,
+within the unchanged 24,000-byte ceiling. This report-wide qualification does
+not rewrite any representative flow's existing `measurements.coverage_complete`
+or `metric_quality`, nor does it imply measurement sample adequacy.
+
 The additive closed shape is:
 
 ```json
