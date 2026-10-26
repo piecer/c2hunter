@@ -14,6 +14,25 @@ const generate = () => execFileSync(python, ['tests/network_report_fixture.py'],
 const fixtures = JSON.parse(generate()) as Record<string, NetworkAnomalyReport>;
 const qualityBytes = readFileSync('tests/fixtures/network-measurement-quality.json', 'utf8');
 const qualityCases = JSON.parse(qualityBytes) as Record<string, { measurement: Record<string, unknown>; projected: unknown; accepted: boolean }>;
+it.each(['object', 'array'])('rejects non-string measurement status %s locally without losing positive or sibling evidence', kind => {
+  const report = structuredClone(fixtures.syn_reset);
+  const first = report.issues![0];
+  const valid = structuredClone(first.examples[0]);
+  const measurement = first.examples[0].measurements as Record<string, unknown>;
+  measurement.status = kind === 'object' ? JSON.parse('{"toString":null}') : [measurement.status];
+  first.examples.push(valid);
+  const freeze = (v: unknown) => { if (v && typeof v === 'object') { Object.freeze(v); Object.values(v).forEach(freeze); } };
+  freeze(report); const raw = JSON.stringify(report);
+  render(<NetworkAnomalyPanel report={report}/>);
+  expect(screen.getByRole('heading', { name: 'Anomaly observed' })).toBeVisible();
+  expect(screen.getAllByTestId('top-observation').length).toBeGreaterThan(1);
+  openEvidence();
+  const measurements = screen.getAllByRole('region', { name: 'Supporting measurements' });
+  expect(measurements).toHaveLength(2);
+  expect(measurements[0]).toHaveTextContent('Invalid measurement qualification');
+  expect(measurements[1]).toHaveTextContent('Detailed measurement analysis');
+  expect(JSON.stringify(report)).toBe(raw);
+});
 it('freezes exact actual producer and AI projection bytes', () => {
   const output = () => execFileSync(python, ['tests/network_report_fixture.py', '--quality-contract'], { encoding: 'utf8' });
   expect(output()).toBe(qualityBytes);
@@ -150,9 +169,9 @@ it('does not upgrade old saved reports and clears new measurements on report rep
 });
 
 it('bounds new reports to eight groups and three lazily mounted examples with one detail owner', () => {
-  const base = fixtures.supporting;
-  const issue = base.issues![0];
-  const report = { ...base, issues: Array.from({ length: 1000 }, () => ({ ...issue, examples: Array.from({ length: 100 }, () => issue.examples[0]) })) };
+  const report = JSON.parse(execFileSync(python, ['tests/network_report_fixture.py', '--maximum'], { encoding: 'utf8', maxBuffer: 20000000 })).many as NetworkAnomalyReport;
+  expect(report.issues).toHaveLength(100);
+  expect(report.issues!.every(issue => issue.examples.length === 10)).toBe(true);
   const { container, rerender } = render(<NetworkAnomalyPanel report={report}/>);
   openGroups();
   expect(screen.getAllByRole('article')).toHaveLength(8);

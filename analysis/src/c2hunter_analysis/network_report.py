@@ -11,8 +11,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from heapq import heappop, heappush
 from ipaddress import ip_address
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
+from .network_icmp_details import DetailBudget, Details, Retained, publish
 from .network_measurements import (
     Hypothesis,
     Measurements,
@@ -54,6 +55,7 @@ class Scope(TypedDict):
 
 
 class Example(TypedDict):
+    icmp_details: NotRequired[Details]
     endpoint_a: Endpoint
     endpoint_b: Endpoint
     event_count: int
@@ -101,7 +103,21 @@ class Summary(TypedDict):
     truncated: bool
 
 
+class FamilyCount(TypedDict):
+    pattern: Pattern
+    observed_groups: int
+    retained_groups: int
+    omitted_groups: int
+
+
+class FamilyCoverage(TypedDict):
+    version: Literal["network-family-coverage-v1"]
+    selection_policy: Literal["family-first-v1"]
+    families: list[FamilyCount]
+
+
 class Report(TypedDict):
+    family_coverage: FamilyCoverage
     measurement_version: Literal["network-supporting-measurements-v1"]
     version: Literal["network-pattern-report-v1"]
     summary: Summary
@@ -117,6 +133,7 @@ class Observation:
     first: float
     last: float
     facts: tuple[int | None, ...]
+    icmp_samples: list[Retained] = field(default_factory=list)
 
 
 DataKey = tuple[int, int, str]
@@ -164,6 +181,7 @@ class TCPDirection:
 @dataclass(slots=True)
 class Budget:
     correlations: int = 0
+    icmp: DetailBudget = field(default_factory=DetailBudget)
 
 
 class TrackingLimit(Exception):
@@ -180,8 +198,12 @@ class Flow:
     )
     udp: set[tuple[int, int, str]] = field(default_factory=set)
     syn: dict[tuple[int, int], tuple[float, bool]] = field(default_factory=dict)
+    # Fixed directional epoch anchors survive cap clearing and SYN response pop.
+    epoch_syn: list[int | None] = field(default_factory=lambda: [None, None])
     closure: TCPClosure = field(default_factory=TCPClosure)
     measurements: SupportingMeasurements = field(default_factory=SupportingMeasurements)
+    # Last valid identity/time observation, including suppressed/incomplete rows;
+    # this is record timestamp semantics, not a new clock authority.
     last_time: float | None = None
     clock_invalid: bool = False
     observations: dict[tuple[Pattern, EndpointKey], Observation] = field(default_factory=dict)
@@ -216,6 +238,8 @@ class Flow:
             previous.count += 1
             previous.first = min(previous.first, time)
             previous.last = max(previous.last, time)
+        if pattern == "icmp_errors":
+            self.budget.icmp.add(self.observations[key].icmp_samples, record, time)
 
 
 _FACT_FIELDS = (
@@ -288,7 +312,7 @@ _DIAGNOSTICS: dict[Pattern, tuple[str, str, str]] = {
 
 def _details(
     flows: dict[FlowKey, Flow], max_issues: int, max_examples: int
-) -> tuple[list[Issue], int, int]:
+) -> tuple[list[Issue], int, int, FamilyCoverage]:
     # Stage two visits only numeric candidate observations. Prose and endpoint
     # DTOs are materialized only for retained groups and suspect examples.
     from heapq import nsmallest
@@ -307,8 +331,38 @@ def _details(
             group.last = max(group.last, observation.last)
             if len(group.examples) < max_examples:
                 group.examples.append((fkey, observation))
-    selected = nsmallest(max_issues, groups, key=lambda k: (-groups[k].count, repr(k)))
+
+    def rank(key: GroupKey) -> tuple[int, str]:
+        return -groups[key].count, repr(key)
+
+    representatives: dict[Pattern, GroupKey] = {}
+    observed: dict[Pattern, int] = {}
+    for key in groups:
+        pattern = key[3]
+        observed[pattern] = observed.get(pattern, 0) + 1
+        previous = representatives.get(pattern)
+        if previous is None or rank(key) < rank(previous):
+            representatives[pattern] = key
+    chosen = set(nsmallest(max_issues, representatives.values(), key=rank))
+    chosen.update(
+        nsmallest(max_issues - len(chosen), (k for k in groups if k not in chosen), key=rank)
+    )
+    selected = sorted(chosen, key=rank)
+    coverage: FamilyCoverage = {
+        "version": "network-family-coverage-v1",
+        "selection_policy": "family-first-v1",
+        "families": [
+            {
+                "pattern": pattern,
+                "observed_groups": observed[pattern],
+                "retained_groups": sum(k[3] == pattern for k in selected),
+                "omitted_groups": observed[pattern] - sum(k[3] == pattern for k in selected),
+            }
+            for pattern in sorted(observed)
+        ],
+    }
     issues: list[Issue] = []
+    detail_owners: list[tuple[Example, int, list[Retained]]] = []
     detailed: set[FlowKey] = set()
     for index, key in enumerate(selected):
         group = groups[key]
@@ -328,13 +382,19 @@ def _details(
                     },
                 }
             )
+            if key[3] == "icmp_errors":
+                detail_owners.append((examples[-1], observation.count, observation.icmp_samples))
         issues.append(
             {
                 "id": f"pattern-{index + 1}",
                 "suspected_cause": hypothesis(key[3]),
-                "detailed_analysis": [
-                    line for example in examples for line in describe(example["measurements"])
-                ],
+                # Repeated prose adds no evidence: retain each distinct line in
+                # first-example order; all per-example facts/measurements remain.
+                "detailed_analysis": list(
+                    dict.fromkeys(
+                        line for example in examples for line in describe(example["measurements"])
+                    )
+                ),
                 "pattern": key[3],
                 "title": _TITLES[key[3]],
                 "severity": "observation",
@@ -365,7 +425,8 @@ def _details(
                 ],
             }
         )
-    return issues, len(groups), len(detailed)
+    publish(detail_owners)
+    return issues, len(groups), len(detailed), coverage
 
 
 def _scan_tcp(record: Record, flow: Flow, direction: int, key: FlowKey, time: float) -> None:
@@ -381,7 +442,10 @@ def _scan_tcp(record: Record, flow: Flow, direction: int, key: FlowKey, time: fl
             flow.syn[identity] = flow.syn[identity][0], True
         else:
             flow.clear_tcp()
+            flow.epoch_syn = [None, None]
             flow.syn[identity] = time, False
+        if _syn_only(record):
+            flow.epoch_syn[direction] = seq
     if flags.get("ack") and (flags.get("syn") or flags.get("rst")):
         match = flow.syn.pop((1 - direction, (ack - 1) % 2**32), None)
         if match is not None:
@@ -441,6 +505,16 @@ def _scan_tcp(record: Record, flow: Flow, direction: int, key: FlowKey, time: fl
     )
     if flags.get("rst") or closed:
         flow.clear_tcp()
+        flow.epoch_syn = [None, None]
+
+
+def _syn_only(record: Record) -> bool:
+    flags = record.get("tcp_flags")
+    return (
+        isinstance(flags, Mapping)
+        and bool(flags.get("syn"))
+        and not any(flags.get(name) for name in ("ack", "rst", "fin", "urg"))
+    )
 
 
 def _endpoint(ip: object, port: object) -> EndpointKey:
@@ -551,28 +625,48 @@ def analyze_network_report(
                 warnings.add("FLOW_TRACKING_LIMIT_REACHED")
                 continue
             flow = flows[key] = Flow(budget)
-        if flow.limited:
-            incomplete += 1
-            limited += 1
-            continue
         flow.directions.add(direction)
+        idle = flow.last_time is not None and time - flow.last_time > 60
+        if flow.last_time is not None and time < flow.last_time:
+            flow.clock_invalid = True
+        else:
+            flow.last_time = time
         if not _complete(record, key[2]):
             incomplete += 1
+            limited += int(flow.limited)
             warnings.add("INCOMPLETE_PACKET_EVIDENCE")
             flow.measurements.gap("INCOMPLETE_PACKET_EVIDENCE")
             flow.clear_correlations()
             continue
-        if flow.last_time is not None and time < flow.last_time:
-            flow.clock_invalid = True
         if flow.clock_invalid:
             incomplete += 1
+            limited += int(flow.limited)
             warnings.add("NON_MONOTONIC_TIMESTAMPS")
             flow.measurements.gap("NON_MONOTONIC_TIMESTAMPS")
             flow.clear_correlations()
             continue
-        if flow.last_time is not None and time - flow.last_time > 60:
+        if flow.limited:
+            anchor = flow.epoch_syn[direction]
+            changed_syn = (
+                key[2] == "TCP"
+                and _syn_only(record)
+                and anchor is not None
+                and record.get("tcp_sequence") != anchor
+            )
+            if idle or changed_syn:
+                flow.clear_correlations()
+                flow.epoch_syn = [None, None]
+                flow.limited = False
+            else:
+                incomplete += 1
+                limited += 1
+                continue
+        if idle:
             flow.clear_correlations()
-        flow.last_time = time
+            flow.epoch_syn = [None, None]
+            for measurement in flow.measurements.directions:
+                measurement.last_time = None
+                measurement.ttl_last = None
         evaluated += 1
         flow.measurements.directions[direction].add(time, record.get("ip_ttl"))
         if key[2] == "TCP":
@@ -647,16 +741,20 @@ def analyze_network_report(
                     incomplete += observation.count
                     limited += observation.count
                     warnings.add("OBSERVATION_LIMIT_REACHED")
+                    budget.icmp.release(observation.icmp_samples)
                     continue
                 target.observations[observation_key] = observation
             else:
                 previous.count += observation.count
                 previous.first = min(previous.first, observation.first)
                 previous.last = max(previous.last, observation.last)
+                budget.icmp.merge(previous.icmp_samples, observation.icmp_samples)
+        pending.observations.clear()
+    quoted.clear()
     if any(len(f.directions) < 2 for f in flows.values()):
         warnings.add("ONE_DIRECTION_OBSERVED")
     complete = bool(evaluated) and not warnings
-    issues, total, detailed = _details(flows, max_issues, max_examples)
+    issues, total, detailed, family_coverage = _details(flows, max_issues, max_examples)
     verdict: Verdict = (
         "anomaly_observed" if total else "no_clear_anomaly" if complete else "insufficient_evidence"
     )
@@ -671,6 +769,7 @@ def analyze_network_report(
         narrative += " Coverage is incomplete; additional patterns may be unobservable."
     return {
         "version": "network-pattern-report-v1",
+        "family_coverage": family_coverage,
         "measurement_version": "network-supporting-measurements-v1",
         "summary": {
             "verdict": verdict,

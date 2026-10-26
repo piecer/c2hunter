@@ -175,7 +175,7 @@ if __name__ == "__main__":
             else [frame(), frame()]
         )
         print(json.dumps(analyze_network_anomalies(records(*packets)), sort_keys=True))
-    elif "--glance" in sys.argv:
+    elif "--glance" in sys.argv or "--maximum" in sys.argv or "--citation" in sys.argv:
         import struct
         from c2hunter_analysis.pcap import parse_pcap
         from test_network_anomaly import capture, internet_checksum
@@ -192,9 +192,10 @@ if __name__ == "__main__":
             return bytes(packet)
 
         evidence = []
-        for group in range(20):
+        maximum = "--maximum" in sys.argv
+        for group in range(101 if maximum else 20):
             packets = []
-            for port in (50000, 50001, 50002):
+            for port in range(50000, 50010 if maximum else 50003):
                 data = frame(flags=24, seq=101, payload=b"abc")
                 packets.extend(source_port(packet, port) for packet in (
                     frame(), frame(flags=18, seq=500, ack=101, reverse=True),
@@ -206,14 +207,47 @@ if __name__ == "__main__":
             evidence.extend(parse_pcap(capture(*packets), sensor_id=f"glance-{group:02d}",
                 internal_networks=["10.0.0.0/8"], retain_packet_bytes=False,
                 retain_network_evidence=True).records)
-        many = analyze_network_report(evidence)
-        assert len(many["issues"]) == 20
-        assert all(len(issue["examples"]) == 3 for issue in many["issues"])
+        many = analyze_network_report(evidence, max_issues=100 if maximum else 20, max_examples=10 if maximum else 3)
+        assert len(many["issues"]) == (100 if maximum else 20)
+        assert all(len(issue["examples"]) == (10 if maximum else 3) for issue in many["issues"])
         udp = frame(protocol=17, payload=b"query")
         data = frame(flags=24, seq=101, payload=b"abc")
         mixed = analyze_network_report(records(frame(), frame(), data, data, udp, udp,
             frame(protocol=1, reverse=True, payload=udp[14:42])))
-        print(json.dumps({"many": many, "mixed": mixed}, sort_keys=True))
+        from c2hunter_controller.network_ai import build_network_input
+        bundle = build_network_input(many, "en")
+        assert len(bundle["issues"]) == 20
+        extra = {}
+        if maximum or "--citation" in sys.argv:
+            from c2hunter_controller.network_ai import NetworkInterpretation
+            ids = [item["id"] for item in bundle["issues"]]
+            interpretation = NetworkInterpretation.model_validate({
+                "schema_version": "network-interpretation-v1", "kind": "MODEL_INTERPRETATION", "language": "en",
+                "summary": "Observed patterns are not a diagnosis.",
+                "possible_causes": [{"hypothesis": "Capture duplication is possible.", "uncertainty": "Unconfirmed.", "issue_ids": ids} for _ in range(10)],
+                "prioritized_checks": [{"priority": "HIGH", "check": "Compare captures.", "issue_ids": ids} for _ in range(10)],
+                "correlations": [{"interpretation": "Shared observations, not proven causality.", "issue_ids": ids} for _ in range(10)],
+                "limitations": ["Single vantage, limited samples."] * 12,
+            }).model_dump()
+            extra = {"network_input": bundle, "run": {"id": "citation-run", "analysis_job_id": "citation-job", "dataset_id": "citation-dataset", "analysis_kind": "NETWORK_ANOMALY", "status": "COMPLETED", "language": "en", "network_input": bundle, "network_interpretation": interpretation}}
+        print(json.dumps({"many": many, "mixed": mixed, **extra}, sort_keys=True))
+    elif "--upstream" in sys.argv:
+        from c2hunter_analysis.network_coverage import analyze_network_job
+        packets = records(frame(), frame(), frame(flags=18, seq=500, ack=101, reverse=True))
+        upstream = analyze_network_job({"flow_records": packets, "source": {"captured_packet_count": len(packets), "skipped_packet_count": 1}})
+        assert upstream["summary"]["tracking_limited_records"] == 0
+        assert upstream["summary"]["counts_are_lower_bounds"] is True
+        print(json.dumps(upstream, sort_keys=True))
+    elif "--limited" in sys.argv:
+        from unittest.mock import patch
+        packets = list(records(frame(flags=24, seq=101, payload=b"abc"), frame(flags=24, seq=101, payload=b"abc"), frame(flags=24, seq=104, payload=b"def")))
+        packets.extend({**packets[0], "sensor_id": f"limited-{i}"} for i in range(24))
+        with patch("c2hunter_analysis.network_report.MAX_TRACKED_FLOWS", 1), patch("c2hunter_analysis.network_report.MAX_FLOW_CORRELATIONS", 1):
+            limited = analyze_network_report(packets)
+        assert limited["summary"]["tracking_limited_records"] == 25
+        assert limited["summary"]["verdict"] == "anomaly_observed"
+        assert {"FLOW_TRACKING_LIMIT_REACHED", "CORRELATION_LIMIT_REACHED"} <= set(limited["warnings"])
+        print(json.dumps(limited, sort_keys=True))
     elif "--pagination" in sys.argv:
         from c2hunter_analysis.pcap import parse_pcap
         from test_network_anomaly import capture

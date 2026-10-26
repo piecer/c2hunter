@@ -1,5 +1,8 @@
+import NetworkSourceCapability from './NetworkSourceCapability';
+import { NetworkEvidenceContext, type NetworkEvidenceJob } from './networkEvidenceContext';
+import { projectNetworkReport } from './networkReportValidation';
 import { ReportDetailContext, type ReportDetail } from './reportDetailContext';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import ReportLanguageScope from './ReportLanguage';
 import { useReportLanguage } from './reportLanguageContext';
 import { choose, factLabel, translateProse, warningLabel } from './reportTranslations';
@@ -37,11 +40,20 @@ function CompactEvidence({ value }: { value: unknown }) {
   };
   return <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', minWidth: 100, maxWidth: 280, maxHeight: 280, overflow: 'auto', fontSize: '0.75rem' }}>{typeof value === 'object' ? format(value) : String(value)}</pre>;
 }
-export default function NetworkAnomalyPanel({ report, children }: { report?: NetworkAnomalyReport; children?: ReactNode }) {
+export default function NetworkAnomalyPanel({ report, children, job }: { report?: NetworkAnomalyReport; children?: ReactNode; job?: NetworkEvidenceJob & { source_type?: string; mode?: string } }) {
   const [owner, setOwner] = useState<ReportDetail>();
-  const [source, setSource] = useState(report);
-  if (source !== report) { setSource(report); setOwner(undefined); }
-  return <ReportDetailContext.Provider value={{ owner, claim: setOwner }}><ReportLanguageScope><ReportContent report={report}/>{children}</ReportLanguageScope></ReportDetailContext.Provider>;
+  const [source, setSource] = useState({ report, jobId: job?.id, generation: {} });
+  const [selection, setSelection] = useState<{ index: number }>();
+  const live = useRef(source.generation);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  if (source.report !== report || source.jobId !== job?.id) {
+    const next = { report, jobId: job?.id, generation: {} };
+    live.current = next.generation;
+    setSource(next); setOwner(undefined); setSelection(undefined);
+  }
+  const current = () => mounted.current && live.current === source.generation;
+  return <NetworkEvidenceContext.Provider value={{ job, projection: projectNetworkReport(report), generation: source.generation, current, selection, navigate: index => { if (current()) { setOwner('evidence'); setSelection({ index }); } } }}><ReportDetailContext.Provider value={{ owner, claim: setOwner }}><ReportLanguageScope><ReportContent report={report}/>{job && <NetworkSourceCapability source={job}/>} {children}</ReportLanguageScope></ReportDetailContext.Provider></NetworkEvidenceContext.Provider>;
 }
 function ReportContent({ report }: { report?: NetworkAnomalyReport }) {
   const language = useReportLanguage();
@@ -49,6 +61,7 @@ function ReportContent({ report }: { report?: NetworkAnomalyReport }) {
   const [legacy, setLegacy] = useState<NetworkAnomalyReport>();
   if (!report) return <section className="panel"><h2>{t('Overall network report', '전체 네트워크 보고서')}</h2><p role="status">{t('No network report is available yet. Check job status and errors.', '아직 네트워크 보고서가 없습니다. 작업 상태와 오류를 확인하세요.')}</p></section>;
   if (report.version === 'network-pattern-report-v1') return <NetworkPatternReport report={report}/>;
+  if (report.version !== 'network-anomaly-v1') return <section className="panel"><p role="alert">{t('Unsupported report version; no overall conclusion is available.', '지원되지 않는 보고서 버전입니다. 종합 결론을 제공할 수 없습니다.')}</p></section>;
   return <section className="panel"><h2>{t('Legacy report', '이전 형식 보고서')}</h2><p>{t('An overall verdict is unavailable for this saved report. Re-run analysis to produce a pattern-first report.', '이 저장된 보고서에는 종합 판정이 없습니다. 패턴 우선 보고서를 생성하려면 분석을 다시 실행하세요.')}</p><button className="secondary" aria-expanded={legacy === report} onClick={() => setLegacy(legacy === report ? undefined : report)}>{legacy === report ? t('Hide', '숨기기') : t('Show', '보기')} {t('legacy flow observations', '이전 형식 흐름 관찰')}</button>{legacy === report && <LegacyNetworkObservations report={report}/>}</section>;
 }
 function LegacyNetworkObservations({ report }: { report: NetworkAnomalyReport }) {

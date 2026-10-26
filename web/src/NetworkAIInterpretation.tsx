@@ -1,5 +1,6 @@
+import { citationTarget, evidenceSignature, useNetworkEvidence } from './networkEvidenceContext';
 import { useReportDetail } from './reportDetailContext';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from './api';
 import { useReportLanguage } from './reportLanguageContext';
@@ -7,7 +8,7 @@ import { choose } from './reportTranslations';
 
 type Interpretation = { schema_version: 'network-interpretation-v1'; kind: 'MODEL_INTERPRETATION'; language: 'ko' | 'en'; summary: string; possible_causes: { hypothesis: string; issue_ids: string[]; uncertainty: string }[]; prioritized_checks: { priority: string; check: string; issue_ids: string[] }[]; correlations: { interpretation: string; issue_ids: string[] }[]; limitations: string[] };
 type FailureDiagnostic = { stage: 'MODEL_OUTPUT'; type: 'JSON_PARSE' | 'SCHEMA' | 'INVALID_CITATION' | 'LANGUAGE'; attempt_count: number; repair_count: number; output_bytes: number; provider_finish_reason?: 'stop' | 'length' | 'load' | 'unload' | 'tool_calls' | 'content_filter' | null };
-type Run = { id: string; analysis_kind: string; status: string; language: 'ko' | 'en'; created_at?: string; completed_at?: string; provider?: string; model_name?: string; progress_percent?: number; error_code?: string; error_message?: string; failure_diagnostic?: FailureDiagnostic | null; network_interpretation?: Interpretation };
+type Run = { analysis_job_id?: string; dataset_id?: string; network_input?: unknown; id: string; analysis_kind: string; status: string; language: 'ko' | 'en'; created_at?: string; completed_at?: string; provider?: string; model_name?: string; progress_percent?: number; error_code?: string; error_message?: string; failure_diagnostic?: FailureDiagnostic | null; network_interpretation?: Interpretation };
 const activeStatuses = new Set(['QUEUED', 'PREPARING', 'ANALYZING', 'VALIDATING']);
 function newerRun(candidate: Run, previous?: Run, orderedRuns?: Run[]) {
   if (!previous || candidate.id === previous.id) return candidate;
@@ -26,6 +27,7 @@ type Capabilities = { network_interpretation: boolean; available: boolean; provi
 export default function NetworkAIInterpretation({ jobId, completed }: { jobId: string; completed: boolean }) {
   const language = useReportLanguage();
   const detail = useReportDetail();
+  const evidence = useNetworkEvidence();
   const [expanded, setOpen] = useState(false);
   const open = expanded && (!detail || detail.owner === 'ai');
   const [fullOwner, setFullOwner] = useState<string>();
@@ -76,6 +78,20 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
     setResultOwner(resultKey);
     setFullOwner(undefined);
   }
+  const signature = evidence ? evidenceSignature(evidence.projection) : '';
+  const [binding, setBinding] = useState({ jobId, runId: current?.id, signature, invalid: false });
+  if (binding.jobId !== jobId || binding.runId !== current?.id) setBinding({ jobId, runId: current?.id, signature, invalid: false });
+  else if (binding.signature !== signature && !binding.invalid) setBinding({ ...binding, invalid: true });
+  const navigationAllowed = !binding.invalid && binding.signature === signature && binding.runId === current?.id && binding.jobId === jobId;
+  const navigationOwner = useRef<object | undefined>(undefined);
+  const navigationToken = { jobId, runId: current?.id, generation: evidence?.generation };
+  navigationOwner.current = navigationToken;
+  useEffect(() => () => { navigationOwner.current = undefined; }, []);
+  const citations = (values: string[]) => {
+    const ids = [...new Set(boundedItems(values).map(id => boundedText(id)))];
+    const targets = ids.map(id => citationTarget(navigationAllowed ? evidence : undefined, current, latest?.id, id));
+    return <span>{ids.map((id, index) => <button type="button" className="secondary" key={id} disabled={targets[index].index === undefined} onClick={() => { if (navigationOwner.current !== navigationToken || !navigationAllowed) return; const target = citationTarget(evidence, current, latest?.id, id); if (target.index !== undefined) evidence?.navigate(target.index); }} style={{ overflowWrap: 'anywhere', maxWidth: '100%' }}>{id}</button>)}{targets.some(target => target.reason) && <small>{targets.some(target => target.reason === 'source') ? t('Cannot navigate: provenance does not match the current report.', '현재 보고서와 출처를 확인할 수 없어 이동할 수 없습니다.') : targets.some(target => target.reason === 'ambiguous') ? t('Cannot navigate: issue ID is missing or ambiguous.', '이슈 ID가 없거나 중복되어 이동할 수 없습니다.') : t('Not in this AI run input evidence.', '이 AI 실행의 입력 근거에 없음.')}</small>}</span>;
+  };
   // Lookup only static labels; never echo unknown diagnostic values from older/newer servers.
   const failureLabels = new Map<string, string>([
     ['JSON_PARSE', t('Invalid JSON response', 'JSON 응답 해석 실패')],
@@ -119,11 +135,11 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
       <p className="muted">{t('Existing AI output is not automatically translated. Changing report language changes labels only; use the manual button for a new interpretation.', '기존 AI 출력은 자동 번역되지 않습니다. 보고서 언어 변경은 항목명만 바꾸며 새 해석은 버튼으로 직접 요청하세요.')}</p>
       <p lang={result.language}>{boundedText(result.summary)}</p>
       <h4>{t('Possible causes (AI hypotheses)', '가능한 원인 (AI 가설)')}</h4>
-      {boundedItems(result.possible_causes).map((cause, index) => <div key={index}><p lang={result.language}>{boundedText(cause?.hypothesis)}</p><strong>{t('Confidence / uncertainty', '신뢰도 / 불확실성')}</strong><p lang={result.language}>{boundedText(cause?.uncertainty)}</p><p>{t('Issue references', '이슈 참조')}: <code>{boundedItems(cause?.issue_ids).map(id => boundedText(id)).join(' ')}</code></p></div>)}
+      {boundedItems(result.possible_causes).map((cause, index) => <div key={index}><p lang={result.language}>{boundedText(cause?.hypothesis)}</p><strong>{t('Confidence / uncertainty', '신뢰도 / 불확실성')}</strong><p lang={result.language}>{boundedText(cause?.uncertainty)}</p><p>{t('Issue references', '이슈 참조')}: {citations(cause?.issue_ids)}</p></div>)}
       <h4>{t('Prioritized next checks', '우선순위별 다음 확인 사항')}</h4>
-      <ol>{boundedItems(result.prioritized_checks).map((check, index) => <li key={index}><strong>{boundedText(check?.priority)}</strong><p lang={result.language}>{boundedText(check?.check)}</p><code>{boundedItems(check?.issue_ids).map(id => boundedText(id)).join(' ')}</code></li>)}</ol>
+      <ol>{boundedItems(result.prioritized_checks).map((check, index) => <li key={index}><strong>{boundedText(check?.priority)}</strong><p lang={result.language}>{boundedText(check?.check)}</p>{citations(check?.issue_ids)}</li>)}</ol>
       <h4>{t('Possible correlations', '가능한 연관성')}</h4>
-      {boundedItems(result.correlations).map((correlation, index) => <div key={index}><p lang={result.language}>{boundedText(correlation?.interpretation)}</p><code>{boundedItems(correlation?.issue_ids).map(id => boundedText(id)).join(' ')}</code></div>)}
+      {boundedItems(result.correlations).map((correlation, index) => <div key={index}><p lang={result.language}>{boundedText(correlation?.interpretation)}</p>{citations(correlation?.issue_ids)}</div>)}
       <h4>{t('Limitations', '한계')}</h4><ul>{boundedItems(result.limitations).map((text, index) => <li lang={result.language} key={index}>{boundedText(text)}</li>)}</ul>
       <p className="muted">{t('Display is bounded to 20 entries per section and 2,000 characters per field; longer content is abbreviated.', '화면에는 섹션당 최대 20개 항목, 필드당 2,000자만 표시하며 긴 내용은 축약됩니다.')}</p>
     </article>}</>}

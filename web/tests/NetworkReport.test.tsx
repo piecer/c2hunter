@@ -1,9 +1,14 @@
+import { execFileSync } from 'node:child_process';
+import { resolve } from 'node:path';
 import { openGroups, openCoverage } from './reportDisclosure';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, expect, it } from 'vitest';
 
 beforeEach(() => localStorage.setItem('c2hunter-report-language', 'en'));
 import NetworkAnomalyPanel from '../src/NetworkAnomalyPanel';
+const fixture = (flag: string) => JSON.parse(execFileSync(process.env.C2HUNTER_TEST_PYTHON ?? resolve('../.venv/bin/python'), ['tests/network_report_fixture.py', flag], { encoding: 'utf8', maxBuffer: 20000000 }));
+const maximum = fixture('--maximum').many;
+const limited = fixture('--limited');
 
 const report = {
   version: 'network-pattern-report-v1',
@@ -42,11 +47,12 @@ it.each([
 });
 
 it('bounds large reports and clears previous and stale expanded evidence', () => {
-  const large = { ...report, summary: { ...report.summary, issue_count: 1000, displayed_issue_count: 1000, omitted_issue_count: 2, truncated: true }, issues: Array.from({ length: 1000 }, (_, i) => ({ ...report.issues[0], id: String(i), examples: Array.from({ length: 100 }, () => report.issues[0].examples[0]) })) };
+  const large = maximum;
   const { container, rerender } = render(<NetworkAnomalyPanel report={large}/>);
   openGroups();
-  expect(screen.getByText(/992 retained groups not shown on this page/)).toBeVisible();
+  expect(screen.getByText(/92 retained groups not shown on this page/)).toBeVisible();
   expect(screen.getByText(/Report truncated/)).toBeVisible();
+  expect(screen.getByRole('heading', { name: 'Anomaly observed' })).toBeVisible();
   expect(screen.getAllByRole('button', { name: /representative evidence/ })).toHaveLength(8);
   for (const button of screen.getAllByRole('button', { name: /representative evidence/ })) {
     fireEvent.click(button);
@@ -66,7 +72,7 @@ it('shows bounded numeric producer facts without interpreting missing values as 
 });
 
 it('preserves positive findings while prominently labeling producer resource-limited lower bounds', () => {
-  render(<NetworkAnomalyPanel report={{ ...report, warnings: ['FLOW_TRACKING_LIMIT_REACHED', 'CORRELATION_LIMIT_REACHED', 'ICMP_QUOTE_LIMIT_REACHED', 'OBSERVATION_LIMIT_REACHED'], summary: { ...report.summary, tracking_limited_records: 25, counts_are_lower_bounds: true, coverage_complete: false } }}/>);
+  render(<NetworkAnomalyPanel report={limited}/>);
   expect(screen.getByRole('heading', { name: 'Anomaly observed' })).toBeVisible();
   expect(screen.getByText(/25 records.*tracking/i)).toBeVisible();
   expect(screen.getByText(/Counts are lower bounds/i)).toBeVisible();

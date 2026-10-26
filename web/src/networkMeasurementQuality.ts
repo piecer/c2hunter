@@ -45,7 +45,8 @@ export function parseMeasurementQuality(m: unknown): MeasurementQuality | 'not_p
   const q = own(m, 'metric_quality');
   const keys = ['observed_rtt_ms', 'interarrival_variation_ms', 'ttl_observed'];
   if (!closed(m, [...keys, 'metric_quality', 'rtt_sources', 'rtt_excluded', 'coverage_complete', 'status', 'reasons']) || !closed(q, keys)) return 'invalid';
-  if (typeof own(m, 'coverage_complete') !== 'boolean' || !['observed', 'insufficient_evidence', 'unsupported'].includes(String(own(m, 'status')))) return 'invalid';
+  const status = own(m, 'status');
+  if (typeof own(m, 'coverage_complete') !== 'boolean' || typeof status !== 'string' || !['observed', 'insufficient_evidence', 'unsupported'].includes(status)) return 'invalid';
   const coverage = own(m, 'reasons');
   if (!Array.isArray(coverage) || coverage.length > 7 || coverage.some(r => typeof r !== 'string' || !coverageReasons.includes(r))) return 'invalid';
   const selected = gapReasons.some(r => coverage.includes(r));

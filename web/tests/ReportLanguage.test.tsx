@@ -124,13 +124,16 @@ it('fails closed for unknown codes without hiding their original spelling', () =
   expect(screen.getByText(/원문: FUTURE_WARNING/)).toBeVisible();
   expect(screen.getByText('원문: future_pattern')).toBeVisible();
 });
-it('preserves unknown producer prose and fact keys as visibly untranslated raw text', () => {
+it('preserves unknown producer prose and raw facts without rendering unsupported fact keys', () => {
   const report = structuredClone(fixtures.syn_reset);
   report.issues![0].evidence.push('<unknown> future evidence');
-  report.issues![0].examples[0].facts = { future_fact: 123 };
+  report.issues![0].examples[0].facts = { future_fact: 123, tcp_sequence: 104 };
+  const original = JSON.stringify(report);
   render(<NetworkAnomalyPanel report={report}/>);
   openEvidence();
   expect(screen.getByText('원문: <unknown> future evidence')).toBeVisible();
   openEvidence();
-  expect(screen.getByText('원문: future_fact: 123')).toBeVisible();
+  expect(screen.queryByText(/future_fact/)).not.toBeInTheDocument();
+  expect(screen.getByText(`${factLabels.tcp_sequence}: 104`)).toBeVisible();
+  expect(JSON.stringify(report)).toBe(original);
 });

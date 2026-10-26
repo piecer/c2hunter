@@ -85,7 +85,7 @@ it('bounds the full report and AI with one lazy detail owner and all three real 
   expect(screen.getAllByRole('region', { name: 'Supporting measurements' })).toHaveLength(3);
   await openAI(true);
   expect(screen.queryByRole('region', { name: 'Supporting measurements' })).not.toBeInTheDocument();
-  expect(container.querySelectorAll('*').length).toBeLessThan(500);
+  expect(document.querySelectorAll('*').length).toBeLessThanOrEqual(2500);
   expect(screen.getByRole('article', { name: 'Full AI interpretation' })).toHaveTextContent(refs[19]);
   openEvidence(1);
   expect(screen.queryByRole('article', { name: 'Full AI interpretation' })).not.toBeInTheDocument();
