@@ -84,7 +84,7 @@ def test_detail_counts_include_summary_clipping(monkeypatch):
 def test_producer_projection_detail_omissions_and_citations_are_distinct(
     monkeypatch, peers, max_issues, producer_omitted, input_omitted
 ):
-    from test_network_ai import response
+    from test_network_ai import legacy_v1_response as response
 
     from c2hunter_controller.network_ai import validate_network_interpretation
 

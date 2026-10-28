@@ -1,3 +1,5 @@
+import NetworkNumericEvidence from './NetworkNumericEvidence';
+import { networkRunDisplay, networkRunRecord, networkRunItems, currentNumericSource } from './networkNumericEvidence';
 import { citationTarget, evidenceSignature, useNetworkEvidence } from './networkEvidenceContext';
 import { useReportDetail } from './reportDetailContext';
 import { useEffect, useRef, useState } from 'react';
@@ -6,9 +8,9 @@ import { api } from './api';
 import { useReportLanguage } from './reportLanguageContext';
 import { choose } from './reportTranslations';
 
-type Interpretation = { schema_version: 'network-interpretation-v1'; kind: 'MODEL_INTERPRETATION'; language: 'ko' | 'en'; summary: string; possible_causes: { hypothesis: string; issue_ids: string[]; uncertainty: string }[]; prioritized_checks: { priority: string; check: string; issue_ids: string[] }[]; correlations: { interpretation: string; issue_ids: string[] }[]; limitations: string[] };
-type FailureDiagnostic = { stage: 'MODEL_OUTPUT'; type: 'JSON_PARSE' | 'SCHEMA' | 'INVALID_CITATION' | 'LANGUAGE'; attempt_count: number; repair_count: number; output_bytes: number; provider_finish_reason?: 'stop' | 'length' | 'load' | 'unload' | 'tool_calls' | 'content_filter' | null };
-type Run = { analysis_job_id?: string; dataset_id?: string; network_input?: unknown; id: string; analysis_kind: string; status: string; language: 'ko' | 'en'; created_at?: string; completed_at?: string; provider?: string; model_name?: string; progress_percent?: number; error_code?: string; error_message?: string; failure_diagnostic?: FailureDiagnostic | null; network_interpretation?: Interpretation };
+type Interpretation = { schema_version: 'network-interpretation-v1' | 'network-interpretation-v2'; kind: 'MODEL_INTERPRETATION'; language: 'ko' | 'en'; summary: string; possible_causes: { hypothesis: string; issue_ids: string[]; uncertainty: string }[]; prioritized_checks: { priority: string; check: string; issue_ids: string[] }[]; correlations: { interpretation: string; issue_ids: string[] }[]; limitations: string[] };
+type FailureDiagnostic = { stage: 'MODEL_OUTPUT'; type: 'JSON_PARSE' | 'SCHEMA' | 'INVALID_CITATION' | 'INVALID_NUMERIC_REFERENCE' | 'LANGUAGE'; attempt_count: number; repair_count: number; output_bytes: number; provider_finish_reason?: 'stop' | 'length' | 'load' | 'unload' | 'tool_calls' | 'content_filter' | null };
+type Run = { input_schema_version?: string; analysis_job_id?: string; dataset_id?: string; network_input?: unknown; network_numeric_evidence?: unknown; id: string; analysis_kind: string; status: string; language: 'ko' | 'en'; created_at?: string; completed_at?: string; provider?: string; model_name?: string; progress_percent?: number; error_code?: string; error_message?: string; failure_diagnostic?: FailureDiagnostic | null; network_interpretation?: Interpretation };
 const activeStatuses = new Set(['QUEUED', 'PREPARING', 'ANALYZING', 'VALIDATING']);
 function newerRun(candidate: Run, previous?: Run, orderedRuns?: Run[]) {
   if (!previous || candidate.id === previous.id) return candidate;
@@ -41,27 +43,33 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
     queryKey: ['ai-runs', jobId], queryFn: () => api.get(`/analysis-jobs/${jobId}/ai-runs`), retry: false,
   });
   const [knownRun, setKnownRun] = useState<Run>();
-  const saved = runs.isSuccess ? runs.data.items?.find(run => run.analysis_kind === 'NETWORK_ANOMALY') : undefined;
+  const items = runs.isSuccess ? networkRunItems(runs.data) : [];
+  const saved = items.find(run => run.analysis_kind === 'NETWORK_ANOMALY');
   // Keep the newest observed identity through lagging/failed lists, while letting
   // the authoritative list supersede a POST response as soon as it knows more.
-  const latest = saved ? newerRun(saved, knownRun, runs.data?.items) : knownRun;
+  const known = networkRunRecord(knownRun);
+  const latest = saved ? newerRun(saved, known, items) : known;
   if (latest !== knownRun) setKnownRun(latest);
   const run = useQuery<Run, Error>({
     queryKey: ['ai-run', latest?.id], queryFn: () => api.get(`/ai-runs/${latest?.id}`), enabled: Boolean(latest?.id), retry: false,
-    refetchInterval: query => !query.state.error && activeStatuses.has(query.state.data?.status ?? latest?.status ?? '') ? 2000 : false,
+    refetchInterval: query => !query.state.error && activeStatuses.has(networkRunRecord(query.state.data)?.status ?? latest?.status ?? '') ? 2000 : false,
   });
-  const current = run.data ?? latest;
+  // A malformed detail is not permission to fall back to a valid list result.
+  const current = run.data === undefined ? latest : networkRunRecord(run.data);
   const active = Boolean(current && activeStatuses.has(current.status));
   const canStart = completed && config?.available === true && config.network_interpretation === true && (!config.remote || allowRemote) && !capabilities.isError && runs.isSuccess && !runs.isFetching && !run.isError && !run.isFetching && !active;
   const start = useMutation({
     onMutate: () => ({ knownRunId: latest?.id }),
     mutationFn: () => api.post<Run>(`/analysis-jobs/${jobId}/ai-runs`, { idempotency_key: `web-${jobId}-${Date.now()}`, analysis_kind: 'NETWORK_ANOMALY', language, allow_remote: allowRemote }),
     onSuccess: async (created, _variables, context) => {
+      const admitted = networkRunRecord(created);
+      if (!admitted) return;
       // A different identity observed during this request wins ambiguous timestamps.
       // Otherwise a deliberate new POST may supersede the previously completed run.
-      setKnownRun(previous => previous && previous.id !== context.knownRunId
-        ? newerRun(previous, created)
-        : newerRun(created, previous));
+      setKnownRun(previous => {
+        const prior = networkRunRecord(previous);
+        return prior && prior.id !== context.knownRunId ? newerRun(prior, admitted) : newerRun(admitted, prior);
+      });
       await client.invalidateQueries({ queryKey: ['ai-runs', jobId] });
     },
   });
@@ -69,7 +77,11 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
     mutationFn: () => api.post(`/ai-runs/${current?.id}/cancel`, { reason: 'operator requested from web console' }),
     onSuccess: async () => { await Promise.all([client.invalidateQueries({ queryKey: ['ai-run', current?.id] }), client.invalidateQueries({ queryKey: ['ai-runs', jobId] })]); },
   });
-  const result = current?.status === 'COMPLETED' && current.network_interpretation?.schema_version === 'network-interpretation-v1' && current.network_interpretation.kind === 'MODEL_INTERPRETATION' ? current.network_interpretation : undefined;
+  const display = networkRunDisplay(current);
+  const numeric = display.numeric;
+  const v2 = display.version === 'v2';
+  const result = display.output as Interpretation | undefined;
+  const proseText = (value: unknown) => v2 && numeric && typeof value === 'string' ? value : boundedText(value);
   // List GET and detail GET can carry identical saved output as different objects.
   // Preserve expansion across that handoff, but never revive changed output.
   const resultKey = JSON.stringify([current?.id, result]);
@@ -83,20 +95,32 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
   if (binding.jobId !== jobId || binding.runId !== current?.id) setBinding({ jobId, runId: current?.id, signature, invalid: false });
   else if (binding.signature !== signature && !binding.invalid) setBinding({ ...binding, invalid: true });
   const navigationAllowed = !binding.invalid && binding.signature === signature && binding.runId === current?.id && binding.jobId === jobId;
+  const numericKey = v2 && current?.status === 'COMPLETED' ? JSON.stringify(numeric ?? null) : undefined;
+  const [numericBinding, setNumericBinding] = useState({ id: current?.id, key: numericKey, invalid: false });
+  if (numericBinding.id !== current?.id) setNumericBinding({ id: current?.id, key: numericKey, invalid: false });
+  else if (numericBinding.key === undefined && numericKey !== undefined) setNumericBinding({ ...numericBinding, key: numericKey });
+  else if (numericBinding.key !== undefined && numericBinding.key !== numericKey && !numericBinding.invalid) setNumericBinding({ ...numericBinding, invalid: true });
+  const numericAllowed = !numericBinding.invalid && (numericBinding.key === undefined || numericBinding.key === numericKey) && navigationAllowed && !runs.isError && !run.isError && Boolean(current && numeric && currentNumericSource(evidence, current, latest?.id, numeric));
   const navigationOwner = useRef<object | undefined>(undefined);
   const navigationToken = { jobId, runId: current?.id, generation: evidence?.generation };
   navigationOwner.current = navigationToken;
   useEffect(() => () => { navigationOwner.current = undefined; }, []);
   const citations = (values: string[]) => {
     const ids = [...new Set(boundedItems(values).map(id => boundedText(id)))];
-    const targets = ids.map(id => citationTarget(navigationAllowed ? evidence : undefined, current, latest?.id, id));
-    return <span>{ids.map((id, index) => <button type="button" className="secondary" key={id} disabled={targets[index].index === undefined} onClick={() => { if (navigationOwner.current !== navigationToken || !navigationAllowed) return; const target = citationTarget(evidence, current, latest?.id, id); if (target.index !== undefined) evidence?.navigate(target.index); }} style={{ overflowWrap: 'anywhere', maxWidth: '100%' }}>{id}</button>)}{targets.some(target => target.reason) && <small>{targets.some(target => target.reason === 'source') ? t('Cannot navigate: provenance does not match the current report.', '현재 보고서와 출처를 확인할 수 없어 이동할 수 없습니다.') : targets.some(target => target.reason === 'ambiguous') ? t('Cannot navigate: issue ID is missing or ambiguous.', '이슈 ID가 없거나 중복되어 이동할 수 없습니다.') : t('Not in this AI run input evidence.', '이 AI 실행의 입력 근거에 없음.')}</small>}</span>;
+    // V2 source/output admission is atomic and already computed once per render.
+    // Do not traverse the complete output again for each of 600 citation buttons.
+    const targets = ids.map(id => v2 ? numericAllowed
+      ? { index: evidence?.projection.slots.find(s => s.issue?.id === id)?.index }
+      : { reason: 'source' as const }
+      : citationTarget(navigationAllowed ? evidence : undefined, current, latest?.id, id));
+    return <span>{ids.map((id, index) => <button type="button" className="secondary" key={id} disabled={targets[index].index === undefined} onClick={() => { if (navigationOwner.current !== navigationToken || !navigationAllowed || v2 && !numericAllowed) return; const target = citationTarget(evidence, current, latest?.id, id); if (target.index !== undefined) evidence?.navigate(target.index); }} style={{ overflowWrap: 'anywhere', maxWidth: '100%' }}>{id}</button>)}{targets.some(target => target.reason) && <small>{targets.some(target => target.reason === 'source') ? t('Cannot navigate: provenance does not match the current report.', '현재 보고서와 출처를 확인할 수 없어 이동할 수 없습니다.') : targets.some(target => target.reason === 'ambiguous') ? t('Cannot navigate: issue ID is missing or ambiguous.', '이슈 ID가 없거나 중복되어 이동할 수 없습니다.') : t('Not in this AI run input evidence.', '이 AI 실행의 입력 근거에 없음.')}</small>}</span>;
   };
   // Lookup only static labels; never echo unknown diagnostic values from older/newer servers.
   const failureLabels = new Map<string, string>([
     ['JSON_PARSE', t('Invalid JSON response', 'JSON 응답 해석 실패')],
     ['SCHEMA', t('Response schema mismatch', '응답 구조 검증 실패')],
     ['INVALID_CITATION', t('Invalid issue references', '이슈 참조 검증 실패')],
+    ['INVALID_NUMERIC_REFERENCE', t('Invalid numeric references', '수치 참조 검증 실패')],
     ['LANGUAGE', t('Requested language mismatch', '요청 언어 불일치')],
   ]);
   const failureLabel = current?.status === 'FAILED' && current.error_code === 'MODEL_OUTPUT_INVALID' && current.failure_diagnostic?.stage === 'MODEL_OUTPUT' ? failureLabels.get(current.failure_diagnostic.type) : undefined;
@@ -125,7 +149,8 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
       {current.status === 'COMPLETED' && !result && <p role="alert">{t('No validated interpretation is available for this run.', '이 실행의 검증된 해석 결과가 없습니다.')}</p>}
     </>}
     {cancel.error && <p role="alert" className="error-text">{t('Cancellation failed', '취소 실패')}: {boundedText(cancel.error.message)}</p>}
-    {open && result && <><p className="muted">{t('AI-generated interpretation — analyst review required; not a confirmed diagnosis.', 'AI 생성 해석 — 분석가 검토 필요; 확정 진단이 아닙니다.')}</p>
+    {open && v2 && <NetworkNumericEvidence value={numeric} allowed={numericAllowed} navigate={id => { if (navigationOwner.current !== navigationToken || !numericAllowed) return; const target = citationTarget(evidence, current, latest?.id, id); if (target.index !== undefined) { setFullOwner(undefined); evidence?.navigate(target.index); } }}/> }
+    {open && result && <><p>{v2 ? t('AI prose — numerical claims are unverified.', 'AI 원문 — 수치 주장은 검증되지 않았습니다.') : t('Legacy AI output — no verified numeric evidence.', '이전 AI 출력 — 검증된 수치 근거 없음.')}</p><p className="muted">{t('AI-generated interpretation — analyst review required; not a confirmed diagnosis.', 'AI 생성 해석 — 분석가 검토 필요; 확정 진단이 아닙니다.')}</p>
       {fullOwner !== resultKey && <p lang={result.language}>{typeof result.summary === 'string' && result.summary.length <= 240 ? result.summary : t('Long AI summary: open the full text to preserve all qualifications.', '긴 AI 요약: 조건과 한계를 포함한 전체 원문을 펼쳐 확인하세요.')}</p>}
       <button type="button" className="secondary" aria-expanded={fullOwner === resultKey} onClick={() => setFullOwner(fullOwner === resultKey ? undefined : resultKey)}>{t('View full AI text', 'AI 원문 전체 보기')}</button>
     {fullOwner === resultKey && <article aria-label={t('Full AI interpretation', 'AI 해석 전체 원문')} className="ai-assessment" style={{ overflowWrap: 'anywhere', maxHeight: 800, overflow: 'auto' }}>
@@ -133,14 +158,14 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
       <p className="muted">{t('Saved run provider / model', '저장된 실행 제공자 / 모델')}: {boundedText(current?.provider) || t('Not reported', '보고되지 않음')} · {boundedText(current?.model_name) || t('Not reported', '보고되지 않음')}</p>
       <p className="muted">{t('Generated language', '생성 언어')}: {result.language === 'ko' ? '한국어' : 'English'} · {t('Completed at', '완료 시각')}: {boundedText(current?.completed_at) || t('Not reported', '보고되지 않음')}</p>
       <p className="muted">{t('Existing AI output is not automatically translated. Changing report language changes labels only; use the manual button for a new interpretation.', '기존 AI 출력은 자동 번역되지 않습니다. 보고서 언어 변경은 항목명만 바꾸며 새 해석은 버튼으로 직접 요청하세요.')}</p>
-      <p lang={result.language}>{boundedText(result.summary)}</p>
+      <p lang={result.language}>{proseText(result.summary)}</p>
       <h4>{t('Possible causes (AI hypotheses)', '가능한 원인 (AI 가설)')}</h4>
-      {boundedItems(result.possible_causes).map((cause, index) => <div key={index}><p lang={result.language}>{boundedText(cause?.hypothesis)}</p><strong>{t('Confidence / uncertainty', '신뢰도 / 불확실성')}</strong><p lang={result.language}>{boundedText(cause?.uncertainty)}</p><p>{t('Issue references', '이슈 참조')}: {citations(cause?.issue_ids)}</p></div>)}
+      {boundedItems(result.possible_causes).map((cause, index) => <div key={index}><p lang={result.language}>{proseText(cause?.hypothesis)}</p><strong>{t('Confidence / uncertainty', '신뢰도 / 불확실성')}</strong><p lang={result.language}>{proseText(cause?.uncertainty)}</p><p>{t('Issue references', '이슈 참조')}: {citations(cause?.issue_ids)}</p></div>)}
       <h4>{t('Prioritized next checks', '우선순위별 다음 확인 사항')}</h4>
-      <ol>{boundedItems(result.prioritized_checks).map((check, index) => <li key={index}><strong>{boundedText(check?.priority)}</strong><p lang={result.language}>{boundedText(check?.check)}</p>{citations(check?.issue_ids)}</li>)}</ol>
+      <ol>{boundedItems(result.prioritized_checks).map((check, index) => <li key={index}><strong>{boundedText(check?.priority)}</strong><p lang={result.language}>{proseText(check?.check)}</p>{citations(check?.issue_ids)}</li>)}</ol>
       <h4>{t('Possible correlations', '가능한 연관성')}</h4>
-      {boundedItems(result.correlations).map((correlation, index) => <div key={index}><p lang={result.language}>{boundedText(correlation?.interpretation)}</p>{citations(correlation?.issue_ids)}</div>)}
-      <h4>{t('Limitations', '한계')}</h4><ul>{boundedItems(result.limitations).map((text, index) => <li lang={result.language} key={index}>{boundedText(text)}</li>)}</ul>
+      {boundedItems(result.correlations).map((correlation, index) => <div key={index}><p lang={result.language}>{proseText(correlation?.interpretation)}</p>{citations(correlation?.issue_ids)}</div>)}
+      <h4>{t('Limitations', '한계')}</h4><ul>{boundedItems(result.limitations).map((text, index) => <li lang={result.language} key={index}>{proseText(text)}</li>)}</ul>
       <p className="muted">{t('Display is bounded to 20 entries per section and 2,000 characters per field; longer content is abbreviated.', '화면에는 섹션당 최대 20개 항목, 필드당 2,000자만 표시하며 긴 내용은 축약됩니다.')}</p>
     </article>}</>}
   </section>;

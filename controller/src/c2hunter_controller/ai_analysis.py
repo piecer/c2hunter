@@ -5,6 +5,7 @@ import json
 import math
 import uuid
 from collections import Counter, defaultdict
+from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -972,10 +973,10 @@ class AIAnalysisService:
         selection_summary = None
         candidates: list[dict[str, Any]]
         if analysis_kind == "NETWORK_ANOMALY":
-            from .network_ai import build_network_input
+            from .network_ai import build_network_input_v2
 
             try:
-                network_input = build_network_input(job.get("network_anomaly"), language)
+                network_input = build_network_input_v2(job.get("network_anomaly"), language)
             except (ValueError, TypeError):
                 raise AIAnalysisError("Network report input failed validation.") from None
             candidates = []
@@ -1037,7 +1038,7 @@ class AIAnalysisService:
             ],
         }
         if network_input is not None:
-            from .network_ai import NETWORK_PROMPT_HASH
+            from .network_numeric_evidence import PROMPT_HASH as NETWORK_PROMPT_HASH
 
             run.update(
                 {
@@ -1045,10 +1046,10 @@ class AIAnalysisService:
                     "language": language,
                     "network_input": network_input,
                     "prompt_name": "network_pattern_system",
-                    "prompt_version": "1.0",
+                    "prompt_version": "2.0",
                     "prompt_hash": NETWORK_PROMPT_HASH,
-                    "input_schema_version": "network-ai-input-v1",
-                    "output_schema_version": "network-interpretation-v1",
+                    "input_schema_version": "network-ai-input-v2",
+                    "output_schema_version": "network-interpretation-v2",
                 }
             )
         if ddos_input is not None:
@@ -1134,23 +1135,41 @@ class AIAnalysisService:
             return run
         try:
             if run.get("analysis_kind") == "NETWORK_ANOMALY":
-                from .network_ai import validate_network_interpretation
+                from .ai_gateway import StructuredLocalGateway
+                from .network_numeric_evidence import validate_binding, validate_output
 
+                try:
+                    identity = validate_binding(run)
+                except (ValueError, TypeError, KeyError, OverflowError):
+                    run["error_code"] = "NETWORK_INPUT_CONTRACT_UNSUPPORTED"
+                    run["error_message"] = (
+                        "Saved network input is unsupported. Start a new manual run."
+                    )
+                    return self._transition(
+                        run, AIAnalysisState.FAILED, "unsupported network input"
+                    )
                 run = self._transition(run, AIAnalysisState.PREPARING, "loading network snapshot")
                 interpret = getattr(self.gateway, "interpret_network_cancellable", None)
                 if not callable(interpret):
                     raise AIAnalysisError("network model provider unavailable")
                 run = self._transition(run, AIAnalysisState.ANALYZING, "calling network model")
+                context = (
+                    {"identity": identity}
+                    if getattr(interpret, "__func__", None)
+                    is StructuredLocalGateway.interpret_network_cancellable
+                    else {}
+                )
                 response = interpret(
-                    run["network_input"],
+                    deepcopy(run["network_input"]),
+                    **context,
                     should_cancel=lambda: (
                         (latest := self.repository.get_ai_run(run_id)) is not None
                         and latest.get("status") == AIAnalysisState.CANCELLED
                     ),
                 )
                 run = self._transition(run, AIAnalysisState.VALIDATING, "validating network output")
-                network_interpretation = validate_network_interpretation(
-                    cast(dict[str, Any], response), run["network_input"]
+                network_interpretation, _ = validate_output(
+                    cast(dict[str, Any], response), run["network_input"], identity
                 )
                 run["network_interpretation"] = network_interpretation.model_dump(mode="json")
                 return self._transition(

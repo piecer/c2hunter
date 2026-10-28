@@ -60,6 +60,10 @@ def public_run(run: dict[str, Any]) -> dict[str, Any]:
         public = {key: view[key] for key in RUN_FIELDS if key in view}
         public["candidate_count"] = len(view["candidate_ids"])
         return public
+    if run.get("analysis_kind") == "NETWORK_ANOMALY":
+        from .network_numeric_evidence import public_network_run
+
+        run = public_network_run(run)
     return {
         **{
             key: value

@@ -74,6 +74,7 @@ def test_nonempty_cited_interpretation_preserves_unknowns_and_excludes_raw_data(
     repository, service, transport = setup(language=language)
     job = repository.get_job("network-job")
     job["network_anomaly"]["issues"] = [issue()]
+    job["network_anomaly"]["summary"].update(issue_count=1, displayed_issue_count=1)
     job["network_anomaly"]["raw_packet_hex"] = "RAW_PACKET_SENTINEL"
     job["network_anomaly"]["flows"] = [{"payload": "RAW_PACKET_SENTINEL"}]
     repository.save_job(job)

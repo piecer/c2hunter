@@ -275,7 +275,11 @@ def test_shared_pcap_producer_schema_ai_worker_and_sqlite_roundtrip(
         assert stored["status"] == "COMPLETED", stored
         assert stored["network_interpretation"] == output
         bundle = stored["network_input"]
-        assert bundle["issues"][0]["observed_measurements"] == [measurement]
+        from c2hunter_controller.network_numeric_evidence import encode_measurements
+
+        assert bundle["issues"][0]["observed_measurements"] == [
+            {"example_index": 0, "measurements": encode_measurements(measurement)}
+        ]
         assert bundle["issues"][0]["suspected_cause"]["confidence"] == "low"
         body = transport.calls[0][2]["body"]
         assert '"observed_rtt_ms"' in body["messages"][1]["content"]

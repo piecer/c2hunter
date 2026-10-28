@@ -1,3 +1,4 @@
+import { parseNumericRun, currentNumericSource } from './networkNumericEvidence';
 import { createContext, useContext } from 'react';
 import { patterns } from './reportTranslations';
 import { projectNetworkReport, record, safeCount } from './networkReportValidation';
@@ -36,6 +37,13 @@ export function evidenceSignature(projection: EvidenceContext['projection']): st
 export function citationTarget(context: EvidenceContext | undefined, run: EvidenceRun | undefined, selectedId: string | undefined, id: string): { index?: number; reason?: 'source' | 'input' | 'ambiguous' } {
   if (!context?.current() || !context.job || !run || run.id !== selectedId || run.analysis_job_id !== context.job.id || context.job.status !== 'COMPLETED' || run.status !== 'COMPLETED' || run.analysis_kind !== 'NETWORK_ANOMALY' || (run.dataset_id !== undefined && context.job.dataset_id !== undefined && run.dataset_id !== context.job.dataset_id)) return { reason: 'source' };
   const input = record(run.network_input);
+  if (input?.schema_version === 'network-ai-input-v2') {
+    const parsed = parseNumericRun(run);
+    if (!parsed || !currentNumericSource(context, run, selectedId, parsed)) return { reason: 'source' };
+    if (!(parsed.input.issues as { id: string }[]).some(i => i.id === id)) return { reason: 'input' };
+    const slot = context.projection.slots.find(s => s.issue?.id === id);
+    return slot ? { index: slot.index } : { reason: 'source' };
+  }
   if (input?.schema_version !== 'network-ai-input-v1' || !Array.isArray(input.issues) || input.issues.length > 20) return { reason: 'source' };
   const items = new Map<string, Record<string, unknown>>();
   for (const raw of input.issues) {

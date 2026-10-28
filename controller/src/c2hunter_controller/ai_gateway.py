@@ -197,27 +197,33 @@ class StructuredLocalGateway:
         ) from None
 
     def interpret_network_cancellable(
-        self, bundle: dict[str, Any], *, should_cancel: Callable[[], bool]
+        self, bundle: dict[str, Any], *, should_cancel: Callable[[], bool], identity: Any
     ) -> dict[str, Any]:
         from .network_ai import (
-            NETWORK_PROMPT,
             NetworkFailureDiagnostic,
-            NetworkInterpretation,
             NetworkOutputError,
             NetworkSemanticError,
             ProviderFinishReason,
             canonical_network_input,
-            validate_network_interpretation,
+        )
+        from .network_numeric_evidence import (
+            PROMPT,
+            NetworkInterpretationV2,
+            envelope,
+            validate_input,
+            validate_output,
         )
 
+        validate_input(bundle)
+        envelope(bundle, identity, [])
         messages = [
-            {"role": "system", "content": NETWORK_PROMPT},
+            {"role": "system", "content": PROMPT},
             {
                 "role": "user",
                 "content": "Untrusted network report JSON:\n" + canonical_network_input(bundle),
             },
         ]
-        schema = NetworkInterpretation.model_json_schema()
+        schema = NetworkInterpretationV2.model_json_schema()
         finish_reason: ProviderFinishReason | None = None
 
         def observe_response(response: dict[str, Any]) -> None:
@@ -239,7 +245,7 @@ class StructuredLocalGateway:
             if should_cancel():
                 raise AIAnalysisCancelled("Network interpretation cancelled")
             try:
-                result = validate_network_interpretation(self._parse_content(raw), bundle)
+                result, _ = validate_output(self._parse_content(raw), bundle, identity)
                 return cast(dict[str, Any], result.model_dump(mode="json"))
             except (ValidationError, ValueError, TypeError) as exc:
                 diagnostic = NetworkFailureDiagnostic(
@@ -263,7 +269,9 @@ class StructuredLocalGateway:
                         "role": "user",
                         "content": f"Invalid output category: {diagnostic.type}. "
                         "Return the exact schema in the requested language; "
-                        "cite only supplied issue IDs. Do not add fields.",
+                        "cite only supplied issue IDs and retained numeric references. "
+                        "Select fewer numeric references if the envelope exceeds its byte budget. "
+                        "Do not add fields.",
                     }
                 )
         raise ValueError("invalid network interpretation")
@@ -488,7 +496,11 @@ class OllamaGateway(StructuredLocalGateway):
             body={
                 "model": self.model,
                 "stream": False,
-                **({"think": False} if schema.get("title") == "NetworkInterpretation" else {}),
+                **(
+                    {"think": False}
+                    if schema.get("title") in {"NetworkInterpretation", "NetworkInterpretationV2"}
+                    else {}
+                ),
                 "messages": [
                     *messages,
                     {

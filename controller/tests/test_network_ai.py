@@ -12,6 +12,16 @@ from c2hunter_controller.repositories import MemoryRepository, SQLiteRepository
 
 
 def response(language="ko", issue_ids=None):
+    value = legacy_v1_response(language, issue_ids)
+    value["schema_version"] = "network-interpretation-v2"
+    value["summary_numeric_refs"] = []
+    for section in ("possible_causes", "prioritized_checks", "correlations"):
+        for item in value[section]:
+            item["numeric_refs"] = []
+    return value
+
+
+def legacy_v1_response(language="ko", issue_ids=None):
     return {
         "schema_version": "network-interpretation-v1",
         "kind": "MODEL_INTERPRETATION",
@@ -80,7 +90,7 @@ def test_network_run_snapshots_report_without_c2_candidates():
     assert run["analysis_kind"] == "NETWORK_ANOMALY"
     assert run["language"] == "ko"
     assert run["candidate_ids"] == []
-    assert run["network_input"]["summary"]["evaluated_records"] == 0
+    assert run["network_input"]["summary"]["evaluated_records"] == "0"
     assert repository.get_job("network-job") == original
 
 
@@ -207,6 +217,7 @@ def test_invalid_model_output_fails_without_publishing_interpretation(mutation):
     repository, service, transport = setup()
     report = repository.get_job("network-job")
     report["network_anomaly"]["issues"] = [issue()]
+    report["network_anomaly"]["summary"].update(issue_count=1, displayed_issue_count=1)
     repository.save_job(report)
     output = response(issue_ids=["NP-001"])
     if mutation == "unknown_id":

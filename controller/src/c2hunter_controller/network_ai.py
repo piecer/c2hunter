@@ -62,7 +62,9 @@ class NetworkFailureDiagnostic(ClosedModel):
     """Last rejected model output only; never provider text or validation locations."""
 
     stage: Literal["MODEL_OUTPUT"] = "MODEL_OUTPUT"
-    type: Literal["JSON_PARSE", "SCHEMA", "INVALID_CITATION", "LANGUAGE"]
+    type: Literal[
+        "JSON_PARSE", "SCHEMA", "INVALID_CITATION", "INVALID_NUMERIC_REFERENCE", "LANGUAGE"
+    ]
     attempt_count: int = Field(ge=1, le=2)
     repair_count: int = Field(ge=0, le=1)
     output_bytes: int = Field(ge=0, le=2**63 - 1)
@@ -83,7 +85,10 @@ class NetworkOutputError(ValueError):
 
 class NetworkSemanticError(ValueError):
     def __init__(
-        self, category: Literal["INVALID_CITATION", "LANGUAGE"], *, duplicate: bool = False
+        self,
+        category: Literal["INVALID_CITATION", "INVALID_NUMERIC_REFERENCE", "LANGUAGE"],
+        *,
+        duplicate: bool = False,
     ) -> None:
         super().__init__(
             "network interpretation language mismatch"
@@ -343,6 +348,18 @@ class InputDetailCounts(TypedDict):
 
 
 def build_network_input(report: Any, language: str = "ko") -> dict[str, Any]:
+    return _build_network_input(report, language, v2=False)
+
+
+def build_network_input_v2(report: Any, language: str = "ko") -> dict[str, Any]:
+    from .network_numeric_evidence import validate_input
+
+    result = _build_network_input(report, language, v2=True)
+    validate_input(result)
+    return result
+
+
+def _build_network_input(report: Any, language: str, *, v2: bool) -> dict[str, Any]:
     if language not in {"ko", "en"}:
         raise ValueError("language must be ko or en")
     if not isinstance(report, dict) or report.get("version") != "network-pattern-report-v1":
@@ -355,7 +372,7 @@ def build_network_input(report: Any, language: str = "ko") -> dict[str, Any]:
         value = source.get(key)
         if type(value) is not int or not 0 <= value <= 2**63 - 1:
             raise ValueError("invalid network report count")
-        summary[key] = value
+        summary[key] = str(value) if v2 else value
     for key in SUMMARY_FLAGS:
         if type(source.get(key)) is not bool:
             raise ValueError("invalid network report coverage")
@@ -373,6 +390,10 @@ def build_network_input(report: Any, language: str = "ko") -> dict[str, Any]:
             summary["suspected_cause"] = None
         else:
             leading = ReportSuspectedCause.model_validate(source["suspected_cause"])
+            if v2:
+                from .network_numeric_evidence import scalar
+
+                scalar(leading.summary, len(leading.summary))
             summary["suspected_cause"] = {**leading.model_dump(), "summary": leading.summary[:400]}
             clipped_summary_characters = max(0, len(leading.summary) - 400)
     detail_counts: InputDetailCounts = {
@@ -386,6 +407,12 @@ def build_network_input(report: Any, language: str = "ko") -> dict[str, Any]:
 
     def texts(value: Any) -> list[str]:
         if isinstance(value, list):
+            if v2:
+                from .network_numeric_evidence import scalar
+
+                for text in value[:4]:
+                    if isinstance(text, str):
+                        scalar(text, len(text))
             detail_counts["capped_diagnostic_entries"] += max(0, len(value) - 4)
             detail_counts["clipped_text_characters"] += sum(
                 max(0, len(text) - 400) for text in value[:4] if isinstance(text, str)
@@ -405,7 +432,7 @@ def build_network_input(report: Any, language: str = "ko") -> dict[str, Any]:
                 detail_counts["capped_diagnostic_entries"] -= 1
 
     result: dict[str, Any] = {
-        "schema_version": "network-ai-input-v1",
+        "schema_version": "network-ai-input-v2" if v2 else "network-ai-input-v1",
         "language": language,
         "summary": summary,
         "issues": [],
@@ -445,7 +472,7 @@ def build_network_input(report: Any, language: str = "ko") -> dict[str, Any]:
             value = issue.get(key)
             if type(value) is not int or not 0 <= value <= 2**63 - 1:
                 raise ValueError("invalid network issue count")
-            item[key] = value
+            item[key] = str(value) if v2 else value
         for key in ("first_seen", "last_seen"):
             value = issue.get(key)
             if not isinstance(value, str) or len(value) > 64:
@@ -458,23 +485,34 @@ def build_network_input(report: Any, language: str = "ko") -> dict[str, Any]:
         examples = issue.get("examples", [])
         if isinstance(examples, list):
             detail_counts["capped_example_entries"] += max(0, len(examples) - 2)
-            for example in examples[:2]:
+            for example_index, example in enumerate(examples[:2]):
                 if isinstance(example, dict) and "measurements" in example:
                     measurement = SupportingMeasurements.model_validate(example["measurements"])
-                    details.setdefault("observed_measurements", []).append(
-                        measurement.model_dump(exclude_unset=True)
-                    )
+                    measured = measurement.model_dump(exclude_unset=True)
+                    if v2:
+                        from .network_numeric_evidence import encode_measurements
+
+                        measured = {
+                            "example_index": example_index,
+                            "measurements": encode_measurements(measured),
+                        }
+                    details.setdefault("observed_measurements", []).append(measured)
                 facts = example.get("facts", {}) if isinstance(example, dict) else {}
                 if isinstance(facts, dict):
+                    observed = {
+                        key: str(value) if v2 else value
+                        for key, maximum in NUMERIC_FACT_MAXIMA.items()
+                        if type(value := facts.get(key)) is int and 0 <= value <= maximum
+                    }
                     details["observed_facts"].append(
-                        {
-                            key: value
-                            for key, maximum in NUMERIC_FACT_MAXIMA.items()
-                            if type(value := facts.get(key)) is int and 0 <= value <= maximum
-                        }
+                        {"example_index": example_index, "facts": observed} if v2 else observed
                     )
         if "suspected_cause" in issue:
             cause = ReportSuspectedCause.model_validate(issue["suspected_cause"])
+            if v2:
+                from .network_numeric_evidence import scalar
+
+                scalar(cause.summary, len(cause.summary))
             details["suspected_cause"] = [{**cause.model_dump(), "summary": cause.summary[:400]}]
             detail_counts["clipped_text_characters"] += max(0, len(cause.summary) - 400)
         for key in ("uncertainty", "evidence", "detailed_analysis", "next_checks"):

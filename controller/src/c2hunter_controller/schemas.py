@@ -12,7 +12,8 @@ from c2hunter_analysis.scoring import DEFAULT_DETECTOR_WEIGHTS, MAX_DETECTOR_WEI
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .ddos_signature_schema import Reference, SignatureEvaluation, SignatureReportContext
-from .network_ai import NetworkFailureDiagnostic
+from .network_ai import NetworkFailureDiagnostic, NetworkInterpretation
+from .network_numeric_evidence import NetworkInterpretationV2, NumericEvidence
 
 
 class Direction(StrEnum):
@@ -2445,6 +2446,8 @@ class AIAnalysisRunResponse(BaseModel):
     id: str
     status: str
     failure_diagnostic: NetworkFailureDiagnostic | None = None
+    network_interpretation: NetworkInterpretation | NetworkInterpretationV2 | None = None
+    network_numeric_evidence: NumericEvidence | None = None
     discovery_mode: Literal["legacy", "shadow"] = "legacy"
     selection_summary: AISelectionSummary | None = None
 
