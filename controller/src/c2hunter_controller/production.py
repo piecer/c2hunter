@@ -4,9 +4,11 @@ import hashlib
 import io
 import json
 import logging
+import math
 import re
 import secrets
 import threading
+import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager, suppress
 from copy import deepcopy
@@ -38,6 +40,7 @@ from c2hunter_controller import historical_ai_sql as historical_sql
 from c2hunter_controller import historical_ai_storage as historical_runs
 from c2hunter_controller import historical_generation as baseline_values
 from c2hunter_controller import historical_read as historical_reader
+from c2hunter_controller import postgres_schema
 from c2hunter_controller.baseline_admission import BaselineAdmission, BaselineLease
 from c2hunter_controller.historical_baseline import QualityReview, ScopeConfig
 from c2hunter_controller.pcap_export_store import (
@@ -1720,498 +1723,534 @@ class PostgresRepository(Repository):
             connection = psycopg.connect(self.database_url, autocommit=False)
             try:
                 with connection.cursor() as cursor:
-                    cursor.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS controller_objects (
-                          kind text NOT NULL, id text NOT NULL, data jsonb NOT NULL,
-                          PRIMARY KEY(kind,id)
-                        );
-                        CREATE TABLE IF NOT EXISTS job_idempotency (
-                          idempotency_key text PRIMARY KEY, job_id text NOT NULL
-                        );
-                        CREATE TABLE IF NOT EXISTS job_candidates (
-                          job_id text PRIMARY KEY, data jsonb NOT NULL
-                        );
-                        CREATE TABLE IF NOT EXISTS candidate_records (
-                          candidate_id text PRIMARY KEY,
-                          job_id text NOT NULL,
-                          position integer NOT NULL,
-                          score integer NOT NULL DEFAULT 0,
-                          severity text NOT NULL DEFAULT '',
-                          excluded boolean NOT NULL DEFAULT false,
-                          data jsonb NOT NULL,
-                          UNIQUE(job_id,position)
-                        );
-                        CREATE INDEX IF NOT EXISTS candidate_records_job_position
-                          ON candidate_records(job_id,position);
-                        CREATE INDEX IF NOT EXISTS candidate_records_triage
-                          ON candidate_records(excluded,severity,score DESC,candidate_id);
-                        CREATE TABLE IF NOT EXISTS ai_analysis_runs (
-                          run_id text PRIMARY KEY,
-                          analysis_job_id text NOT NULL,
-                          idempotency_key text NOT NULL,
-                          created_at timestamptz NOT NULL,
-                          data jsonb NOT NULL,
-                          UNIQUE(analysis_job_id,idempotency_key)
-                        );
-                        CREATE INDEX IF NOT EXISTS ai_analysis_runs_job_created
-                          ON ai_analysis_runs(analysis_job_id,created_at DESC);
-                        CREATE TABLE IF NOT EXISTS ai_candidate_assessments (
-                          assessment_id text PRIMARY KEY,
-                          ai_run_id text NOT NULL REFERENCES ai_analysis_runs(run_id),
-                          created_at timestamptz NOT NULL,
-                          data jsonb NOT NULL
-                        );
-                        CREATE INDEX IF NOT EXISTS ai_candidate_assessments_run_created
-                          ON ai_candidate_assessments(ai_run_id,created_at);
-                        CREATE TABLE IF NOT EXISTS ai_generated_artifacts (
-                          artifact_id text PRIMARY KEY,
-                          assessment_id text NOT NULL
-                            REFERENCES ai_candidate_assessments(assessment_id),
-                          created_at timestamptz NOT NULL,
-                          data jsonb NOT NULL
-                        );
-                        CREATE INDEX IF NOT EXISTS ai_generated_artifacts_assessment_created
-                          ON ai_generated_artifacts(assessment_id,created_at);
-                        CREATE TABLE IF NOT EXISTS ai_feedback (
-                          feedback_id text PRIMARY KEY,
-                          assessment_id text NOT NULL
-                            REFERENCES ai_candidate_assessments(assessment_id),
-                          created_at timestamptz NOT NULL,
-                          data jsonb NOT NULL
-                        );
-                        CREATE INDEX IF NOT EXISTS ai_feedback_assessment_created
-                          ON ai_feedback(assessment_id,created_at);
-                        CREATE TABLE IF NOT EXISTS job_flow_records (
-                          job_id text PRIMARY KEY, data jsonb NOT NULL
-                        );
-                        CREATE TABLE IF NOT EXISTS job_flow_record_chunks (
-                          job_id text NOT NULL, chunk_no integer NOT NULL,
-                          data jsonb NOT NULL,
-                          PRIMARY KEY(job_id,chunk_no)
-                        );
-                        CREATE TABLE IF NOT EXISTS job_payload_signatures (
-                          job_id text PRIMARY KEY, data jsonb NOT NULL
-                        );
-                        CREATE TABLE IF NOT EXISTS audit_events (
-                          sequence bigserial PRIMARY KEY, kind text NOT NULL,
-                          object_id text NOT NULL,
-                          occurred_at timestamptz NOT NULL, data jsonb NOT NULL
-                        );
-                        CREATE TABLE IF NOT EXISTS pcap_export_jobs (
-                          export_id text PRIMARY KEY,
-                          principal_scope text NOT NULL,
-                          idempotency_key text,
-                          request_fingerprint text NOT NULL,
-                          coalesce_fingerprint text NOT NULL,
-                          parent_job_id text NOT NULL,
-                          source_job_id text NOT NULL,
-                          source_generation text NOT NULL,
-                          status text NOT NULL,
-                          attempt integer NOT NULL DEFAULT 0,
-                          lease_token text,
-                          lease_expires_at timestamptz,
-                          next_attempt_at timestamptz,
-                          queued_at timestamptz NOT NULL,
-                          completed_at timestamptz,
-                          artifact_size_bytes bigint,
-                          data jsonb NOT NULL
-                        );
-                        CREATE TABLE IF NOT EXISTS pcap_capture_source_versions (
-                          source_kind text NOT NULL
-                            CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
-                          source_id text NOT NULL,
-                          object_key text NOT NULL,
-                          source_version_id text NOT NULL,
-                          source_size_bytes bigint NOT NULL CHECK(source_size_bytes>=0),
-                          source_sha256 text NOT NULL,
-                          updated_at timestamptz NOT NULL,
-                          PRIMARY KEY(source_kind,source_id)
-                        );
-                        CREATE TABLE IF NOT EXISTS pcap_offset_index_generations (
-                          build_id text PRIMARY KEY,
-                          source_kind text NOT NULL
-                            CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
-                          source_id text NOT NULL,
-                          source_version_id text NOT NULL,
-                          source_size_bytes bigint NOT NULL CHECK(source_size_bytes>=0),
-                          source_sha256 text NOT NULL,
-                          capture_format text NOT NULL CHECK(capture_format IN ('PCAP','PCAPNG')),
-                          schema_version integer NOT NULL,
-                          parser_contract_version integer NOT NULL,
-                          state text NOT NULL CHECK(state IN ('STAGING','READY')),
-                          created_at timestamptz NOT NULL,
-                          packet_count bigint,
-                          interface_count integer,
-                          index_sha256 text
-                        );
-                        CREATE TABLE IF NOT EXISTS pcap_offset_index_interfaces (
-                          build_id text NOT NULL
-                            REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
-                          interface_ordinal integer NOT NULL,
-                          section_index integer NOT NULL,
-                          interface_id integer NOT NULL,
-                          link_type integer NOT NULL,
-                          snaplen bigint NOT NULL,
-                          timestamp_resolution_numerator bigint NOT NULL,
-                          timestamp_resolution_denominator bigint NOT NULL,
-                          timestamp_offset_seconds bigint NOT NULL,
-                          PRIMARY KEY(build_id,interface_ordinal)
-                        );
-                        CREATE TABLE IF NOT EXISTS pcap_offset_index_packets (
-                          build_id text NOT NULL
-                            REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
-                          packet_index bigint NOT NULL,
-                          record_offset bigint NOT NULL,
-                          data_offset bigint NOT NULL,
-                          captured_length bigint NOT NULL,
-                          original_length bigint NOT NULL,
-                          framed_length bigint NOT NULL,
-                          section_index integer NOT NULL,
-                          interface_id integer NOT NULL,
-                          interface_ordinal integer NOT NULL,
-                          raw_timestamp_ticks numeric(20,0) NOT NULL,
-                          PRIMARY KEY(build_id,packet_index)
-                        );
-                        CREATE TABLE IF NOT EXISTS pcap_offset_index_owners (
-                          source_kind text NOT NULL,
-                          source_id text NOT NULL,
-                          build_id text NOT NULL UNIQUE
-                            REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
-                          PRIMARY KEY(source_kind,source_id)
-                        );
-                        CREATE TABLE IF NOT EXISTS pcap_offset_index_jobs (
-                          source_kind text NOT NULL CHECK(source_kind='LIVE_SEGMENT'),
-                          source_id text NOT NULL, sensor_id text NOT NULL,
-                          analysis_job_id text NOT NULL, object_key text NOT NULL,
-                          source_size_bytes bigint NOT NULL CHECK(source_size_bytes>=0),
-                          source_sha256 text NOT NULL,
-                          capture_format text NOT NULL CHECK(capture_format='PCAP'),
-                          schema_version integer NOT NULL, parser_contract_version integer NOT NULL,
-                          status text NOT NULL
-                            CHECK(status IN ('QUEUED','RUNNING','COMPLETED','FAILED')),
-                          attempt integer NOT NULL DEFAULT 0,
-                          max_attempts integer NOT NULL CHECK(max_attempts>0),
-                          lease_token text, lease_expires_at timestamptz,
-                          next_attempt_at timestamptz NOT NULL, queued_at timestamptz NOT NULL,
-                          updated_at timestamptz NOT NULL, completed_at timestamptz,
-                          error_code text, published_build_id text,
-                          published_source_version_id text,
-                          PRIMARY KEY(source_kind,source_id)
-                        );
-                        CREATE TABLE IF NOT EXISTS pcap_posting_index_intents (
-                          source_kind text NOT NULL
-                            CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
-                          source_id text NOT NULL,
-                          source_version_id text NOT NULL,
-                          source_size_bytes bigint NOT NULL CHECK(source_size_bytes>=0),
-                          source_sha256 text NOT NULL CHECK(source_sha256 ~ '^[0-9a-f]{64}$'),
-                          capture_format text NOT NULL CHECK(capture_format IN ('PCAP','PCAPNG')),
-                          parent_structural_build_id text NOT NULL
-                            REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
-                          parent_structural_index_sha256 text NOT NULL
-                            CHECK(parent_structural_index_sha256 ~ '^[0-9a-f]{64}$'),
-                          structural_schema_version integer NOT NULL
-                            CHECK(structural_schema_version>0),
-                          structural_parser_contract_version integer NOT NULL
-                            CHECK(structural_parser_contract_version>0),
-                          posting_schema_version integer NOT NULL CHECK(posting_schema_version>0),
-                          posting_parser_contract_version integer NOT NULL
-                            CHECK(posting_parser_contract_version>0),
-                          filter_contract_version integer NOT NULL CHECK(filter_contract_version>0),
-                          status text NOT NULL
-                            CHECK(status IN ('PENDING','DEFERRED','COMPLETED','FAILED')),
-                          requested_at timestamptz NOT NULL,
-                          updated_at timestamptz NOT NULL,
-                          published_build_id text,
-                          terminal_attempt integer
-                            CHECK(terminal_attempt IS NULL OR terminal_attempt>=0),
-                          terminal_max_attempts integer
-                            CHECK(terminal_max_attempts IS NULL OR terminal_max_attempts>0),
-                          error_code text
-                            CHECK(error_code IS NULL OR error_code ~ '^[A-Z][A-Z0-9_]{0,63}$'),
-                          PRIMARY KEY(source_kind,source_id),
-                          CONSTRAINT pcap_posting_index_intents_source_parent_key
-                            UNIQUE(source_kind,source_id,parent_structural_build_id),
-                          FOREIGN KEY(source_kind,source_id)
-                            REFERENCES pcap_capture_source_versions(source_kind,source_id)
-                            ON DELETE CASCADE
-                        );
-                        CREATE TABLE IF NOT EXISTS pcap_posting_index_jobs (
-                          source_kind text NOT NULL
-                            CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
-                          source_id text NOT NULL,
-                          parent_structural_build_id text NOT NULL,
-                          status text NOT NULL
-                            CHECK(status IN ('QUEUED','RUNNING','COMPLETED','FAILED')),
-                          attempt integer NOT NULL DEFAULT 0 CHECK(attempt>=0),
-                          max_attempts integer NOT NULL CHECK(max_attempts>0),
-                          lease_token text,
-                          lease_expires_at timestamptz,
-                          next_attempt_at timestamptz NOT NULL,
-                          queued_at timestamptz NOT NULL,
-                          updated_at timestamptz NOT NULL,
-                          error_code text
-                            CHECK(error_code IS NULL OR error_code ~ '^[A-Z][A-Z0-9_]{0,63}$'),
-                          PRIMARY KEY(source_kind,source_id),
-                          CONSTRAINT pcap_posting_index_jobs_intent_parent_fkey
-                            FOREIGN KEY(source_kind,source_id,parent_structural_build_id)
-                            REFERENCES pcap_posting_index_intents(
-                              source_kind,source_id,parent_structural_build_id
-                            ) ON DELETE CASCADE
-                        );
-                        CREATE TABLE IF NOT EXISTS pcap_posting_index_generations (
-                          build_id text PRIMARY KEY,
-                          source_kind text NOT NULL
-                            CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
-                          source_id text NOT NULL,
-                          source_version_id text NOT NULL,
-                          source_size_bytes bigint NOT NULL CHECK(source_size_bytes>=0),
-                          source_sha256 text NOT NULL CHECK(source_sha256 ~ '^[0-9a-f]{64}$'),
-                          capture_format text NOT NULL CHECK(capture_format IN ('PCAP','PCAPNG')),
-                          parent_structural_build_id text NOT NULL
-                            REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
-                          parent_structural_index_sha256 text NOT NULL
-                            CHECK(parent_structural_index_sha256 ~ '^[0-9a-f]{64}$'),
-                          structural_schema_version integer NOT NULL
-                            CHECK(structural_schema_version>0),
-                          structural_parser_contract_version integer NOT NULL
-                            CHECK(structural_parser_contract_version>0),
-                          posting_schema_version integer NOT NULL CHECK(posting_schema_version>0),
-                          posting_parser_contract_version integer NOT NULL
-                            CHECK(posting_parser_contract_version>0),
-                          filter_contract_version integer NOT NULL CHECK(filter_contract_version>0),
-                          state text NOT NULL CHECK(state IN ('STAGING','READY')),
-                          created_at timestamptz NOT NULL,
-                          packet_count bigint NOT NULL CHECK(packet_count>=0),
-                          supported_count bigint NOT NULL CHECK(supported_count>=0),
-                          membership_count bigint NOT NULL CHECK(membership_count>=0),
-                          distinct_key_count bigint NOT NULL CHECK(distinct_key_count>=0),
-                          chunk_count bigint NOT NULL CHECK(chunk_count>=0),
-                          encoded_byte_count bigint NOT NULL CHECK(encoded_byte_count>=0),
-                          complete_dimensions text[] NOT NULL,
-                          posting_index_sha256 text NOT NULL
-                            CHECK(posting_index_sha256 ~ '^[0-9a-f]{64}$'),
-                          binding_document bytea NOT NULL,
-                          builder_attempt integer NOT NULL CHECK(builder_attempt>0),
-                          lease_token text NOT NULL,
-                          expected_owner_build_id text,
-                          UNIQUE(source_kind,source_id,parent_structural_build_id,build_id),
-                          FOREIGN KEY(source_kind,source_id)
-                            REFERENCES pcap_capture_source_versions(source_kind,source_id)
-                            ON DELETE CASCADE
-                        );
-                        CREATE TABLE IF NOT EXISTS pcap_posting_index_chunks (
-                          build_id text NOT NULL
-                            REFERENCES pcap_posting_index_generations(build_id) ON DELETE CASCADE,
-                          dimension text NOT NULL CHECK(dimension IN (
-                            'ALL_PACKET','SUPPORTED','SRC_ADDRESS','DST_ADDRESS','SRC_PORT',
-                            'DST_PORT','PROTOCOL','HAS_PAYLOAD'
-                          )),
-                          canonical_value bytea NOT NULL,
-                          chunk_ordinal bigint NOT NULL CHECK(chunk_ordinal>=0),
-                          first_packet_index bigint NOT NULL CHECK(first_packet_index>=0),
-                          last_packet_index bigint NOT NULL
-                            CHECK(last_packet_index>=first_packet_index),
-                          membership_count bigint NOT NULL CHECK(membership_count>0),
-                          encoded_ordinals bytea NOT NULL,
-                          PRIMARY KEY(build_id,dimension,canonical_value,chunk_ordinal)
-                        );
-                        CREATE TABLE IF NOT EXISTS pcap_posting_index_owners (
-                          source_kind text NOT NULL
-                            CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
-                          source_id text NOT NULL,
-                          parent_structural_build_id text NOT NULL,
-                          build_id text NOT NULL UNIQUE,
-                          PRIMARY KEY(source_kind,source_id,parent_structural_build_id),
-                          FOREIGN KEY(source_kind,source_id,parent_structural_build_id,build_id)
-                            REFERENCES pcap_posting_index_generations(
-                              source_kind,source_id,parent_structural_build_id,build_id
-                            ) ON DELETE CASCADE
-                        );
-                        DO $stage11$
-                        BEGIN
-                          IF NOT EXISTS (
-                            SELECT 1 FROM pg_constraint AS con
-                            JOIN pg_class AS rel ON rel.oid=con.conrelid
-                            JOIN pg_namespace AS nsp ON nsp.oid=rel.relnamespace
-                            WHERE nsp.nspname=current_schema()
-                              AND rel.relname='pcap_posting_index_intents'
-                              AND con.conname='pcap_posting_index_intents_source_parent_key'
-                          ) THEN
-                            ALTER TABLE pcap_posting_index_intents ADD CONSTRAINT
-                              pcap_posting_index_intents_source_parent_key
-                              UNIQUE(source_kind,source_id,parent_structural_build_id);
-                          END IF;
-                          IF NOT EXISTS (
-                            SELECT 1 FROM pg_constraint AS con
-                            JOIN pg_class AS rel ON rel.oid=con.conrelid
-                            JOIN pg_namespace AS nsp ON nsp.oid=rel.relnamespace
-                            WHERE nsp.nspname=current_schema()
-                              AND rel.relname='pcap_posting_index_jobs'
-                              AND con.conname='pcap_posting_index_jobs_intent_parent_fkey'
-                          ) THEN
-                            ALTER TABLE pcap_posting_index_jobs ADD CONSTRAINT
-                              pcap_posting_index_jobs_intent_parent_fkey
-                              FOREIGN KEY(source_kind,source_id,parent_structural_build_id)
-                              REFERENCES pcap_posting_index_intents(
-                                source_kind,source_id,parent_structural_build_id
-                              ) ON DELETE CASCADE;
-                          END IF;
-                          ALTER TABLE pcap_posting_index_jobs DROP CONSTRAINT IF EXISTS
-                            pcap_posting_index_jobs_source_kind_source_id_fkey;
-                          ALTER TABLE pcap_posting_index_jobs DROP CONSTRAINT IF EXISTS
-                            pcap_posting_index_jobs_parent_structural_build_id_fkey;
-                        END $stage11$;
-                        CREATE INDEX IF NOT EXISTS pcap_posting_index_jobs_claim
-                          ON pcap_posting_index_jobs(
-                            status,next_attempt_at,queued_at,source_kind,source_id
-                          );
-                        CREATE INDEX IF NOT EXISTS pcap_posting_index_jobs_lease
-                          ON pcap_posting_index_jobs(status,lease_expires_at,source_kind,source_id);
-                        CREATE INDEX IF NOT EXISTS pcap_posting_index_jobs_terminal
-                          ON pcap_posting_index_jobs(status,updated_at,source_kind,source_id);
-                        CREATE INDEX IF NOT EXISTS pcap_posting_index_intents_reconcile
-                          ON pcap_posting_index_intents(status,requested_at,source_kind,source_id);
-                        CREATE INDEX IF NOT EXISTS pcap_posting_index_generations_staging
-                          ON pcap_posting_index_generations(state,created_at,build_id);
-                        CREATE INDEX IF NOT EXISTS pcap_posting_index_chunks_read
-                          ON pcap_posting_index_chunks(
-                            build_id,dimension,canonical_value,chunk_ordinal
-                          );
-                        DO $stage10$
-                        DECLARE
-                          target_table text;
-                          constraint_row record;
-                        BEGIN
-                          FOREACH target_table IN ARRAY ARRAY[
-                            'pcap_capture_source_versions',
-                            'pcap_offset_index_generations'
-                          ] LOOP
-                            FOR constraint_row IN
-                              SELECT con.conname
-                              FROM pg_constraint AS con
-                              JOIN pg_class AS rel ON rel.oid=con.conrelid
-                              JOIN pg_namespace AS nsp ON nsp.oid=rel.relnamespace
-                              WHERE nsp.nspname=current_schema()
-                                AND rel.relname=target_table
-                                AND con.contype='c'
-                                AND pg_get_constraintdef(con.oid) LIKE '%source_kind%'
-                                AND pg_get_constraintdef(con.oid) LIKE '%PCAP_UPLOAD%'
-                                AND pg_get_constraintdef(con.oid) NOT LIKE '%LIVE_SEGMENT%'
-                            LOOP
-                              EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I',
-                                             target_table,constraint_row.conname);
-                            END LOOP;
-                          END LOOP;
-                          IF NOT EXISTS (
-                            SELECT 1 FROM pg_constraint con
-                            JOIN pg_class rel ON rel.oid=con.conrelid
-                            WHERE rel.relname='pcap_capture_source_versions'
-                              AND con.contype='c'
-                              AND pg_get_constraintdef(con.oid) LIKE '%LIVE_SEGMENT%'
-                          ) THEN
-                            ALTER TABLE pcap_capture_source_versions ADD CONSTRAINT
-                              pcap_capture_source_versions_source_kind_check
-                              CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT'));
-                          END IF;
-                          IF NOT EXISTS (
-                            SELECT 1 FROM pg_constraint con
-                            JOIN pg_class rel ON rel.oid=con.conrelid
-                            WHERE rel.relname='pcap_offset_index_generations'
-                              AND con.contype='c'
-                              AND pg_get_constraintdef(con.oid) LIKE '%LIVE_SEGMENT%'
-                          ) THEN
-                            ALTER TABLE pcap_offset_index_generations ADD CONSTRAINT
-                              pcap_offset_index_generations_source_kind_check
-                              CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT'));
-                          END IF;
-                        END $stage10$;
-                        CREATE INDEX IF NOT EXISTS pcap_offset_index_generations_staging
-                          ON pcap_offset_index_generations(state,created_at,build_id);
-                        CREATE INDEX IF NOT EXISTS pcap_offset_index_packets_lookup
-                          ON pcap_offset_index_packets(build_id,packet_index);
-                        CREATE INDEX IF NOT EXISTS pcap_offset_index_jobs_claim
-                          ON pcap_offset_index_jobs(status,next_attempt_at,queued_at,source_id);
-                        CREATE INDEX IF NOT EXISTS pcap_offset_index_jobs_lease
-                          ON pcap_offset_index_jobs(status,lease_expires_at);
-                        CREATE UNIQUE INDEX IF NOT EXISTS pcap_export_jobs_principal_idempotency
-                          ON pcap_export_jobs(principal_scope,idempotency_key)
-                          WHERE idempotency_key IS NOT NULL;
-                        CREATE UNIQUE INDEX IF NOT EXISTS pcap_export_jobs_reusable_coalesce
-                          ON pcap_export_jobs(principal_scope,coalesce_fingerprint)
-                          WHERE status IN ('QUEUED','RUNNING','COMPLETED');
-                        CREATE INDEX IF NOT EXISTS pcap_export_jobs_claim
-                          ON pcap_export_jobs(status,next_attempt_at,queued_at);
-                        CREATE INDEX IF NOT EXISTS pcap_export_jobs_lease
-                          ON pcap_export_jobs(status,lease_expires_at);
-                        CREATE INDEX IF NOT EXISTS pcap_export_jobs_parent
-                          ON pcap_export_jobs(parent_job_id,status);
-                        CREATE INDEX IF NOT EXISTS controller_objects_active_live_jobs
-                          ON controller_objects ((data->>'status'))
-                          WHERE kind='job' AND data->>'mode'='LIVE';
-                        CREATE INDEX IF NOT EXISTS controller_objects_sensor_pcap_job_uploaded_id
-                          ON controller_objects (
-                            (data->>'analysis_job_id'),(data->>'uploaded_at'),id
-                          ) WHERE kind='sensor_pcap';
-
-                        """
-                    )
-                    # Release bootstrap DDL table locks before acquiring job row fences.
-                    # Otherwise a deleting job owner can wait on our schema lock while
-                    # we wait on its row, creating a lock-order cycle.
-                    connection.commit()
-                    cursor.execute(
-                        "SELECT id FROM controller_objects WHERE kind='job' AND ("
-                        "data ? 'flow_records' OR data ? 'payload_signatures' OR "
-                        "EXISTS (SELECT 1 FROM job_flow_records "
-                        "WHERE job_id=controller_objects.id) OR "
-                        "EXISTS (SELECT 1 FROM job_candidates WHERE job_id=controller_objects.id)) "
-                        "ORDER BY id FOR UPDATE"
-                    )
-                    migration_job_ids = [str(row[0]) for row in cursor.fetchall()]
-                    cursor.execute(
-                        """
-                        INSERT INTO job_flow_records(job_id,data)
-                          SELECT id,data->'flow_records'
-                          FROM controller_objects
-                          WHERE kind='job' AND data ? 'flow_records'
-                          ON CONFLICT(job_id) DO NOTHING;
-                        UPDATE controller_objects
-                          SET data=data-'flow_records'
-                          WHERE kind='job' AND data ? 'flow_records';
-                        INSERT INTO job_flow_record_chunks(job_id,chunk_no,data)
-                          SELECT job_id,0,data
-                          FROM job_flow_records
-                          ON CONFLICT(job_id,chunk_no) DO NOTHING;
-                        DELETE FROM job_flow_records AS legacy
-                          WHERE EXISTS (
-                            SELECT 1
-                            FROM job_flow_record_chunks AS chunk
-                            WHERE chunk.job_id=legacy.job_id
-                          );
-                        CREATE INDEX IF NOT EXISTS job_flow_record_chunks_job_id
-                          ON job_flow_record_chunks(job_id,chunk_no);
-                        INSERT INTO job_payload_signatures(job_id,data)
-                          SELECT id,data->'payload_signatures'
-                          FROM controller_objects
-                          WHERE kind='job' AND data ? 'payload_signatures'
-                          ON CONFLICT(job_id) DO NOTHING;
-                        UPDATE controller_objects
-                          SET data=data-'payload_signatures'
-                          WHERE kind='job' AND data ? 'payload_signatures';
-                        """
-                    )
-                    self._migrate_legacy_candidates(cursor, migration_job_ids)
-                    cursor.execute(baseline_storage.schema(postgres=True))
-                connection.commit()
-                self._ensure_candidate_query_indexes(connection)
-                historical_sql.initialize_postgres(connection)
-            except Exception:
+                    postgres_schema.require_ready(cursor)
+                connection.rollback()
+            except BaseException:
                 historical_sql.close_quarantined(connection)
                 raise
             self._connection = connection
             return connection
+
+    def initialize_schema(self, *, lock_timeout_seconds: float = 30) -> None:
+        """Explicit migration on an invocation-owned connection, never a borrowed one."""
+        import psycopg
+
+        if not math.isfinite(lock_timeout_seconds) or not 0 < lock_timeout_seconds <= 300:
+            raise ValueError("migration lock timeout must be finite and in (0, 300]")
+        connection = psycopg.connect(self.database_url, autocommit=False)
+        try:
+            deadline = time.monotonic() + lock_timeout_seconds
+            with connection.cursor() as cursor:
+                while True:
+                    cursor.execute("SELECT pg_try_advisory_lock(2026081301)")
+                    acquired = cursor.fetchone() == (True,)
+                    connection.rollback()  # Session lock survives all internal commits.
+                    if acquired:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("controller schema migration lock timed out")
+                    time.sleep(0.05)
+                cursor.execute(
+                    "CREATE TABLE IF NOT EXISTS controller_schema_version "
+                    "(version integer NOT NULL)"
+                )
+                cursor.execute("SELECT version FROM controller_schema_version LIMIT 2")
+                versions = cursor.fetchall()
+                if versions and versions != [(postgres_schema.VERSION,)]:
+                    raise postgres_schema.SchemaNotReady()
+                cursor.execute("DELETE FROM controller_schema_version")
+            connection.commit()
+            self._initialize_schema(connection)
+            from .postgres_index_maintenance import remove_redundant_indexes
+
+            with connection.cursor() as cursor:
+                remove_redundant_indexes(cursor, lock_timeout_seconds=lock_timeout_seconds)
+                postgres_schema.verify_layout(cursor)
+                cursor.execute("INSERT INTO controller_schema_version(version) VALUES (1)")
+            connection.commit()
+        finally:
+            historical_sql.close_quarantined(connection)
+
+    def _initialize_schema(self, connection: Any) -> None:
+        """Migration-only work; never called by connection/readiness paths."""
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS controller_objects (
+                  kind text NOT NULL, id text NOT NULL, data jsonb NOT NULL,
+                  PRIMARY KEY(kind,id)
+                );
+                CREATE TABLE IF NOT EXISTS job_idempotency (
+                  idempotency_key text PRIMARY KEY, job_id text NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS job_candidates (
+                  job_id text PRIMARY KEY, data jsonb NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS candidate_records (
+                  candidate_id text PRIMARY KEY,
+                  job_id text NOT NULL,
+                  position integer NOT NULL,
+                  score integer NOT NULL DEFAULT 0,
+                  severity text NOT NULL DEFAULT '',
+                  excluded boolean NOT NULL DEFAULT false,
+                  data jsonb NOT NULL,
+                  UNIQUE(job_id,position)
+                );
+                CREATE INDEX IF NOT EXISTS candidate_records_triage
+                  ON candidate_records(excluded,severity,score DESC,candidate_id);
+                CREATE TABLE IF NOT EXISTS ai_analysis_runs (
+                  run_id text PRIMARY KEY,
+                  analysis_job_id text NOT NULL,
+                  idempotency_key text NOT NULL,
+                  created_at timestamptz NOT NULL,
+                  data jsonb NOT NULL,
+                  UNIQUE(analysis_job_id,idempotency_key)
+                );
+                CREATE INDEX IF NOT EXISTS ai_analysis_runs_job_created
+                  ON ai_analysis_runs(analysis_job_id,created_at DESC);
+                CREATE TABLE IF NOT EXISTS ai_candidate_assessments (
+                  assessment_id text PRIMARY KEY,
+                  ai_run_id text NOT NULL REFERENCES ai_analysis_runs(run_id),
+                  created_at timestamptz NOT NULL,
+                  data jsonb NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ai_candidate_assessments_run_created
+                  ON ai_candidate_assessments(ai_run_id,created_at);
+                CREATE TABLE IF NOT EXISTS ai_generated_artifacts (
+                  artifact_id text PRIMARY KEY,
+                  assessment_id text NOT NULL
+                    REFERENCES ai_candidate_assessments(assessment_id),
+                  created_at timestamptz NOT NULL,
+                  data jsonb NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ai_generated_artifacts_assessment_created
+                  ON ai_generated_artifacts(assessment_id,created_at);
+                CREATE TABLE IF NOT EXISTS ai_feedback (
+                  feedback_id text PRIMARY KEY,
+                  assessment_id text NOT NULL
+                    REFERENCES ai_candidate_assessments(assessment_id),
+                  created_at timestamptz NOT NULL,
+                  data jsonb NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ai_feedback_assessment_created
+                  ON ai_feedback(assessment_id,created_at);
+                CREATE TABLE IF NOT EXISTS job_flow_records (
+                  job_id text PRIMARY KEY, data jsonb NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS job_flow_record_chunks (
+                  job_id text NOT NULL, chunk_no integer NOT NULL,
+                  data jsonb NOT NULL,
+                  PRIMARY KEY(job_id,chunk_no)
+                );
+                CREATE TABLE IF NOT EXISTS job_payload_signatures (
+                  job_id text PRIMARY KEY, data jsonb NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS audit_events (
+                  sequence bigserial PRIMARY KEY, kind text NOT NULL,
+                  object_id text NOT NULL,
+                  occurred_at timestamptz NOT NULL, data jsonb NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS pcap_export_jobs (
+                  export_id text PRIMARY KEY,
+                  principal_scope text NOT NULL,
+                  idempotency_key text,
+                  request_fingerprint text NOT NULL,
+                  coalesce_fingerprint text NOT NULL,
+                  parent_job_id text NOT NULL,
+                  source_job_id text NOT NULL,
+                  source_generation text NOT NULL,
+                  status text NOT NULL,
+                  attempt integer NOT NULL DEFAULT 0,
+                  lease_token text,
+                  lease_expires_at timestamptz,
+                  next_attempt_at timestamptz,
+                  queued_at timestamptz NOT NULL,
+                  completed_at timestamptz,
+                  artifact_size_bytes bigint,
+                  data jsonb NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS pcap_capture_source_versions (
+                  source_kind text NOT NULL
+                    CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+                  source_id text NOT NULL,
+                  object_key text NOT NULL,
+                  source_version_id text NOT NULL,
+                  source_size_bytes bigint NOT NULL CHECK(source_size_bytes>=0),
+                  source_sha256 text NOT NULL,
+                  updated_at timestamptz NOT NULL,
+                  PRIMARY KEY(source_kind,source_id)
+                );
+                CREATE TABLE IF NOT EXISTS pcap_offset_index_generations (
+                  build_id text PRIMARY KEY,
+                  source_kind text NOT NULL
+                    CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+                  source_id text NOT NULL,
+                  source_version_id text NOT NULL,
+                  source_size_bytes bigint NOT NULL CHECK(source_size_bytes>=0),
+                  source_sha256 text NOT NULL,
+                  capture_format text NOT NULL CHECK(capture_format IN ('PCAP','PCAPNG')),
+                  schema_version integer NOT NULL,
+                  parser_contract_version integer NOT NULL,
+                  state text NOT NULL CHECK(state IN ('STAGING','READY')),
+                  created_at timestamptz NOT NULL,
+                  packet_count bigint,
+                  interface_count integer,
+                  index_sha256 text
+                );
+                CREATE TABLE IF NOT EXISTS pcap_offset_index_interfaces (
+                  build_id text NOT NULL
+                    REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
+                  interface_ordinal integer NOT NULL,
+                  section_index integer NOT NULL,
+                  interface_id integer NOT NULL,
+                  link_type integer NOT NULL,
+                  snaplen bigint NOT NULL,
+                  timestamp_resolution_numerator bigint NOT NULL,
+                  timestamp_resolution_denominator bigint NOT NULL,
+                  timestamp_offset_seconds bigint NOT NULL,
+                  PRIMARY KEY(build_id,interface_ordinal)
+                );
+                CREATE TABLE IF NOT EXISTS pcap_offset_index_packets (
+                  build_id text NOT NULL
+                    REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
+                  packet_index bigint NOT NULL,
+                  record_offset bigint NOT NULL,
+                  data_offset bigint NOT NULL,
+                  captured_length bigint NOT NULL,
+                  original_length bigint NOT NULL,
+                  framed_length bigint NOT NULL,
+                  section_index integer NOT NULL,
+                  interface_id integer NOT NULL,
+                  interface_ordinal integer NOT NULL,
+                  raw_timestamp_ticks numeric(20,0) NOT NULL,
+                  PRIMARY KEY(build_id,packet_index)
+                );
+                CREATE TABLE IF NOT EXISTS pcap_offset_index_owners (
+                  source_kind text NOT NULL,
+                  source_id text NOT NULL,
+                  build_id text NOT NULL UNIQUE
+                    REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
+                  PRIMARY KEY(source_kind,source_id)
+                );
+                CREATE TABLE IF NOT EXISTS pcap_offset_index_jobs (
+                  source_kind text NOT NULL CHECK(source_kind='LIVE_SEGMENT'),
+                  source_id text NOT NULL, sensor_id text NOT NULL,
+                  analysis_job_id text NOT NULL, object_key text NOT NULL,
+                  source_size_bytes bigint NOT NULL CHECK(source_size_bytes>=0),
+                  source_sha256 text NOT NULL,
+                  capture_format text NOT NULL CHECK(capture_format='PCAP'),
+                  schema_version integer NOT NULL, parser_contract_version integer NOT NULL,
+                  status text NOT NULL
+                    CHECK(status IN ('QUEUED','RUNNING','COMPLETED','FAILED')),
+                  attempt integer NOT NULL DEFAULT 0,
+                  max_attempts integer NOT NULL CHECK(max_attempts>0),
+                  lease_token text, lease_expires_at timestamptz,
+                  next_attempt_at timestamptz NOT NULL, queued_at timestamptz NOT NULL,
+                  updated_at timestamptz NOT NULL, completed_at timestamptz,
+                  error_code text, published_build_id text,
+                  published_source_version_id text,
+                  PRIMARY KEY(source_kind,source_id)
+                );
+                CREATE TABLE IF NOT EXISTS pcap_posting_index_intents (
+                  source_kind text NOT NULL
+                    CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+                  source_id text NOT NULL,
+                  source_version_id text NOT NULL,
+                  source_size_bytes bigint NOT NULL CHECK(source_size_bytes>=0),
+                  source_sha256 text NOT NULL CHECK(source_sha256 ~ '^[0-9a-f]{64}$'),
+                  capture_format text NOT NULL CHECK(capture_format IN ('PCAP','PCAPNG')),
+                  parent_structural_build_id text NOT NULL
+                    REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
+                  parent_structural_index_sha256 text NOT NULL
+                    CHECK(parent_structural_index_sha256 ~ '^[0-9a-f]{64}$'),
+                  structural_schema_version integer NOT NULL
+                    CHECK(structural_schema_version>0),
+                  structural_parser_contract_version integer NOT NULL
+                    CHECK(structural_parser_contract_version>0),
+                  posting_schema_version integer NOT NULL CHECK(posting_schema_version>0),
+                  posting_parser_contract_version integer NOT NULL
+                    CHECK(posting_parser_contract_version>0),
+                  filter_contract_version integer NOT NULL CHECK(filter_contract_version>0),
+                  status text NOT NULL
+                    CHECK(status IN ('PENDING','DEFERRED','COMPLETED','FAILED')),
+                  requested_at timestamptz NOT NULL,
+                  updated_at timestamptz NOT NULL,
+                  published_build_id text,
+                  terminal_attempt integer
+                    CHECK(terminal_attempt IS NULL OR terminal_attempt>=0),
+                  terminal_max_attempts integer
+                    CHECK(terminal_max_attempts IS NULL OR terminal_max_attempts>0),
+                  error_code text
+                    CHECK(error_code IS NULL OR error_code ~ '^[A-Z][A-Z0-9_]{0,63}$'),
+                  PRIMARY KEY(source_kind,source_id),
+                  CONSTRAINT pcap_posting_index_intents_source_parent_key
+                    UNIQUE(source_kind,source_id,parent_structural_build_id),
+                  FOREIGN KEY(source_kind,source_id)
+                    REFERENCES pcap_capture_source_versions(source_kind,source_id)
+                    ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS pcap_posting_index_jobs (
+                  source_kind text NOT NULL
+                    CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+                  source_id text NOT NULL,
+                  parent_structural_build_id text NOT NULL,
+                  status text NOT NULL
+                    CHECK(status IN ('QUEUED','RUNNING','COMPLETED','FAILED')),
+                  attempt integer NOT NULL DEFAULT 0 CHECK(attempt>=0),
+                  max_attempts integer NOT NULL CHECK(max_attempts>0),
+                  lease_token text,
+                  lease_expires_at timestamptz,
+                  next_attempt_at timestamptz NOT NULL,
+                  queued_at timestamptz NOT NULL,
+                  updated_at timestamptz NOT NULL,
+                  error_code text
+                    CHECK(error_code IS NULL OR error_code ~ '^[A-Z][A-Z0-9_]{0,63}$'),
+                  PRIMARY KEY(source_kind,source_id),
+                  CONSTRAINT pcap_posting_index_jobs_intent_parent_fkey
+                    FOREIGN KEY(source_kind,source_id,parent_structural_build_id)
+                    REFERENCES pcap_posting_index_intents(
+                      source_kind,source_id,parent_structural_build_id
+                    ) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS pcap_posting_index_generations (
+                  build_id text PRIMARY KEY,
+                  source_kind text NOT NULL
+                    CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+                  source_id text NOT NULL,
+                  source_version_id text NOT NULL,
+                  source_size_bytes bigint NOT NULL CHECK(source_size_bytes>=0),
+                  source_sha256 text NOT NULL CHECK(source_sha256 ~ '^[0-9a-f]{64}$'),
+                  capture_format text NOT NULL CHECK(capture_format IN ('PCAP','PCAPNG')),
+                  parent_structural_build_id text NOT NULL
+                    REFERENCES pcap_offset_index_generations(build_id) ON DELETE CASCADE,
+                  parent_structural_index_sha256 text NOT NULL
+                    CHECK(parent_structural_index_sha256 ~ '^[0-9a-f]{64}$'),
+                  structural_schema_version integer NOT NULL
+                    CHECK(structural_schema_version>0),
+                  structural_parser_contract_version integer NOT NULL
+                    CHECK(structural_parser_contract_version>0),
+                  posting_schema_version integer NOT NULL CHECK(posting_schema_version>0),
+                  posting_parser_contract_version integer NOT NULL
+                    CHECK(posting_parser_contract_version>0),
+                  filter_contract_version integer NOT NULL CHECK(filter_contract_version>0),
+                  state text NOT NULL CHECK(state IN ('STAGING','READY')),
+                  created_at timestamptz NOT NULL,
+                  packet_count bigint NOT NULL CHECK(packet_count>=0),
+                  supported_count bigint NOT NULL CHECK(supported_count>=0),
+                  membership_count bigint NOT NULL CHECK(membership_count>=0),
+                  distinct_key_count bigint NOT NULL CHECK(distinct_key_count>=0),
+                  chunk_count bigint NOT NULL CHECK(chunk_count>=0),
+                  encoded_byte_count bigint NOT NULL CHECK(encoded_byte_count>=0),
+                  complete_dimensions text[] NOT NULL,
+                  posting_index_sha256 text NOT NULL
+                    CHECK(posting_index_sha256 ~ '^[0-9a-f]{64}$'),
+                  binding_document bytea NOT NULL,
+                  builder_attempt integer NOT NULL CHECK(builder_attempt>0),
+                  lease_token text NOT NULL,
+                  expected_owner_build_id text,
+                  UNIQUE(source_kind,source_id,parent_structural_build_id,build_id),
+                  FOREIGN KEY(source_kind,source_id)
+                    REFERENCES pcap_capture_source_versions(source_kind,source_id)
+                    ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS pcap_posting_index_chunks (
+                  build_id text NOT NULL
+                    REFERENCES pcap_posting_index_generations(build_id) ON DELETE CASCADE,
+                  dimension text NOT NULL CHECK(dimension IN (
+                    'ALL_PACKET','SUPPORTED','SRC_ADDRESS','DST_ADDRESS','SRC_PORT',
+                    'DST_PORT','PROTOCOL','HAS_PAYLOAD'
+                  )),
+                  canonical_value bytea NOT NULL,
+                  chunk_ordinal bigint NOT NULL CHECK(chunk_ordinal>=0),
+                  first_packet_index bigint NOT NULL CHECK(first_packet_index>=0),
+                  last_packet_index bigint NOT NULL
+                    CHECK(last_packet_index>=first_packet_index),
+                  membership_count bigint NOT NULL CHECK(membership_count>0),
+                  encoded_ordinals bytea NOT NULL,
+                  PRIMARY KEY(build_id,dimension,canonical_value,chunk_ordinal)
+                );
+                CREATE TABLE IF NOT EXISTS pcap_posting_index_owners (
+                  source_kind text NOT NULL
+                    CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT')),
+                  source_id text NOT NULL,
+                  parent_structural_build_id text NOT NULL,
+                  build_id text NOT NULL UNIQUE,
+                  PRIMARY KEY(source_kind,source_id,parent_structural_build_id),
+                  FOREIGN KEY(source_kind,source_id,parent_structural_build_id,build_id)
+                    REFERENCES pcap_posting_index_generations(
+                      source_kind,source_id,parent_structural_build_id,build_id
+                    ) ON DELETE CASCADE
+                );
+                DO $stage11$
+                BEGIN
+                  IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint AS con
+                    JOIN pg_class AS rel ON rel.oid=con.conrelid
+                    JOIN pg_namespace AS nsp ON nsp.oid=rel.relnamespace
+                    WHERE nsp.nspname=current_schema()
+                      AND rel.relname='pcap_posting_index_intents'
+                      AND con.conname='pcap_posting_index_intents_source_parent_key'
+                  ) THEN
+                    ALTER TABLE pcap_posting_index_intents ADD CONSTRAINT
+                      pcap_posting_index_intents_source_parent_key
+                      UNIQUE(source_kind,source_id,parent_structural_build_id);
+                  END IF;
+                  IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint AS con
+                    JOIN pg_class AS rel ON rel.oid=con.conrelid
+                    JOIN pg_namespace AS nsp ON nsp.oid=rel.relnamespace
+                    WHERE nsp.nspname=current_schema()
+                      AND rel.relname='pcap_posting_index_jobs'
+                      AND con.conname='pcap_posting_index_jobs_intent_parent_fkey'
+                  ) THEN
+                    ALTER TABLE pcap_posting_index_jobs ADD CONSTRAINT
+                      pcap_posting_index_jobs_intent_parent_fkey
+                      FOREIGN KEY(source_kind,source_id,parent_structural_build_id)
+                      REFERENCES pcap_posting_index_intents(
+                        source_kind,source_id,parent_structural_build_id
+                      ) ON DELETE CASCADE;
+                  END IF;
+                  ALTER TABLE pcap_posting_index_jobs DROP CONSTRAINT IF EXISTS
+                    pcap_posting_index_jobs_source_kind_source_id_fkey;
+                  ALTER TABLE pcap_posting_index_jobs DROP CONSTRAINT IF EXISTS
+                    pcap_posting_index_jobs_parent_structural_build_id_fkey;
+                END $stage11$;
+                CREATE INDEX IF NOT EXISTS pcap_posting_index_jobs_claim
+                  ON pcap_posting_index_jobs(
+                    status,next_attempt_at,queued_at,source_kind,source_id
+                  );
+                CREATE INDEX IF NOT EXISTS pcap_posting_index_jobs_lease
+                  ON pcap_posting_index_jobs(status,lease_expires_at,source_kind,source_id);
+                CREATE INDEX IF NOT EXISTS pcap_posting_index_jobs_terminal
+                  ON pcap_posting_index_jobs(status,updated_at,source_kind,source_id);
+                CREATE INDEX IF NOT EXISTS pcap_posting_index_intents_reconcile
+                  ON pcap_posting_index_intents(status,requested_at,source_kind,source_id);
+                CREATE INDEX IF NOT EXISTS pcap_posting_index_generations_staging
+                  ON pcap_posting_index_generations(state,created_at,build_id);
+                DO $stage10$
+                DECLARE
+                  target_table text;
+                  constraint_row record;
+                BEGIN
+                  FOREACH target_table IN ARRAY ARRAY[
+                    'pcap_capture_source_versions',
+                    'pcap_offset_index_generations'
+                  ] LOOP
+                    FOR constraint_row IN
+                      SELECT con.conname
+                      FROM pg_constraint AS con
+                      JOIN pg_class AS rel ON rel.oid=con.conrelid
+                      JOIN pg_namespace AS nsp ON nsp.oid=rel.relnamespace
+                      WHERE nsp.nspname=current_schema()
+                        AND rel.relname=target_table
+                        AND con.contype='c'
+                        AND pg_get_constraintdef(con.oid) LIKE '%source_kind%'
+                        AND pg_get_constraintdef(con.oid) LIKE '%PCAP_UPLOAD%'
+                        AND pg_get_constraintdef(con.oid) NOT LIKE '%LIVE_SEGMENT%'
+                    LOOP
+                      EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I',
+                                     target_table,constraint_row.conname);
+                    END LOOP;
+                  END LOOP;
+                  IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint con
+                    JOIN pg_class rel ON rel.oid=con.conrelid
+                    WHERE rel.relname='pcap_capture_source_versions'
+                      AND con.contype='c'
+                      AND pg_get_constraintdef(con.oid) LIKE '%LIVE_SEGMENT%'
+                  ) THEN
+                    ALTER TABLE pcap_capture_source_versions ADD CONSTRAINT
+                      pcap_capture_source_versions_source_kind_check
+                      CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT'));
+                  END IF;
+                  IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint con
+                    JOIN pg_class rel ON rel.oid=con.conrelid
+                    WHERE rel.relname='pcap_offset_index_generations'
+                      AND con.contype='c'
+                      AND pg_get_constraintdef(con.oid) LIKE '%LIVE_SEGMENT%'
+                  ) THEN
+                    ALTER TABLE pcap_offset_index_generations ADD CONSTRAINT
+                      pcap_offset_index_generations_source_kind_check
+                      CHECK(source_kind IN ('PCAP_UPLOAD','LIVE_SEGMENT'));
+                  END IF;
+                END $stage10$;
+                CREATE INDEX IF NOT EXISTS pcap_offset_index_generations_staging
+                  ON pcap_offset_index_generations(state,created_at,build_id);
+                CREATE INDEX IF NOT EXISTS pcap_offset_index_jobs_claim
+                  ON pcap_offset_index_jobs(status,next_attempt_at,queued_at,source_id);
+                CREATE INDEX IF NOT EXISTS pcap_offset_index_jobs_lease
+                  ON pcap_offset_index_jobs(status,lease_expires_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS pcap_export_jobs_principal_idempotency
+                  ON pcap_export_jobs(principal_scope,idempotency_key)
+                  WHERE idempotency_key IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS pcap_export_jobs_reusable_coalesce
+                  ON pcap_export_jobs(principal_scope,coalesce_fingerprint)
+                  WHERE status IN ('QUEUED','RUNNING','COMPLETED');
+                CREATE INDEX IF NOT EXISTS pcap_export_jobs_claim
+                  ON pcap_export_jobs(status,next_attempt_at,queued_at);
+                CREATE INDEX IF NOT EXISTS pcap_export_jobs_lease
+                  ON pcap_export_jobs(status,lease_expires_at);
+                CREATE INDEX IF NOT EXISTS pcap_export_jobs_parent
+                  ON pcap_export_jobs(parent_job_id,status);
+                CREATE INDEX IF NOT EXISTS controller_objects_active_live_jobs
+                  ON controller_objects ((data->>'status'))
+                  WHERE kind='job' AND data->>'mode'='LIVE';
+                CREATE INDEX IF NOT EXISTS controller_objects_sensor_pcap_job_uploaded_id
+                  ON controller_objects (
+                    (data->>'analysis_job_id'),(data->>'uploaded_at'),id
+                  ) WHERE kind='sensor_pcap';
+
+                """
+            )
+            # Release bootstrap DDL table locks before acquiring job row fences.
+            # Otherwise a deleting job owner can wait on our schema lock while
+            # we wait on its row, creating a lock-order cycle.
+            connection.commit()
+            cursor.execute(
+                "SELECT id FROM controller_objects WHERE kind='job' AND ("
+                "data ? 'flow_records' OR data ? 'payload_signatures' OR "
+                "EXISTS (SELECT 1 FROM job_flow_records "
+                "WHERE job_id=controller_objects.id) OR "
+                "EXISTS (SELECT 1 FROM job_candidates WHERE job_id=controller_objects.id)) "
+                "ORDER BY id FOR UPDATE"
+            )
+            migration_job_ids = [str(row[0]) for row in cursor.fetchall()]
+            cursor.execute(
+                """
+                INSERT INTO job_flow_records(job_id,data)
+                  SELECT id,data->'flow_records'
+                  FROM controller_objects
+                  WHERE kind='job' AND data ? 'flow_records'
+                  ON CONFLICT(job_id) DO NOTHING;
+                UPDATE controller_objects
+                  SET data=data-'flow_records'
+                  WHERE kind='job' AND data ? 'flow_records';
+                INSERT INTO job_flow_record_chunks(job_id,chunk_no,data)
+                  SELECT job_id,0,data
+                  FROM job_flow_records
+                  ON CONFLICT(job_id,chunk_no) DO NOTHING;
+                DELETE FROM job_flow_records AS legacy
+                  WHERE EXISTS (
+                    SELECT 1
+                    FROM job_flow_record_chunks AS chunk
+                    WHERE chunk.job_id=legacy.job_id
+                  );
+                INSERT INTO job_payload_signatures(job_id,data)
+                  SELECT id,data->'payload_signatures'
+                  FROM controller_objects
+                  WHERE kind='job' AND data ? 'payload_signatures'
+                  ON CONFLICT(job_id) DO NOTHING;
+                UPDATE controller_objects
+                  SET data=data-'payload_signatures'
+                  WHERE kind='job' AND data ? 'payload_signatures';
+                """
+            )
+            self._migrate_legacy_candidates(cursor, migration_job_ids)
+            cursor.execute(baseline_storage.schema(postgres=True))
+        connection.commit()
+        self._ensure_candidate_query_indexes(connection)
+        historical_sql.initialize_postgres(connection)
 
     @staticmethod
     def _migrate_legacy_candidates(cursor: Any, job_ids: list[str]) -> None:
@@ -3894,8 +3933,8 @@ ORDER BY source_kind,source_id
                 with baseline_storage.transaction(
                     self.connection, postgres=True, snapshot=False
                 ) as cursor:
-                    cursor.execute("SELECT 1")
-                    return bool(cursor.fetchone() == (1,))
+                    postgres_schema.require_ready(cursor)
+                    return True
             except Exception:
                 return False
 
@@ -3966,35 +4005,39 @@ ORDER BY source_kind,source_id
         return self._put("sensor", sensor["sensor_id"], sensor)
 
     def update_sensor_heartbeat(
-        self, sensor_id: str, fields: dict[str, Any]
+        self,
+        sensor_id: str,
+        fields: dict[str, Any],
+        *,
+        clock_skew_threshold_seconds: float | None = None,
+        heartbeat_timeout_seconds: float | None = None,
     ) -> dict[str, Any] | None:
-        with self._lock:
-            connection = self.connection
-            try:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        "SELECT data FROM controller_objects "
-                        "WHERE kind='sensor' AND id=%s FOR UPDATE",
-                        (sensor_id,),
-                    )
-                    row = cursor.fetchone()
-                    if row is None:
-                        connection.commit()
-                        return None
-                    value = row[0]
-                    sensor = value if isinstance(value, dict) else json.loads(value)
-                    sensor.update(fields)
-                    cursor.execute(
-                        "UPDATE controller_objects SET data=%s::jsonb "
-                        "WHERE kind='sensor' AND id=%s",
-                        (self._json(sensor), sensor_id),
-                    )
+        from .heartbeat_audit import routine_telemetry
+
+        with self._shared_cursor() as cursor:
+            cursor.execute(
+                "SELECT data FROM controller_objects WHERE kind='sensor' AND id=%s FOR UPDATE",
+                (sensor_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            value = row[0]
+            before = value if isinstance(value, dict) else json.loads(value)
+            sensor = {**before, **fields}
+            routine = routine_telemetry(
+                before,
+                sensor,
+                clock_skew_threshold_seconds=clock_skew_threshold_seconds,
+                heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+            )
+            cursor.execute(
+                "UPDATE controller_objects SET data=%s::jsonb WHERE kind='sensor' AND id=%s",
+                (self._json(sensor), sensor_id),
+            )
+            if not routine:
                 self._audit("sensor-heartbeat", sensor_id, fields)
-                connection.commit()
-                return deepcopy(sensor)
-            except Exception:
-                connection.rollback()
-                raise
+            return deepcopy(sensor)
 
     def get_sensor(self, sensor_id: str) -> dict[str, Any] | None:
         return self._get("sensor", sensor_id)

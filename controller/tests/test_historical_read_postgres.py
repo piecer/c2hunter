@@ -27,6 +27,7 @@ def pg_repo() -> Iterator[Any]:
     private = make_conninfo(dsn, options="-c search_path=" + schema)
     repo = PostgresRepository(private, None)
     try:
+        repo.initialize_schema()
         assert repo.connection is not None
         yield repo
     finally:

@@ -44,7 +44,7 @@ def test_online_initializer_locks_parents_in_order_then_rereads(
             return connection
 
         monkeypatch.setattr(psycopg, "connect", owned_connect)
-        future = executor.submit(lambda: initializer.connection)
+        future = executor.submit(initializer.initialize_schema)
         try:
             assert opened.wait(10)
             wait_for_pg_block(observer, backend[0], future)

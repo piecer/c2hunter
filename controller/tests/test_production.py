@@ -85,7 +85,9 @@ class FakeCursor:
             connection.info.transaction_status = TransactionStatus.INERROR
             raise connection.execute_error
         self.connection.queries.append(query)
-        if "RETURNING job_id" in query:
+        if query == "SELECT 1" or "pg_try_advisory_lock" in query:
+            self._last_row = (1,)
+        elif "RETURNING job_id" in query:
             self._last_row = ("job-id",)
         elif "SELECT job_id FROM job_idempotency" in query:
             self._last_row = ("job-1",)
@@ -136,6 +138,12 @@ def isolate_historical_owner_migration(monkeypatch: Any) -> list[Any]:
         calls.append(connection)
 
     monkeypatch.setattr(production.historical_sql, "initialize_postgres", initialize)
+    # This SQL recorder has no catalog. Runtime readiness still executes a real
+    # modeled statement so existing statement-failure/cleanup probes keep firing.
+    monkeypatch.setattr(
+        production.postgres_schema, "require_ready", lambda cursor: cursor.execute("SELECT 1")
+    )
+    monkeypatch.setattr(production.postgres_schema, "verify_layout", lambda cursor: None)
     return calls
 
 
@@ -402,8 +410,12 @@ def test_connection_initialization_is_thread_safe(
         assert first.result(timeout=1) is second.result(timeout=1)
 
     assert connection_count == 1
-    assert isolate_historical_owner_migration == [first.result()]
-    queries = first.result().queries
+    assert isolate_historical_owner_migration == []
+    assert first.result().queries == ["SELECT 1"]
+    migration_connection = FakeConnection()
+    repository._initialize_schema(migration_connection)
+    assert isolate_historical_owner_migration == [migration_connection]
+    queries = migration_connection.queries
     schema = queries[0]
     concurrent_indexes = "\n".join(queries[1:])
     assert "CREATE TABLE IF NOT EXISTS job_flow_records" in schema
@@ -461,7 +473,7 @@ def test_failed_connection_initialization_closes_connection_and_can_retry(
     assert failed_connection.closed
     assert repository._connection is None
     assert repository.connection is successful_connection
-    assert isolate_historical_owner_migration == [successful_connection]
+    assert isolate_historical_owner_migration == []
 
 
 @pytest.mark.parametrize("close_error", [False, True])
@@ -497,15 +509,28 @@ def test_failed_historical_migration_closes_unpublished_connection_and_can_retry
         if connection is failed:
             raise fault
 
+    # This connection double models ownership, not pg_catalog. Real index guards
+    # are exercised without stubs in test_postgres_redundant_indexes.
+    from c2hunter_controller import postgres_index_maintenance
+
+    index_calls = []
+
+    def maintain_indexes(cursor: Any, *, lock_timeout_seconds: float) -> None:
+        assert cursor.connection is healthy and not healthy.closed
+        assert repository._connection is None and lock_timeout_seconds == 30
+        index_calls.append(cursor.connection)
+
+    monkeypatch.setattr(postgres_index_maintenance, "remove_redundant_indexes", maintain_indexes)
     monkeypatch.setattr(production.historical_sql, "initialize_postgres", migrate)
     with pytest.raises(HistoricalStorageError) as raised:
-        _ = repository.connection
+        repository.initialize_schema()
     assert raised.value is fault
     assert failed.closed and repository._connection is None
     assert closed == [failed] and not healthy.closed
-    assert repository.connection is healthy
-    assert repository.connection is healthy  # No extra initializer on reuse.
-    assert calls == [failed, healthy] and not healthy.closed
+    repository.initialize_schema()
+    assert calls == [failed, healthy] and healthy.closed
+    assert index_calls == [healthy]
+    assert repository._connection is None
     repository.close()
     assert healthy.closed and repository._connection is None
 
@@ -522,7 +547,7 @@ def test_failed_concurrent_index_initialization_restores_connection_state(
     repository = PostgresRepository("postgresql://test", cast(MinioBlobStore, SimpleNamespace()))
 
     with pytest.raises(RuntimeError, match="concurrent index failed"):
-        _ = repository.connection
+        repository.initialize_schema()
 
     assert any("pg_advisory_unlock" in query for query in connection.queries)
     assert connection.autocommit is False
@@ -1275,7 +1300,7 @@ def test_postgres_schema_indexes_sensor_pcaps_by_job_and_export_order(
     )
     repository = PostgresRepository("postgresql://controller", cast(MinioBlobStore, object()))
 
-    _ = repository.connection
+    repository._initialize_schema(connection)
 
     assert isolate_historical_owner_migration == [connection]
     schema = connection.queries[0]

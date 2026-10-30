@@ -121,6 +121,9 @@ def facade(monkeypatch):
     # Only catalog validation is unavailable in this driver model. Keep the
     # actual facade, strict historical idle guard, transaction, and RunSQL.
     monkeypatch.setattr(historical_ai_sql, "postgres_schema", lambda *a, **k: None)
+    from c2hunter_controller import postgres_schema
+
+    monkeypatch.setattr(postgres_schema, "require_ready", lambda cursor: cursor.execute("SELECT 1"))
     yield repo, conn
     repo.close()
 

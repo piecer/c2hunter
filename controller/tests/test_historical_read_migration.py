@@ -75,7 +75,7 @@ def test_standalone_legacy_initializer_preserves_reader_snapshot(
             ThreadPoolExecutor(max_workers=1, thread_name_prefix="initializer") as initializers,
             ThreadPoolExecutor(max_workers=1, thread_name_prefix="reader") as readers,
         ):
-            pending = initializers.submit(lambda: initializer.connection)
+            pending = initializers.submit(initializer.initialize_schema)
             try:
                 assert ddl_done.wait(10), "bootstrap did not reach the data-migration seam"
                 result = readers.submit(read, pg_repo)

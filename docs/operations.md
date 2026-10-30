@@ -11,6 +11,96 @@ curl -fsS http://localhost:8000/api/v1/metrics
 
 Alert on offline/degraded sensors, queue depth, spool bytes, capture drops, clock offset, job failures, object-storage growth, DB capacity, and certificate expiry. `/health` is process liveness; `/ready` must represent dependency readiness.
 
+## PostgreSQL schema initialization and upgrades
+
+PostgreSQL connections, reconnects, repository readiness and worker healthchecks
+are read-only with respect to schema and legacy data. They **do not bootstrap or
+repair a database**. Memory and SQLite initialization are unchanged.
+
+Before starting this release against a fresh or legacy database, back up the
+database and schedule a maintenance window. Stop old-version consumers first:
+older binaries still perform implicit DDL and do not participate in the new
+initializer protocol. Run the matching controller image's explicit migration:
+
+```bash
+# Uses only C2HUNTER_DATABASE_URL from the process environment; no .env auto-load.
+python -m c2hunter_controller.migrate --lock-timeout 30
+# Compose alternative, with the operator's chosen environment file:
+docker compose --env-file .env run --rm postgres-migrate
+```
+
+The Compose `postgres-migrate` one-shot service must complete successfully before
+controller and worker services start. On upgrades, explicitly rerun it with the
+new image; do not rely on an old exited one-shot container. It needs schema-owner
+DDL rights. Runtime roles need their normal table/sequence DML rights and schema
+USAGE, but not schema CREATE/ALTER ownership; readiness itself works with SELECT
+only. Compose retains the existing database identity by default—it does not
+provision separate least-privilege roles automatically.
+
+Initializers hold one session advisory lock across bootstrap commits, ordered
+parent-row fences, legacy backfills, concurrent index maintenance and historical
+owner migration. The lock wait defaults to 30 seconds (finite, greater than zero,
+at most 300); timeout fails instead of retrying the migration. This is the
+initializer-admission wait, not a total migration execution deadline. Configure
+PostgreSQL statement/lock timeouts for the maintenance workload as appropriate.
+
+A committed empty `controller_schema_version` marks an in-progress or failed
+migration. Version 1 is published only after all phases and compatibility checks
+succeed. Some earlier phases may already have committed on failure; the failed
+phase rolls back when its owned connection closes. Preserve backups, inspect the
+cause and rerun the idempotent command; never insert a readiness marker manually.
+An unknown version is refused without erasing it. Missing/malformed markers,
+changed required table/column/default/constraint layouts, and invalid historical
+owner guards fail readiness closed. The v1 layout is pinned to the shipped
+PostgreSQL 16 schema; secondary indexes are deliberately outside its compatibility
+digest. Custom incompatible schema changes require an explicit reviewed migration,
+not automatic repair by a healthcheck. The CLI exits nonzero with a sanitized
+message; it does not print database URLs or driver errors containing legacy data.
+
+## PostgreSQL redundant indexes and heartbeat audit policy
+
+The same explicit migration removes only these redundant **secondary** indexes:
+`candidate_records_job_position`, `job_flow_record_chunks_job_id`,
+`pcap_offset_index_packets_lookup`, and `pcap_posting_index_chunks_read`.
+Fresh installations no longer create them. Their constraint-backed PK/UNIQUE
+indexes, foreign keys, table rows and existing audit history remain intact;
+SQLite indexes and schema version 1 are unchanged.
+
+This phase is **maintenance-only, not online/nonblocking**. It takes ordered
+ACCESS EXCLUSIVE table locks, validates every candidate and keeper against the
+catalog, rechecks OIDs/definitions under lock, then uses transactional DROP
+RESTRICT. Table locks do not block every index rename: the phase also rechecks
+name-to-OID identity immediately before DROP and verifies that the original
+candidate OIDs are absent before committing. A late name substitution rolls
+back the entire removal transaction, including any already-issued DROP.
+Its per-lock wait is capped at the smaller of `--lock-timeout` and five
+seconds; each statement is capped at four times that bound. A missing extra is
+idempotent, but does not waive keeper validation. A same-name mismatch, unexpected
+dependency/role or lock timeout aborts without partial index removal and leaves
+the migration incomplete. Investigate rather than renaming/dropping constraints
+or manually publishing the readiness marker. Stop old binaries first: they may
+recreate the redundant indexes. Runtime connections and healthchecks never run
+this removal.
+
+Only PostgreSQL routine `sensor-heartbeat` audit INSERTs may be omitted. Every
+heartbeat still updates current state and runs capture-completion processing.
+The decision uses the latest locked sensor row and the API's configured clock
+skew/heartbeat timeout, not client-supplied thresholds. Ordinary timestamp,
+resource usage, pending-byte and nondecreasing received-packet changes need not
+produce telemetry history. Status/error changes (including clearing), loss or
+reset counters, clock-threshold crossings, timeout recovery/clock regression,
+interface/discovery/configuration/job changes and unknown fields remain audited.
+Missing/invalid context or comparison data retains auditing. Memory/SQLite audit
+behavior is unchanged.
+
+Registration/re-registration, configuration, credentials/enrollment, security,
+job/candidate/decision events and explicit audit appends are **not filtered**.
+Registration retries and genuine loss/status events can still grow audit data;
+this is not a hard growth cap. Historical `sensor` rows cannot be assumed to be
+heartbeat telemetry. Existing rows are not deleted or compacted, no automatic
+audit retention worker/DELETE is implemented, and existing disk-space reclamation
+is not promised. The retention policy constants alone do not execute retention.
+
 ## Authentication and token management
 
 ### Static bearer tokens

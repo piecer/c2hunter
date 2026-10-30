@@ -1920,7 +1920,12 @@ def create_app(
                 "last_heartbeat_at": now.isoformat(),
             }
         )
-        sensor = repo.update_sensor_heartbeat(sensor_id, fields)
+        sensor = repo.update_sensor_heartbeat(
+            sensor_id,
+            fields,
+            clock_skew_threshold_seconds=config.clock_skew_threshold_seconds,
+            heartbeat_timeout_seconds=config.heartbeat_timeout_seconds,
+        )
         if sensor is None:
             raise ApiError(404, "SENSOR_NOT_FOUND", "센서를 찾을 수 없습니다")
         record_capture_completions(sensor_id, payload, now)

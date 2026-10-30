@@ -153,7 +153,7 @@ def test_postgres_migration_creates_durable_queue_and_indexes(
     monkeypatch.setattr(repo, "_ensure_candidate_query_indexes", lambda _connection: None)
     historical_calls = isolate_historical_migration(monkeypatch, repo, connection)
 
-    assert repo.connection is connection
+    repo._initialize_schema(connection)
     assert historical_calls == [connection]
     migration = connection.calls[0][0]
     assert "CREATE TABLE IF NOT EXISTS pcap_export_jobs" in migration

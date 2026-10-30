@@ -781,7 +781,12 @@ class Repository(Protocol):
     ) -> list[str]: ...
     def upsert_sensor(self, sensor: dict[str, Any]) -> dict[str, Any]: ...
     def update_sensor_heartbeat(
-        self, sensor_id: str, fields: dict[str, Any]
+        self,
+        sensor_id: str,
+        fields: dict[str, Any],
+        *,
+        clock_skew_threshold_seconds: float | None = None,
+        heartbeat_timeout_seconds: float | None = None,
     ) -> dict[str, Any] | None: ...
     def get_sensor(self, sensor_id: str) -> dict[str, Any] | None: ...
     def list_sensors(self) -> list[dict[str, Any]]: ...
@@ -4555,7 +4560,12 @@ class MemoryRepository(
             return deepcopy(sensor), "OK"
 
     def update_sensor_heartbeat(
-        self, sensor_id: str, fields: dict[str, Any]
+        self,
+        sensor_id: str,
+        fields: dict[str, Any],
+        *,
+        clock_skew_threshold_seconds: float | None = None,
+        heartbeat_timeout_seconds: float | None = None,
     ) -> dict[str, Any] | None:
         with self._lock:
             sensor = self.sensors.get(sensor_id)
@@ -7632,7 +7642,12 @@ class SQLiteRepository(
             return self.upsert_sensor(sensor), "OK"
 
     def update_sensor_heartbeat(
-        self, sensor_id: str, fields: dict[str, Any]
+        self,
+        sensor_id: str,
+        fields: dict[str, Any],
+        *,
+        clock_skew_threshold_seconds: float | None = None,
+        heartbeat_timeout_seconds: float | None = None,
     ) -> dict[str, Any] | None:
         with self._lock:
             sensor = self.get_sensor(sensor_id)

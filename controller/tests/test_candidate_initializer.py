@@ -62,7 +62,12 @@ def test_pg_initializer_never_migrates_orphans(adapter: Any) -> None:
     )
     adapter.connection.commit()
     adapter.close()
+    adapter.initialize_schema()
     assert adapter.get_candidates("missing") == []
+    assert adapter.connection.execute(
+        "SELECT data FROM job_candidates WHERE job_id='missing'"
+    ).fetchone() == ([{"id": "orphan"}],)
+    adapter.connection.rollback()
 
 
 @pytest.mark.parametrize("point", ["flow", "signature", "candidate"])

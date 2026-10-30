@@ -41,6 +41,7 @@ def publication_adapter(request: pytest.FixtureRequest, tmp_path: Path) -> Itera
             cast(MinioBlobStore, SimpleNamespace(delete=lambda key: None)),
         )
         try:
+            repository.initialize_schema()
             assert repository.connection is not None
             yield repository
         finally:

@@ -86,6 +86,13 @@ _postgres_minio_integration = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(scope="module", autouse=True)
+def initialize_postgres_schema() -> None:
+    """Integration fixtures provision explicitly; runtime never migrates."""
+    repo = PostgresRepository(os.environ["C2HUNTER_DATABASE_URL"], cast(MinioBlobStore, None))
+    repo.initialize_schema()
+
+
 def _release_and_drain_publication_probe(
     *,
     release: Callable[[], None],
@@ -202,7 +209,7 @@ def _postgres_repositories(count: int) -> list[PostgresRepository]:
         for _ in range(count):
             repository = PostgresRepository(
                 os.environ["C2HUNTER_DATABASE_URL"],
-                cast(MinioBlobStore, SimpleNamespace(delete=lambda _key: None)),
+                cast(MinioBlobStore, SimpleNamespace(delete=lambda _key: None, ready=lambda: True)),
             )
             repositories.append(repository)
             assert repository.ready()
@@ -448,6 +455,7 @@ def test_real_postgres_source_delete_and_enqueue_are_atomic() -> None:
         repositories[0].create_job(
             {
                 "id": parent_id,
+                "idempotency_key": parent_id,
                 "status": "COMPLETED",
                 "mode": "PCAP_UPLOAD",
                 "sensor_ids": ["uploaded"],

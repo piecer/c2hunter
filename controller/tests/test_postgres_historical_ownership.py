@@ -93,6 +93,9 @@ def pg(monkeypatch):
     # Driver model is not a PostgreSQL catalog. Retain actual RunSQL, guard,
     # transaction and repository methods; bypass only PG catalog validation.
     monkeypatch.setattr(sql, "postgres_schema", lambda *a, **k: None)
+    from c2hunter_controller import postgres_schema
+
+    monkeypatch.setattr(postgres_schema, "require_ready", lambda cursor: cursor.execute("SELECT 1"))
     yield repo, connection
     connection.release.set()
     repo.close()

@@ -112,6 +112,7 @@ def test_rendered_compose_preserves_joint_worker_shape_and_exact_posting_env() -
     assert isinstance(services, dict)
     assert set(services) == {
         "postgres",
+        "postgres-migrate",
         "redis",
         "clickhouse",
         "minio",
@@ -121,6 +122,16 @@ def test_rendered_compose_preserves_joint_worker_shape_and_exact_posting_env() -
         "pcap-offset-index-worker",
         "web",
     }
+
+    migration = services["postgres-migrate"]
+    assert migration["command"] == ["python", "-m", "c2hunter_controller.migrate"]
+    assert migration["restart"] == "no"
+    assert migration["depends_on"]["postgres"]["condition"] == "service_healthy"
+    for service in ("controller", "worker", "pcap-export-worker", "pcap-offset-index-worker"):
+        assert (
+            services[service]["depends_on"]["postgres-migrate"]["condition"]
+            == "service_completed_successfully"
+        )
 
     controller = services["controller"]
     joint_worker = services["pcap-offset-index-worker"]

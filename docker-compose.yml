@@ -27,6 +27,13 @@ services:
     volumes: [minio-data:/data]
     healthcheck: { test: [CMD, curl, -f, http://127.0.0.1:9000/minio/health/live], interval: 10s, timeout: 5s, retries: 15 }
     restart: unless-stopped
+  postgres-migrate:
+    build: { context: ., dockerfile: scripts/controller.Dockerfile }
+    command: [python, -m, c2hunter_controller.migrate]
+    environment:
+      C2HUNTER_DATABASE_URL: "postgresql://${POSTGRES_USER:-c2hunter}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-c2hunter}"
+    depends_on: { postgres: { condition: service_healthy } }
+    restart: "no"
   controller:
     build: { context: ., dockerfile: scripts/controller.Dockerfile }
     extra_hosts:
@@ -121,13 +128,13 @@ services:
       C2HUNTER_MISP_DEFAULT_EVENT_ID: "${C2HUNTER_MISP_DEFAULT_EVENT_ID:-}"
       C2HUNTER_MISP_VERIFY_TLS: "${C2HUNTER_MISP_VERIFY_TLS:-true}"
     ports: ["${CONTROLLER_PORT:-8000}:8000"]
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, clickhouse: { condition: service_healthy }, minio: { condition: service_healthy } }
+    depends_on: { postgres-migrate: { condition: service_completed_successfully }, postgres: { condition: service_healthy }, redis: { condition: service_healthy }, clickhouse: { condition: service_healthy }, minio: { condition: service_healthy } }
     healthcheck: { test: [CMD, python, -m, c2hunter_controller.healthcheck], interval: 10s, timeout: 5s, retries: 15 }
     restart: unless-stopped
   worker:
     build: { context: ., dockerfile: scripts/worker.Dockerfile }
     environment: { C2HUNTER_REDIS_URL: redis://redis:6379/0, C2HUNTER_DATABASE_URL: "postgresql://${POSTGRES_USER:-c2hunter}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-c2hunter}" }
-    depends_on: { controller: { condition: service_healthy }, redis: { condition: service_healthy } }
+    depends_on: { postgres-migrate: { condition: service_completed_successfully }, controller: { condition: service_healthy }, redis: { condition: service_healthy } }
     healthcheck: { test: [CMD, python, -m, c2hunter_worker, healthcheck, --max-age, "30"], interval: 15s, timeout: 5s, retries: 5 }
     restart: unless-stopped
   pcap-export-worker:
@@ -166,7 +173,7 @@ services:
       C2HUNTER_PCAP_INDEXED_EXPORT_MAX_SOURCE_FRACTION_NUMERATOR: "${C2HUNTER_PCAP_INDEXED_EXPORT_MAX_SOURCE_FRACTION_NUMERATOR:-1}"
       C2HUNTER_PCAP_INDEXED_EXPORT_MAX_SOURCE_FRACTION_DENOMINATOR: "${C2HUNTER_PCAP_INDEXED_EXPORT_MAX_SOURCE_FRACTION_DENOMINATOR:-2}"
     expose: ["9103"]
-    depends_on: { postgres: { condition: service_healthy }, minio: { condition: service_healthy } }
+    depends_on: { postgres-migrate: { condition: service_completed_successfully }, postgres: { condition: service_healthy }, minio: { condition: service_healthy } }
     healthcheck: { test: [CMD, python, -m, c2hunter_controller.pcap_export_worker, healthcheck], interval: 15s, timeout: 5s, retries: 5 }
     restart: unless-stopped
   pcap-offset-index-worker:
@@ -228,7 +235,7 @@ services:
       C2HUNTER_PCAP_POSTING_INDEX_BACKFILL_ENABLED: "${C2HUNTER_PCAP_POSTING_INDEX_BACKFILL_ENABLED:-false}"
       C2HUNTER_PCAP_POSTING_INDEX_BACKFILL_BATCH_SIZE: "${C2HUNTER_PCAP_POSTING_INDEX_BACKFILL_BATCH_SIZE:-100}"
     expose: ["9104"]
-    depends_on: { postgres: { condition: service_healthy }, minio: { condition: service_healthy } }
+    depends_on: { postgres-migrate: { condition: service_completed_successfully }, postgres: { condition: service_healthy }, minio: { condition: service_healthy } }
     healthcheck: { test: [CMD, python, -m, c2hunter_controller.pcap_offset_index_worker, healthcheck], interval: 15s, timeout: 5s, retries: 5 }
     restart: unless-stopped
   ai-worker:
@@ -254,7 +261,7 @@ services:
       C2HUNTER_AI_METRICS_PORT: "${C2HUNTER_AI_METRICS_PORT:-9102}"
     expose: ["9102"]
     extra_hosts: ["host.docker.internal:host-gateway"]
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy }, minio: { condition: service_healthy } }
+    depends_on: { postgres-migrate: { condition: service_completed_successfully }, postgres: { condition: service_healthy }, redis: { condition: service_healthy }, minio: { condition: service_healthy } }
     healthcheck: { test: [CMD, python, -m, c2hunter_controller.ai_worker, healthcheck, --max-age, "30"], interval: 15s, timeout: 5s, retries: 5 }
     restart: unless-stopped
   web:

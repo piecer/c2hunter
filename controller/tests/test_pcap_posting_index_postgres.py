@@ -300,7 +300,7 @@ def test_stage11_postgres_migration_is_additive_normalized_and_idempotent(
     )
 
     for _ in range(2):
-        expected_connection = connections[0]
+        expected_connection = connections.pop(0)
         repository = PostgresRepository(
             "postgresql://stage11.invalid/controller", cast(MinioBlobStore, SimpleNamespace())
         )
@@ -308,7 +308,8 @@ def test_stage11_postgres_migration_is_additive_normalized_and_idempotent(
         historical_calls = isolate_historical_migration(
             monkeypatch, repository, expected_connection
         )
-        connection = repository.connection
+        repository._initialize_schema(expected_connection)
+        connection = expected_connection
         assert historical_calls == [connection] and connection is expected_connection
         schema = connection.calls[0][0]
         for table in (
@@ -370,7 +371,8 @@ def test_postgres_ddl_model_rejects_task_whose_parent_differs_from_intent(
         "postgresql://stage11.invalid/controller", cast(MinioBlobStore, SimpleNamespace())
     )
     historical_calls = isolate_historical_migration(monkeypatch, repository, connection)
-    schema_connection = repository.connection
+    repository._initialize_schema(connection)
+    schema_connection = connection
     assert historical_calls == [connection]
     schema = re.sub(r"\s*([(),])\s*", r"\1", " ".join(schema_connection.calls[0][0].split()))
     repository.close()

@@ -178,6 +178,8 @@ class InitializerConnection:
         return []
 
     def fetchone(self):
+        if self.queries[-1] == "SELECT pg_try_advisory_lock(2026081301)":
+            return (True,)
         return None
 
     def commit(self):
@@ -214,8 +216,10 @@ class InitializerConnection:
 def test_actual_owner_initializer_order_failure_and_retry(monkeypatch, fault):
     """Run real constructor, indexes, initializer and transaction helpers.
 
-    Catalog validation alone is isolated here; a separate test below retains its
-    fail-closed path. This does not establish PostgreSQL engine acceptance.
+    Catalog validation and index maintenance are isolated because this driver
+    models transaction ownership, not pg_catalog. Real index guards are covered
+    in test_postgres_redundant_indexes. The fail-closed catalog path is retained
+    separately below. This does not establish PostgreSQL engine acceptance.
     """
     from c2hunter_controller import historical_ai_sql as sql
     from c2hunter_controller import historical_ai_storage as custody
@@ -240,7 +244,7 @@ def test_actual_owner_initializer_order_failure_and_retry(monkeypatch, fault):
         assert repo._connection is None
         assert cursor is acquired[-1] and not cursor.closed and not cursor.autocommit
         assert cursor.info.transaction_status == TransactionStatus.INTRANS
-        assert cursor.events[:2] == [("commit", 0), ("commit", 0)]
+        assert cursor.events[:4] == [("rollback", 0), ("commit", 0), ("commit", 0), ("commit", 0)]
         unlock = cursor.queries.index("SELECT pg_advisory_unlock(2026081301)")
         lock = cursor.queries.index("LOCK TABLE ai_analysis_runs IN ACCESS EXCLUSIVE MODE")
         assert unlock < lock
@@ -258,10 +262,23 @@ def test_actual_owner_initializer_order_failure_and_retry(monkeypatch, fault):
 
     monkeypatch.setattr(psycopg, "connect", connect)
     monkeypatch.setattr(sql, "postgres_schema", validate)
+    from c2hunter_controller import postgres_index_maintenance, postgres_schema
+
+    monkeypatch.setattr(postgres_schema, "verify_layout", lambda cursor: None)
+    index_calls = []
+
+    def maintain_indexes(cursor, *, lock_timeout_seconds):
+        assert cursor is acquired[-1] and not cursor.closed and not cursor.autocommit
+        assert repo._connection is None and lock_timeout_seconds == 30
+        assert cursor.info.transaction_status == TransactionStatus.IDLE
+        assert validated[-2:] == [(cursor, True), (cursor, False)]
+        index_calls.append(cursor)
+
+    monkeypatch.setattr(postgres_index_maintenance, "remove_redundant_indexes", maintain_indexes)
     if fault:
         error = custody.HistoricalStorageOutcomeUnknown if failed_commit else type(primary)
         with pytest.raises(error) as raised:
-            _ = repo.connection
+            repo.initialize_schema()
         if not failed_commit:
             assert raised.value is primary
         assert repo._connection is None and first.closed and first.close_calls == 1
@@ -270,24 +287,29 @@ def test_actual_owner_initializer_order_failure_and_retry(monkeypatch, fault):
         assert first.events[-1] == ("commit" if failed_commit else "rollback", count)
         assert validated == [(first, True)] + ([(first, False)] if count == 2 else [])
         assert not healthy.closed and unrelated.close_calls == 0
+        assert index_calls == []
         expected = healthy
     else:
         expected = first
 
-    assert repo.connection is expected
-    assert repo.connection is expected
+    repo.initialize_schema()
+    assert index_calls == [expected]
+    assert repo._connection is None and expected.closed
     assert acquired == ([first, healthy] if fault else [first])
     assert validated[-2:] == [(expected, True), (expected, False)]
     assert expected.events == [
+        ("rollback", 0),
+        ("commit", 0),
         ("commit", 0),
         ("commit", 0),
         ("begin", 1),
         ("commit", 1),
         ("begin", 2),
         ("commit", 2),
+        ("commit", 2),
     ]
     assert expected.info.transaction_status == TransactionStatus.IDLE
-    assert not expected.closed and other.connection is unrelated
+    assert expected.closed and other.connection is unrelated
     repo.close()
     assert expected.closed and expected.close_calls == 1 and repo._connection is None
     assert unrelated.close_calls == 0
@@ -325,7 +347,7 @@ def test_actual_owner_catalog_refusal_rolls_back_and_closes_unpublished_connecti
     # No initializer or catalog-validator replacement: missing table metadata
     # must reach the actual fail-closed validation rather than publish a handle.
     with pytest.raises(HistoricalStorageError):
-        _ = repo.connection
+        repo.initialize_schema()
     assert "FROM pg_class" in connection.queries[-1]
     assert connection.events[-2:] == [("begin", 1), ("rollback", 1)]
     assert connection.closed and connection.close_calls == 1 and repo._connection is None

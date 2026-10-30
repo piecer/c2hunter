@@ -458,7 +458,7 @@ def test_postgres_migration_uses_normalized_generation_interface_packet_owner_ta
     monkeypatch.setattr(repository, "_ensure_candidate_query_indexes", lambda _connection: None)
     historical_calls = isolate_historical_migration(monkeypatch, repository, connection)
 
-    assert repository.connection is connection
+    repository._initialize_schema(connection)
     assert historical_calls == [connection]
     schema = connection.calls[0][0]
     for table in (
@@ -1442,7 +1442,7 @@ def test_postgres_forward_migration_replaces_arbitrarily_named_upload_only_check
     monkeypatch.setattr(repository, "_ensure_candidate_query_indexes", lambda _connection: None)
     historical_calls = isolate_historical_migration(monkeypatch, repository, connection)
 
-    assert repository.connection is connection
+    repository._initialize_schema(connection)
     assert historical_calls == [connection]
     schema = connection.calls[0][0]
     assert "pg_get_constraintdef" in schema
