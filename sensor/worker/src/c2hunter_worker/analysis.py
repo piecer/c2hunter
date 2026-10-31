@@ -32,19 +32,9 @@ def execute_analysis(payload: dict[str, Any]) -> dict[str, Any]:
             "network_anomaly": analyze_network_job(payload),
         }
     if module == "ddos_attack":
-        from c2hunter_analysis.ddos_attack import analyze_ddos_attack
-        from c2hunter_analysis.ddos_signatures import load_reference
+        from c2hunter_analysis.ddos_job import analyze_ddos_job
 
-        return {
-            "candidates": [],
-            "ddos_attack": analyze_ddos_attack(
-                payload.get("flow_records", []),
-                internal_cidrs=payload.get("internal_networks", ()),
-                parameters=payload.get("analysis", {}),
-                coverage_context=payload.get("ddos_coverage_context", {}),
-                normal_reference=load_reference(payload),
-            ),
-        }
+        return analyze_ddos_job(payload)
     if module != "c2":
         raise ValueError(f"unsupported analysis module: {module}")
     flows: list[Flow] = []

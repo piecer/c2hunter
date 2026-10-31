@@ -113,6 +113,8 @@ from c2hunter_controller.repositories import (
     _pcap_export_snapshot,
 )
 
+from .pcap_attack_guidance_schema import project_job_guidance, validate_job_guidance
+
 _AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 _JOB_TERMINAL_STATUSES = {"COMPLETED", "PARTIALLY_COMPLETED", "FAILED", "CANCELLED"}
 logger = logging.getLogger(__name__)
@@ -4186,6 +4188,7 @@ ORDER BY source_kind,source_id
         return self._list("group")
 
     def create_job(self, job: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        validate_job_guidance(job)
         metadata = {
             key: value
             for key, value in job.items()
@@ -4225,6 +4228,7 @@ ORDER BY source_kind,source_id
             return deepcopy(job), True
 
     def save_job(self, job: dict[str, Any]) -> dict[str, Any]:
+        validate_job_guidance(job)
         metadata = {
             key: value
             for key, value in job.items()
@@ -4248,6 +4252,7 @@ ORDER BY source_kind,source_id
             return deepcopy(job)
 
     def save_job_metadata(self, job: dict[str, Any]) -> dict[str, Any]:
+        validate_job_guidance(job)
         metadata = {
             key: value
             for key, value in job.items()
@@ -4263,6 +4268,7 @@ ORDER BY source_kind,source_id
             return deepcopy(metadata)
 
     def transition_job_terminal(self, job: dict[str, Any]) -> bool:
+        validate_job_guidance(job)
         if job.get("status") not in _JOB_TERMINAL_STATUSES:
             raise ValueError("terminal transition requires a terminal target status")
         metadata = {
@@ -4290,6 +4296,7 @@ ORDER BY source_kind,source_id
     def complete_job_with_candidates(
         self, job: dict[str, Any], candidates: list[dict[str, Any]]
     ) -> bool:
+        validate_job_guidance(job)
         if job.get("status") not in {"COMPLETED", "PARTIALLY_COMPLETED"}:
             raise ValueError("successful publication requires a successful terminal status")
         if type(job.get("candidate_count")) is not int or job["candidate_count"] != len(candidates):
@@ -4455,7 +4462,8 @@ ORDER BY source_kind,source_id
             return row[0] if isinstance(row[0], dict) else json.loads(row[0])
 
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None:
-        return self._get("job", job_id)
+        job = self._get("job", job_id)
+        return project_job_guidance(job) if job is not None else None
 
     def claim_pcap_preparation(
         self, *, now: datetime, lease_seconds: int, max_attempts: int = 3
@@ -4738,12 +4746,14 @@ ORDER BY source_kind,source_id
             )
             rows = cursor.fetchall()
             return {
-                str(row[0]): row[1] if isinstance(row[1], dict) else json.loads(row[1])
+                str(row[0]): project_job_guidance(
+                    row[1] if isinstance(row[1], dict) else json.loads(row[1]), compact=True
+                )
                 for row in rows
             }
 
     def list_jobs(self) -> list[dict[str, Any]]:
-        return self._list("job")
+        return [project_job_guidance(job, compact=True) for job in self._list("job")]
 
     def list_active_live_jobs(self) -> list[dict[str, Any]]:
         with self._shared_cursor() as cursor:

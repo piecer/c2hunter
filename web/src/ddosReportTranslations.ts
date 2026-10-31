@@ -13,6 +13,17 @@ export const attackTypes: Record<string, Localized> = {
   POSSIBLE_REFLECTION_AMPLIFICATION: ['Possible reflection/amplification', '반사·증폭 공격 가능성'],
   MULTI_VECTOR: ['Multi-vector flood', '다중 벡터 플러드'],
 };
+export const investigativeChecks: Record<string, Localized> = {
+  TCP_SYN_FLOOD: ['Compare SYN-only traffic with visible SYN-ACK replies and completed connections. Check capture direction, backlog and connection logs; missing replies may reflect one-sided capture, not exhaustion.', 'SYN-only 트래픽을 관찰된 SYN-ACK 응답 및 완료된 연결과 비교하세요. 캡처 방향, backlog와 연결 로그를 확인하세요. 응답 부재는 자원 고갈이 아닌 단방향 캡처 때문일 수 있습니다.'],
+  TCP_ACK_FLOOD: ['Inspect ACK payload visibility and connection context. Compare with legitimate transfers and asymmetric routing before interpreting the ACK shape as a flood.', 'ACK payload 관측 범위와 연결 맥락을 조사하세요. ACK 형태를 플러드로 해석하기 전에 정상 전송 및 비대칭 routing과 비교하세요.'],
+  TCP_RST_FLOOD: ['Correlate RST timing with connection attempts and service or middlebox logs. Resets may be legitimate rejection or defensive responses.', 'RST 시각을 연결 시도 및 서비스·중간 장비 로그와 대조하세요. Reset은 정상 거부 또는 방어 응답일 수 있습니다.'],
+  UDP_FLOOD: ['Review the UDP service, ports, packet sizes and timing at the observed target. Compare service logs and expected bursts; port or volume alone does not prove reflection or malicious intent.', '관찰 대상의 UDP 서비스, 포트, 패킷 크기와 시각을 검토하세요. 서비스 로그 및 예상 burst와 비교하세요. 포트나 트래픽 양만으로 반사 또는 악의적 의도가 입증되지는 않습니다.'],
+  ICMP_ECHO_FLOOD: ['Compare echo requests with visible replies and expected monitoring activity. Check capture direction and host logs before inferring impact.', 'echo 요청을 관찰된 응답 및 예상 모니터링 활동과 비교하세요. 영향을 추정하기 전에 캡처 방향과 호스트 로그를 확인하세요.'],
+  ICMP_FLOOD: ['Inspect available ICMP types and codes, quoted traffic and network events. Distinguish necessary control traffic from a burst; absent type metadata remains unknown.', '확인 가능한 ICMP 유형·코드, 인용된 트래픽과 네트워크 이벤트를 조사하세요. 필수 제어 트래픽과 burst를 구분하세요. 유형 메타데이터 부재는 미확인으로 남습니다.'],
+  POSSIBLE_REFLECTION_AMPLIFICATION: ['Inspect suspected service ports and request/response visibility. Compare matching requests and replies if captured; a service port alone does not prove reflection, and amplification must not be inferred from missing requests.', '의심 서비스 포트와 요청·응답 관측 범위를 조사하세요. 캡처된 경우 대응 요청과 응답을 비교하세요. 서비스 포트만으로 반사가 입증되지 않으며 요청 부재로 증폭을 추정하면 안 됩니다.'],
+  MULTI_VECTOR: ['Compare the component findings and their overlapping observed intervals at the target. Check service logs and capture coverage; a shared target or timing does not prove a shared actor.', '대상의 구성 발견 항목과 겹치는 관찰 구간을 비교하세요. 서비스 로그와 캡처 범위를 확인하세요. 공통 대상이나 시각은 동일 공격 주체를 입증하지 않습니다.'],
+};
+
 export const objectives: Record<string, Localized> = {
   CONNECTION_STATE_EXHAUSTION: ['Possible connection-state resource exhaustion', '연결 상태 자원 고갈 가능성'],
   BANDWIDTH_EXHAUSTION: ['Possible bandwidth exhaustion', '대역폭 고갈 가능성'],
@@ -126,7 +137,7 @@ export const warnings: Record<string, Localized> = {
   SENSOR_CLOCK_SKEW: ['A selected sensor reported material clock skew.', '선택한 센서에서 유의미한 시계 오차가 보고되었습니다.'],
   SENSOR_CAPTURE_QUALITY_UNAVAILABLE: ['Job-scoped sensor drop and clock-quality telemetry was unavailable.', '작업 범위의 센서 drop 및 시계 품질 telemetry를 확인할 수 없습니다.'],
   PARTIAL_CAPTURE: ['The capture or dataset is partial.', '캡처 또는 데이터셋이 부분적입니다.'],
-  DOS_LIKE_TRAFFIC: ['High-volume single-source DoS-like traffic was not classified as DDoS.', '단일 source의 고용량 DoS 유사 트래픽은 DDoS로 분류하지 않았습니다.'],
+  DOS_LIKE_TRAFFIC: ['Traffic met the packet-count threshold but remained below the configured source-count threshold; it was not classified as DDoS. This does not establish a high packet rate or a clean result.', '패킷 수 임계값은 충족했지만 설정된 source 수 임계값보다 적어 DDoS로 분류하지 않았습니다. 높은 패킷 속도나 정상 결과를 의미하지 않습니다.'],
   AMBIGUOUS_DIRECTION: ['Some records had ambiguous direction and were skipped.', '방향이 불명확한 일부 레코드를 제외했습니다.'],
   INCOMPLETE_RECORDS: ['Some invalid or incomplete records were skipped.', '유효하지 않거나 불완전한 일부 레코드를 제외했습니다.'],
   TARGET_LIMIT_REACHED: ['The target tracking limit was reached.', '대상 추적 한도에 도달했습니다.'],

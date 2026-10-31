@@ -28,6 +28,7 @@ function Picker({ inherit, datasetId, disabled }: Props) {
       <option value="select">{t('Select a different normal dataset', '다른 정상 데이터셋 선택')}</option>
     </select></label>
     <p>{t('Selection is your explicit assertion of normality, not an automatic recommendation. The server validates eligibility, the 512-record / 1 MiB source limit and 256 KiB projection; public summaries cannot prove these bounds.', '선택은 운영자의 명시적인 정상성 판단이며 자동 추천이 아닙니다. 서버가 적격성, 원본 512개 레코드 / 1 MiB 및 투영 256 KiB 제한을 검증합니다. 공개 요약만으로 이 제한을 확인할 수 없습니다.')}</p>
+    <p>{t('The statistical baseline uses same-capture low-traffic buckets, not known-normal traffic. This separate operator-selected reference is used for candidate predicate evaluation; selecting it does not upgrade flood likelihood or establish normality.', '통계 기준선은 정상으로 확인된 트래픽이 아니라 같은 캡처의 저트래픽 버킷을 사용합니다. 이와 별도로 운영자가 선택한 참조는 후보 조건식 평가용입니다. 이를 선택해도 플러드 가능성을 상향하지 않으며 정상성을 입증하지도 않습니다.')}</p>
     {mode === 'inherit' && <p>{t('Reuses the stored immutable reference even if its original job has been deleted.', '원본 작업이 삭제되어도 저장된 불변 참조를 재사용합니다.')}</p>}
     {mode === 'clear' && <p>{t('False positives remain unmeasured, not zero.', '오탐은 0이 아니라 미측정입니다.')}</p>}
     {mode === 'select' && <>

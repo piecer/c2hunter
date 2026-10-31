@@ -226,6 +226,10 @@ def _page(items: list[dict[str, Any]], page: int, page_size: int) -> dict[str, A
 
 def _public_job(job: dict[str, Any]) -> dict[str, Any]:
     """Never return retained packets or detector snapshots in control-plane responses."""
+    from .pcap_attack_guidance_schema import project_job_guidance
+
+    if "pcap_attack_guidance" in job or "pcap_attack_guidance_summary" not in job:
+        job = project_job_guidance(job)
     public = {
         key: value
         for key, value in job.items()
@@ -1479,6 +1483,12 @@ def create_app(
         response = _error(request, exc.status, exc.code, exc.message, exc.details)
         response.headers.update(exc.headers)
         return response
+
+    from .pcap_attack_guidance_schema import GuidanceError
+
+    @app.exception_handler(GuidanceError)
+    async def guidance_error(request: Request, exc: GuidanceError) -> JSONResponse:
+        return _error(request, 500, "INVALID_PCAP_GUIDANCE", "Stored PCAP guidance is invalid")
 
     @app.exception_handler(HistoricalAccessDenied)
     async def historical_access_error(
@@ -2853,12 +2863,26 @@ def create_app(
             return
         candidates: list[dict[str, Any]] = []
         if result.get("status") == "COMPLETED":
+            if module != "ddos_attack" and "pcap_attack_guidance" in result.get("result", {}):
+                job["error_code"] = "INVALID_DDOS_RESULT"
+                job["error"] = "worker returned PCAP guidance for an incompatible module"
+                machine.transition(job, JobState.FAILED, "invalid PCAP guidance owner")
+                repo.transition_job_terminal(job)
+                work_queue.ack_result(receipt)
+                return
             if module == "network_anomaly":
                 job["network_anomaly"] = result["result"]["network_anomaly"]
                 candidates = []
             elif module == "ddos_attack":
                 try:
                     report = _validated_ddos_report(result["result"]["ddos_attack"], job)
+                    from .pcap_attack_guidance_schema import validate_job_guidance
+
+                    admitted = {**job, "ddos_attack": report}
+                    admitted.pop("pcap_attack_guidance", None)
+                    if "pcap_attack_guidance" in result["result"]:
+                        admitted["pcap_attack_guidance"] = result["result"]["pcap_attack_guidance"]
+                    guide = validate_job_guidance(admitted)
                 except (KeyError, TypeError, ValueError, ValidationError):
                     job["error_code"] = "INVALID_DDOS_RESULT"
                     job["error"] = "worker returned an invalid DDoS report"
@@ -2867,6 +2891,9 @@ def create_app(
                     work_queue.ack_result(receipt)
                     return
                 job["ddos_attack"] = report
+                job.pop("pcap_attack_guidance", None)
+                if guide is not None:
+                    job["pcap_attack_guidance"] = guide
                 job["ddos_attack_summary"] = _ddos_summary(report)
                 candidates = []
             elif module == "c2":
@@ -3070,18 +3097,22 @@ def create_app(
             job["network_anomaly"] = analyze_network_job(job)
             candidates = []
         elif module == "ddos_attack":
-            from c2hunter_analysis.ddos_attack import analyze_ddos_attack
-            from c2hunter_analysis.ddos_signatures import load_reference
+            from c2hunter_analysis.ddos_job import analyze_ddos_job
+
+            from .pcap_attack_guidance_schema import validate_job_guidance
 
             try:
-                report = analyze_ddos_attack(
-                    job.get("flow_records", []),
-                    internal_cidrs=job.get("internal_networks", ()),
-                    parameters=job.get("analysis", {}),
-                    coverage_context=job.get("ddos_coverage_context", {}),
-                    normal_reference=load_reference(job),
-                )
-                job["ddos_attack"] = _validated_ddos_report(report, job)
+                result = analyze_ddos_job(job)
+                report = _validated_ddos_report(result["ddos_attack"], job)
+                admitted = {**job, "ddos_attack": report}
+                admitted.pop("pcap_attack_guidance", None)
+                if "pcap_attack_guidance" in result:
+                    admitted["pcap_attack_guidance"] = result["pcap_attack_guidance"]
+                guide = validate_job_guidance(admitted)
+                job["ddos_attack"] = report
+                job.pop("pcap_attack_guidance", None)
+                if guide is not None:
+                    job["pcap_attack_guidance"] = guide
             except Exception as exc:
                 job["error"] = "DDoS analyzer returned an invalid result"
                 job["error_code"] = "INVALID_DDOS_RESULT"
@@ -3780,7 +3811,14 @@ def create_app(
             summary = {
                 key: value
                 for key, value in item.items()
-                if key not in {"flow_records", "transitions", "volatile_capture", "ddos_attack"}
+                if key
+                not in {
+                    "flow_records",
+                    "transitions",
+                    "volatile_capture",
+                    "ddos_attack",
+                    "pcap_attack_guidance",
+                }
             }
             candidate_count = item.get("candidate_count")
             if candidate_count is None:

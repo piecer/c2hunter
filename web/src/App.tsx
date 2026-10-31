@@ -10,6 +10,7 @@ import { useDDoSSubmission } from './useDDoSSubmission';
 import { usePcapSubmission, type PcapInvocation } from './usePcapSubmission';
 import DDoSNormalReference from './DDoSNormalReference';
 import { ddosReferenceParameters } from './ddosReferenceRequest';
+import PcapAttackGuidance, { PcapGuidanceAIScope } from './PcapAttackGuidance';
 import DDoSAIInterpretation from './DDoSAIInterpretation';
 import ReportLanguageScope from './ReportLanguage';
 import C2DiscoverySelection, { type SelectionSummary } from './C2DiscoverySelection';
@@ -466,7 +467,8 @@ function ddosParameters(form: FormData): Record<string, number> {
 }
 
 function DDoSThresholdFields({ analysis }: { analysis?: Record<string, unknown> }) {
-  return <fieldset><legend>DDoS traffic thresholds</legend><div className="grid">{ddosThresholds.map(([name, label, fallback, min, max, step]) => <label key={name}>{label}<input name={name} type="number" min={min} max={max} step={step} defaultValue={typeof analysis?.[name] === 'number' ? Number(analysis[name]) : fallback}/></label>)}</div></fieldset>;
+  const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(ddosThresholds.map(([name, , fallback]) => [name, String(typeof analysis?.[name] === 'number' ? analysis[name] : fallback)])));
+  return <fieldset><legend>DDoS traffic thresholds</legend><div className="grid">{ddosThresholds.map(([name, label, , min, max, step]) => <label key={name}>{label}<input name={name} type="number" min={min} max={max} step={step} value={values[name]} onChange={event => setValues(previous => ({ ...previous, [name]: event.target.value }))}/></label>)}</div></fieldset>;
 }
 
 function PcapUpload() {
@@ -563,7 +565,7 @@ function PcapUpload() {
           ? '업로드 완료 · 분석 준비로 이동합니다'
           : '';
   return <>
-    <header className="header-actions"><div><p className="eyebrow">OFFLINE INVESTIGATION</p><h1>Upload PCAP</h1><p className="muted">Analyze an existing capture for C2 detection or independent network observations.</p></div><Link to="/analyses">View analysis history</Link></header>
+    <header className="header-actions"><div><p className="eyebrow">OFFLINE INVESTIGATION</p><h1>Upload PCAP</h1><p className="muted">Choose DoS/DDoS-shaped traffic triage, C2 detection, or independent network observations for an existing capture.</p></div><div className="actions"><button type="button" onClick={() => { retireUpload(); setAnalysisModule('ddos_attack'); }}>Offline attack triage</button><Link to="/analyses">View analysis history</Link></div></header>
     <form ref={formRef} className="panel form" onSubmit={submit} onChange={event => {
       const target = event.target as HTMLInputElement;
       // The unnamed preset selector also changes explicit/default wire policy.
@@ -572,12 +574,13 @@ function PcapUpload() {
       <label>Analysis name<input name="name" required maxLength={200} /></label>
       <label>Analysis module<select name="analysis_module" value={analysisModule} onChange={event => setAnalysisModule(event.target.value)}><option value="c2">C2 detection</option><option value="ddos_attack">DDoS attack analysis</option><option value="network_anomaly">Network anomaly</option></select></label>
       {analysisModule === 'network_anomaly' && <><NetworkSourceCapability selection="PCAP_UPLOAD"/><NetworkObservationHelp/></>}
-      {isDDoS && <><DDoSAnalysisHelp/><DDoSThresholdFields/><DDoSNormalReference disabled={mutation.isPending}/></>}
+      {isDDoS && <><DDoSAnalysisHelp/><p>This offline triage is not a general intrusion detector. It assesses TCP, UDP and ICMP flood shapes, not application-layer attacks or all malicious packets.</p><details><summary>Advanced DDoS thresholds and optional normal reference</summary><DDoSThresholdFields/><DDoSNormalReference disabled={mutation.isPending}/></details></>}
       <label>Analyst note<textarea name="description" rows={3} maxLength={5000} placeholder="Case, ticket, or collection context" /></label>
       <label>Capture file<input name="pcap" type="file" accept=".pcap,.pcapng,.cap,application/vnd.tcpdump.pcap,application/octet-stream" onChange={event => { const selected = event.currentTarget.files?.[0]; retireUpload(); setValidationError(''); if (selected && selected.size > PCAP_UPLOAD_MAX_BYTES) { event.currentTarget.value = ''; setFile(undefined); setValidationError('PCAP files must be 500 MiB or smaller.'); return; } setFile(selected); }} required /></label>
       {file && <div className="file-summary" role={uploadStage ? undefined : 'status'}><strong>{file.name}</strong><span>{formatBytes(file.size)}</span></div>}
       {uploadStage && <section className="upload-progress-panel" role="status" aria-live="polite"><strong>{stageLabel}</strong>{uploadStage === 'UPLOADING' && uploadProgress.total > 0 && <progress aria-label="PCAP upload progress" max={uploadProgress.total} value={uploadProgress.loaded}/>}</section>}
-      <div className="grid"><label>Internal networks<input name="internal_networks" defaultValue="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" required /></label></div>
+      <div className="grid"><label>{isDDoS ? 'Protected-side networks' : 'Internal networks'}<input name="internal_networks" aria-describedby={isDDoS ? 'protected-networks-help' : undefined} defaultValue="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" required /></label></div>
+      {isDDoS && <p id="protected-networks-help" className="muted">Enter the protected/capture-side networks you know, including public IPv4 hosts (/32) or IPv6 CIDRs (for example 2001:db8::/64). These networks determine traffic direction and eligible target roles; the private defaults do not cover a public target. Do not broaden them unless they match your capture context.</p>}
       <fieldset hidden={!isC2} disabled={!isC2} style={!isC2 ? { display: 'none' } : undefined}><legend>C2 candidate thresholds</legend><div className="grid"><label>Minimum score<input name="score" type="number" min="0" max="100" defaultValue="0" required /></label><label>Minimum internal hosts<input name="hosts" type="number" min="2" defaultValue="3" required /></label><label>Beacon minimum samples<input name="samples" type="number" min="3" defaultValue="5" required /></label></div></fieldset>
       <fieldset hidden={!isC2} disabled={!isC2} style={!isC2 ? { display: 'none' } : undefined}><DetectorWeightFields weights={detectorWeights} setWeights={updateDetectorWeights} enabled={isC2}/><fieldset><legend>모집단 이상 탐지</legend><label className="check"><input type="checkbox" name="ml_anomaly_enabled"/>후보군 대비 이상 통신 탐지 사용</label><label className="check"><input type="checkbox" name="ml_anomaly_allow_standalone"/>이상 탐지만으로 후보 생성 허용</label><p className="muted">기본값은 사용 안 함입니다. 단독 후보 생성은 실험 기능이며, 허용하지 않으면 다른 탐지 근거가 있는 후보의 점수만 보강합니다.</p></fieldset></fieldset>
       <p className="muted">Supported containers: classic PCAP and PCAPNG. Supported packet links include Ethernet, raw IP, Linux cooked capture v1/v2, and loopback. The upload limit is 500 MiB and 2,000,000 packets.</p>
@@ -835,6 +838,19 @@ function PcapAnalysisLifecycle({ job }: { job: Job }) {
   </section>;
 }
 
+function DDoSReportPending({ job }: { job: Job }) {
+  const failed = job.status === 'FAILED';
+  const cancelled = job.status === 'CANCELLED';
+  const terminal = terminalStatuses.has(job.status);
+  const heading = failed ? 'DDoS analysis failed' : cancelled ? 'DDoS analysis cancelled' : terminal ? 'DDoS report unavailable' : job.status === 'UPLOAD_PENDING' ? 'Awaiting capture upload' : job.status === 'ANALYZING' ? 'DDoS analysis in progress' : 'Preparing DDoS analysis';
+  const reason = (job.transitions ?? []).filter(transition => transition.to_status === job.status).at(-1)?.reason;
+  return <section className="panel" aria-label="DDoS report status"><h2>{heading}</h2>
+    <p role={terminal ? 'alert' : 'status'}>{terminal ? 'No DDoS report is available for this job. This is not a clean result.' : 'The DDoS report is not ready yet. No attack conclusion is available while processing continues.'}</p>
+    <p lang="ko">{terminal ? '이 작업의 DDoS 보고서가 없습니다. 정상 결과를 의미하지 않습니다.' : 'DDoS 분석 준비 또는 처리 중입니다. 아직 공격 여부를 판단할 수 없습니다.'}</p>
+    {(failed || cancelled) && <p>{reason || 'No terminal reason was recorded.'}</p>}
+  </section>;
+}
+
 function JobDetail() {
   const { id } = useParams();
   const [detailsOwner, setDetailsOwner] = useState<string>();
@@ -855,6 +871,7 @@ function JobDetail() {
     const terminal = terminalStatuses.has(j.status);
     const source = j.source;
     const module = j.analysis?.module ?? 'c2';
+    const showGuidance = (module === 'ddos_attack' && j.source_type === 'PCAP_UPLOAD') || Object.hasOwn(j, 'pcap_attack_guidance');
     return <>
       <header className="header-actions"><div><p className="eyebrow">ANALYSIS DETAIL</p><h1>{j.name}</h1><span className={`badge ${j.status.toLowerCase()}`}>{j.status}</span><p className="record-id">Job {j.id}{j.dataset_id ? ` · Dataset ${j.dataset_id}` : ''}</p></div><Link to="/analyses">Back to analysis history</Link></header>
       {(j.source_type === 'PCAP_UPLOAD' || j.processing) && <PcapAnalysisLifecycle job={j}/>}
@@ -867,7 +884,8 @@ function JobDetail() {
         {!terminal && <button className="danger" disabled={cancel.isPending} onClick={() => cancel.mutate()}>{cancel.isPending ? 'Cancelling…' : 'Cancel analysis'}</button>}
         {cancel.error && <p role="alert" className="error-text">{cancel.error.message}</p>}{notice && <p role="status">{notice}</p>}
       </section>}
-      {module === 'network_anomaly' ? <NetworkAnomalyPanel key={j.id} report={j.network_anomaly} job={j}><NetworkAIInterpretation key={j.id} jobId={j.id} completed={j.status === 'COMPLETED' && Boolean(j.network_anomaly)}/></NetworkAnomalyPanel> : module === 'ddos_attack' && j.ddos_attack ? <DDoSAttackPanel key={`${j.id}:${j.ddos_attack.primary_finding_id ?? 'none'}:${String(j.ddos_attack.summary?.finding_count ?? 'unknown')}`} report={j.ddos_attack} job={{ id: j.id, dataset_id: j.dataset_id, source_type: j.source_type, source: j.source, internal_networks: j.internal_networks }} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}><DDoSAIInterpretation jobId={j.id} completed={j.status === 'COMPLETED'}/></DDoSAttackPanel> : module === 'c2' ? <ReportLanguageScope key={`c2-ai-${j.id}`}><AIAnalysisPanel job={j} knownCandidateIds={items(candidates.data).map(candidate => candidate.id)}/></ReportLanguageScope> : <p role="alert">Unsupported analysis module.</p>}
+      {module === 'network_anomaly' ? <NetworkAnomalyPanel key={j.id} report={j.network_anomaly} job={j}><NetworkAIInterpretation key={j.id} jobId={j.id} completed={j.status === 'COMPLETED' && Boolean(j.network_anomaly)}/></NetworkAnomalyPanel> : module === 'ddos_attack' && j.ddos_attack ? <DDoSAttackPanel key={`${j.id}:${j.ddos_attack.primary_finding_id ?? 'none'}:${String(j.ddos_attack.summary?.finding_count ?? 'unknown')}`} report={j.ddos_attack} job={{ id: j.id, dataset_id: j.dataset_id, source_type: j.source_type, source: j.source, internal_networks: j.internal_networks }} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}>{showGuidance && <PcapAttackGuidance job={j} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}/>}<PcapGuidanceAIScope/><DDoSAIInterpretation jobId={j.id} completed={j.status === 'COMPLETED'}/></DDoSAttackPanel> : module === 'ddos_attack' ? <DDoSReportPending job={j}/> : module === 'c2' ? <ReportLanguageScope key={`c2-ai-${j.id}`}><AIAnalysisPanel job={j} knownCandidateIds={items(candidates.data).map(candidate => candidate.id)}/></ReportLanguageScope> : <p role="alert">Unsupported analysis module.</p>}
+      {showGuidance && !(module === 'ddos_attack' && j.ddos_attack) && <ReportLanguageScope key={`pcap-guide-${j.id}`}><PcapAttackGuidance job={j} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}/></ReportLanguageScope>}
       {module !== 'c2' && <button type="button" className="secondary" aria-expanded={detailsOwner === j.id} onClick={() => setDetailsOwner(detailsOwner === j.id ? undefined : j.id)}>작업 상세 / Job details</button>}
       {(module === 'c2' || detailsOwner === j.id) && <>
       {module !== 'c2' && <><section className="metrics compact"><article><strong>{(j.packet_count ?? 0).toLocaleString()}</strong><span>Packets</span></article><article><strong>{(j.flow_count ?? 0).toLocaleString()}</strong><span>Flows</span></article>{j.analysis?.module === 'network_anomaly' ? <article><strong>{j.network_anomaly?.version === 'network-pattern-report-v1' ? (typeof j.network_anomaly.summary?.flow_count === 'number' ? j.network_anomaly.summary.flow_count.toLocaleString() : '—') : j.network_anomaly?.flows?.length.toLocaleString() ?? '—'}</strong><span>Observed bidirectional flows</span></article> : String(module) === 'ddos_attack' ? <article><strong>{Number(j.ddos_attack?.summary.finding_count ?? 0).toLocaleString()}</strong><span>DDoS findings</span></article> : <article><strong>{(j.candidate_count ?? 0).toLocaleString()}</strong><span>Candidates</span></article>}<article><strong>{strings(j.sensor_ids).length}</strong><span>Sensors</span></article></section></>}

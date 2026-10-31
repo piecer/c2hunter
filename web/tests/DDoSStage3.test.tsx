@@ -5,6 +5,42 @@ import { expect, it, vi } from 'vitest';
 import DDoSAttackPanel from '../src/DDoSAttackPanel';
 
 const report = JSON.parse(readFileSync('tests/fixtures/ddos-report-contract.json', 'utf8'));
+const scenarios = JSON.parse(readFileSync('tests/fixtures/ddos-report-scenarios.json', 'utf8'));
+it.each([
+  ['tcp_syn_inbound', 'SYN-ACK', 'SYN-ACK'],
+  ['tcp_ack_inbound', 'payload', 'payload'],
+  ['tcp_rst_inbound', 'middlebox', '중간 장비'],
+  ['udp_outbound_participant', 'UDP service', 'UDP 서비스'],
+  ['icmp_echo', 'echo requests', 'echo 요청'],
+  ['icmp_generic', 'ICMP types', 'ICMP 유형'],
+  ['possible_reflection', 'request/response', '요청·응답'],
+  ['multi_vector', 'overlapping', '겹치는'],
+])('offers passive family-specific checks and reachable secondary responses for %s in both languages', (name, en, ko) => {
+  for (const language of ['en', 'ko']) {
+    localStorage.setItem('c2hunter-report-language', language);
+    const scenario = scenarios[name];
+    const primary = scenario.findings.find((item: { id: string }) => item.id === scenario.primary_finding_id);
+    const { unmount } = render(<DDoSAttackPanel report={scenario}/>);
+    const next = screen.getByRole('region', { name: language === 'en' ? 'Next check' : '다음 확인' });
+    expect(next).toHaveTextContent(language === 'en' ? en : ko);
+    expect(next).toHaveTextContent(primary.first_seen);
+    expect(next).toHaveTextContent(primary.last_seen);
+    expect(next).not.toHaveTextContent(/Enable a SYN proxy|Engage upstream scrubbing|Rate-limit nonessential|SYN 프록시.*활성화|스크러빙.*적용|ICMP 속도 제한/);
+    fireEvent.click(within(next).getByRole('button'));
+    const evidence = screen.getByRole('region', { name: language === 'en' ? 'DDoS finding evidence' : 'DDoS 발견 근거' });
+    expect(within(evidence).getByRole('heading', { name: language === 'en' ? 'Uncertainty' : '불확실성' })).toBeVisible();
+    expect(within(evidence).getByRole('heading', { name: language === 'en' ? 'Recommended responses' : '권장 대응' })).toBeVisible();
+    expect(evidence).toHaveTextContent(language === 'en' ? 'Human approval required' : '운영자 승인 필요');
+    unmount();
+  }
+});
+it.each(['en', 'ko'])('distinguishes same-capture low-bucket statistics from operator-selected predicate reference in %s', language => {
+  localStorage.setItem('c2hunter-report-language', language);
+  render(<DDoSAttackPanel report={report}/>);
+  expect(screen.getByText(language === 'en' ? /same-capture low-traffic buckets/ : /같은 캡처의 저트래픽 버킷/)).toBeVisible();
+  expect(screen.getByText(language === 'en' ? /operator-selected normal reference.*predicate evaluation.*does not upgrade/ : /운영자가 선택한 정상 참조.*조건식 평가.*상향하지/)).toBeVisible();
+});
+
 it('scopes the three axes to the selected target and leads with patterns and next check', () => {
   render(<DDoSAttackPanel report={report}/>);
   fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'en' } });

@@ -13,7 +13,7 @@ import math
 import statistics
 from bisect import bisect_right
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from ipaddress import IPv4Network, IPv6Network, collapse_addresses, ip_address, ip_network
@@ -1214,6 +1214,7 @@ def analyze_ddos_attack(
     parameters: Mapping[str, object] | None = None,
     coverage_context: Mapping[str, object] | None = None,
     normal_reference: dict[str, Any] | None = None,
+    _observe_packet: Callable[[Observation], None] | None = None,
 ) -> dict[str, Any]:
     """Classify bounded DDoS-shaped traffic and publish a deterministic report."""
     policy = _validated_policy(parameters)
@@ -1283,6 +1284,8 @@ def analyze_ddos_attack(
             numeric_overflow = True
             continue
         evaluated += 1
+        if _observe_packet is not None:
+            _observe_packet(row)
         signature_sample.add(entry, packet_count=row.packets)
         packet_total += row.packets
         byte_total += row.size_bytes
@@ -1354,12 +1357,11 @@ def analyze_ddos_attack(
             target.syn_ack += reverse_syn_ack[response_key]
     packet_collector.finish(targets, bool(warnings) or skipped > 0 or incomplete > 0)
     findings = [item for target in targets.values() if (item := _finding(target, policy))]
-    if not findings:
-        for target in targets.values():
-            if len(target.sources) < _number(
-                policy, "ddos_min_source_count"
-            ) and target.packet_count >= _number(policy, "ddos_min_packet_count"):
-                warnings.add("DOS_LIKE_TRAFFIC")
+    for target in targets.values():
+        if len(target.sources) < _number(
+            policy, "ddos_min_source_count"
+        ) and target.packet_count >= _number(policy, "ddos_min_packet_count"):
+            warnings.add("DOS_LIKE_TRAFFIC")
     findings.extend(_multi_vector(findings, policy))
     total_findings = len(findings)
     findings.sort(

@@ -6,13 +6,13 @@ import { axisNames, axisReasons } from './ddosEvidence';
 import { useReportLanguage } from './reportLanguageContext';
 import {
   attackTypes, choose, classificationConfidences, commonPatternTypes, deliveryMechanisms,
-  limitations, metricLabels, objectives, recommendationCaveats,
+  investigativeChecks, limitations, metricLabels, objectives, recommendationCaveats,
   recommendations, recommendationScopes, roles, sourceAuthenticities,
   sourcePopulations, uncertainties, warnings,
 } from './ddosReportTranslations';
 
 export type { DDoSAttackReport, DDoSFinding, DDoSSignatureCandidate, DDoSClassification, DDoSCommonPattern, DDoSRecommendation } from './ddosReportContract';
-import { type DDoSAttackReport, type DDoSRecommendation, isDDoSAttackReport } from './ddosReportContract';
+import { type DDoSAttackReport, isDDoSAttackReport } from './ddosReportContract';
 
 function format(value: unknown, language: 'ko' | 'en'): string {
   if (value == null) return language === 'ko' ? '관찰되지 않음' : 'Not observed';
@@ -47,7 +47,7 @@ function Content({ report, detailOwner, setDetailOwner, ownerPrefix, current, jo
   const findings = report.findings;
   const primary = findings.find(item => item.id === report.primary_finding_id) ?? findings[0];
   const actionByCode = new Map(report.recommendations.map(item => [item.code, item]));
-  const priorityActions = (primary?.recommendation_codes ?? []).map(code => actionByCode.get(code)).filter(Boolean).slice(0, 1) as DDoSRecommendation[];
+
   const heading = report.verdict === 'attack_likely' ? t('DDoS attack likely', 'DDoS 공격 가능성 높음')
     : report.verdict === 'suspicious_traffic' ? t('Suspicious DDoS-shaped traffic observed', '의심스러운 DDoS 형태 관찰')
       : report.verdict === 'no_clear_attack' && report.summary.coverage_complete === true ? t('No clear DDoS attack observed', '뚜렷한 DDoS 공격 징후 없음')
@@ -73,7 +73,16 @@ function Content({ report, detailOwner, setDetailOwner, ownerPrefix, current, jo
       </div>}
       <p className="muted">{t('Botnet-like is not confirmed botnet; unconfirmed authenticity is not proof of no spoofing; reflection is not measured amplification.', '봇넷 유사 형태는 확정 봇넷이 아니며, 진위 미확인은 spoofing 부재의 증명이 아닙니다. 반사는 측정된 증폭이 아닙니다.')}</p>
       {primary?.common_patterns && <section aria-label={t('Selected target patterns', '선택 대상 패턴')}><h3>{t('Key observed patterns', '주요 관찰 패턴')}</h3><ul className="ddos-top-patterns">{primary.common_patterns.slice(0, 3).map(pattern => <li key={pattern.id}>{choose(language, commonPatternTypes[pattern.type])} — {pattern.values.every(value => value.length < 48) ? pattern.values.join(', ') : t(`${pattern.values.length} comparison fingerprint(s); full values in details`, `비교 지문 ${pattern.values.length}개; 전체 값은 상세 참조`)} · {pattern.support_count} {t('supporting records', '지지 레코드')}</li>)}</ul></section>}
-      <section className="ddos-next"><h3>{t('Next check', '다음 확인')}</h3><p>{t('Verify service impact and the independent normal reference before any mitigation.', '대응 전 서비스 영향과 독립적인 정상 참조를 확인하세요.')}</p><ol>{priorityActions.map(item => <li key={item.code}>{choose(language, recommendations[item.code])} <small>{choose(language, recommendationScopes[item.scope])} · {choose(language, recommendationCaveats[item.code])} · {t('Human approval required', '운영자 승인 필요')}</small></li>)}</ol></section>
+      <section className="ddos-next" role="region" aria-label={t('Next check', '다음 확인')}><h3>{t('Next check', '다음 확인')}</h3>
+        <p>{t('Preserve the capture and correlate the observed target and time with service logs before any response. These are passive investigative checks, not mitigation instructions.', '대응 전에 캡처를 보존하고 관찰 대상·시각을 서비스 로그와 대조하세요. 이는 수동 조사 절차이며 완화 조치 지시가 아닙니다.')}</p>
+        {primary ? <>
+          <p>{choose(language, investigativeChecks[primary.attack_type])}</p>
+          <p>{t('Observed time', '관찰 시각')}: {primary.first_seen} → {primary.last_seen}</p>
+          <button type="button" className="secondary" aria-expanded={detailOwner === `${ownerPrefix}:finding:${primary.id}`} onClick={() => { if (current()) { setPage(Math.floor(findings.indexOf(primary) / 8)); setDetailOwner(`${ownerPrefix}:finding:${primary.id}`); } }}>{t('Review selected target evidence', '선택 대상 근거 검토')}</button>
+          {Boolean(primary.signature_candidates?.length) && <p className="muted">{t('Inspect signature candidates in detailed evidence; reviewed JSON and supported passive exports remain subject to their evidence and ownership limits.', '상세 근거에서 시그니처 후보를 조사하세요. 검토용 JSON 및 지원되는 수동 export에는 근거와 소유권 제한이 유지됩니다.')}</p>}
+        </> : <p>{t('Review analysis coverage, protected-side networks and capture visibility. No retained finding is not proof of normal traffic.', '분석 범위, 보호 측 네트워크 및 캡처 관측 범위를 검토하세요. 보존된 발견 항목 부재는 정상 트래픽의 증명이 아닙니다.')}</p>}
+        <p className="muted">{t('The statistical baseline uses same-capture low-traffic buckets, not known-normal traffic. The optional operator-selected normal reference is for candidate predicate evaluation; selecting it does not upgrade flood likelihood or establish normality.', '통계 기준선은 정상으로 확인된 트래픽이 아니라 같은 캡처의 저트래픽 버킷을 사용합니다. 운영자가 선택한 정상 참조는 선택 사항이며 후보 조건식 평가용입니다. 이를 선택해도 플러드 가능성을 상향하지 않으며 정상성을 입증하지도 않습니다.')}</p>
+      </section>
       {(report.warnings.length > 0 || report.summary.coverage_complete !== true) && <p className="warning">{t('Coverage is incomplete or qualified; absence of additional findings is not a clean result.', '분석 범위가 불완전하거나 조건부입니다. 추가 발견이 없더라도 정상 결과로 해석할 수 없습니다.')}</p>}
     </section>
     <button type="button" className="secondary" aria-expanded={coverageOpen} onClick={() => { if (current()) setDetailOwner(coverageOpen ? undefined : coverageKey); }}>{t('Analysis coverage and limitations', '분석 범위와 한계')}</button>

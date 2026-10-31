@@ -39,6 +39,7 @@ from . import historical_generation as baseline_values
 from . import historical_read as historical_reader
 from .baseline_admission import BaselineAdmission, BaselineLease
 from .historical_baseline import QualityReview, ScopeConfig
+from .pcap_attack_guidance_schema import project_job_guidance, validate_job_guidance
 from .pcap_export_store import ExportQueueStorageError, RepositoryQueueStore
 from .pcap_indexed_export import (
     CaptureByteRange,
@@ -3028,6 +3029,7 @@ class MemoryRepository(
         return deepcopy(list(self.groups.values()))
 
     def create_job(self, job: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        validate_job_guidance(job)
         with self._lock:
             existing_id = self.idempotency_keys.get(job["idempotency_key"])
             if existing_id:
@@ -3037,6 +3039,7 @@ class MemoryRepository(
             return deepcopy(job), True
 
     def save_job(self, job: dict[str, Any]) -> dict[str, Any]:
+        validate_job_guidance(job)
         with self._lock:
             stored = deepcopy(job)
             existing = self.jobs.get(job["id"])
@@ -3048,6 +3051,7 @@ class MemoryRepository(
             return deepcopy(job)
 
     def save_job_metadata(self, job: dict[str, Any]) -> dict[str, Any]:
+        validate_job_guidance(job)
         summary = {
             key: value
             for key, value in job.items()
@@ -3056,6 +3060,7 @@ class MemoryRepository(
         return self.save_job(summary)
 
     def transition_job_terminal(self, job: dict[str, Any]) -> bool:
+        validate_job_guidance(job)
         if job.get("status") not in _JOB_TERMINAL_STATUSES:
             raise ValueError("terminal transition requires a terminal target status")
         with self._lock:
@@ -3071,6 +3076,7 @@ class MemoryRepository(
     def complete_job_with_candidates(
         self, job: dict[str, Any], candidates: list[dict[str, Any]]
     ) -> bool:
+        validate_job_guidance(job)
         if job.get("status") not in {"COMPLETED", "PARTIALLY_COMPLETED"}:
             raise ValueError("successful publication requires a successful terminal status")
         if type(job.get("candidate_count")) is not int or job["candidate_count"] != len(candidates):
@@ -3161,7 +3167,7 @@ class MemoryRepository(
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
             value = self.jobs.get(job_id)
-            return deepcopy(value) if value else None
+            return deepcopy(project_job_guidance(value)) if value else None
 
     def get_job_by_idempotency(self, key: str) -> dict[str, Any] | None:
         with self._lock:
@@ -3176,7 +3182,7 @@ class MemoryRepository(
             return deepcopy(
                 {
                     key: item
-                    for key, item in value.items()
+                    for key, item in project_job_guidance(value).items()
                     if key not in {"flow_records", "payload_signatures"}
                 }
             )
@@ -3186,7 +3192,7 @@ class MemoryRepository(
         for job_id in dict.fromkeys(job_ids):
             job_summary = self.get_job_summary(job_id)
             if job_summary is not None:
-                summaries[job_id] = job_summary
+                summaries[job_id] = project_job_guidance(job_summary, compact=True)
         return summaries
 
     def list_jobs(self) -> list[dict[str, Any]]:
@@ -3195,7 +3201,7 @@ class MemoryRepository(
                 deepcopy(
                     {
                         key: item
-                        for key, item in job.items()
+                        for key, item in project_job_guidance(job, compact=True).items()
                         if key not in {"flow_records", "payload_signatures"}
                     }
                 )
@@ -5611,6 +5617,7 @@ class SQLiteRepository(
         return self._list("group")
 
     def create_job(self, job: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        validate_job_guidance(job)
         with self._lock, self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
             row = self.connection.execute(
@@ -5629,12 +5636,14 @@ class SQLiteRepository(
             return deepcopy(job), True
 
     def save_job(self, job: dict[str, Any]) -> dict[str, Any]:
+        validate_job_guidance(job)
         with self._lock, self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
             self._save_job_parts(job)
             return deepcopy(job)
 
     def save_job_metadata(self, job: dict[str, Any]) -> dict[str, Any]:
+        validate_job_guidance(job)
         metadata = {
             key: value
             for key, value in job.items()
@@ -5643,6 +5652,7 @@ class SQLiteRepository(
         return self._put("job", job["id"], metadata)
 
     def transition_job_terminal(self, job: dict[str, Any]) -> bool:
+        validate_job_guidance(job)
         if job.get("status") not in _JOB_TERMINAL_STATUSES:
             raise ValueError("terminal transition requires a terminal target status")
         metadata = {
@@ -5667,6 +5677,7 @@ class SQLiteRepository(
     def complete_job_with_candidates(
         self, job: dict[str, Any], candidates: list[dict[str, Any]]
     ) -> bool:
+        validate_job_guidance(job)
         if job.get("status") not in {"COMPLETED", "PARTIALLY_COMPLETED"}:
             raise ValueError("successful publication requires a successful terminal status")
         if type(job.get("candidate_count")) is not int or job["candidate_count"] != len(candidates):
@@ -5771,7 +5782,7 @@ class SQLiteRepository(
                 self.connection.rollback()
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
-        job = self._get("job", job_id)
+        job = self.get_job_summary(job_id)
         if job is None:
             return None
         row = self.connection.execute(
@@ -5794,7 +5805,8 @@ class SQLiteRepository(
             return json.loads(row[0]) if row is not None else None
 
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None:
-        return self._get("job", job_id)
+        job = self._get("job", job_id)
+        return project_job_guidance(job) if job is not None else None
 
     def get_job_summaries(self, job_ids: list[str]) -> dict[str, dict[str, Any]]:
         selected = list(dict.fromkeys(job_ids))
@@ -5805,10 +5817,10 @@ class SQLiteRepository(
             f"SELECT id,data FROM objects WHERE kind='job' AND id IN ({placeholders})",  # noqa: S608 -- placeholders contain only generated question marks
             selected,
         ).fetchall()
-        return {str(row[0]): json.loads(row[1]) for row in rows}
+        return {str(row[0]): project_job_guidance(json.loads(row[1]), compact=True) for row in rows}
 
     def list_jobs(self) -> list[dict[str, Any]]:
-        return self._list("job")
+        return [project_job_guidance(job, compact=True) for job in self._list("job")]
 
     def claim_pcap_preparation(
         self, *, now: datetime, lease_seconds: int, max_attempts: int = 3

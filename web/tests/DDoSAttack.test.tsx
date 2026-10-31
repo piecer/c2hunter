@@ -138,13 +138,16 @@ it('accepts the closed unknown-payload qualifier for legacy ACK aggregates', () 
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
 
-it('shows one DDoS verdict type defensive objective and priority response first in Korean and English', () => {
+it('shows one DDoS verdict type and investigation first, with reviewed responses in secondary evidence in Korean and English', () => {
   render(<DDoSAttackPanel report={report}/>);
   const glance = screen.getByRole('region', { name: 'DDoS 한눈에 보기' });
   expect(within(glance).getByRole('heading', { name: '의심스러운 DDoS 형태 관찰' })).toBeVisible();
   expect(within(glance).getByText('TCP SYN 플러드')).toBeVisible();
   expect(within(glance).getByText(/연결 상태 자원 고갈/)).toBeVisible();
-  expect(within(glance).getByText(/SYN 프록시 또는 SYN 쿠키/)).toBeVisible();
+  expect(within(glance).queryByText(/SYN 프록시 또는 SYN 쿠키/)).not.toBeInTheDocument();
+  expect(within(glance).getByText(/SYN-ACK 응답/)).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: /상세 근거 보기/ }));
+  expect(within(screen.getByRole('region', { name: 'DDoS 발견 근거' })).getByText(/SYN 프록시 또는 SYN 쿠키/)).toBeVisible();
   expect(screen.queryByText('AI C2 분석')).not.toBeInTheDocument();
 
   fireEvent.change(screen.getByRole('combobox', { name: '보고서 언어 / Report language' }), { target: { value: 'en' } });
@@ -152,6 +155,7 @@ it('shows one DDoS verdict type defensive objective and priority response first 
   const englishGlance = screen.getByRole('region', { name: 'DDoS at a glance' });
   expect(within(englishGlance).getByText('TCP SYN flood')).toBeVisible();
   expect(within(englishGlance).getByText(/connection-state resource exhaustion/i)).toBeVisible();
+  expect(within(screen.getByRole('region', { name: 'DDoS finding evidence' })).getByText(/Enable a SYN proxy or SYN cookies/)).toBeVisible();
 });
 
 it('lazily exposes facts uncertainty and coverage while keeping all actions human-approved', () => {

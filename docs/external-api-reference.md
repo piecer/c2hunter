@@ -362,8 +362,25 @@ parameter는 이 legacy 경로에만 적용된다.
 | `ddos_reflection_min_average_packet_bytes` | `256` | reflection 가설 최소 평균 packet 크기 |
 | `ddos_overlap_window_seconds` | `10` | multi-vector overlap 허용 구간 |
 
-`ddos_attack` job detail은 `ddos-attack-report-v1` full report를 반환하고 목록은 compact
-`ddos_attack_summary`만 반환한다. DDoS job은 Candidate, TI, MISP 또는 C2 AI run을 생성하지 않는다.
+`ddos_attack` job detail은 새 분석의 `ddos-attack-report-v4` full report를 반환하며,
+저장된 v1–v3 보고서는 기존 계약대로 읽는다. 목록은 compact `ddos_attack_summary`를
+반환한다. DDoS job은 Candidate, TI, MISP 또는 C2 AI run을 생성하지 않는다.
+
+Offline PCAP DDoS 분석은 별도 `pcap_attack_guidance` (`pcap-attack-guidance-v1`)를
+job detail에 포함한다. 필수 top-level 키는 `version`, `job_id`, `dataset_id`, `status`,
+`summary`, `candidates`, `coverage_codes`, `limitations`이다. 상태는
+`REVIEW_CANDIDATES`, `NO_CANDIDATE`, `INSUFFICIENT_OBSERVATION`이며 기존 DDoS 판정과
+별개의 조사 안내다. 최대 32개 후보·128 KiB, 정확한 관측 수·시각·owner 연결과 닫힌
+중첩 스키마를 검증한다. 구체적인 관측 의미와 한도는 `docs/ddos-attack-analysis.md`의
+업로드 PCAP 안내 절과 생성된 `controller/tests/fixtures/pcap_attack_guidance/schema.json`,
+`registry.json`을 참조한다. JSON Schema만으로는 구간·패킷 보존과 시각 관계를 모두 표현하지 않는다.
+
+목록과 배치 summary에는 상세 artifact 없이 `pcap_attack_guidance_summary`의 `status`,
+`candidate_count`, `omitted_candidate_count`, `coverage_complete`만 제공한다. 과거/이전 worker의
+artifact 부재는 `{"status":"UNAVAILABLE"}`이며 후보 0개와 다르다. 명시적 null·잘못된
+owner·모순된 측정값은 부재로 처리하지 않는다. 잘못된 결과 조회는 `500 INVALID_PCAP_GUIDANCE`,
+worker 결과 게시 실패는 `INVALID_DDOS_RESULT`와 FAILED 상태이며 해당 artifact를 게시하지 않는다.
+재분석은 새 job/dataset 연결로 재계산한다. C2/network/LIVE 결과에 이 artifact를 붙이지 않는다.
 업로드 parser skip, capture truncation, sensor drop/clock 품질 및 job-scoped sensor 품질 부재는
 각각 closed warning code로 report coverage에 반영되며 불완전한 coverage에서는
 `no_clear_attack` 또는 high-confidence 판정을 반환하지 않는다.
