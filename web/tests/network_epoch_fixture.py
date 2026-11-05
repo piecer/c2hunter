@@ -91,6 +91,8 @@ class _Queue:
 
 
 def _public_case(name: str, content: bytes) -> dict[str, Any]:
+    # Standalone fixture callers do not pass through build_bundle's bootstrap.
+    sys.path.insert(0, str(ROOT / "sensor/worker/src"))
     from c2hunter_analysis.pcap import parse_pcap
     from c2hunter_controller.app import create_app
     from c2hunter_controller.config import Settings

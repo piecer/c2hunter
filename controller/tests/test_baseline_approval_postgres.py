@@ -211,7 +211,7 @@ def test_pg_operation_ddl_failure(pg_repo: Any, monkeypatch: Any) -> None:
                 guard.setattr(psycopg, "connect", connect)
                 failed = PostgresRepository(repo.database_url, None)
                 with pytest.raises(psycopg.errors.RaiseException):
-                    _ = failed.connection
+                    failed.initialize_schema()
                 assert len(observed) == 1 and observed[0].closed
             assert admin.execute(
                 "SELECT last_value,is_called FROM approval_ddl_fired"
@@ -221,6 +221,7 @@ def test_pg_operation_ddl_failure(pg_repo: Any, monkeypatch: Any) -> None:
         finally:
             admin.execute(sql.SQL("DROP EVENT TRIGGER {}").format(sql.Identifier(trigger)))
     with closing(PostgresRepository(repo.database_url, None)) as reopened:
+        reopened.initialize_schema()
         assert reopened.get_baseline_scope(config().scope_id).control_revision == 0
         assert reopened.get_job("root")["id"] == "root"
         assert reopened.connection.execute(

@@ -8,7 +8,7 @@ const candidate = { id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113
 const flow = { flow_id: 'e2e-flow', job_id: 'job-1', sensor_id: 'sensor-a', timestamp: '2026-07-20T10:00:00Z', source_ip: '10.0.0.5', destination_ip: '203.0.113.10', source_port: 51000, destination_port: 443, internal_ip: '10.0.0.5', external_ip: '203.0.113.10', service_port: 443, protocol: 'TCP', direction: 'OUTBOUND', packet_count: 5, total_bytes: 512, payload_hash: 'fixture-hash', payload_prefix_hash: 'fixture-prefix', payload_length: 16, has_payload: true, current_label: null };
 async function fulfill(route: Route, body: unknown, status = 200) { await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) }); }
 
-export async function installApiFixture(page: Page) {
+export async function installApiFixture(page: Page, { aiAvailable = false }: { aiAvailable?: boolean } = {}) {
   let allowlist: Array<{ id: string; type: string; value: string; description: string }> = [];
   let integrationSettings = {
     version: 1, virustotal_enabled: true, abuseipdb_enabled: true, misp_enabled: true,
@@ -86,6 +86,12 @@ export async function installApiFixture(page: Page) {
     if (path === '/analysis-jobs' && method === 'GET') return fulfill(route, { items: [{ id: 'job-1', name: 'E2E investigation', status: 'COMPLETED', candidate_count: 1 }] });
     if (path === '/analysis-jobs' && method === 'POST') return fulfill(route, { id: 'job-1', name: 'E2E investigation', status: 'CREATED' }, 201);
     if (path === '/analysis-jobs/job-1/ai-runs' && method === 'GET') return fulfill(route, { items: aiRuns, total: aiRuns.length });
+    if (path === '/ai-capabilities' && method === 'GET') return fulfill(route, {
+      available: aiAvailable, remote: false, destination: 'http://127.0.0.1',
+      provider: 'local-fixture', model_name: 'fixture-only',
+      network_interpretation: aiAvailable, ddos_interpretation: aiAvailable,
+      reason: aiAvailable ? null : 'AI_ANALYSIS_DISABLED',
+    });
     if (path === '/analysis-jobs/job-1/ai-runs' && method === 'POST') {
       aiRuns = [{ id: 'ai-run-1', analysis_job_id: 'job-1', status: 'COMPLETED', progress_percent: 100, candidate_count: 1, created_at: '2026-07-20T10:15:00Z' }];
       return fulfill(route, aiRuns[0], 201);

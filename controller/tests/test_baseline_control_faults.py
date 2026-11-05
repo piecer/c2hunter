@@ -686,11 +686,12 @@ def test_memory_fallible_preparation_inventory(action: str) -> None:
                 raise marker
         return trace
 
+    previous_trace = sys.gettrace()
     sys.settrace(trace)
     try:
         invoke(repo, request)
     finally:
-        sys.settrace(None)
+        sys.settrace(previous_trace)
     inventory = list(observed)
     assert inventory
     repo._baseline_scopes, repo._baseline_generations, repo._baseline_operations = before
@@ -699,12 +700,13 @@ def test_memory_fallible_preparation_inventory(action: str) -> None:
         observed.clear()
         fired.clear()
         references = (repo._baseline_scopes, repo._baseline_generations, repo._baseline_operations)
+        previous_trace = sys.gettrace()
         sys.settrace(trace)
         try:
             with pytest.raises(MemoryError) as caught:
                 invoke(repo, request)
         finally:
-            sys.settrace(None)
+            sys.settrace(previous_trace)
         assert caught.value is marker and fired == [site]
         assert raw_state(repo) == before
         assert all(

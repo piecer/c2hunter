@@ -28,6 +28,7 @@ async function form(page: Page, route = '/analyses/upload', module = 'ddos_attac
   await page.goto(route);
   await page.getByLabel('Analysis name').fill('Owned independent request');
   await page.getByLabel('Analysis module').selectOption(module);
+  if (module === 'ddos_attack') await page.getByText('Advanced DDoS thresholds and optional normal reference', { exact: true }).click();
   await page.getByLabel('Capture file').setInputFiles(join(root, 'unmeasured.pcap'));
   return page.getByLabel('Analysis name').locator('xpath=ancestor::form');
 }
@@ -117,7 +118,7 @@ for (const change of ['different-file', 'same-metadata-file', 'networks', 'thres
 for (const module of ['ddos_attack', 'c2', 'network_anomaly']) test(`A capture fails, B initiation fails, ${module} B retry cannot PUT A`, async ({ page }) => {
   await install(page); const f = await form(page, '/analyses/upload', module), wire = await transport(page);
   await submit(f); await expect(page.getByText('Owned capture interruption')).toBeVisible();
-  await page.getByLabel('Internal networks').fill('192.0.2.0/24'); wire.control.failAdmission = true;
+  await page.getByLabel(module === 'ddos_attack' ? 'Protected-side networks' : 'Internal networks').fill('192.0.2.0/24'); wire.control.failAdmission = true;
   await submit(f); await expect(page.getByText('Owned initiation failure')).toBeVisible();
   expect(wire.puts).toHaveLength(1);
   wire.control.failAdmission = false; wire.control.failCapture = false;

@@ -190,7 +190,7 @@ test('analyst can download an archived sensor PCAP', async ({ page }) => {
 });
 
 test('analyst can run bounded AI analysis and inspect the candidate assessment', async ({ page }) => {
-  await installApiFixture(page);
+  await installApiFixture(page, { aiAvailable: true });
   await page.route(/\/api\/v1\/analysis-jobs\/job-1$/, async route => {
     await route.fulfill({
       status: 200,
@@ -212,7 +212,7 @@ test('analyst can run bounded AI analysis and inspect the candidate assessment',
 
   const aiPanel = page.getByRole('region', { name: 'AI C2 분석' });
   await aiPanel.getByRole('button', { name: 'Run AI analysis' }).click();
-  await expect(aiPanel.getByText('COMPLETED')).toBeVisible();
+  await expect(aiPanel.getByText('COMPLETED', { exact: true })).toBeVisible();
   await expect(aiPanel.getByText('AI LIKELY_C2')).toBeVisible();
   await expect(aiPanel.getByText('E-C2H-001').first()).toBeVisible();
   await expect(aiPanel.getByText('Review priority 72')).toBeVisible();

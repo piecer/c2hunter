@@ -132,6 +132,7 @@ for (const width of [1280, 390]) for (const language of ['ko', 'en']) test(`refe
     if (!route.endsWith(fixture.jobs.measured.id)) {
       await page.getByLabel('Analysis name').fill('Owned stage3 UI admission');
       await page.getByLabel('Analysis module').selectOption('ddos_attack');
+      if (route.endsWith('/upload')) await page.getByText('Advanced DDoS thresholds and optional normal reference', { exact: true }).click();
       await page.getByLabel('Minimum observed sources', { exact: true }).fill('3');
       await page.getByLabel('Minimum packets', { exact: true }).fill('6');
       await page.getByLabel('Minimum packets/second', { exact: true }).fill('1');

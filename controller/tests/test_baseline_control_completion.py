@@ -395,11 +395,12 @@ def test_value_and_memory_preparation_sites(adapter: Any, path: str) -> None:
         else:
             restore_baseline(repo, before)
 
+    previous_trace = sys.gettrace()
     sys.settrace(trace)
     try:
         expected = call(repo)
     finally:
-        sys.settrace(None)
+        sys.settrace(previous_trace)
     inventory = list(observed)
     assert inventory
     restore()
@@ -418,12 +419,13 @@ def test_value_and_memory_preparation_sites(adapter: Any, path: str) -> None:
     for target, site in enumerate(inventory):
         observed.clear()
         fired.clear()
+        previous_trace = sys.gettrace()
         sys.settrace(trace)
         try:
             with pytest.raises(RuntimeError) as caught:
                 call(repo)
         finally:
-            sys.settrace(None)
+            sys.settrace(previous_trace)
         assert caught.value is marker and fired == [site]
         after = raw_state(repo)
         committed = not memory and len(after[2]) and after[0] != before[0]

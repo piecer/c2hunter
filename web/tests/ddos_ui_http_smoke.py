@@ -7,6 +7,11 @@ import shutil
 import sys
 from pathlib import Path
 
+# This standalone browser helper also executes the repository-owned worker;
+# CI installs only controller and analysis as editable packages.
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'sensor/worker/src'))
+
 from fastapi.testclient import TestClient
 from c2hunter_controller.app import create_app
 from c2hunter_controller.config import Settings

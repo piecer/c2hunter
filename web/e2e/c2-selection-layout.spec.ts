@@ -78,7 +78,39 @@ for (const width of [1280, 390]) {
     const datasetDescription = page.locator('.panel.compact > p').filter({ hasText: datasetId });
     await expect(datasetDescription).toContainText(datasetId);
     expect(await datasetDescription.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    const savedRun = page.getByRole('combobox', { name: 'Saved AI run', exact: true });
+    await expect(savedRun.locator('option:checked')).toHaveText(`${run.created_at} · ${run.status} · ${run.id}`);
+    const collapsedGeometry = await page.evaluate(() => {
+      const measure = (element: Element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return { tag: element.tagName, className: element.className, left: rect.left, right: rect.right,
+          width: rect.width, client: element.clientWidth, scroll: element.scrollWidth,
+          minWidth: style.minWidth, cssWidth: style.width, display: style.display,
+          columns: style.gridTemplateColumns, overflowX: style.overflowX };
+      };
+      const select = document.querySelector('section[aria-labelledby="ai-c2-analysis-heading"] > label > select')!;
+      const owners = [];
+      for (let element: Element | null = select; element; element = element.parentElement) owners.push(measure(element));
+      return { viewport: innerWidth, body: document.body.scrollWidth, document: document.documentElement.scrollWidth,
+        owners, overflowing: Array.from(document.querySelectorAll('body *')).filter(element => {
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && rect.right > innerWidth + 1;
+        }).map(measure) };
+    });
+    await testInfo.attach('collapsed-geometry', { body: JSON.stringify(collapsedGeometry, null, 2), contentType: 'application/json' });
+    await testInfo.attach('collapsed-page', { body: await page.screenshot({ fullPage: true }), contentType: 'image/png' });
     await expectPageFits(page);
+    await expectWithinViewport(savedRun);
+    await savedRun.focus();
+    await expect(savedRun).toBeFocused();
+    await savedRun.press('Alt+ArrowDown');
+    await expect(savedRun.locator('option:checked')).toHaveAccessibleName(`${run.created_at} · ${run.status} · ${run.id}`);
+    await testInfo.attach('saved-run-picker', { body: await page.screenshot(), contentType: 'image/png' });
+    await savedRun.press('Home');
+    await savedRun.press('Enter');
+    await expect(savedRun).toHaveValue(run.id);
+    await expect(savedRun.locator('option:checked')).toHaveText(`${run.created_at} · ${run.status} · ${run.id}`);
     await toggle.click();
     const table = coverage.getByRole('table', { name: 'Selection inventory' });
     await expect(table.locator('tbody tr')).toHaveCount(20);
@@ -91,6 +123,7 @@ for (const width of [1280, 390]) {
     }));
     console.log(`inventory layout ${width}: ${JSON.stringify(geometry)}`);
     await testInfo.attach('layout', { body: JSON.stringify(geometry), contentType: 'application/json' });
+    await testInfo.attach('expanded-page', { body: await page.screenshot({ fullPage: true }), contentType: 'image/png' });
     await expectPageFits(page);
     await expectWithinViewport(coverage);
     await expectWithinViewport(wrap);
