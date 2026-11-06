@@ -26,6 +26,9 @@ def main(argv: list[str] | None = None) -> int:
         # Schema operations never use blob storage; no service client is created.
         repo = PostgresRepository(database_url, cast(MinioBlobStore, None))
         repo.initialize_schema(lock_timeout_seconds=args.lock_timeout)
+        from .ai_investigation_store import initialize_investigation_store
+
+        initialize_investigation_store(repo)
     except Exception:
         # Driver errors can include credentials, DSNs and legacy JSON contents.
         print("PostgreSQL migration failed; schema is not confirmed ready", file=sys.stderr)

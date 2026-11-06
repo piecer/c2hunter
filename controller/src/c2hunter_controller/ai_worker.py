@@ -139,6 +139,15 @@ class AIAnalysisWorker:
         retries = int(getattr(gateway, "retries", 1))
         self._liveness_seconds = 5 * 2 * (retries + 1) * timeout + 30
         self._heartbeat_deadline = 0.0
+        from .ai_investigation_worker import InvestigationSupervisor, configured_service
+
+        investigation_service, _ = configured_service(getattr(service, "repository", None), gateway)
+        self.investigation_runtime = (
+            InvestigationSupervisor(investigation_service)
+            if investigation_service is not None and investigation_service.gateway is not None
+            else None
+        )
+        self.investigation_drained = True
 
     def run_once(self, timeout: int = 1) -> bool:
         with self._heartbeat():
@@ -182,11 +191,15 @@ class AIAnalysisWorker:
 
     def run(self, stopped: Event) -> None:
         try:
+            if self.investigation_runtime is not None:
+                self.investigation_runtime.start(stopped)
             with self._heartbeat(stopped):
                 while not stopped.is_set():
                     self._run_once(timeout=1)
         finally:
-            self._write_health("STOPPED")
+            if self.investigation_runtime is not None:
+                self.investigation_drained = self.investigation_runtime.close(2.0)
+            self._write_health("STOPPED" if self.investigation_drained else "STOPPING")
 
     @contextmanager
     def _heartbeat(self, stopped: Event | None = None) -> Iterator[None]:
@@ -350,8 +363,9 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    AIAnalysisWorker(queue, service, health_path=health_path, metrics=metrics).run(stopped)
-    return 0
+    worker = AIAnalysisWorker(queue, service, health_path=health_path, metrics=metrics)
+    worker.run(stopped)
+    return 0 if worker.investigation_drained else 1
 
 
 if __name__ == "__main__":

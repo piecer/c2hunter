@@ -147,6 +147,8 @@ class Settings(BaseSettings):
     analysis_job_rate_limit: int = Field(default=30, gt=0)
     trusted_proxy_cidrs: str = ""
     ai_analysis_enabled: bool = False
+    # Opt-in application-owned investigation supervisor; legacy AI queue is unchanged.
+    ai_investigation_inline_enabled: bool = False
     ai_model_provider: Literal["fake", "ollama", "openai-compatible"] = "fake"
     ai_model_base_url: str = "http://127.0.0.1:11434"
     ai_model_name: str = "qwen3.6-agent:256k"

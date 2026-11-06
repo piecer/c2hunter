@@ -1,0 +1,1 @@
+{"code":null,"evidence_id":"ba4e026109888a679ecb98483c59d9969af336aca0d834f2e9670a6e92ececc5","kind":"TOOL","progress":{"model_calls":1,"source_bytes":8650752,"source_bytes_accounting":"RESERVED_READER_UPPER_BOUND_NOT_MEASURED","source_records":2,"tool_calls":2,"transport_attempts":1},"sequence":4,"tool":"peer_protocol_observations","version":"ip-investigation-v1"}

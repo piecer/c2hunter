@@ -1,0 +1,1 @@
+{"code":null,"evidence_id":null,"kind":"MODEL","progress":{"model_calls":1,"source_bytes":8650752,"source_bytes_accounting":"RESERVED_READER_UPPER_BOUND_NOT_MEASURED","source_records":2,"tool_calls":1,"transport_attempts":1},"sequence":3,"tool":null,"version":"ip-investigation-v1"}

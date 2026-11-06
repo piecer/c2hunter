@@ -1,0 +1,3108 @@
+{
+  "Evidence": {
+    "$defs": {
+      "CohortPeer": {
+        "additionalProperties": false,
+        "properties": {
+          "comparison": {
+            "const": "SAME_SOURCE_PROTOCOL_OVERLAP",
+            "default": "SAME_SOURCE_PROTOCOL_OVERLAP",
+            "title": "Comparison",
+            "type": "string"
+          },
+          "ip": {
+            "title": "Ip",
+            "type": "string"
+          },
+          "observed_byte_rows": {
+            "title": "Observed Byte Rows",
+            "type": "integer"
+          },
+          "rows": {
+            "title": "Rows",
+            "type": "integer"
+          },
+          "sensor_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Sensor Id",
+            "type": "string"
+          },
+          "total_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Bytes"
+          }
+        },
+        "required": [
+          "sensor_id",
+          "ip",
+          "rows",
+          "total_bytes",
+          "observed_byte_rows"
+        ],
+        "title": "CohortPeer",
+        "type": "object"
+      },
+      "Counts": {
+        "additionalProperties": false,
+        "properties": {
+          "inspected": {
+            "title": "Inspected",
+            "type": "integer"
+          },
+          "matched": {
+            "title": "Matched",
+            "type": "integer"
+          },
+          "not_observed": {
+            "title": "Not Observed",
+            "type": "integer"
+          },
+          "omitted": {
+            "title": "Omitted",
+            "type": "integer"
+          },
+          "retained": {
+            "title": "Retained",
+            "type": "integer"
+          },
+          "scope_unavailable": {
+            "default": 0,
+            "maximum": 8192,
+            "minimum": 0,
+            "title": "Scope Unavailable",
+            "type": "integer"
+          },
+          "unavailable": {
+            "default": 0,
+            "title": "Unavailable",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "inspected",
+          "matched",
+          "retained",
+          "omitted",
+          "not_observed"
+        ],
+        "title": "Counts",
+        "type": "object"
+      },
+      "InvestigationScope": {
+        "additionalProperties": false,
+        "properties": {
+          "end_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "End Time"
+          },
+          "endpoint_side": {
+            "default": "either",
+            "enum": [
+              "either",
+              "source",
+              "destination"
+            ],
+            "title": "Endpoint Side",
+            "type": "string"
+          },
+          "sensor_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sensor Id"
+          },
+          "start_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Start Time"
+          },
+          "target_ip": {
+            "title": "Target Ip",
+            "type": "string"
+          },
+          "traffic_direction": {
+            "anyOf": [
+              {
+                "enum": [
+                  "INBOUND",
+                  "OUTBOUND",
+                  "INTERNAL",
+                  "UNKNOWN"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Traffic Direction"
+          }
+        },
+        "required": [
+          "target_ip"
+        ],
+        "title": "InvestigationScope",
+        "type": "object"
+      },
+      "Metric": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "enum": [
+              "matched_rows",
+              "total_bytes",
+              "packet_count",
+              "sensor_count",
+              "c2_eligible_rows",
+              "suppressed_control_rows",
+              "eligibility_unavailable_rows",
+              "inbound_rows",
+              "outbound_rows",
+              "internal_rows",
+              "unknown_rows",
+              "inbound_bytes",
+              "outbound_bytes",
+              "internal_bytes",
+              "unknown_bytes"
+            ],
+            "title": "Name",
+            "type": "string"
+          },
+          "observed_rows": {
+            "title": "Observed Rows",
+            "type": "integer"
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "unavailable_rows": {
+            "title": "Unavailable Rows",
+            "type": "integer"
+          },
+          "unit": {
+            "enum": [
+              "rows",
+              "bytes",
+              "packets",
+              "sensors"
+            ],
+            "title": "Unit",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "ref",
+          "name",
+          "unit",
+          "value",
+          "observed_rows",
+          "unavailable_rows"
+        ],
+        "title": "Metric",
+        "type": "object"
+      },
+      "Observation": {
+        "additionalProperties": false,
+        "properties": {
+          "certificate_fingerprint": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "pattern": "^[a-zA-Z0-9:_-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Certificate Fingerprint"
+          },
+          "destination_ip": {
+            "title": "Destination Ip",
+            "type": "string"
+          },
+          "destination_port": {
+            "anyOf": [
+              {
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Destination Port"
+          },
+          "direction": {
+            "enum": [
+              "INBOUND",
+              "OUTBOUND",
+              "INTERNAL",
+              "UNKNOWN"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "maxLength": 253,
+                "pattern": "^[a-zA-Z0-9_.-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Domain"
+          },
+          "duration_seconds": {
+            "anyOf": [
+              {
+                "maximum": 1000000000.0,
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Duration Seconds"
+          },
+          "ordinal": {
+            "exclusiveMaximum": 8192,
+            "minimum": 0,
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "packet_count": {
+            "anyOf": [
+              {
+                "maximum": 1099511627775,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Packet Count"
+          },
+          "payload_length": {
+            "anyOf": [
+              {
+                "maximum": 1099511627775,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Payload Length"
+          },
+          "payload_length_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "payload_length",
+                  "complete_transport_packet"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Payload Length Source"
+          },
+          "present_fields": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Present Fields",
+            "type": "array"
+          },
+          "protocol": {
+            "enum": [
+              "TCP",
+              "UDP",
+              "ICMP",
+              "ICMPV6",
+              "OTHER"
+            ],
+            "title": "Protocol",
+            "type": "string"
+          },
+          "row_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Row Sha256",
+            "type": "string"
+          },
+          "sensor_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Sensor Id",
+            "type": "string"
+          },
+          "source_ip": {
+            "title": "Source Ip",
+            "type": "string"
+          },
+          "source_port": {
+            "anyOf": [
+              {
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source Port"
+          },
+          "tcp_flags": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/$defs/TCPFlag"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tcp Flags"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "tls_fingerprint": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "pattern": "^[a-zA-Z0-9:_-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tls Fingerprint"
+          },
+          "total_bytes": {
+            "anyOf": [
+              {
+                "maximum": 1099511627775,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Total Bytes"
+          },
+          "unavailable_fields": {
+            "default": [],
+            "items": {
+              "enum": [
+                "protocol",
+                "direction",
+                "domain",
+                "tls_fingerprint",
+                "certificate_fingerprint"
+              ],
+              "type": "string"
+            },
+            "maxItems": 5,
+            "title": "Unavailable Fields",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ordinal",
+          "row_sha256",
+          "sensor_id",
+          "timestamp",
+          "source_ip",
+          "destination_ip",
+          "protocol",
+          "direction",
+          "present_fields"
+        ],
+        "title": "Observation",
+        "type": "object"
+      },
+      "ProtocolObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "c2_eligibility": {
+            "enum": [
+              "ELIGIBLE",
+              "UNAVAILABLE",
+              "SUPPRESSED_OUTBOUND_CONTROL"
+            ],
+            "title": "C2 Eligibility",
+            "type": "string"
+          },
+          "certificate_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Certificate Fingerprint"
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain"
+          },
+          "payload_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payload Length"
+          },
+          "payload_length_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "payload_length",
+                  "complete_transport_packet"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Payload Length Source"
+          },
+          "ref": {
+            "$ref": "#/$defs/RowReference"
+          },
+          "tcp_flags": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/$defs/TCPFlag"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tcp Flags"
+          },
+          "tls_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tls Fingerprint"
+          }
+        },
+        "required": [
+          "ref",
+          "domain",
+          "tls_fingerprint",
+          "certificate_fingerprint",
+          "payload_length",
+          "tcp_flags",
+          "c2_eligibility"
+        ],
+        "title": "ProtocolObservation",
+        "type": "object"
+      },
+      "RowReference": {
+        "additionalProperties": false,
+        "properties": {
+          "ordinal": {
+            "exclusiveMaximum": 8192,
+            "minimum": 0,
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "row_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Row Sha256",
+            "type": "string"
+          },
+          "source_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_sha256",
+          "ordinal",
+          "row_sha256"
+        ],
+        "title": "RowReference",
+        "type": "object"
+      },
+      "Sample": {
+        "additionalProperties": false,
+        "properties": {
+          "c2_eligibility": {
+            "enum": [
+              "ELIGIBLE",
+              "UNAVAILABLE",
+              "SUPPRESSED_OUTBOUND_CONTROL"
+            ],
+            "title": "C2 Eligibility",
+            "type": "string"
+          },
+          "ref": {
+            "$ref": "#/$defs/RowReference"
+          },
+          "row": {
+            "$ref": "#/$defs/Observation"
+          },
+          "selection": {
+            "const": "SOURCE_ORDER",
+            "default": "SOURCE_ORDER",
+            "title": "Selection",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ref",
+          "row",
+          "c2_eligibility"
+        ],
+        "title": "Sample",
+        "type": "object"
+      },
+      "SourceBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "dataset_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Dataset Id",
+            "type": "string"
+          },
+          "job_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "metadata_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Metadata Sha256",
+            "type": "string"
+          },
+          "projection_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Projection Sha256",
+            "type": "string"
+          },
+          "rows_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Rows Sha256",
+            "type": "string"
+          },
+          "source_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Sha256",
+            "type": "string"
+          },
+          "version": {
+            "const": "ip-evidence-v1",
+            "default": "ip-evidence-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "dataset_id",
+          "metadata_sha256",
+          "rows_sha256",
+          "projection_sha256",
+          "source_sha256"
+        ],
+        "title": "SourceBinding",
+        "type": "object"
+      },
+      "TCPFlag": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "maximum": 1099511627775,
+            "minimum": 0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "name": {
+            "enum": [
+              "syn",
+              "ack",
+              "fin",
+              "rst",
+              "psh",
+              "urg",
+              "ece",
+              "cwr"
+            ],
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "count"
+        ],
+        "title": "TCPFlag",
+        "type": "object"
+      },
+      "TimelineBucket": {
+        "additionalProperties": false,
+        "properties": {
+          "aggregate_rows": {
+            "title": "Aggregate Rows",
+            "type": "integer"
+          },
+          "end_time": {
+            "title": "End Time",
+            "type": "string"
+          },
+          "packet_interval_mean_seconds": {
+            "default": null,
+            "title": "Packet Interval Mean Seconds",
+            "type": "null"
+          },
+          "packet_rows": {
+            "title": "Packet Rows",
+            "type": "integer"
+          },
+          "rows": {
+            "title": "Rows",
+            "type": "integer"
+          },
+          "sensor_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Sensor Id",
+            "type": "string"
+          },
+          "start_time": {
+            "title": "Start Time",
+            "type": "string"
+          },
+          "unavailable_rows": {
+            "title": "Unavailable Rows",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sensor_id",
+          "start_time",
+          "end_time",
+          "rows",
+          "packet_rows",
+          "aggregate_rows",
+          "unavailable_rows"
+        ],
+        "title": "TimelineBucket",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "args_sha256": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Args Sha256",
+        "type": "string"
+      },
+      "cohort": {
+        "default": [],
+        "items": {
+          "$ref": "#/$defs/CohortPeer"
+        },
+        "title": "Cohort",
+        "type": "array"
+      },
+      "cohort_omitted": {
+        "default": 0,
+        "title": "Cohort Omitted",
+        "type": "integer"
+      },
+      "cohort_total": {
+        "default": 0,
+        "title": "Cohort Total",
+        "type": "integer"
+      },
+      "cohort_unavailable_rows": {
+        "default": 0,
+        "maximum": 8192,
+        "minimum": 0,
+        "title": "Cohort Unavailable Rows",
+        "type": "integer"
+      },
+      "counts": {
+        "$ref": "#/$defs/Counts"
+      },
+      "evidence_id": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Evidence Id",
+        "type": "string"
+      },
+      "limit": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Limit"
+      },
+      "limitations": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Limitations",
+        "type": "array"
+      },
+      "metrics": {
+        "items": {
+          "$ref": "#/$defs/Metric"
+        },
+        "title": "Metrics",
+        "type": "array"
+      },
+      "protocols": {
+        "default": [],
+        "items": {
+          "$ref": "#/$defs/ProtocolObservation"
+        },
+        "title": "Protocols",
+        "type": "array"
+      },
+      "samples": {
+        "default": [],
+        "items": {
+          "$ref": "#/$defs/Sample"
+        },
+        "title": "Samples",
+        "type": "array"
+      },
+      "scope": {
+        "$ref": "#/$defs/InvestigationScope"
+      },
+      "source": {
+        "$ref": "#/$defs/SourceBinding"
+      },
+      "status": {
+        "enum": [
+          "OBSERVED",
+          "NOT_OBSERVED",
+          "UNAVAILABLE",
+          "NOT_FOUND_IN_INSPECTED_SCOPE"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "timeline": {
+        "default": [],
+        "items": {
+          "$ref": "#/$defs/TimelineBucket"
+        },
+        "title": "Timeline",
+        "type": "array"
+      },
+      "tool": {
+        "enum": [
+          "peer_overview",
+          "peer_flow_samples",
+          "peer_timeline",
+          "peer_protocol_observations",
+          "compare_peer_cohort"
+        ],
+        "title": "Tool",
+        "type": "string"
+      },
+      "version": {
+        "const": "ip-evidence-v1",
+        "default": "ip-evidence-v1",
+        "title": "Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "evidence_id",
+      "source",
+      "scope",
+      "tool",
+      "args_sha256",
+      "status",
+      "counts",
+      "metrics",
+      "limitations"
+    ],
+    "title": "Evidence",
+    "type": "object"
+  },
+  "InvestigationCapabilities": {
+    "additionalProperties": false,
+    "properties": {
+      "availability": {
+        "enum": [
+          "CONFIGURED_NOT_PROBED",
+          "UNAVAILABLE"
+        ],
+        "title": "Availability",
+        "type": "string"
+      },
+      "deadline_seconds": {
+        "const": 300,
+        "default": 300,
+        "title": "Deadline Seconds",
+        "type": "integer"
+      },
+      "max_model_calls": {
+        "const": 6,
+        "default": 6,
+        "title": "Max Model Calls",
+        "type": "integer"
+      },
+      "max_planning_responses": {
+        "const": 4,
+        "default": 4,
+        "title": "Max Planning Responses",
+        "type": "integer"
+      },
+      "max_tool_calls": {
+        "const": 12,
+        "default": 12,
+        "title": "Max Tool Calls",
+        "type": "integer"
+      },
+      "max_transport_attempts": {
+        "const": 12,
+        "default": 12,
+        "title": "Max Transport Attempts",
+        "type": "integer"
+      },
+      "modes": {
+        "default": [
+          "IP"
+        ],
+        "items": {
+          "const": "IP",
+          "type": "string"
+        },
+        "title": "Modes",
+        "type": "array"
+      },
+      "preparation_concurrency": {
+        "const": 2,
+        "default": 2,
+        "title": "Preparation Concurrency",
+        "type": "integer"
+      },
+      "preparation_concurrency_scope": {
+        "const": "PROCESS_ONLY",
+        "default": "PROCESS_ONLY",
+        "title": "Preparation Concurrency Scope",
+        "type": "string"
+      },
+      "remote_server_allowed": {
+        "title": "Remote Server Allowed",
+        "type": "boolean"
+      },
+      "retained_evidence_bytes": {
+        "default": 131072,
+        "title": "Retained Evidence Bytes",
+        "type": "integer"
+      },
+      "snapshot_bytes": {
+        "default": 131072,
+        "title": "Snapshot Bytes",
+        "type": "integer"
+      },
+      "source_bytes_accounting": {
+        "const": "RESERVED_READER_UPPER_BOUND_NOT_MEASURED",
+        "default": "RESERVED_READER_UPPER_BOUND_NOT_MEASURED",
+        "title": "Source Bytes Accounting",
+        "type": "string"
+      },
+      "source_reservation_bytes": {
+        "default": 8650752,
+        "title": "Source Reservation Bytes",
+        "type": "integer"
+      },
+      "version": {
+        "const": "ip-investigation-v1",
+        "default": "ip-investigation-v1",
+        "title": "Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "availability",
+      "remote_server_allowed"
+    ],
+    "title": "InvestigationCapabilities",
+    "type": "object"
+  },
+  "InvestigationRequest": {
+    "additionalProperties": false,
+    "properties": {
+      "allow_remote": {
+        "default": false,
+        "title": "Allow Remote",
+        "type": "boolean"
+      },
+      "end_time": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "End Time"
+      },
+      "endpoint_side": {
+        "default": "either",
+        "enum": [
+          "either",
+          "source",
+          "destination"
+        ],
+        "title": "Endpoint Side",
+        "type": "string"
+      },
+      "expected_source_sha256": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Expected Source Sha256",
+        "type": "string"
+      },
+      "idempotency_key": {
+        "maxLength": 200,
+        "minLength": 1,
+        "pattern": "^[!-~]+$",
+        "title": "Idempotency Key",
+        "type": "string"
+      },
+      "language": {
+        "default": "ko",
+        "enum": [
+          "ko",
+          "en"
+        ],
+        "title": "Language",
+        "type": "string"
+      },
+      "mode": {
+        "const": "IP",
+        "default": "IP",
+        "title": "Mode",
+        "type": "string"
+      },
+      "question": {
+        "maxLength": 2000,
+        "minLength": 1,
+        "title": "Question",
+        "type": "string"
+      },
+      "sensor_id": {
+        "anyOf": [
+          {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Sensor Id"
+      },
+      "start_time": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Start Time"
+      },
+      "target_ip": {
+        "title": "Target Ip",
+        "type": "string"
+      },
+      "traffic_direction": {
+        "anyOf": [
+          {
+            "enum": [
+              "INBOUND",
+              "OUTBOUND",
+              "INTERNAL",
+              "UNKNOWN"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Traffic Direction"
+      },
+      "version": {
+        "const": "ip-investigation-v1",
+        "default": "ip-investigation-v1",
+        "title": "Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "target_ip",
+      "question",
+      "idempotency_key",
+      "expected_source_sha256"
+    ],
+    "title": "InvestigationRequest",
+    "type": "object"
+  },
+  "InvestigationResult": {
+    "$defs": {
+      "Counts": {
+        "additionalProperties": false,
+        "properties": {
+          "inspected": {
+            "title": "Inspected",
+            "type": "integer"
+          },
+          "matched": {
+            "title": "Matched",
+            "type": "integer"
+          },
+          "not_observed": {
+            "title": "Not Observed",
+            "type": "integer"
+          },
+          "omitted": {
+            "title": "Omitted",
+            "type": "integer"
+          },
+          "retained": {
+            "title": "Retained",
+            "type": "integer"
+          },
+          "scope_unavailable": {
+            "default": 0,
+            "maximum": 8192,
+            "minimum": 0,
+            "title": "Scope Unavailable",
+            "type": "integer"
+          },
+          "unavailable": {
+            "default": 0,
+            "title": "Unavailable",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "inspected",
+          "matched",
+          "retained",
+          "omitted",
+          "not_observed"
+        ],
+        "title": "Counts",
+        "type": "object"
+      },
+      "EvidenceQuality": {
+        "additionalProperties": false,
+        "properties": {
+          "counts": {
+            "$ref": "#/$defs/Counts"
+          },
+          "evidence_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "OBSERVED",
+              "NOT_OBSERVED",
+              "UNAVAILABLE",
+              "NOT_FOUND_IN_INSPECTED_SCOPE"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "tool": {
+            "enum": [
+              "peer_overview",
+              "peer_flow_samples",
+              "peer_timeline",
+              "peer_protocol_observations",
+              "compare_peer_cohort"
+            ],
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "evidence_id",
+          "tool",
+          "status",
+          "counts"
+        ],
+        "title": "EvidenceQuality",
+        "type": "object"
+      },
+      "ExecutionIdentity": {
+        "additionalProperties": false,
+        "description": "Declared configuration, not proof of immutable provider model weights.",
+        "properties": {
+          "action_schema_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Action Schema Sha256",
+            "type": "string"
+          },
+          "evidence_version": {
+            "const": "ip-evidence-v1",
+            "default": "ip-evidence-v1",
+            "title": "Evidence Version",
+            "type": "string"
+          },
+          "final_schema_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Final Schema Sha256",
+            "type": "string"
+          },
+          "model": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "model_config_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Model Config Sha256",
+            "type": "string"
+          },
+          "model_settings": {
+            "$ref": "#/$defs/ModelSettings"
+          },
+          "policy_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "policy_version": {
+            "const": "ip-investigation-policy-v1",
+            "default": "ip-investigation-policy-v1",
+            "title": "Policy Version",
+            "type": "string"
+          },
+          "prompt_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Prompt Sha256",
+            "type": "string"
+          },
+          "prompt_version": {
+            "const": "ip-investigation-prompt-v1",
+            "default": "ip-investigation-prompt-v1",
+            "title": "Prompt Version",
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "ollama",
+              "openai-compatible"
+            ],
+            "title": "Provider",
+            "type": "string"
+          },
+          "version": {
+            "const": "ip-investigation-execution-v1",
+            "default": "ip-investigation-execution-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "model",
+          "model_settings",
+          "model_config_sha256",
+          "prompt_sha256",
+          "action_schema_sha256",
+          "final_schema_sha256",
+          "policy_sha256"
+        ],
+        "title": "ExecutionIdentity",
+        "type": "object"
+      },
+      "Interpretation": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_ids": {
+            "items": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Evidence Ids",
+            "type": "array"
+          },
+          "metric_refs": {
+            "items": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "maxItems": 3,
+            "title": "Metric Refs",
+            "type": "array"
+          },
+          "text": {
+            "maxLength": 600,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "evidence_ids",
+          "metric_refs"
+        ],
+        "title": "Interpretation",
+        "type": "object"
+      },
+      "InvestigationScope": {
+        "additionalProperties": false,
+        "properties": {
+          "end_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "End Time"
+          },
+          "endpoint_side": {
+            "default": "either",
+            "enum": [
+              "either",
+              "source",
+              "destination"
+            ],
+            "title": "Endpoint Side",
+            "type": "string"
+          },
+          "sensor_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sensor Id"
+          },
+          "start_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Start Time"
+          },
+          "target_ip": {
+            "title": "Target Ip",
+            "type": "string"
+          },
+          "traffic_direction": {
+            "anyOf": [
+              {
+                "enum": [
+                  "INBOUND",
+                  "OUTBOUND",
+                  "INTERNAL",
+                  "UNKNOWN"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Traffic Direction"
+          }
+        },
+        "required": [
+          "target_ip"
+        ],
+        "title": "InvestigationScope",
+        "type": "object"
+      },
+      "Metric": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "enum": [
+              "matched_rows",
+              "total_bytes",
+              "packet_count",
+              "sensor_count",
+              "c2_eligible_rows",
+              "suppressed_control_rows",
+              "eligibility_unavailable_rows",
+              "inbound_rows",
+              "outbound_rows",
+              "internal_rows",
+              "unknown_rows",
+              "inbound_bytes",
+              "outbound_bytes",
+              "internal_bytes",
+              "unknown_bytes"
+            ],
+            "title": "Name",
+            "type": "string"
+          },
+          "observed_rows": {
+            "title": "Observed Rows",
+            "type": "integer"
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "unavailable_rows": {
+            "title": "Unavailable Rows",
+            "type": "integer"
+          },
+          "unit": {
+            "enum": [
+              "rows",
+              "bytes",
+              "packets",
+              "sensors"
+            ],
+            "title": "Unit",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "ref",
+          "name",
+          "unit",
+          "value",
+          "observed_rows",
+          "unavailable_rows"
+        ],
+        "title": "Metric",
+        "type": "object"
+      },
+      "ModelSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "context_tokens": {
+            "maximum": 262144,
+            "minimum": 8192,
+            "title": "Context Tokens",
+            "type": "integer"
+          },
+          "max_output_tokens": {
+            "maximum": 16384,
+            "minimum": 1,
+            "title": "Max Output Tokens",
+            "type": "integer"
+          },
+          "temperature": {
+            "maximum": 1,
+            "minimum": 0,
+            "title": "Temperature",
+            "type": "number"
+          },
+          "timeout_seconds": {
+            "exclusiveMinimum": 0,
+            "maximum": 600,
+            "title": "Timeout Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "temperature",
+          "context_tokens",
+          "max_output_tokens",
+          "timeout_seconds"
+        ],
+        "title": "ModelSettings",
+        "type": "object"
+      },
+      "Progress": {
+        "additionalProperties": false,
+        "properties": {
+          "model_calls": {
+            "default": 0,
+            "maximum": 6,
+            "minimum": 0,
+            "title": "Model Calls",
+            "type": "integer"
+          },
+          "source_bytes": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Source Bytes",
+            "type": "integer"
+          },
+          "source_bytes_accounting": {
+            "const": "RESERVED_READER_UPPER_BOUND_NOT_MEASURED",
+            "default": "RESERVED_READER_UPPER_BOUND_NOT_MEASURED",
+            "title": "Source Bytes Accounting",
+            "type": "string"
+          },
+          "source_records": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Source Records",
+            "type": "integer"
+          },
+          "tool_calls": {
+            "default": 0,
+            "maximum": 12,
+            "minimum": 0,
+            "title": "Tool Calls",
+            "type": "integer"
+          },
+          "transport_attempts": {
+            "default": 0,
+            "maximum": 12,
+            "minimum": 0,
+            "title": "Transport Attempts",
+            "type": "integer"
+          }
+        },
+        "title": "Progress",
+        "type": "object"
+      },
+      "SourceBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "dataset_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Dataset Id",
+            "type": "string"
+          },
+          "job_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "metadata_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Metadata Sha256",
+            "type": "string"
+          },
+          "projection_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Projection Sha256",
+            "type": "string"
+          },
+          "rows_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Rows Sha256",
+            "type": "string"
+          },
+          "source_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Sha256",
+            "type": "string"
+          },
+          "version": {
+            "const": "ip-evidence-v1",
+            "default": "ip-evidence-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "dataset_id",
+          "metadata_sha256",
+          "rows_sha256",
+          "projection_sha256",
+          "source_sha256"
+        ],
+        "title": "SourceBinding",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "counterevidence": {
+        "items": {
+          "$ref": "#/$defs/Interpretation"
+        },
+        "title": "Counterevidence",
+        "type": "array"
+      },
+      "counts": {
+        "$ref": "#/$defs/Counts"
+      },
+      "evidence_quality": {
+        "items": {
+          "$ref": "#/$defs/EvidenceQuality"
+        },
+        "maxItems": 12,
+        "minItems": 1,
+        "title": "Evidence Quality",
+        "type": "array"
+      },
+      "execution": {
+        "$ref": "#/$defs/ExecutionIdentity"
+      },
+      "facts": {
+        "items": {
+          "$ref": "#/$defs/Metric"
+        },
+        "maxItems": 24,
+        "title": "Facts",
+        "type": "array"
+      },
+      "language": {
+        "enum": [
+          "ko",
+          "en"
+        ],
+        "title": "Language",
+        "type": "string"
+      },
+      "limitations": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Limitations",
+        "type": "array"
+      },
+      "mode": {
+        "enum": [
+          "MODEL_ASSISTED",
+          "FACTS_ONLY"
+        ],
+        "title": "Mode",
+        "type": "string"
+      },
+      "next_checks": {
+        "items": {
+          "maxLength": 600,
+          "minLength": 1,
+          "type": "string"
+        },
+        "title": "Next Checks",
+        "type": "array"
+      },
+      "partial_scope": {
+        "const": true,
+        "default": true,
+        "title": "Partial Scope",
+        "type": "boolean"
+      },
+      "progress": {
+        "$ref": "#/$defs/Progress"
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "maxLength": 64,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Reason"
+      },
+      "scope": {
+        "$ref": "#/$defs/InvestigationScope"
+      },
+      "source": {
+        "$ref": "#/$defs/SourceBinding"
+      },
+      "support": {
+        "items": {
+          "$ref": "#/$defs/Interpretation"
+        },
+        "title": "Support",
+        "type": "array"
+      },
+      "uncertainty": {
+        "items": {
+          "maxLength": 600,
+          "minLength": 1,
+          "type": "string"
+        },
+        "title": "Uncertainty",
+        "type": "array"
+      },
+      "verdict": {
+        "enum": [
+          "SUSPICIOUS_C2",
+          "BENIGN_HYPOTHESIS",
+          "NEEDS_REVIEW",
+          "INCONCLUSIVE"
+        ],
+        "title": "Verdict",
+        "type": "string"
+      },
+      "version": {
+        "const": "ip-investigation-v1",
+        "default": "ip-investigation-v1",
+        "title": "Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "verdict",
+      "mode",
+      "language",
+      "source",
+      "scope",
+      "counts",
+      "facts",
+      "evidence_quality",
+      "support",
+      "counterevidence",
+      "uncertainty",
+      "next_checks",
+      "limitations",
+      "execution",
+      "progress"
+    ],
+    "title": "InvestigationResult",
+    "type": "object"
+  },
+  "InvestigationRun": {
+    "$defs": {
+      "Counts": {
+        "additionalProperties": false,
+        "properties": {
+          "inspected": {
+            "title": "Inspected",
+            "type": "integer"
+          },
+          "matched": {
+            "title": "Matched",
+            "type": "integer"
+          },
+          "not_observed": {
+            "title": "Not Observed",
+            "type": "integer"
+          },
+          "omitted": {
+            "title": "Omitted",
+            "type": "integer"
+          },
+          "retained": {
+            "title": "Retained",
+            "type": "integer"
+          },
+          "scope_unavailable": {
+            "default": 0,
+            "maximum": 8192,
+            "minimum": 0,
+            "title": "Scope Unavailable",
+            "type": "integer"
+          },
+          "unavailable": {
+            "default": 0,
+            "title": "Unavailable",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "inspected",
+          "matched",
+          "retained",
+          "omitted",
+          "not_observed"
+        ],
+        "title": "Counts",
+        "type": "object"
+      },
+      "EvidenceQuality": {
+        "additionalProperties": false,
+        "properties": {
+          "counts": {
+            "$ref": "#/$defs/Counts"
+          },
+          "evidence_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "OBSERVED",
+              "NOT_OBSERVED",
+              "UNAVAILABLE",
+              "NOT_FOUND_IN_INSPECTED_SCOPE"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "tool": {
+            "enum": [
+              "peer_overview",
+              "peer_flow_samples",
+              "peer_timeline",
+              "peer_protocol_observations",
+              "compare_peer_cohort"
+            ],
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "evidence_id",
+          "tool",
+          "status",
+          "counts"
+        ],
+        "title": "EvidenceQuality",
+        "type": "object"
+      },
+      "ExecutionIdentity": {
+        "additionalProperties": false,
+        "description": "Declared configuration, not proof of immutable provider model weights.",
+        "properties": {
+          "action_schema_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Action Schema Sha256",
+            "type": "string"
+          },
+          "evidence_version": {
+            "const": "ip-evidence-v1",
+            "default": "ip-evidence-v1",
+            "title": "Evidence Version",
+            "type": "string"
+          },
+          "final_schema_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Final Schema Sha256",
+            "type": "string"
+          },
+          "model": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "model_config_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Model Config Sha256",
+            "type": "string"
+          },
+          "model_settings": {
+            "$ref": "#/$defs/ModelSettings"
+          },
+          "policy_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "policy_version": {
+            "const": "ip-investigation-policy-v1",
+            "default": "ip-investigation-policy-v1",
+            "title": "Policy Version",
+            "type": "string"
+          },
+          "prompt_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Prompt Sha256",
+            "type": "string"
+          },
+          "prompt_version": {
+            "const": "ip-investigation-prompt-v1",
+            "default": "ip-investigation-prompt-v1",
+            "title": "Prompt Version",
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "ollama",
+              "openai-compatible"
+            ],
+            "title": "Provider",
+            "type": "string"
+          },
+          "version": {
+            "const": "ip-investigation-execution-v1",
+            "default": "ip-investigation-execution-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "model",
+          "model_settings",
+          "model_config_sha256",
+          "prompt_sha256",
+          "action_schema_sha256",
+          "final_schema_sha256",
+          "policy_sha256"
+        ],
+        "title": "ExecutionIdentity",
+        "type": "object"
+      },
+      "Interpretation": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_ids": {
+            "items": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Evidence Ids",
+            "type": "array"
+          },
+          "metric_refs": {
+            "items": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "maxItems": 3,
+            "title": "Metric Refs",
+            "type": "array"
+          },
+          "text": {
+            "maxLength": 600,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "evidence_ids",
+          "metric_refs"
+        ],
+        "title": "Interpretation",
+        "type": "object"
+      },
+      "InvestigationFailure": {
+        "additionalProperties": false,
+        "properties": {
+          "execution": {
+            "$ref": "#/$defs/ExecutionIdentity"
+          },
+          "kind": {
+            "const": "FAILURE",
+            "default": "FAILURE",
+            "title": "Kind",
+            "type": "string"
+          },
+          "progress": {
+            "$ref": "#/$defs/Progress"
+          },
+          "reason": {
+            "maxLength": 64,
+            "title": "Reason",
+            "type": "string"
+          },
+          "version": {
+            "const": "ip-investigation-v1",
+            "default": "ip-investigation-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "execution",
+          "progress"
+        ],
+        "title": "InvestigationFailure",
+        "type": "object"
+      },
+      "InvestigationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_remote": {
+            "default": false,
+            "title": "Allow Remote",
+            "type": "boolean"
+          },
+          "end_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "End Time"
+          },
+          "endpoint_side": {
+            "default": "either",
+            "enum": [
+              "either",
+              "source",
+              "destination"
+            ],
+            "title": "Endpoint Side",
+            "type": "string"
+          },
+          "expected_source_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Expected Source Sha256",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[!-~]+$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "language": {
+            "default": "ko",
+            "enum": [
+              "ko",
+              "en"
+            ],
+            "title": "Language",
+            "type": "string"
+          },
+          "mode": {
+            "const": "IP",
+            "default": "IP",
+            "title": "Mode",
+            "type": "string"
+          },
+          "question": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          },
+          "sensor_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sensor Id"
+          },
+          "start_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Start Time"
+          },
+          "target_ip": {
+            "title": "Target Ip",
+            "type": "string"
+          },
+          "traffic_direction": {
+            "anyOf": [
+              {
+                "enum": [
+                  "INBOUND",
+                  "OUTBOUND",
+                  "INTERNAL",
+                  "UNKNOWN"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Traffic Direction"
+          },
+          "version": {
+            "const": "ip-investigation-v1",
+            "default": "ip-investigation-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_ip",
+          "question",
+          "idempotency_key",
+          "expected_source_sha256"
+        ],
+        "title": "InvestigationRequest",
+        "type": "object"
+      },
+      "InvestigationResult": {
+        "additionalProperties": false,
+        "properties": {
+          "counterevidence": {
+            "items": {
+              "$ref": "#/$defs/Interpretation"
+            },
+            "title": "Counterevidence",
+            "type": "array"
+          },
+          "counts": {
+            "$ref": "#/$defs/Counts"
+          },
+          "evidence_quality": {
+            "items": {
+              "$ref": "#/$defs/EvidenceQuality"
+            },
+            "maxItems": 12,
+            "minItems": 1,
+            "title": "Evidence Quality",
+            "type": "array"
+          },
+          "execution": {
+            "$ref": "#/$defs/ExecutionIdentity"
+          },
+          "facts": {
+            "items": {
+              "$ref": "#/$defs/Metric"
+            },
+            "maxItems": 24,
+            "title": "Facts",
+            "type": "array"
+          },
+          "language": {
+            "enum": [
+              "ko",
+              "en"
+            ],
+            "title": "Language",
+            "type": "string"
+          },
+          "limitations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Limitations",
+            "type": "array"
+          },
+          "mode": {
+            "enum": [
+              "MODEL_ASSISTED",
+              "FACTS_ONLY"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "next_checks": {
+            "items": {
+              "maxLength": 600,
+              "minLength": 1,
+              "type": "string"
+            },
+            "title": "Next Checks",
+            "type": "array"
+          },
+          "partial_scope": {
+            "const": true,
+            "default": true,
+            "title": "Partial Scope",
+            "type": "boolean"
+          },
+          "progress": {
+            "$ref": "#/$defs/Progress"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reason"
+          },
+          "scope": {
+            "$ref": "#/$defs/InvestigationScope"
+          },
+          "source": {
+            "$ref": "#/$defs/SourceBinding"
+          },
+          "support": {
+            "items": {
+              "$ref": "#/$defs/Interpretation"
+            },
+            "title": "Support",
+            "type": "array"
+          },
+          "uncertainty": {
+            "items": {
+              "maxLength": 600,
+              "minLength": 1,
+              "type": "string"
+            },
+            "title": "Uncertainty",
+            "type": "array"
+          },
+          "verdict": {
+            "enum": [
+              "SUSPICIOUS_C2",
+              "BENIGN_HYPOTHESIS",
+              "NEEDS_REVIEW",
+              "INCONCLUSIVE"
+            ],
+            "title": "Verdict",
+            "type": "string"
+          },
+          "version": {
+            "const": "ip-investigation-v1",
+            "default": "ip-investigation-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "verdict",
+          "mode",
+          "language",
+          "source",
+          "scope",
+          "counts",
+          "facts",
+          "evidence_quality",
+          "support",
+          "counterevidence",
+          "uncertainty",
+          "next_checks",
+          "limitations",
+          "execution",
+          "progress"
+        ],
+        "title": "InvestigationResult",
+        "type": "object"
+      },
+      "InvestigationScope": {
+        "additionalProperties": false,
+        "properties": {
+          "end_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "End Time"
+          },
+          "endpoint_side": {
+            "default": "either",
+            "enum": [
+              "either",
+              "source",
+              "destination"
+            ],
+            "title": "Endpoint Side",
+            "type": "string"
+          },
+          "sensor_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sensor Id"
+          },
+          "start_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Start Time"
+          },
+          "target_ip": {
+            "title": "Target Ip",
+            "type": "string"
+          },
+          "traffic_direction": {
+            "anyOf": [
+              {
+                "enum": [
+                  "INBOUND",
+                  "OUTBOUND",
+                  "INTERNAL",
+                  "UNKNOWN"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Traffic Direction"
+          }
+        },
+        "required": [
+          "target_ip"
+        ],
+        "title": "InvestigationScope",
+        "type": "object"
+      },
+      "Metric": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "enum": [
+              "matched_rows",
+              "total_bytes",
+              "packet_count",
+              "sensor_count",
+              "c2_eligible_rows",
+              "suppressed_control_rows",
+              "eligibility_unavailable_rows",
+              "inbound_rows",
+              "outbound_rows",
+              "internal_rows",
+              "unknown_rows",
+              "inbound_bytes",
+              "outbound_bytes",
+              "internal_bytes",
+              "unknown_bytes"
+            ],
+            "title": "Name",
+            "type": "string"
+          },
+          "observed_rows": {
+            "title": "Observed Rows",
+            "type": "integer"
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "unavailable_rows": {
+            "title": "Unavailable Rows",
+            "type": "integer"
+          },
+          "unit": {
+            "enum": [
+              "rows",
+              "bytes",
+              "packets",
+              "sensors"
+            ],
+            "title": "Unit",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "ref",
+          "name",
+          "unit",
+          "value",
+          "observed_rows",
+          "unavailable_rows"
+        ],
+        "title": "Metric",
+        "type": "object"
+      },
+      "ModelSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "context_tokens": {
+            "maximum": 262144,
+            "minimum": 8192,
+            "title": "Context Tokens",
+            "type": "integer"
+          },
+          "max_output_tokens": {
+            "maximum": 16384,
+            "minimum": 1,
+            "title": "Max Output Tokens",
+            "type": "integer"
+          },
+          "temperature": {
+            "maximum": 1,
+            "minimum": 0,
+            "title": "Temperature",
+            "type": "number"
+          },
+          "timeout_seconds": {
+            "exclusiveMinimum": 0,
+            "maximum": 600,
+            "title": "Timeout Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "temperature",
+          "context_tokens",
+          "max_output_tokens",
+          "timeout_seconds"
+        ],
+        "title": "ModelSettings",
+        "type": "object"
+      },
+      "Progress": {
+        "additionalProperties": false,
+        "properties": {
+          "model_calls": {
+            "default": 0,
+            "maximum": 6,
+            "minimum": 0,
+            "title": "Model Calls",
+            "type": "integer"
+          },
+          "source_bytes": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Source Bytes",
+            "type": "integer"
+          },
+          "source_bytes_accounting": {
+            "const": "RESERVED_READER_UPPER_BOUND_NOT_MEASURED",
+            "default": "RESERVED_READER_UPPER_BOUND_NOT_MEASURED",
+            "title": "Source Bytes Accounting",
+            "type": "string"
+          },
+          "source_records": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Source Records",
+            "type": "integer"
+          },
+          "tool_calls": {
+            "default": 0,
+            "maximum": 12,
+            "minimum": 0,
+            "title": "Tool Calls",
+            "type": "integer"
+          },
+          "transport_attempts": {
+            "default": 0,
+            "maximum": 12,
+            "minimum": 0,
+            "title": "Transport Attempts",
+            "type": "integer"
+          }
+        },
+        "title": "Progress",
+        "type": "object"
+      },
+      "SourceBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "dataset_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Dataset Id",
+            "type": "string"
+          },
+          "job_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "metadata_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Metadata Sha256",
+            "type": "string"
+          },
+          "projection_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Projection Sha256",
+            "type": "string"
+          },
+          "rows_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Rows Sha256",
+            "type": "string"
+          },
+          "source_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Sha256",
+            "type": "string"
+          },
+          "version": {
+            "const": "ip-evidence-v1",
+            "default": "ip-evidence-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "dataset_id",
+          "metadata_sha256",
+          "rows_sha256",
+          "projection_sha256",
+          "source_sha256"
+        ],
+        "title": "SourceBinding",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "created_at": {
+        "title": "Created At",
+        "type": "number"
+      },
+      "execution": {
+        "$ref": "#/$defs/ExecutionIdentity"
+      },
+      "id": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Id",
+        "type": "string"
+      },
+      "job_id": {
+        "maxLength": 200,
+        "minLength": 1,
+        "pattern": "^[!-~]+$",
+        "title": "Job Id",
+        "type": "string"
+      },
+      "language": {
+        "enum": [
+          "ko",
+          "en"
+        ],
+        "title": "Language",
+        "type": "string"
+      },
+      "owner_id": {
+        "maxLength": 200,
+        "minLength": 1,
+        "pattern": "^[!-~]+$",
+        "title": "Owner Id",
+        "type": "string"
+      },
+      "progress": {
+        "$ref": "#/$defs/Progress"
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Reason"
+      },
+      "request": {
+        "$ref": "#/$defs/InvestigationRequest"
+      },
+      "result": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InvestigationResult"
+          },
+          {
+            "$ref": "#/$defs/InvestigationFailure"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Result"
+      },
+      "revision": {
+        "minimum": 0,
+        "title": "Revision",
+        "type": "integer"
+      },
+      "scope": {
+        "$ref": "#/$defs/InvestigationScope"
+      },
+      "status": {
+        "enum": [
+          "QUEUED",
+          "PREPARING",
+          "INVESTIGATING",
+          "VALIDATING",
+          "COMPLETED",
+          "PARTIAL",
+          "FAILED",
+          "CANCELLED"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "target_ip": {
+        "title": "Target Ip",
+        "type": "string"
+      },
+      "version": {
+        "const": "ip-investigation-v1",
+        "default": "ip-investigation-v1",
+        "title": "Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "id",
+      "owner_id",
+      "job_id",
+      "status",
+      "revision",
+      "created_at",
+      "request",
+      "target_ip",
+      "language",
+      "scope",
+      "execution",
+      "progress"
+    ],
+    "title": "InvestigationRun",
+    "type": "object"
+  },
+  "InvestigationStep": {
+    "$defs": {
+      "Progress": {
+        "additionalProperties": false,
+        "properties": {
+          "model_calls": {
+            "default": 0,
+            "maximum": 6,
+            "minimum": 0,
+            "title": "Model Calls",
+            "type": "integer"
+          },
+          "source_bytes": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Source Bytes",
+            "type": "integer"
+          },
+          "source_bytes_accounting": {
+            "const": "RESERVED_READER_UPPER_BOUND_NOT_MEASURED",
+            "default": "RESERVED_READER_UPPER_BOUND_NOT_MEASURED",
+            "title": "Source Bytes Accounting",
+            "type": "string"
+          },
+          "source_records": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Source Records",
+            "type": "integer"
+          },
+          "tool_calls": {
+            "default": 0,
+            "maximum": 12,
+            "minimum": 0,
+            "title": "Tool Calls",
+            "type": "integer"
+          },
+          "transport_attempts": {
+            "default": 0,
+            "maximum": 12,
+            "minimum": 0,
+            "title": "Transport Attempts",
+            "type": "integer"
+          }
+        },
+        "title": "Progress",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "code": {
+        "anyOf": [
+          {
+            "maxLength": 64,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Code"
+      },
+      "evidence_id": {
+        "anyOf": [
+          {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Evidence Id"
+      },
+      "kind": {
+        "enum": [
+          "SOURCE",
+          "MODEL",
+          "TOOL",
+          "FINAL"
+        ],
+        "title": "Kind",
+        "type": "string"
+      },
+      "progress": {
+        "$ref": "#/$defs/Progress"
+      },
+      "sequence": {
+        "maximum": 24,
+        "minimum": 1,
+        "title": "Sequence",
+        "type": "integer"
+      },
+      "tool": {
+        "anyOf": [
+          {
+            "enum": [
+              "peer_overview",
+              "peer_flow_samples",
+              "peer_timeline",
+              "peer_protocol_observations",
+              "compare_peer_cohort"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Tool"
+      },
+      "version": {
+        "const": "ip-investigation-v1",
+        "default": "ip-investigation-v1",
+        "title": "Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "sequence",
+      "kind",
+      "progress"
+    ],
+    "title": "InvestigationStep",
+    "type": "object"
+  },
+  "SourcePreview": {
+    "$defs": {
+      "Counts": {
+        "additionalProperties": false,
+        "properties": {
+          "inspected": {
+            "title": "Inspected",
+            "type": "integer"
+          },
+          "matched": {
+            "title": "Matched",
+            "type": "integer"
+          },
+          "not_observed": {
+            "title": "Not Observed",
+            "type": "integer"
+          },
+          "omitted": {
+            "title": "Omitted",
+            "type": "integer"
+          },
+          "retained": {
+            "title": "Retained",
+            "type": "integer"
+          },
+          "scope_unavailable": {
+            "default": 0,
+            "maximum": 8192,
+            "minimum": 0,
+            "title": "Scope Unavailable",
+            "type": "integer"
+          },
+          "unavailable": {
+            "default": 0,
+            "title": "Unavailable",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "inspected",
+          "matched",
+          "retained",
+          "omitted",
+          "not_observed"
+        ],
+        "title": "Counts",
+        "type": "object"
+      },
+      "InvestigationScope": {
+        "additionalProperties": false,
+        "properties": {
+          "end_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "End Time"
+          },
+          "endpoint_side": {
+            "default": "either",
+            "enum": [
+              "either",
+              "source",
+              "destination"
+            ],
+            "title": "Endpoint Side",
+            "type": "string"
+          },
+          "sensor_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sensor Id"
+          },
+          "start_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Start Time"
+          },
+          "target_ip": {
+            "title": "Target Ip",
+            "type": "string"
+          },
+          "traffic_direction": {
+            "anyOf": [
+              {
+                "enum": [
+                  "INBOUND",
+                  "OUTBOUND",
+                  "INTERNAL",
+                  "UNKNOWN"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Traffic Direction"
+          }
+        },
+        "required": [
+          "target_ip"
+        ],
+        "title": "InvestigationScope",
+        "type": "object"
+      },
+      "SourceBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "dataset_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Dataset Id",
+            "type": "string"
+          },
+          "job_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "metadata_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Metadata Sha256",
+            "type": "string"
+          },
+          "projection_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Projection Sha256",
+            "type": "string"
+          },
+          "rows_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Rows Sha256",
+            "type": "string"
+          },
+          "source_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Sha256",
+            "type": "string"
+          },
+          "version": {
+            "const": "ip-evidence-v1",
+            "default": "ip-evidence-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "dataset_id",
+          "metadata_sha256",
+          "rows_sha256",
+          "projection_sha256",
+          "source_sha256"
+        ],
+        "title": "SourceBinding",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "counts": {
+        "$ref": "#/$defs/Counts"
+      },
+      "limitations": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Limitations",
+        "type": "array"
+      },
+      "scope": {
+        "$ref": "#/$defs/InvestigationScope"
+      },
+      "snapshot_bytes": {
+        "title": "Snapshot Bytes",
+        "type": "integer"
+      },
+      "source": {
+        "$ref": "#/$defs/SourceBinding"
+      },
+      "status": {
+        "enum": [
+          "OBSERVED",
+          "NOT_OBSERVED",
+          "UNAVAILABLE",
+          "NOT_FOUND_IN_INSPECTED_SCOPE"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "version": {
+        "const": "ip-investigation-v1",
+        "default": "ip-investigation-v1",
+        "title": "Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "source",
+      "scope",
+      "status",
+      "counts",
+      "snapshot_bytes",
+      "limitations"
+    ],
+    "title": "SourcePreview",
+    "type": "object"
+  }
+}

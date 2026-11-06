@@ -37,6 +37,7 @@ from . import historical_ai_sql as historical_sql
 from . import historical_ai_storage as historical_runs
 from . import historical_generation as baseline_values
 from . import historical_read as historical_reader
+from .ai_investigation_contract import SourceSnapshot
 from .baseline_admission import BaselineAdmission, BaselineLease
 from .historical_baseline import QualityReview, ScopeConfig
 from .pcap_attack_guidance_schema import project_job_guidance, validate_job_guidance
@@ -817,6 +818,13 @@ class Repository(Protocol):
         scope: ScopeConfig,
         quality_review: QualityReview | None,
     ) -> historical_reader.HistoricalReadSnapshot: ...
+
+    def read_investigation_source(
+        self,
+        job_id: str,
+        *,
+        expected_source_sha256: str | None = None,
+    ) -> SourceSnapshot: ...
 
     def get_job(self, job_id: str) -> dict[str, Any] | None: ...
     def get_job_summary(self, job_id: str) -> dict[str, Any] | None: ...
@@ -2764,6 +2772,18 @@ class MemoryRepository(
         self.posting_index_generations: dict[str, PostingIndexSnapshot] = {}
         self.posting_index_owners: dict[tuple[str, str, str], str] = {}
         self._lock = threading.RLock()
+
+    def read_investigation_source(
+        self,
+        job_id: str,
+        *,
+        expected_source_sha256: str | None = None,
+    ) -> SourceSnapshot:
+        from .ai_investigation_read import memory_snapshot, validate_arguments
+
+        validate_arguments(job_id, expected_source_sha256)
+        with self._lock:
+            return memory_snapshot(self.jobs, job_id, expected_source_sha256)
 
     def read_historical_source(
         self,
@@ -5284,6 +5304,32 @@ class SQLiteRepository(
                 busy = (result_code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
                 raise historical_reader.HistoricalReadError(
                     "BASELINE_BUSY" if busy else "BASELINE_STORAGE_UNAVAILABLE"
+                ) from None
+
+    def read_investigation_source(
+        self,
+        job_id: str,
+        *,
+        expected_source_sha256: str | None = None,
+    ) -> SourceSnapshot:
+        from .ai_investigation_contract import InvestigationError
+        from .ai_investigation_read import sqlite_snapshot, validate_arguments
+
+        validate_arguments(job_id, expected_source_sha256)
+        with self._lock:
+            try:
+                if self.connection.in_transaction or self.connection.autocommit is True:
+                    raise InvestigationError("SOURCE_BUSY")
+                self.connection.execute("BEGIN")
+                try:
+                    return sqlite_snapshot(self.connection, job_id, expected_source_sha256)
+                finally:
+                    self.connection.rollback()
+            except sqlite3.Error as exc:
+                code = getattr(exc, "sqlite_errorcode", 0) & 0xFF
+                busy = code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                raise InvestigationError(
+                    "SOURCE_BUSY" if busy else "SOURCE_STORAGE_UNAVAILABLE"
                 ) from None
 
     def _save_job_parts(self, job: dict[str, Any]) -> None:

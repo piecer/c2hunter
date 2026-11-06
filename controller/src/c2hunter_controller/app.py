@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -1159,6 +1160,71 @@ def create_app(
         app.router.add_event_handler("startup", local_ai_runtime.start)
         app.router.add_event_handler("shutdown", local_ai_runtime.stop)
 
+    from .ai_investigation_http import investigation_path, investigation_router
+    from .ai_investigation_worker import InvestigationSupervisor, configured_service
+
+    investigation_service, investigation_reason = configured_service(
+        repo, gateway, bootstrap_local=True
+    )
+    investigation_runtime = (
+        InvestigationSupervisor(investigation_service)
+        if (local_ai_worker_enabled or config.ai_investigation_inline_enabled)
+        and config.ai_analysis_enabled
+        and investigation_service is not None
+        and investigation_service.gateway is not None
+        else None
+    )
+    app.state.investigation_service = investigation_service
+    app.state.investigation_runtime = investigation_runtime
+    app.state.investigation_drained = True
+
+    def investigation_dispatch_available() -> bool:
+        if not config.ai_analysis_enabled:
+            return False
+        if investigation_runtime is not None:
+            return investigation_runtime.accepting
+        # Existing distributed AI-worker owns this durable SQL queue. This is
+        # configuration support, NOT a liveness/model-readiness assertion.
+        return isinstance(repo, PostgresRepository) and config.redis_url != "memory://"
+
+    if investigation_runtime is not None:
+
+        async def start_investigation_runtime() -> None:
+            app.state.investigation_drained = False
+            try:
+                investigation_runtime.start()
+            except BaseException:
+                # Failed ASGI startup need not run shutdown handlers. Retain the
+                # owner and report its bounded drain here, not a default True.
+                if investigation_runtime.owns_thread:
+                    # Preserve the primary even if cleanup or its logging fails.
+                    try:
+                        await stop_investigation_runtime()
+                    except BaseException:  # noqa: S110 - logging can mask the primary again
+                        # Keep the owner and last proved drain state for shutdown.
+                        pass
+                else:
+                    app.state.investigation_drained = True  # constructor never returned
+                raise
+
+        app.router.add_event_handler("startup", start_investigation_runtime)
+
+        async def stop_investigation_runtime() -> None:
+            app.state.investigation_drained = await asyncio.to_thread(
+                investigation_runtime.close, 2.0
+            )
+            if not app.state.investigation_drained:
+                logger.error("Investigation shutdown retains unresolved worker ownership")
+
+        app.router.add_event_handler("shutdown", stop_investigation_runtime)
+    app.include_router(
+        investigation_router(
+            investigation_service,
+            investigation_dispatch_available,
+            lambda: investigation_reason,
+        )
+    )
+
     def environment_integration_settings() -> dict[str, Any]:
         return {
             "version": 1,
@@ -1422,8 +1488,13 @@ def create_app(
                 rate_limiter.check(
                     "enrollment-claim", client_key, config.enrollment_claim_rate_limit
                 )
-            minimum_role = Role.ANALYST if baseline_page else required_role(request.method, path)
-            if config.api_auth_required and minimum_role is not None:
+            investigation_request = investigation_path(path)
+            minimum_role = (
+                Role.ANALYST
+                if baseline_page or investigation_request
+                else required_role(request.method, path)
+            )
+            if (config.api_auth_required or investigation_request) and minimum_role is not None:
                 principal = authenticator.authenticate(request.headers.get("authorization"))
                 require_role(principal, minimum_role)
                 request.state.principal = principal
@@ -1455,6 +1526,8 @@ def create_app(
     @app.middleware("http")
     async def observability(request: Request, call_next: Any) -> Response:
         request.state.request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+        if investigation_path(request.url.path):
+            request.state.request_id = request.state.request_id[:200]
         metric_path = _metrics_path(request.url.path)
         with latency.labels(metric_path).time():
             response = await call_next(request)

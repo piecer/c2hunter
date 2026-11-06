@@ -1,3 +1,5 @@
+import { readBoundedJSON } from './investigationTransport';
+
 export class ApiError extends Error {
   constructor(message: string, public status: number, public code = 'HTTP_ERROR', public details?: unknown) { super(message); this.name = 'ApiError'; }
 }
@@ -93,7 +95,28 @@ function uploadWithProgress<T>(
   });
 }
 
+async function boundedRequest(path: string, init: RequestInit = {}, onHeaders?: (headers: Headers) => void): Promise<unknown> {
+  const token = localStorage.getItem('c2hunter-token');
+  const headers = new Headers(init.headers);
+  headers.set('accept', 'application/json');
+  if (init.body) headers.set('content-type', 'application/json');
+  if (token) headers.set('authorization', `Bearer ${token}`);
+  const response = await fetch(`/api/v1${path}`, { ...init, headers: Object.fromEntries(headers.entries()) });
+  // Keep the existing authentication invalidation flow even on malformed errors.
+  invalidateAuthentication(response);
+  onHeaders?.(response.headers);
+  const body = await readBoundedJSON(response);
+  if (!response.ok) {
+    const error = body && typeof body === 'object' && 'error' in body ? body.error : body;
+    const code = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'HTTP_ERROR';
+    // Do not render arbitrary driver/provider text. The safe code remains visible.
+    throw new ApiError(`Investigation request failed (${response.status}): ${code}`, response.status, code);
+  }
+  return body;
+}
+
 export const api = {
+  boundedRequest,
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body?: unknown) => request<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) }),
   put: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PUT', body: body === undefined ? undefined : JSON.stringify(body) }),

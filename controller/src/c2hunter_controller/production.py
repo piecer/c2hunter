@@ -39,7 +39,6 @@ from c2hunter_controller import historical_ai as historical_dto
 from c2hunter_controller import historical_ai_sql as historical_sql
 from c2hunter_controller import historical_ai_storage as historical_runs
 from c2hunter_controller import historical_generation as baseline_values
-from c2hunter_controller import historical_read as historical_reader
 from c2hunter_controller import postgres_schema
 from c2hunter_controller.baseline_admission import BaselineAdmission, BaselineLease
 from c2hunter_controller.historical_baseline import QualityReview, ScopeConfig
@@ -113,6 +112,8 @@ from c2hunter_controller.repositories import (
     _pcap_export_snapshot,
 )
 
+from . import historical_read as historical_reader
+from .ai_investigation_contract import SourceSnapshot
 from .pcap_attack_guidance_schema import project_job_guidance, validate_job_guidance
 
 _AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
@@ -609,6 +610,36 @@ class PostgresRepository(Repository):
         "max_attempts,lease_token,lease_expires_at,next_attempt_at,queued_at,updated_at,error_code"
     )
     _LIVE_TASK_RETURNING_COLUMNS = "task." + _LIVE_TASK_COLUMNS.replace(",", ",task.")
+
+    def read_investigation_source(
+        self,
+        job_id: str,
+        *,
+        expected_source_sha256: str | None = None,
+    ) -> SourceSnapshot:
+        import psycopg
+        from psycopg.pq import TransactionStatus
+
+        from .ai_investigation_contract import InvestigationError
+        from .ai_investigation_read import postgres_snapshot, validate_arguments
+
+        validate_arguments(job_id, expected_source_sha256)
+        with self._lock:
+            try:
+                connection = self.connection
+                if (
+                    connection.info.transaction_status != TransactionStatus.IDLE
+                    or connection.autocommit
+                ):
+                    raise InvestigationError("SOURCE_BUSY")
+                with connection.transaction(), connection.cursor() as cursor:
+                    cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                    cursor.execute("SET LOCAL statement_timeout='5s'")
+                    return postgres_snapshot(cursor, job_id, expected_source_sha256)
+            except psycopg.errors.LockNotAvailable:
+                raise InvestigationError("SOURCE_BUSY") from None
+            except psycopg.Error:
+                raise InvestigationError("SOURCE_STORAGE_UNAVAILABLE") from None
 
     def read_historical_source(
         self,
