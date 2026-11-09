@@ -1,27 +1,22 @@
+import { captureAuthentication, invalidateAuthentication } from './authentication';
 import { readBoundedJSON } from './investigationTransport';
 
 export class ApiError extends Error {
   constructor(message: string, public status: number, public code = 'HTTP_ERROR', public details?: unknown) { super(message); this.name = 'ApiError'; }
 }
 
-function invalidateAuthentication(response: Response): void {
-  if (response.status !== 401) return;
-  localStorage.removeItem('c2hunter-token');
-  window.dispatchEvent(new Event('c2hunter-auth-invalid'));
-}
-
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const token = localStorage.getItem('c2hunter-token');
+  const authority = captureAuthentication(), token = authority.token;
   const headers = new Headers(init.headers);
   headers.set('accept', 'application/json');
   if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
   if (token) headers.set('authorization', `Bearer ${token}`);
   const response = await fetch(`/api/v1${path}`, { ...init, headers: Object.fromEntries(headers.entries()) });
+  invalidateAuthentication(response.status, authority, init.signal);
   // Read a clone so repeated test adapters and cache layers that return the same
   // Response object cannot make a later request lose the structured error body.
   const body = response.status === 204 ? undefined : await response.clone().json().catch(() => undefined);
   if (!response.ok) {
-    invalidateAuthentication(response);
     const envelope = body?.error ?? body;
     throw new ApiError(envelope?.message ?? `Request failed (${response.status})`, response.status, envelope?.code, envelope?.details);
   }
@@ -29,12 +24,12 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 async function download(path: string, fallbackFilename: string): Promise<void> {
-  const token = localStorage.getItem('c2hunter-token');
+  const authority = captureAuthentication(), token = authority.token;
   const headers: Record<string, string> = { accept: 'application/vnd.tcpdump.pcap' };
   if (token) headers.authorization = `Bearer ${token}`;
   const response = await fetch(`/api/v1${path}`, { headers });
   if (!response.ok) {
-    invalidateAuthentication(response);
+    invalidateAuthentication(response.status, authority);
     const body = await response.clone().json().catch(() => undefined);
     const envelope = body?.error ?? body;
     throw new ApiError(envelope?.message ?? `Request failed (${response.status})`, response.status, envelope?.code, envelope?.details);
@@ -62,17 +57,20 @@ function uploadWithProgress<T>(
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const request = new XMLHttpRequest();
+    let settled = false;
     const abort = () => request.abort();
     const cleanup = () => signal?.removeEventListener('abort', abort);
     request.open('PUT', `/api/v1${path}`);
     request.setRequestHeader('accept', 'application/json');
     request.setRequestHeader('content-type', contentType);
-    const token = localStorage.getItem('c2hunter-token');
+    const authority = captureAuthentication(), token = authority.token;
     if (token) request.setRequestHeader('authorization', `Bearer ${token}`);
     request.upload.onprogress = event => {
       if (event.lengthComputable) onProgress({ loaded: event.loaded, total: event.total });
     };
     request.onload = () => {
+      if (settled) return;
+      settled = true;
       cleanup();
       let parsed: unknown;
       try { parsed = request.responseText ? JSON.parse(request.responseText) : undefined; } catch { parsed = undefined; }
@@ -80,15 +78,12 @@ function uploadWithProgress<T>(
         resolve(parsed as T);
         return;
       }
-      if (request.status === 401) {
-        localStorage.removeItem('c2hunter-token');
-        window.dispatchEvent(new Event('c2hunter-auth-invalid'));
-      }
+      invalidateAuthentication(request.status, authority, signal);
       const envelope = (parsed as { error?: { code?: string; message?: string; details?: unknown } } | undefined)?.error;
       reject(new ApiError(envelope?.message ?? `Request failed (${request.status})`, request.status, envelope?.code, envelope?.details));
     };
-    request.onerror = () => { cleanup(); reject(new ApiError('Upload transport failed', 0, 'UPLOAD_TRANSPORT_ERROR')); };
-    request.onabort = () => { cleanup(); reject(new DOMException('Upload aborted', 'AbortError')); };
+    request.onerror = () => { settled = true; cleanup(); reject(new ApiError('Upload transport failed', 0, 'UPLOAD_TRANSPORT_ERROR')); };
+    request.onabort = () => { settled = true; cleanup(); reject(new DOMException('Upload aborted', 'AbortError')); };
     if (signal?.aborted) { request.abort(); return; }
     signal?.addEventListener('abort', abort, { once: true });
     request.send(body);
@@ -96,14 +91,14 @@ function uploadWithProgress<T>(
 }
 
 async function boundedRequest(path: string, init: RequestInit = {}, onHeaders?: (headers: Headers) => void): Promise<unknown> {
-  const token = localStorage.getItem('c2hunter-token');
+  const authority = captureAuthentication(), token = authority.token;
   const headers = new Headers(init.headers);
   headers.set('accept', 'application/json');
   if (init.body) headers.set('content-type', 'application/json');
   if (token) headers.set('authorization', `Bearer ${token}`);
   const response = await fetch(`/api/v1${path}`, { ...init, headers: Object.fromEntries(headers.entries()) });
   // Keep the existing authentication invalidation flow even on malformed errors.
-  invalidateAuthentication(response);
+  invalidateAuthentication(response.status, authority, init.signal);
   onHeaders?.(response.headers);
   const body = await readBoundedJSON(response);
   if (!response.ok) {

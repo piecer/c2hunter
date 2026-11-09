@@ -72,10 +72,14 @@ class TransportError(Exception):
 
 def investigation_path(path: str) -> bool:
     parts = path.strip("/").split("/")
-    return parts[:3] == ["api", "v1", "ai-investigations"] or (
+    return (
+        len(parts) >= 3
+        and parts[:2] == ["api", "v1"]
+        and parts[2] in {"ai-investigations", "ai-job-investigations"}
+    ) or (
         len(parts) >= 5
         and parts[:3] == ["api", "v1", "analysis-jobs"]
-        and parts[4] == "ai-investigations"
+        and parts[4] in {"ai-investigations", "ai-job-investigations"}
     )
 
 
@@ -329,6 +333,15 @@ def investigation_router(
 def failure(
     request: Request, code: str, status: int | None = None, message: str | None = None
 ) -> Response:
+    parts = request.scope.get("path", "").strip("/").split("/")
+    if (len(parts) >= 3 and parts[:3] == ["api", "v1", "ai-job-investigations"]) or (
+        len(parts) >= 5
+        and parts[:3] == ["api", "v1", "analysis-jobs"]
+        and parts[4] == "ai-job-investigations"
+    ):
+        from .ai_job_investigation_http import job_failure
+
+        return job_failure(request, code, status, message)
     if status is None:
         code = code if code in ERRORS else "INTERNAL_ERROR"
         status, message = ERRORS[code]

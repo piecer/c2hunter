@@ -114,6 +114,7 @@ from c2hunter_controller.repositories import (
 
 from . import historical_read as historical_reader
 from .ai_investigation_contract import SourceSnapshot
+from .ai_job_investigation_schema import JobPreparation
 from .pcap_attack_guidance_schema import project_job_guidance, validate_job_guidance
 
 _AI_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
@@ -636,6 +637,37 @@ class PostgresRepository(Repository):
                     cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
                     cursor.execute("SET LOCAL statement_timeout='5s'")
                     return postgres_snapshot(cursor, job_id, expected_source_sha256)
+            except psycopg.errors.LockNotAvailable:
+                raise InvestigationError("SOURCE_BUSY") from None
+            except psycopg.Error:
+                raise InvestigationError("SOURCE_STORAGE_UNAVAILABLE") from None
+
+    def read_job_investigation_source(
+        self,
+        job_id: str,
+        *,
+        expected_source_sha256: str | None = None,
+    ) -> JobPreparation:
+        import psycopg
+        from psycopg.pq import TransactionStatus
+
+        from .ai_investigation_contract import InvestigationError
+        from .ai_investigation_read import validate_arguments
+        from .ai_job_investigation_read import postgres_preparation
+
+        validate_arguments(job_id, expected_source_sha256)
+        with self._lock:
+            try:
+                connection = self.connection
+                if (
+                    connection.info.transaction_status != TransactionStatus.IDLE
+                    or connection.autocommit
+                ):
+                    raise InvestigationError("SOURCE_BUSY")
+                with connection.transaction(), connection.cursor() as cursor:
+                    cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                    cursor.execute("SET LOCAL statement_timeout='5s'")
+                    return postgres_preparation(cursor, job_id, expected_source_sha256)
             except psycopg.errors.LockNotAvailable:
                 raise InvestigationError("SOURCE_BUSY") from None
             except psycopg.Error:

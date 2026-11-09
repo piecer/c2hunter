@@ -1,0 +1,19 @@
+.job-investigation { min-width: 0; overflow-wrap: anywhere; }
+.job-investigation :where(section, article, fieldset, dl, dd, label, nav) { min-width: 0; max-width: 100%; }
+.job-investigation :where(code, pre, button, p, dd) { overflow-wrap: anywhere; white-space: normal; word-break: break-word; }
+.job-investigation pre { white-space: pre-wrap; }
+.job-investigation code { display: inline-block; max-width: 100%; }
+.job-investigation :where(textarea, select) { width: 100%; box-sizing: border-box; }
+.job-investigation label { display: block; margin-block: .65rem; }
+.job-investigation fieldset { margin: 0; }
+.job-investigation .job-peer-page { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
+.job-investigation .job-peer-page article, .job-investigation .job-run { border: 1px solid var(--border, #334155); border-radius: .5rem; padding: .75rem; }
+.job-investigation .job-actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-block: .75rem; }
+.job-investigation button { max-width: 100%; min-height: 2.75rem; }
+.job-investigation button:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.job-investigation dd { margin-inline-start: 1rem; }
+@media (max-width: 600px) {
+  .job-investigation .job-peer-page { grid-template-columns: minmax(0, 1fr); }
+  .job-investigation .job-actions > button { flex: 1 1 10rem; }
+  .job-investigation fieldset { padding: .5rem; }
+}

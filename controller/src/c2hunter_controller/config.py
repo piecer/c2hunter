@@ -149,6 +149,8 @@ class Settings(BaseSettings):
     ai_analysis_enabled: bool = False
     # Opt-in application-owned investigation supervisor; legacy AI queue is unchanged.
     ai_investigation_inline_enabled: bool = False
+    # Experimental JOB discovery is separate from legacy IP investigations.
+    ai_job_investigation_enabled: bool = False
     ai_model_provider: Literal["fake", "ollama", "openai-compatible"] = "fake"
     ai_model_base_url: str = "http://127.0.0.1:11434"
     ai_model_name: str = "qwen3.6-agent:256k"

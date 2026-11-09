@@ -29,6 +29,9 @@ def main(argv: list[str] | None = None) -> int:
         from .ai_investigation_store import initialize_investigation_store
 
         initialize_investigation_store(repo)
+        from .ai_job_investigation_store import initialize_job_investigation_store
+
+        initialize_job_investigation_store(repo)
     except Exception:
         # Driver errors can include credentials, DSNs and legacy JSON contents.
         print("PostgreSQL migration failed; schema is not confirmed ready", file=sys.stderr)

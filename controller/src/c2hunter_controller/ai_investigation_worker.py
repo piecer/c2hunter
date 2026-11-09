@@ -22,6 +22,7 @@ from .ai_investigation_store import (
     InvestigationStoreError,
     initialize_investigation_store,
 )
+from .ai_job_investigation import JobInvestigationService
 from .repositories import MemoryRepository, SQLiteRepository
 
 
@@ -49,6 +50,7 @@ def configured_service(
 class _Work:
     claim: dict[str, Any]
     deadline: float
+    service: InvestigationService | JobInvestigationService | None = None
     thread: threading.Thread | None = None
     outcome: ExecutionOutcome | None = None
     cancel_requested: bool = False
@@ -62,10 +64,21 @@ class InvestigationSupervisor:
     Quarantined outcomes require explicit operator reconciliation, not retry.
     """
 
-    def __init__(self, service: InvestigationService, *, poll_seconds: float = 0.25) -> None:
+    def __init__(
+        self,
+        service: InvestigationService,
+        *,
+        poll_seconds: float = 0.25,
+        job_service: JobInvestigationService | None = None,
+    ) -> None:
         if not math.isfinite(poll_seconds) or not 0.05 <= poll_seconds <= 1:
             raise ValueError("invalid investigation poll interval")
         self.service = service
+        if job_service is not None and job_service.repository is not service.repository:
+            raise ValueError("shared dispatcher requires the same repository")
+        self.job_service = job_service
+        self._services = (service,) if job_service is None else (service, job_service)
+        self._next_service = 0
         self.poll_seconds = poll_seconds
         self.worker_id = "investigation-" + uuid.uuid4().hex
         self._stop = threading.Event()
@@ -81,6 +94,9 @@ class InvestigationSupervisor:
         """A constructed supervisor remains owned, even if start raised."""
         with self._lock:
             return self._thread is not None
+
+    def accepts_job(self, service: JobInvestigationService) -> bool:
+        return self.job_service is service and self.accepting
 
     @property
     def running(self) -> bool:
@@ -124,7 +140,9 @@ class InvestigationSupervisor:
 
     def _compute(self, work: _Work) -> None:
         try:
-            work.outcome = self.service.execute_claim(work.claim, deadline_monotonic=work.deadline)
+            work.outcome = (work.service or self.service).execute_claim(
+                work.claim, deadline_monotonic=work.deadline
+            )
         except BaseException:
             # A callback may have committed. Never infer a safe ACK from an exit.
             work.outcome = None
@@ -141,7 +159,9 @@ class InvestigationSupervisor:
             acknowledged = False
             if work.outcome is not None and work.outcome.acknowledge_exit:
                 try:
-                    acknowledged = self.service.store.worker_exited(work.outcome.claim)
+                    acknowledged = (work.service or self.service).store.worker_exited(
+                        work.outcome.claim
+                    )
                 except Exception:
                     acknowledged = False
             with self._lock:
@@ -158,7 +178,7 @@ class InvestigationSupervisor:
                 continue
             work.cancel_requested = True
             try:
-                self.service.store.cancel(
+                (work.service or self.service).store.cancel(
                     work.claim["owner_id"], work.claim["job_id"], work.claim["id"]
                 )
             except Exception:
@@ -172,17 +192,24 @@ class InvestigationSupervisor:
                     return
             deadline = time.monotonic() + 300
             try:
-                claim = self.service.store.claim(self.worker_id)
+                claim = None
+                service: InvestigationService | JobInvestigationService = self.service
+                for _ in self._services:
+                    service = self._services[self._next_service]
+                    self._next_service = (self._next_service + 1) % len(self._services)
+                    claim = service.store.claim(self.worker_id)
+                    if claim is not None:
+                        break
             except Exception:
                 with self._lock:
                     self._fault = True
                 return
             if claim is None:
                 return
-            work = _Work(claim, deadline)
+            work = _Work(claim, deadline, service=service)
             try:
                 if self._stopping():
-                    self.service.store.cancel(claim["owner_id"], claim["job_id"], claim["id"])
+                    service.store.cancel(claim["owner_id"], claim["job_id"], claim["id"])
                     work.cancel_requested = True
                 thread = threading.Thread(
                     target=self._compute,

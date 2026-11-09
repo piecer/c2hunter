@@ -1162,12 +1162,28 @@ def create_app(
 
     from .ai_investigation_http import investigation_path, investigation_router
     from .ai_investigation_worker import InvestigationSupervisor, configured_service
+    from .ai_job_investigation_http import configured_job_service, job_investigation_router
 
     investigation_service, investigation_reason = configured_service(
         repo, gateway, bootstrap_local=True
     )
+    job_investigation_service, job_investigation_reason = configured_job_service(
+        repo,
+        gateway,
+        bootstrap_local=True,
+        enabled=config.ai_job_investigation_enabled and config.ai_analysis_enabled,
+    )
+    # Distributed/old fleets do not negotiate JOB capability in this slice.
+    # configured_job_service already verified explicit schema readiness. Only
+    # the actually owned accepting runtime below grants dispatch capability.
+    job_dispatch_supported = config.redis_url == "memory://"
     investigation_runtime = (
-        InvestigationSupervisor(investigation_service)
+        InvestigationSupervisor(
+            investigation_service,
+            job_service=job_investigation_service
+            if job_dispatch_supported and config.ai_job_investigation_enabled
+            else None,
+        )
         if (local_ai_worker_enabled or config.ai_investigation_inline_enabled)
         and config.ai_analysis_enabled
         and investigation_service is not None
@@ -1177,6 +1193,17 @@ def create_app(
     app.state.investigation_service = investigation_service
     app.state.investigation_runtime = investigation_runtime
     app.state.investigation_drained = True
+    app.state.job_investigation_service = job_investigation_service
+    if job_investigation_service is not None:
+        job_investigation_service.dispatch_available = lambda: (
+            config.ai_analysis_enabled
+            and job_dispatch_supported
+            and investigation_runtime is not None
+            and investigation_runtime.accepts_job(job_investigation_service)
+        )
+    app.include_router(
+        job_investigation_router(job_investigation_service, lambda: job_investigation_reason)
+    )
 
     def investigation_dispatch_available() -> bool:
         if not config.ai_analysis_enabled:

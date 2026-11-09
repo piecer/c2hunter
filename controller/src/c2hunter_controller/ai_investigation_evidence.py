@@ -61,6 +61,22 @@ class EvidenceService:
     def __init__(self, snapshot: SourceSnapshot, scope: InvestigationScope) -> None:
         self.snapshot = SourceSnapshot.model_validate(snapshot)
         self.scope = InvestigationScope.model_validate(scope)
+        self._prepare_rows()
+
+    @classmethod
+    def _from_prepared(cls, snapshot: SourceSnapshot, scope: InvestigationScope) -> EvidenceService:
+        """Private broker seam: caller owns one validated immutable preparation.
+
+        Public construction still detaches/revalidates arbitrary model instances.
+        This is not an admission API and must never accept raw persisted input.
+        """
+        instance = cls.__new__(cls)
+        instance.snapshot = snapshot
+        instance.scope = InvestigationScope.model_validate(scope)
+        instance._prepare_rows()
+        return instance
+
+    def _prepare_rows(self) -> None:
         self._cache: dict[str, Evidence] = {}
         self.retained_bytes = 0
         self._rows = tuple(row for row in self.snapshot.rows if self._matches(row))

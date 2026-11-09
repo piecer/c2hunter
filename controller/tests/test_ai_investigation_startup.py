@@ -27,8 +27,12 @@ def test_explicit_migration_command_initializes_investigation_after_base(monkeyp
         "c2hunter_controller.ai_investigation_store.initialize_investigation_store",
         lambda repo: events.append("investigation"),
     )
+    monkeypatch.setattr(
+        "c2hunter_controller.ai_job_investigation_store.initialize_job_investigation_store",
+        lambda repo: events.append("job_investigation"),
+    )
     assert migrate.main([]) == 0
-    assert events == ["base", "investigation"]
+    assert events == ["base", "investigation", "job_investigation"]
 
 
 def test_missing_store_is_unavailable_without_runtime_ddl(tmp_path):

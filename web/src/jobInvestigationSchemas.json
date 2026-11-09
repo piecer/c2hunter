@@ -1,0 +1,4273 @@
+{
+  "run": {
+    "$defs": {
+      "DiscoveryCoverage": {
+        "additionalProperties": false,
+        "properties": {
+          "examined_peers": {
+            "anyOf": [
+              {
+                "ge": 0,
+                "le": 16384,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Examined Peers"
+          },
+          "excluded_peers": {
+            "anyOf": [
+              {
+                "ge": 0,
+                "le": 16384,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Excluded Peers"
+          },
+          "state": {
+            "enum": [
+              "AVAILABLE",
+              "PARTIAL",
+              "UNAVAILABLE"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 32,
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "state",
+          "examined_peers",
+          "excluded_peers",
+          "warnings"
+        ],
+        "title": "DiscoveryCoverage",
+        "type": "object"
+      },
+      "JobCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "inspected": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Inspected",
+            "type": "integer"
+          },
+          "matched": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Matched",
+            "type": "integer"
+          },
+          "not_observed": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Not Observed",
+            "type": "integer"
+          },
+          "omitted": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Omitted",
+            "type": "integer"
+          },
+          "retained": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Retained",
+            "type": "integer"
+          },
+          "scope_unavailable": {
+            "default": 0,
+            "ge": 0,
+            "le": 8192,
+            "title": "Scope Unavailable",
+            "type": "integer"
+          },
+          "unavailable": {
+            "default": 0,
+            "ge": 0,
+            "le": 8192,
+            "title": "Unavailable",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "inspected",
+          "matched",
+          "retained",
+          "omitted",
+          "not_observed"
+        ],
+        "title": "JobCounts",
+        "type": "object"
+      },
+      "JobCoverage": {
+        "additionalProperties": false,
+        "properties": {
+          "awaiting_selection_peers": {
+            "ge": 0,
+            "le": 32,
+            "title": "Awaiting Selection Peers",
+            "type": "integer"
+          },
+          "capture_completeness": {
+            "const": "UNKNOWN",
+            "default": "UNKNOWN",
+            "title": "Capture Completeness",
+            "type": "string"
+          },
+          "investigated_peers": {
+            "ge": 0,
+            "le": 3,
+            "title": "Investigated Peers",
+            "type": "integer"
+          },
+          "lineage": {
+            "const": "CURRENT_JOB_ONLY_NOT_VALIDATED",
+            "default": "CURRENT_JOB_ONLY_NOT_VALIDATED",
+            "title": "Lineage",
+            "type": "string"
+          },
+          "not_investigated_peers": {
+            "ge": 0,
+            "le": 3,
+            "title": "Not Investigated Peers",
+            "type": "integer"
+          },
+          "not_selected_peers": {
+            "ge": 0,
+            "le": 32,
+            "title": "Not Selected Peers",
+            "type": "integer"
+          },
+          "observed_peers": {
+            "ge": 0,
+            "le": 16384,
+            "title": "Observed Peers",
+            "type": "integer"
+          },
+          "pool_omitted_peers": {
+            "ge": 0,
+            "le": 16384,
+            "title": "Pool Omitted Peers",
+            "type": "integer"
+          },
+          "pool_peers": {
+            "ge": 0,
+            "le": 32,
+            "title": "Pool Peers",
+            "type": "integer"
+          },
+          "selected_peers": {
+            "ge": 0,
+            "le": 3,
+            "title": "Selected Peers",
+            "type": "integer"
+          },
+          "source_rows": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Source Rows",
+            "type": "integer"
+          },
+          "source_status": {
+            "enum": [
+              "COMPLETED",
+              "PARTIALLY_COMPLETED"
+            ],
+            "title": "Source Status",
+            "type": "string"
+          },
+          "unobserved_peer_count": {
+            "default": null,
+            "title": "Unobserved Peer Count",
+            "type": "null"
+          },
+          "whole_job_conclusion": {
+            "const": "NOT_ESTABLISHED",
+            "default": "NOT_ESTABLISHED",
+            "title": "Whole Job Conclusion",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_status",
+          "source_rows",
+          "observed_peers",
+          "pool_peers",
+          "pool_omitted_peers",
+          "awaiting_selection_peers",
+          "not_selected_peers",
+          "selected_peers",
+          "investigated_peers",
+          "not_investigated_peers",
+          "unobserved_peer_count",
+          "capture_completeness",
+          "lineage",
+          "whole_job_conclusion"
+        ],
+        "title": "JobCoverage",
+        "type": "object"
+      },
+      "JobEvidenceQuality": {
+        "additionalProperties": false,
+        "properties": {
+          "counts": {
+            "$ref": "#/$defs/JobCounts"
+          },
+          "evidence_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "OBSERVED",
+              "NOT_OBSERVED",
+              "UNAVAILABLE",
+              "NOT_FOUND_IN_INSPECTED_SCOPE"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "tool": {
+            "enum": [
+              "peer_overview",
+              "peer_flow_samples",
+              "peer_timeline",
+              "peer_protocol_observations",
+              "compare_peer_cohort"
+            ],
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "evidence_id",
+          "tool",
+          "status",
+          "counts"
+        ],
+        "title": "JobEvidenceQuality",
+        "type": "object"
+      },
+      "JobExecutionIdentity": {
+        "additionalProperties": false,
+        "properties": {
+          "action_schema_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Action Schema Sha256",
+            "type": "string"
+          },
+          "evidence_version": {
+            "const": "ip-evidence-v1",
+            "default": "ip-evidence-v1",
+            "title": "Evidence Version",
+            "type": "string"
+          },
+          "final_schema_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Final Schema Sha256",
+            "type": "string"
+          },
+          "model": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "model_config_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Model Config Sha256",
+            "type": "string"
+          },
+          "model_settings": {
+            "$ref": "#/$defs/JobModelSettings"
+          },
+          "policy_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "policy_version": {
+            "const": "job-investigation-policy-v1",
+            "default": "job-investigation-policy-v1",
+            "title": "Policy Version",
+            "type": "string"
+          },
+          "prompt_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Prompt Sha256",
+            "type": "string"
+          },
+          "prompt_version": {
+            "const": "job-investigation-prompt-v1",
+            "default": "job-investigation-prompt-v1",
+            "title": "Prompt Version",
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "ollama",
+              "openai-compatible"
+            ],
+            "title": "Provider",
+            "type": "string"
+          },
+          "version": {
+            "const": "job-investigation-execution-v1",
+            "default": "job-investigation-execution-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "provider",
+          "model",
+          "model_settings",
+          "model_config_sha256",
+          "prompt_version",
+          "prompt_sha256",
+          "action_schema_sha256",
+          "final_schema_sha256",
+          "policy_version",
+          "policy_sha256",
+          "evidence_version"
+        ],
+        "title": "JobExecutionIdentity",
+        "type": "object"
+      },
+      "JobFailure": {
+        "additionalProperties": false,
+        "properties": {
+          "execution": {
+            "$ref": "#/$defs/JobExecutionIdentity"
+          },
+          "kind": {
+            "const": "FAILURE",
+            "default": "FAILURE",
+            "title": "Kind",
+            "type": "string"
+          },
+          "progress": {
+            "$ref": "#/$defs/JobProgress"
+          },
+          "reason": {
+            "enum": [
+              "INVALID_SOURCE_ARGUMENTS",
+              "SOURCE_NOT_FOUND",
+              "SOURCE_INVALID",
+              "SOURCE_UNAVAILABLE",
+              "SOURCE_STATE",
+              "SOURCE_CHANGED",
+              "SOURCE_LIMIT",
+              "SOURCE_BUSY",
+              "SOURCE_STORAGE_UNAVAILABLE",
+              "PEER_OUT_OF_POOL",
+              "INVALID_REQUEST",
+              "JOB_DISABLED",
+              "JOB_DISPATCH_UNSUPPORTED",
+              "UNAVAILABLE",
+              "REMOTE_NOT_ALLOWED",
+              "POOL_EMPTY",
+              "POOL_REFERENCE_MISMATCH",
+              "PEER_NOT_SELECTED",
+              "INVALID_SELECTION_STATE",
+              "MODEL_INVALID",
+              "MODEL_UNAVAILABLE",
+              "MODEL_LIMIT",
+              "MODEL_BUDGET",
+              "TOOL_BUDGET",
+              "PLANNING_BUDGET",
+              "EVIDENCE_BUDGET",
+              "REFERENCE_MISMATCH",
+              "COUNTEREVIDENCE_REQUIRED",
+              "POSITIVE_UNSUPPORTED",
+              "FINAL_LIMIT",
+              "DEADLINE_EXCEEDED",
+              "EXECUTION_IDENTITY_CHANGED",
+              "INCOMPLETE_ASSESSMENT",
+              "USER_CANCELLED",
+              "WORKER_EXITED",
+              "CLOCK_ROLLBACK",
+              "QUEUE_EXPIRED",
+              "OWNER_LOST",
+              "JOB_RESPONSE_LIMIT"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "version": {
+            "const": "job-investigation-v1",
+            "default": "job-investigation-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "kind",
+          "reason",
+          "execution",
+          "progress"
+        ],
+        "title": "JobFailure",
+        "type": "object"
+      },
+      "JobInterpretation": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_ids": {
+            "items": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Evidence Ids",
+            "type": "array"
+          },
+          "metric_refs": {
+            "items": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "maxItems": 3,
+            "title": "Metric Refs",
+            "type": "array"
+          },
+          "text": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "evidence_ids",
+          "metric_refs"
+        ],
+        "title": "JobInterpretation",
+        "type": "object"
+      },
+      "JobMetric": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "enum": [
+              "matched_rows",
+              "total_bytes",
+              "packet_count",
+              "sensor_count",
+              "c2_eligible_rows",
+              "suppressed_control_rows",
+              "eligibility_unavailable_rows",
+              "inbound_rows",
+              "outbound_rows",
+              "internal_rows",
+              "unknown_rows",
+              "inbound_bytes",
+              "outbound_bytes",
+              "internal_bytes",
+              "unknown_bytes"
+            ],
+            "title": "Name",
+            "type": "string"
+          },
+          "observed_rows": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Observed Rows",
+            "type": "integer"
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "unavailable_rows": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Unavailable Rows",
+            "type": "integer"
+          },
+          "unit": {
+            "enum": [
+              "rows",
+              "bytes",
+              "packets",
+              "sensors"
+            ],
+            "title": "Unit",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "ge": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "ref",
+          "name",
+          "unit",
+          "value",
+          "observed_rows",
+          "unavailable_rows"
+        ],
+        "title": "JobMetric",
+        "type": "object"
+      },
+      "JobModelSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "context_tokens": {
+            "ge": 8192,
+            "le": 262144,
+            "title": "Context Tokens",
+            "type": "integer"
+          },
+          "max_output_tokens": {
+            "ge": 1,
+            "le": 16384,
+            "title": "Max Output Tokens",
+            "type": "integer"
+          },
+          "temperature": {
+            "maximum": 1,
+            "minimum": 0,
+            "title": "Temperature",
+            "type": "number"
+          },
+          "timeout_seconds": {
+            "exclusiveMinimum": 0,
+            "maximum": 600,
+            "title": "Timeout Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "temperature",
+          "context_tokens",
+          "max_output_tokens",
+          "timeout_seconds"
+        ],
+        "title": "JobModelSettings",
+        "type": "object"
+      },
+      "JobPool": {
+        "additionalProperties": false,
+        "properties": {
+          "discovery": {
+            "$ref": "#/$defs/DiscoveryCoverage"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/$defs/PeerSummary"
+            },
+            "maxItems": 32,
+            "title": "Entries",
+            "type": "array"
+          },
+          "legacy_membership": {
+            "const": "NOT_READ",
+            "title": "Legacy Membership",
+            "type": "string"
+          },
+          "limitations": {
+            "items": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "maxItems": 32,
+            "title": "Limitations",
+            "type": "array"
+          },
+          "observed_peers": {
+            "ge": 0,
+            "le": 16384,
+            "title": "Observed Peers",
+            "type": "integer"
+          },
+          "omitted_identities": {
+            "enum": [
+              "NOT_RETAINED",
+              "NONE"
+            ],
+            "title": "Omitted Identities",
+            "type": "string"
+          },
+          "omitted_peers": {
+            "ge": 0,
+            "le": 16384,
+            "title": "Omitted Peers",
+            "type": "integer"
+          },
+          "policy_version": {
+            "const": "job-investigation-policy-v1",
+            "title": "Policy Version",
+            "type": "string"
+          },
+          "pool_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Pool Sha256",
+            "type": "string"
+          },
+          "source_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Sha256",
+            "type": "string"
+          },
+          "version": {
+            "const": "job-investigation-pool-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "source_sha256",
+          "policy_version",
+          "pool_sha256",
+          "entries",
+          "observed_peers",
+          "omitted_peers",
+          "omitted_identities",
+          "legacy_membership",
+          "discovery",
+          "limitations"
+        ],
+        "title": "JobPool",
+        "type": "object"
+      },
+      "JobProgress": {
+        "additionalProperties": false,
+        "properties": {
+          "model_calls": {
+            "default": 0,
+            "ge": 0,
+            "le": 6,
+            "title": "Model Calls",
+            "type": "integer"
+          },
+          "planning_responses": {
+            "default": 0,
+            "ge": 0,
+            "le": 4,
+            "title": "Planning Responses",
+            "type": "integer"
+          },
+          "source_bytes": {
+            "default": 0,
+            "ge": 0,
+            "le": 8650752,
+            "title": "Source Bytes",
+            "type": "integer"
+          },
+          "source_bytes_accounting": {
+            "const": "RESERVED_READER_UPPER_BOUND_NOT_MEASURED",
+            "default": "RESERVED_READER_UPPER_BOUND_NOT_MEASURED",
+            "title": "Source Bytes Accounting",
+            "type": "string"
+          },
+          "source_records": {
+            "default": 0,
+            "ge": 0,
+            "le": 8192,
+            "title": "Source Records",
+            "type": "integer"
+          },
+          "tool_calls": {
+            "default": 0,
+            "ge": 0,
+            "le": 12,
+            "title": "Tool Calls",
+            "type": "integer"
+          },
+          "transport_attempts": {
+            "default": 0,
+            "ge": 0,
+            "le": 12,
+            "title": "Transport Attempts",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "source_bytes_accounting",
+          "model_calls",
+          "tool_calls",
+          "transport_attempts",
+          "source_bytes",
+          "source_records",
+          "planning_responses"
+        ],
+        "title": "JobProgress",
+        "type": "object"
+      },
+      "JobRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_remote": {
+            "title": "Allow Remote",
+            "type": "boolean"
+          },
+          "baseline_mode": {
+            "const": "off",
+            "title": "Baseline Mode",
+            "type": "string"
+          },
+          "expected_source_sha256": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Source Sha256"
+          },
+          "experimental": {
+            "const": true,
+            "title": "Experimental",
+            "type": "boolean"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[!-~]+$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "language": {
+            "enum": [
+              "ko",
+              "en"
+            ],
+            "title": "Language",
+            "type": "string"
+          },
+          "mode": {
+            "const": "JOB",
+            "title": "Mode",
+            "type": "string"
+          },
+          "question": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          },
+          "version": {
+            "const": "job-investigation-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "mode",
+          "experimental",
+          "question",
+          "language",
+          "idempotency_key",
+          "expected_source_sha256",
+          "allow_remote",
+          "baseline_mode"
+        ],
+        "title": "JobRequest",
+        "type": "object"
+      },
+      "JobResult": {
+        "additionalProperties": false,
+        "properties": {
+          "assessments": {
+            "items": {
+              "$ref": "#/$defs/PeerAssessment"
+            },
+            "maxItems": 3,
+            "title": "Assessments",
+            "type": "array"
+          },
+          "coverage": {
+            "$ref": "#/$defs/JobCoverage"
+          },
+          "execution": {
+            "$ref": "#/$defs/JobExecutionIdentity"
+          },
+          "kind": {
+            "const": "RESULT",
+            "default": "RESULT",
+            "title": "Kind",
+            "type": "string"
+          },
+          "language": {
+            "enum": [
+              "ko",
+              "en"
+            ],
+            "title": "Language",
+            "type": "string"
+          },
+          "limitations": {
+            "items": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "maxItems": 32,
+            "title": "Limitations",
+            "type": "array"
+          },
+          "partial_scope": {
+            "const": true,
+            "default": true,
+            "title": "Partial Scope",
+            "type": "boolean"
+          },
+          "pool_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Pool Sha256",
+            "type": "string"
+          },
+          "progress": {
+            "$ref": "#/$defs/JobProgress"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "INVALID_SOURCE_ARGUMENTS",
+                  "SOURCE_NOT_FOUND",
+                  "SOURCE_INVALID",
+                  "SOURCE_UNAVAILABLE",
+                  "SOURCE_STATE",
+                  "SOURCE_CHANGED",
+                  "SOURCE_LIMIT",
+                  "SOURCE_BUSY",
+                  "SOURCE_STORAGE_UNAVAILABLE",
+                  "PEER_OUT_OF_POOL",
+                  "INVALID_REQUEST",
+                  "JOB_DISABLED",
+                  "JOB_DISPATCH_UNSUPPORTED",
+                  "UNAVAILABLE",
+                  "REMOTE_NOT_ALLOWED",
+                  "POOL_EMPTY",
+                  "POOL_REFERENCE_MISMATCH",
+                  "PEER_NOT_SELECTED",
+                  "INVALID_SELECTION_STATE",
+                  "MODEL_INVALID",
+                  "MODEL_UNAVAILABLE",
+                  "MODEL_LIMIT",
+                  "MODEL_BUDGET",
+                  "TOOL_BUDGET",
+                  "PLANNING_BUDGET",
+                  "EVIDENCE_BUDGET",
+                  "REFERENCE_MISMATCH",
+                  "COUNTEREVIDENCE_REQUIRED",
+                  "POSITIVE_UNSUPPORTED",
+                  "FINAL_LIMIT",
+                  "DEADLINE_EXCEEDED",
+                  "EXECUTION_IDENTITY_CHANGED",
+                  "INCOMPLETE_ASSESSMENT",
+                  "USER_CANCELLED",
+                  "WORKER_EXITED",
+                  "CLOCK_ROLLBACK",
+                  "QUEUE_EXPIRED",
+                  "OWNER_LOST",
+                  "JOB_RESPONSE_LIMIT"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "source": {
+            "$ref": "#/$defs/SourceBinding"
+          },
+          "version": {
+            "const": "job-investigation-v1",
+            "default": "job-investigation-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "kind",
+          "source",
+          "pool_sha256",
+          "execution",
+          "language",
+          "progress",
+          "coverage",
+          "assessments",
+          "limitations",
+          "partial_scope",
+          "reason"
+        ],
+        "title": "JobResult",
+        "type": "object"
+      },
+      "PeerAssessment": {
+        "additionalProperties": false,
+        "properties": {
+          "counterevidence": {
+            "items": {
+              "$ref": "#/$defs/JobInterpretation"
+            },
+            "maxItems": 2,
+            "title": "Counterevidence",
+            "type": "array"
+          },
+          "evidence_quality": {
+            "items": {
+              "$ref": "#/$defs/JobEvidenceQuality"
+            },
+            "maxItems": 12,
+            "minItems": 1,
+            "title": "Evidence Quality",
+            "type": "array"
+          },
+          "facts": {
+            "items": {
+              "$ref": "#/$defs/JobMetric"
+            },
+            "maxItems": 8,
+            "title": "Facts",
+            "type": "array"
+          },
+          "mode": {
+            "enum": [
+              "MODEL_ASSISTED",
+              "FACTS_ONLY"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "next_checks": {
+            "items": {
+              "maxLength": 300,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 2,
+            "title": "Next Checks",
+            "type": "array"
+          },
+          "peer_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Peer Id",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "INVALID_SOURCE_ARGUMENTS",
+                  "SOURCE_NOT_FOUND",
+                  "SOURCE_INVALID",
+                  "SOURCE_UNAVAILABLE",
+                  "SOURCE_STATE",
+                  "SOURCE_CHANGED",
+                  "SOURCE_LIMIT",
+                  "SOURCE_BUSY",
+                  "SOURCE_STORAGE_UNAVAILABLE",
+                  "PEER_OUT_OF_POOL",
+                  "INVALID_REQUEST",
+                  "JOB_DISABLED",
+                  "JOB_DISPATCH_UNSUPPORTED",
+                  "UNAVAILABLE",
+                  "REMOTE_NOT_ALLOWED",
+                  "POOL_EMPTY",
+                  "POOL_REFERENCE_MISMATCH",
+                  "PEER_NOT_SELECTED",
+                  "INVALID_SELECTION_STATE",
+                  "MODEL_INVALID",
+                  "MODEL_UNAVAILABLE",
+                  "MODEL_LIMIT",
+                  "MODEL_BUDGET",
+                  "TOOL_BUDGET",
+                  "PLANNING_BUDGET",
+                  "EVIDENCE_BUDGET",
+                  "REFERENCE_MISMATCH",
+                  "COUNTEREVIDENCE_REQUIRED",
+                  "POSITIVE_UNSUPPORTED",
+                  "FINAL_LIMIT",
+                  "DEADLINE_EXCEEDED",
+                  "EXECUTION_IDENTITY_CHANGED",
+                  "INCOMPLETE_ASSESSMENT",
+                  "USER_CANCELLED",
+                  "WORKER_EXITED",
+                  "CLOCK_ROLLBACK",
+                  "QUEUE_EXPIRED",
+                  "OWNER_LOST",
+                  "JOB_RESPONSE_LIMIT"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "support": {
+            "items": {
+              "$ref": "#/$defs/JobInterpretation"
+            },
+            "maxItems": 2,
+            "title": "Support",
+            "type": "array"
+          },
+          "uncertainty": {
+            "items": {
+              "maxLength": 300,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 2,
+            "minItems": 1,
+            "title": "Uncertainty",
+            "type": "array"
+          },
+          "verdict": {
+            "enum": [
+              "SUSPICIOUS_C2",
+              "BENIGN_HYPOTHESIS",
+              "NEEDS_REVIEW",
+              "INCONCLUSIVE"
+            ],
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "peer_id",
+          "verdict",
+          "support",
+          "counterevidence",
+          "uncertainty",
+          "next_checks",
+          "mode",
+          "facts",
+          "evidence_quality",
+          "reason"
+        ],
+        "title": "PeerAssessment",
+        "type": "object"
+      },
+      "PeerSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "behavior_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Behavior Score"
+          },
+          "behavior_state": {
+            "enum": [
+              "PRIORITIZED",
+              "NOT_PRIORITIZED",
+              "UNAVAILABLE"
+            ],
+            "title": "Behavior State",
+            "type": "string"
+          },
+          "eligibility_unavailable_rows": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Eligibility Unavailable Rows",
+            "type": "integer"
+          },
+          "eligible_rows": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Eligible Rows",
+            "type": "integer"
+          },
+          "ip": {
+            "title": "Ip",
+            "type": "string"
+          },
+          "matched_rows": {
+            "ge": 1,
+            "le": 8192,
+            "title": "Matched Rows",
+            "type": "integer"
+          },
+          "peer_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Peer Id",
+            "type": "string"
+          },
+          "suppressed_control_rows": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Suppressed Control Rows",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "peer_id",
+          "ip",
+          "matched_rows",
+          "eligible_rows",
+          "suppressed_control_rows",
+          "eligibility_unavailable_rows",
+          "behavior_state",
+          "behavior_score"
+        ],
+        "title": "PeerSummary",
+        "type": "object"
+      },
+      "Selection": {
+        "additionalProperties": false,
+        "properties": {
+          "peer_ids": {
+            "items": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "maxItems": 3,
+            "title": "Peer Ids",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "PENDING",
+              "COMMITTED"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "peer_ids"
+        ],
+        "title": "Selection",
+        "type": "object"
+      },
+      "SourceBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "dataset_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Dataset Id",
+            "type": "string"
+          },
+          "job_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "metadata_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Metadata Sha256",
+            "type": "string"
+          },
+          "projection_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Projection Sha256",
+            "type": "string"
+          },
+          "rows_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Rows Sha256",
+            "type": "string"
+          },
+          "source_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Sha256",
+            "type": "string"
+          },
+          "version": {
+            "const": "ip-evidence-v1",
+            "default": "ip-evidence-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "dataset_id",
+          "metadata_sha256",
+          "rows_sha256",
+          "projection_sha256",
+          "source_sha256"
+        ],
+        "title": "SourceBinding",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "coverage": {
+        "$ref": "#/$defs/JobCoverage"
+      },
+      "created_at": {
+        "title": "Created At",
+        "type": "number"
+      },
+      "execution": {
+        "$ref": "#/$defs/JobExecutionIdentity"
+      },
+      "id": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Id",
+        "type": "string"
+      },
+      "job_id": {
+        "maxLength": 200,
+        "minLength": 1,
+        "pattern": "^[!-~]+$",
+        "title": "Job Id",
+        "type": "string"
+      },
+      "owner_id": {
+        "maxLength": 200,
+        "minLength": 1,
+        "pattern": "^[!-~]+$",
+        "title": "Owner Id",
+        "type": "string"
+      },
+      "pool": {
+        "$ref": "#/$defs/JobPool"
+      },
+      "progress": {
+        "$ref": "#/$defs/JobProgress"
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "enum": [
+              "INVALID_SOURCE_ARGUMENTS",
+              "SOURCE_NOT_FOUND",
+              "SOURCE_INVALID",
+              "SOURCE_UNAVAILABLE",
+              "SOURCE_STATE",
+              "SOURCE_CHANGED",
+              "SOURCE_LIMIT",
+              "SOURCE_BUSY",
+              "SOURCE_STORAGE_UNAVAILABLE",
+              "PEER_OUT_OF_POOL",
+              "INVALID_REQUEST",
+              "JOB_DISABLED",
+              "JOB_DISPATCH_UNSUPPORTED",
+              "UNAVAILABLE",
+              "REMOTE_NOT_ALLOWED",
+              "POOL_EMPTY",
+              "POOL_REFERENCE_MISMATCH",
+              "PEER_NOT_SELECTED",
+              "INVALID_SELECTION_STATE",
+              "MODEL_INVALID",
+              "MODEL_UNAVAILABLE",
+              "MODEL_LIMIT",
+              "MODEL_BUDGET",
+              "TOOL_BUDGET",
+              "PLANNING_BUDGET",
+              "EVIDENCE_BUDGET",
+              "REFERENCE_MISMATCH",
+              "COUNTEREVIDENCE_REQUIRED",
+              "POSITIVE_UNSUPPORTED",
+              "FINAL_LIMIT",
+              "DEADLINE_EXCEEDED",
+              "EXECUTION_IDENTITY_CHANGED",
+              "INCOMPLETE_ASSESSMENT",
+              "USER_CANCELLED",
+              "WORKER_EXITED",
+              "CLOCK_ROLLBACK",
+              "QUEUE_EXPIRED",
+              "OWNER_LOST",
+              "JOB_RESPONSE_LIMIT"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason"
+      },
+      "request": {
+        "$ref": "#/$defs/JobRequest"
+      },
+      "result": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/JobResult"
+          },
+          {
+            "$ref": "#/$defs/JobFailure"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Result"
+      },
+      "revision": {
+        "ge": 0,
+        "title": "Revision",
+        "type": "integer"
+      },
+      "selection": {
+        "$ref": "#/$defs/Selection"
+      },
+      "source": {
+        "$ref": "#/$defs/SourceBinding"
+      },
+      "status": {
+        "enum": [
+          "QUEUED",
+          "PREPARING",
+          "INVESTIGATING",
+          "VALIDATING",
+          "COMPLETED",
+          "PARTIAL",
+          "FAILED",
+          "CANCELLED"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "version": {
+        "const": "job-investigation-v1",
+        "default": "job-investigation-v1",
+        "title": "Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "version",
+      "id",
+      "owner_id",
+      "job_id",
+      "status",
+      "revision",
+      "created_at",
+      "request",
+      "source",
+      "execution",
+      "pool",
+      "selection",
+      "coverage",
+      "progress",
+      "result",
+      "reason"
+    ],
+    "title": "JobRun",
+    "type": "object"
+  },
+  "step": {
+    "$defs": {
+      "JobProgress": {
+        "additionalProperties": false,
+        "properties": {
+          "model_calls": {
+            "default": 0,
+            "ge": 0,
+            "le": 6,
+            "title": "Model Calls",
+            "type": "integer"
+          },
+          "planning_responses": {
+            "default": 0,
+            "ge": 0,
+            "le": 4,
+            "title": "Planning Responses",
+            "type": "integer"
+          },
+          "source_bytes": {
+            "default": 0,
+            "ge": 0,
+            "le": 8650752,
+            "title": "Source Bytes",
+            "type": "integer"
+          },
+          "source_bytes_accounting": {
+            "const": "RESERVED_READER_UPPER_BOUND_NOT_MEASURED",
+            "default": "RESERVED_READER_UPPER_BOUND_NOT_MEASURED",
+            "title": "Source Bytes Accounting",
+            "type": "string"
+          },
+          "source_records": {
+            "default": 0,
+            "ge": 0,
+            "le": 8192,
+            "title": "Source Records",
+            "type": "integer"
+          },
+          "tool_calls": {
+            "default": 0,
+            "ge": 0,
+            "le": 12,
+            "title": "Tool Calls",
+            "type": "integer"
+          },
+          "transport_attempts": {
+            "default": 0,
+            "ge": 0,
+            "le": 12,
+            "title": "Transport Attempts",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "source_bytes_accounting",
+          "model_calls",
+          "tool_calls",
+          "transport_attempts",
+          "source_bytes",
+          "source_records",
+          "planning_responses"
+        ],
+        "title": "JobProgress",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "code": {
+        "anyOf": [
+          {
+            "enum": [
+              "INVALID_SOURCE_ARGUMENTS",
+              "SOURCE_NOT_FOUND",
+              "SOURCE_INVALID",
+              "SOURCE_UNAVAILABLE",
+              "SOURCE_STATE",
+              "SOURCE_CHANGED",
+              "SOURCE_LIMIT",
+              "SOURCE_BUSY",
+              "SOURCE_STORAGE_UNAVAILABLE",
+              "PEER_OUT_OF_POOL",
+              "INVALID_REQUEST",
+              "JOB_DISABLED",
+              "JOB_DISPATCH_UNSUPPORTED",
+              "UNAVAILABLE",
+              "REMOTE_NOT_ALLOWED",
+              "POOL_EMPTY",
+              "POOL_REFERENCE_MISMATCH",
+              "PEER_NOT_SELECTED",
+              "INVALID_SELECTION_STATE",
+              "MODEL_INVALID",
+              "MODEL_UNAVAILABLE",
+              "MODEL_LIMIT",
+              "MODEL_BUDGET",
+              "TOOL_BUDGET",
+              "PLANNING_BUDGET",
+              "EVIDENCE_BUDGET",
+              "REFERENCE_MISMATCH",
+              "COUNTEREVIDENCE_REQUIRED",
+              "POSITIVE_UNSUPPORTED",
+              "FINAL_LIMIT",
+              "DEADLINE_EXCEEDED",
+              "EXECUTION_IDENTITY_CHANGED",
+              "INCOMPLETE_ASSESSMENT",
+              "USER_CANCELLED",
+              "WORKER_EXITED",
+              "CLOCK_ROLLBACK",
+              "QUEUE_EXPIRED",
+              "OWNER_LOST",
+              "JOB_RESPONSE_LIMIT"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Code"
+      },
+      "evidence_id": {
+        "anyOf": [
+          {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Evidence Id"
+      },
+      "kind": {
+        "enum": [
+          "SOURCE",
+          "MODEL",
+          "TOOL",
+          "FINAL"
+        ],
+        "title": "Kind",
+        "type": "string"
+      },
+      "origin": {
+        "anyOf": [
+          {
+            "enum": [
+              "AUTOMATIC_SEED",
+              "MODEL_REQUEST"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Origin"
+      },
+      "peer_id": {
+        "anyOf": [
+          {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Peer Id"
+      },
+      "progress": {
+        "$ref": "#/$defs/JobProgress"
+      },
+      "sequence": {
+        "ge": 1,
+        "le": 24,
+        "title": "Sequence",
+        "type": "integer"
+      },
+      "tool": {
+        "anyOf": [
+          {
+            "enum": [
+              "peer_overview",
+              "peer_flow_samples",
+              "peer_timeline",
+              "peer_protocol_observations",
+              "compare_peer_cohort"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "select_peers",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Tool"
+      },
+      "version": {
+        "const": "job-investigation-v1",
+        "default": "job-investigation-v1",
+        "title": "Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "version",
+      "sequence",
+      "kind",
+      "progress",
+      "peer_id",
+      "tool",
+      "evidence_id",
+      "code",
+      "origin"
+    ],
+    "title": "JobStep",
+    "type": "object"
+  },
+  "result": {
+    "$defs": {
+      "JobCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "inspected": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Inspected",
+            "type": "integer"
+          },
+          "matched": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Matched",
+            "type": "integer"
+          },
+          "not_observed": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Not Observed",
+            "type": "integer"
+          },
+          "omitted": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Omitted",
+            "type": "integer"
+          },
+          "retained": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Retained",
+            "type": "integer"
+          },
+          "scope_unavailable": {
+            "default": 0,
+            "ge": 0,
+            "le": 8192,
+            "title": "Scope Unavailable",
+            "type": "integer"
+          },
+          "unavailable": {
+            "default": 0,
+            "ge": 0,
+            "le": 8192,
+            "title": "Unavailable",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "inspected",
+          "matched",
+          "retained",
+          "omitted",
+          "not_observed"
+        ],
+        "title": "JobCounts",
+        "type": "object"
+      },
+      "JobCoverage": {
+        "additionalProperties": false,
+        "properties": {
+          "awaiting_selection_peers": {
+            "ge": 0,
+            "le": 32,
+            "title": "Awaiting Selection Peers",
+            "type": "integer"
+          },
+          "capture_completeness": {
+            "const": "UNKNOWN",
+            "default": "UNKNOWN",
+            "title": "Capture Completeness",
+            "type": "string"
+          },
+          "investigated_peers": {
+            "ge": 0,
+            "le": 3,
+            "title": "Investigated Peers",
+            "type": "integer"
+          },
+          "lineage": {
+            "const": "CURRENT_JOB_ONLY_NOT_VALIDATED",
+            "default": "CURRENT_JOB_ONLY_NOT_VALIDATED",
+            "title": "Lineage",
+            "type": "string"
+          },
+          "not_investigated_peers": {
+            "ge": 0,
+            "le": 3,
+            "title": "Not Investigated Peers",
+            "type": "integer"
+          },
+          "not_selected_peers": {
+            "ge": 0,
+            "le": 32,
+            "title": "Not Selected Peers",
+            "type": "integer"
+          },
+          "observed_peers": {
+            "ge": 0,
+            "le": 16384,
+            "title": "Observed Peers",
+            "type": "integer"
+          },
+          "pool_omitted_peers": {
+            "ge": 0,
+            "le": 16384,
+            "title": "Pool Omitted Peers",
+            "type": "integer"
+          },
+          "pool_peers": {
+            "ge": 0,
+            "le": 32,
+            "title": "Pool Peers",
+            "type": "integer"
+          },
+          "selected_peers": {
+            "ge": 0,
+            "le": 3,
+            "title": "Selected Peers",
+            "type": "integer"
+          },
+          "source_rows": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Source Rows",
+            "type": "integer"
+          },
+          "source_status": {
+            "enum": [
+              "COMPLETED",
+              "PARTIALLY_COMPLETED"
+            ],
+            "title": "Source Status",
+            "type": "string"
+          },
+          "unobserved_peer_count": {
+            "default": null,
+            "title": "Unobserved Peer Count",
+            "type": "null"
+          },
+          "whole_job_conclusion": {
+            "const": "NOT_ESTABLISHED",
+            "default": "NOT_ESTABLISHED",
+            "title": "Whole Job Conclusion",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_status",
+          "source_rows",
+          "observed_peers",
+          "pool_peers",
+          "pool_omitted_peers",
+          "awaiting_selection_peers",
+          "not_selected_peers",
+          "selected_peers",
+          "investigated_peers",
+          "not_investigated_peers",
+          "unobserved_peer_count",
+          "capture_completeness",
+          "lineage",
+          "whole_job_conclusion"
+        ],
+        "title": "JobCoverage",
+        "type": "object"
+      },
+      "JobEvidenceQuality": {
+        "additionalProperties": false,
+        "properties": {
+          "counts": {
+            "$ref": "#/$defs/JobCounts"
+          },
+          "evidence_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "OBSERVED",
+              "NOT_OBSERVED",
+              "UNAVAILABLE",
+              "NOT_FOUND_IN_INSPECTED_SCOPE"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "tool": {
+            "enum": [
+              "peer_overview",
+              "peer_flow_samples",
+              "peer_timeline",
+              "peer_protocol_observations",
+              "compare_peer_cohort"
+            ],
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "evidence_id",
+          "tool",
+          "status",
+          "counts"
+        ],
+        "title": "JobEvidenceQuality",
+        "type": "object"
+      },
+      "JobExecutionIdentity": {
+        "additionalProperties": false,
+        "properties": {
+          "action_schema_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Action Schema Sha256",
+            "type": "string"
+          },
+          "evidence_version": {
+            "const": "ip-evidence-v1",
+            "default": "ip-evidence-v1",
+            "title": "Evidence Version",
+            "type": "string"
+          },
+          "final_schema_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Final Schema Sha256",
+            "type": "string"
+          },
+          "model": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "model_config_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Model Config Sha256",
+            "type": "string"
+          },
+          "model_settings": {
+            "$ref": "#/$defs/JobModelSettings"
+          },
+          "policy_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "policy_version": {
+            "const": "job-investigation-policy-v1",
+            "default": "job-investigation-policy-v1",
+            "title": "Policy Version",
+            "type": "string"
+          },
+          "prompt_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Prompt Sha256",
+            "type": "string"
+          },
+          "prompt_version": {
+            "const": "job-investigation-prompt-v1",
+            "default": "job-investigation-prompt-v1",
+            "title": "Prompt Version",
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "ollama",
+              "openai-compatible"
+            ],
+            "title": "Provider",
+            "type": "string"
+          },
+          "version": {
+            "const": "job-investigation-execution-v1",
+            "default": "job-investigation-execution-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "provider",
+          "model",
+          "model_settings",
+          "model_config_sha256",
+          "prompt_version",
+          "prompt_sha256",
+          "action_schema_sha256",
+          "final_schema_sha256",
+          "policy_version",
+          "policy_sha256",
+          "evidence_version"
+        ],
+        "title": "JobExecutionIdentity",
+        "type": "object"
+      },
+      "JobInterpretation": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_ids": {
+            "items": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Evidence Ids",
+            "type": "array"
+          },
+          "metric_refs": {
+            "items": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "maxItems": 3,
+            "title": "Metric Refs",
+            "type": "array"
+          },
+          "text": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "evidence_ids",
+          "metric_refs"
+        ],
+        "title": "JobInterpretation",
+        "type": "object"
+      },
+      "JobMetric": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "enum": [
+              "matched_rows",
+              "total_bytes",
+              "packet_count",
+              "sensor_count",
+              "c2_eligible_rows",
+              "suppressed_control_rows",
+              "eligibility_unavailable_rows",
+              "inbound_rows",
+              "outbound_rows",
+              "internal_rows",
+              "unknown_rows",
+              "inbound_bytes",
+              "outbound_bytes",
+              "internal_bytes",
+              "unknown_bytes"
+            ],
+            "title": "Name",
+            "type": "string"
+          },
+          "observed_rows": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Observed Rows",
+            "type": "integer"
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "unavailable_rows": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Unavailable Rows",
+            "type": "integer"
+          },
+          "unit": {
+            "enum": [
+              "rows",
+              "bytes",
+              "packets",
+              "sensors"
+            ],
+            "title": "Unit",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "ge": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "ref",
+          "name",
+          "unit",
+          "value",
+          "observed_rows",
+          "unavailable_rows"
+        ],
+        "title": "JobMetric",
+        "type": "object"
+      },
+      "JobModelSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "context_tokens": {
+            "ge": 8192,
+            "le": 262144,
+            "title": "Context Tokens",
+            "type": "integer"
+          },
+          "max_output_tokens": {
+            "ge": 1,
+            "le": 16384,
+            "title": "Max Output Tokens",
+            "type": "integer"
+          },
+          "temperature": {
+            "maximum": 1,
+            "minimum": 0,
+            "title": "Temperature",
+            "type": "number"
+          },
+          "timeout_seconds": {
+            "exclusiveMinimum": 0,
+            "maximum": 600,
+            "title": "Timeout Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "temperature",
+          "context_tokens",
+          "max_output_tokens",
+          "timeout_seconds"
+        ],
+        "title": "JobModelSettings",
+        "type": "object"
+      },
+      "JobProgress": {
+        "additionalProperties": false,
+        "properties": {
+          "model_calls": {
+            "default": 0,
+            "ge": 0,
+            "le": 6,
+            "title": "Model Calls",
+            "type": "integer"
+          },
+          "planning_responses": {
+            "default": 0,
+            "ge": 0,
+            "le": 4,
+            "title": "Planning Responses",
+            "type": "integer"
+          },
+          "source_bytes": {
+            "default": 0,
+            "ge": 0,
+            "le": 8650752,
+            "title": "Source Bytes",
+            "type": "integer"
+          },
+          "source_bytes_accounting": {
+            "const": "RESERVED_READER_UPPER_BOUND_NOT_MEASURED",
+            "default": "RESERVED_READER_UPPER_BOUND_NOT_MEASURED",
+            "title": "Source Bytes Accounting",
+            "type": "string"
+          },
+          "source_records": {
+            "default": 0,
+            "ge": 0,
+            "le": 8192,
+            "title": "Source Records",
+            "type": "integer"
+          },
+          "tool_calls": {
+            "default": 0,
+            "ge": 0,
+            "le": 12,
+            "title": "Tool Calls",
+            "type": "integer"
+          },
+          "transport_attempts": {
+            "default": 0,
+            "ge": 0,
+            "le": 12,
+            "title": "Transport Attempts",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "source_bytes_accounting",
+          "model_calls",
+          "tool_calls",
+          "transport_attempts",
+          "source_bytes",
+          "source_records",
+          "planning_responses"
+        ],
+        "title": "JobProgress",
+        "type": "object"
+      },
+      "PeerAssessment": {
+        "additionalProperties": false,
+        "properties": {
+          "counterevidence": {
+            "items": {
+              "$ref": "#/$defs/JobInterpretation"
+            },
+            "maxItems": 2,
+            "title": "Counterevidence",
+            "type": "array"
+          },
+          "evidence_quality": {
+            "items": {
+              "$ref": "#/$defs/JobEvidenceQuality"
+            },
+            "maxItems": 12,
+            "minItems": 1,
+            "title": "Evidence Quality",
+            "type": "array"
+          },
+          "facts": {
+            "items": {
+              "$ref": "#/$defs/JobMetric"
+            },
+            "maxItems": 8,
+            "title": "Facts",
+            "type": "array"
+          },
+          "mode": {
+            "enum": [
+              "MODEL_ASSISTED",
+              "FACTS_ONLY"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "next_checks": {
+            "items": {
+              "maxLength": 300,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 2,
+            "title": "Next Checks",
+            "type": "array"
+          },
+          "peer_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Peer Id",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "INVALID_SOURCE_ARGUMENTS",
+                  "SOURCE_NOT_FOUND",
+                  "SOURCE_INVALID",
+                  "SOURCE_UNAVAILABLE",
+                  "SOURCE_STATE",
+                  "SOURCE_CHANGED",
+                  "SOURCE_LIMIT",
+                  "SOURCE_BUSY",
+                  "SOURCE_STORAGE_UNAVAILABLE",
+                  "PEER_OUT_OF_POOL",
+                  "INVALID_REQUEST",
+                  "JOB_DISABLED",
+                  "JOB_DISPATCH_UNSUPPORTED",
+                  "UNAVAILABLE",
+                  "REMOTE_NOT_ALLOWED",
+                  "POOL_EMPTY",
+                  "POOL_REFERENCE_MISMATCH",
+                  "PEER_NOT_SELECTED",
+                  "INVALID_SELECTION_STATE",
+                  "MODEL_INVALID",
+                  "MODEL_UNAVAILABLE",
+                  "MODEL_LIMIT",
+                  "MODEL_BUDGET",
+                  "TOOL_BUDGET",
+                  "PLANNING_BUDGET",
+                  "EVIDENCE_BUDGET",
+                  "REFERENCE_MISMATCH",
+                  "COUNTEREVIDENCE_REQUIRED",
+                  "POSITIVE_UNSUPPORTED",
+                  "FINAL_LIMIT",
+                  "DEADLINE_EXCEEDED",
+                  "EXECUTION_IDENTITY_CHANGED",
+                  "INCOMPLETE_ASSESSMENT",
+                  "USER_CANCELLED",
+                  "WORKER_EXITED",
+                  "CLOCK_ROLLBACK",
+                  "QUEUE_EXPIRED",
+                  "OWNER_LOST",
+                  "JOB_RESPONSE_LIMIT"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "support": {
+            "items": {
+              "$ref": "#/$defs/JobInterpretation"
+            },
+            "maxItems": 2,
+            "title": "Support",
+            "type": "array"
+          },
+          "uncertainty": {
+            "items": {
+              "maxLength": 300,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 2,
+            "minItems": 1,
+            "title": "Uncertainty",
+            "type": "array"
+          },
+          "verdict": {
+            "enum": [
+              "SUSPICIOUS_C2",
+              "BENIGN_HYPOTHESIS",
+              "NEEDS_REVIEW",
+              "INCONCLUSIVE"
+            ],
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "peer_id",
+          "verdict",
+          "support",
+          "counterevidence",
+          "uncertainty",
+          "next_checks",
+          "mode",
+          "facts",
+          "evidence_quality",
+          "reason"
+        ],
+        "title": "PeerAssessment",
+        "type": "object"
+      },
+      "SourceBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "dataset_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Dataset Id",
+            "type": "string"
+          },
+          "job_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "metadata_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Metadata Sha256",
+            "type": "string"
+          },
+          "projection_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Projection Sha256",
+            "type": "string"
+          },
+          "rows_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Rows Sha256",
+            "type": "string"
+          },
+          "source_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Sha256",
+            "type": "string"
+          },
+          "version": {
+            "const": "ip-evidence-v1",
+            "default": "ip-evidence-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "dataset_id",
+          "metadata_sha256",
+          "rows_sha256",
+          "projection_sha256",
+          "source_sha256"
+        ],
+        "title": "SourceBinding",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "assessments": {
+        "items": {
+          "$ref": "#/$defs/PeerAssessment"
+        },
+        "maxItems": 3,
+        "title": "Assessments",
+        "type": "array"
+      },
+      "coverage": {
+        "$ref": "#/$defs/JobCoverage"
+      },
+      "execution": {
+        "$ref": "#/$defs/JobExecutionIdentity"
+      },
+      "kind": {
+        "const": "RESULT",
+        "default": "RESULT",
+        "title": "Kind",
+        "type": "string"
+      },
+      "language": {
+        "enum": [
+          "ko",
+          "en"
+        ],
+        "title": "Language",
+        "type": "string"
+      },
+      "limitations": {
+        "items": {
+          "maxLength": 128,
+          "type": "string"
+        },
+        "maxItems": 32,
+        "title": "Limitations",
+        "type": "array"
+      },
+      "partial_scope": {
+        "const": true,
+        "default": true,
+        "title": "Partial Scope",
+        "type": "boolean"
+      },
+      "pool_sha256": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Pool Sha256",
+        "type": "string"
+      },
+      "progress": {
+        "$ref": "#/$defs/JobProgress"
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "enum": [
+              "INVALID_SOURCE_ARGUMENTS",
+              "SOURCE_NOT_FOUND",
+              "SOURCE_INVALID",
+              "SOURCE_UNAVAILABLE",
+              "SOURCE_STATE",
+              "SOURCE_CHANGED",
+              "SOURCE_LIMIT",
+              "SOURCE_BUSY",
+              "SOURCE_STORAGE_UNAVAILABLE",
+              "PEER_OUT_OF_POOL",
+              "INVALID_REQUEST",
+              "JOB_DISABLED",
+              "JOB_DISPATCH_UNSUPPORTED",
+              "UNAVAILABLE",
+              "REMOTE_NOT_ALLOWED",
+              "POOL_EMPTY",
+              "POOL_REFERENCE_MISMATCH",
+              "PEER_NOT_SELECTED",
+              "INVALID_SELECTION_STATE",
+              "MODEL_INVALID",
+              "MODEL_UNAVAILABLE",
+              "MODEL_LIMIT",
+              "MODEL_BUDGET",
+              "TOOL_BUDGET",
+              "PLANNING_BUDGET",
+              "EVIDENCE_BUDGET",
+              "REFERENCE_MISMATCH",
+              "COUNTEREVIDENCE_REQUIRED",
+              "POSITIVE_UNSUPPORTED",
+              "FINAL_LIMIT",
+              "DEADLINE_EXCEEDED",
+              "EXECUTION_IDENTITY_CHANGED",
+              "INCOMPLETE_ASSESSMENT",
+              "USER_CANCELLED",
+              "WORKER_EXITED",
+              "CLOCK_ROLLBACK",
+              "QUEUE_EXPIRED",
+              "OWNER_LOST",
+              "JOB_RESPONSE_LIMIT"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason"
+      },
+      "source": {
+        "$ref": "#/$defs/SourceBinding"
+      },
+      "version": {
+        "const": "job-investigation-v1",
+        "default": "job-investigation-v1",
+        "title": "Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "version",
+      "kind",
+      "source",
+      "pool_sha256",
+      "execution",
+      "language",
+      "progress",
+      "coverage",
+      "assessments",
+      "limitations",
+      "partial_scope",
+      "reason"
+    ],
+    "title": "JobResult",
+    "type": "object"
+  },
+  "capabilities": {
+    "$defs": {
+      "JobLimits": {
+        "additionalProperties": false,
+        "properties": {
+          "execution_deadline_seconds": {
+            "const": 300,
+            "default": 300,
+            "title": "Execution Deadline Seconds",
+            "type": "integer"
+          },
+          "model_calls": {
+            "const": 6,
+            "default": 6,
+            "title": "Model Calls",
+            "type": "integer"
+          },
+          "persisted_preparation_bytes": {
+            "const": 131072,
+            "default": 131072,
+            "title": "Persisted Preparation Bytes",
+            "type": "integer"
+          },
+          "planning_responses": {
+            "const": 4,
+            "default": 4,
+            "title": "Planning Responses",
+            "type": "integer"
+          },
+          "pool_encoded_bytes": {
+            "const": 16384,
+            "default": 16384,
+            "title": "Pool Encoded Bytes",
+            "type": "integer"
+          },
+          "pool_peers": {
+            "const": 32,
+            "default": 32,
+            "title": "Pool Peers",
+            "type": "integer"
+          },
+          "retained_evidence_run_bytes": {
+            "const": 131072,
+            "default": 131072,
+            "title": "Retained Evidence Run Bytes",
+            "type": "integer"
+          },
+          "selected_peers": {
+            "const": 3,
+            "default": 3,
+            "title": "Selected Peers",
+            "type": "integer"
+          },
+          "tool_calls": {
+            "const": 12,
+            "default": 12,
+            "title": "Tool Calls",
+            "type": "integer"
+          },
+          "transport_attempts": {
+            "const": 12,
+            "default": 12,
+            "title": "Transport Attempts",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pool_peers",
+          "pool_encoded_bytes",
+          "selected_peers",
+          "model_calls",
+          "tool_calls",
+          "planning_responses",
+          "transport_attempts",
+          "execution_deadline_seconds",
+          "persisted_preparation_bytes",
+          "retained_evidence_run_bytes"
+        ],
+        "title": "JobLimits",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "availability": {
+        "enum": [
+          "CONFIGURED_NOT_PROBED",
+          "UNAVAILABLE"
+        ],
+        "title": "Availability",
+        "type": "string"
+      },
+      "dispatch_scope": {
+        "enum": [
+          "OWNED_CAPABLE_RUNTIME",
+          "UNAVAILABLE"
+        ],
+        "title": "Dispatch Scope",
+        "type": "string"
+      },
+      "experimental": {
+        "const": true,
+        "default": true,
+        "title": "Experimental",
+        "type": "boolean"
+      },
+      "historical_comparison": {
+        "const": "UNSUPPORTED",
+        "default": "UNSUPPORTED",
+        "title": "Historical Comparison",
+        "type": "string"
+      },
+      "limits": {
+        "$ref": "#/$defs/JobLimits"
+      },
+      "mode": {
+        "const": "JOB",
+        "default": "JOB",
+        "title": "Mode",
+        "type": "string"
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "enum": [
+              "INVALID_SOURCE_ARGUMENTS",
+              "SOURCE_NOT_FOUND",
+              "SOURCE_INVALID",
+              "SOURCE_UNAVAILABLE",
+              "SOURCE_STATE",
+              "SOURCE_CHANGED",
+              "SOURCE_LIMIT",
+              "SOURCE_BUSY",
+              "SOURCE_STORAGE_UNAVAILABLE",
+              "PEER_OUT_OF_POOL",
+              "INVALID_REQUEST",
+              "JOB_DISABLED",
+              "JOB_DISPATCH_UNSUPPORTED",
+              "UNAVAILABLE",
+              "REMOTE_NOT_ALLOWED",
+              "POOL_EMPTY",
+              "POOL_REFERENCE_MISMATCH",
+              "PEER_NOT_SELECTED",
+              "INVALID_SELECTION_STATE",
+              "MODEL_INVALID",
+              "MODEL_UNAVAILABLE",
+              "MODEL_LIMIT",
+              "MODEL_BUDGET",
+              "TOOL_BUDGET",
+              "PLANNING_BUDGET",
+              "EVIDENCE_BUDGET",
+              "REFERENCE_MISMATCH",
+              "COUNTEREVIDENCE_REQUIRED",
+              "POSITIVE_UNSUPPORTED",
+              "FINAL_LIMIT",
+              "DEADLINE_EXCEEDED",
+              "EXECUTION_IDENTITY_CHANGED",
+              "INCOMPLETE_ASSESSMENT",
+              "USER_CANCELLED",
+              "WORKER_EXITED",
+              "CLOCK_ROLLBACK",
+              "QUEUE_EXPIRED",
+              "OWNER_LOST",
+              "JOB_RESPONSE_LIMIT"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Reason"
+      },
+      "remote_server_allowed": {
+        "title": "Remote Server Allowed",
+        "type": "boolean"
+      },
+      "version": {
+        "const": "job-investigation-v1",
+        "default": "job-investigation-v1",
+        "title": "Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "version",
+      "availability",
+      "experimental",
+      "mode",
+      "dispatch_scope",
+      "historical_comparison",
+      "remote_server_allowed",
+      "limits",
+      "reason"
+    ],
+    "title": "JobCapabilities",
+    "type": "object"
+  },
+  "evidence": {
+    "$defs": {
+      "CohortPeer": {
+        "additionalProperties": false,
+        "properties": {
+          "comparison": {
+            "const": "SAME_SOURCE_PROTOCOL_OVERLAP",
+            "default": "SAME_SOURCE_PROTOCOL_OVERLAP",
+            "title": "Comparison",
+            "type": "string"
+          },
+          "ip": {
+            "title": "Ip",
+            "type": "string"
+          },
+          "observed_byte_rows": {
+            "title": "Observed Byte Rows",
+            "type": "integer"
+          },
+          "rows": {
+            "title": "Rows",
+            "type": "integer"
+          },
+          "sensor_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Sensor Id",
+            "type": "string"
+          },
+          "total_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Bytes"
+          }
+        },
+        "required": [
+          "sensor_id",
+          "ip",
+          "rows",
+          "total_bytes",
+          "observed_byte_rows"
+        ],
+        "title": "CohortPeer",
+        "type": "object"
+      },
+      "Counts": {
+        "additionalProperties": false,
+        "properties": {
+          "inspected": {
+            "title": "Inspected",
+            "type": "integer"
+          },
+          "matched": {
+            "title": "Matched",
+            "type": "integer"
+          },
+          "not_observed": {
+            "title": "Not Observed",
+            "type": "integer"
+          },
+          "omitted": {
+            "title": "Omitted",
+            "type": "integer"
+          },
+          "retained": {
+            "title": "Retained",
+            "type": "integer"
+          },
+          "scope_unavailable": {
+            "default": 0,
+            "maximum": 8192,
+            "minimum": 0,
+            "title": "Scope Unavailable",
+            "type": "integer"
+          },
+          "unavailable": {
+            "default": 0,
+            "title": "Unavailable",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "inspected",
+          "matched",
+          "retained",
+          "omitted",
+          "not_observed"
+        ],
+        "title": "Counts",
+        "type": "object"
+      },
+      "InvestigationScope": {
+        "additionalProperties": false,
+        "properties": {
+          "end_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "End Time"
+          },
+          "endpoint_side": {
+            "default": "either",
+            "enum": [
+              "either",
+              "source",
+              "destination"
+            ],
+            "title": "Endpoint Side",
+            "type": "string"
+          },
+          "sensor_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sensor Id"
+          },
+          "start_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Start Time"
+          },
+          "target_ip": {
+            "title": "Target Ip",
+            "type": "string"
+          },
+          "traffic_direction": {
+            "anyOf": [
+              {
+                "enum": [
+                  "INBOUND",
+                  "OUTBOUND",
+                  "INTERNAL",
+                  "UNKNOWN"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Traffic Direction"
+          }
+        },
+        "required": [
+          "target_ip"
+        ],
+        "title": "InvestigationScope",
+        "type": "object"
+      },
+      "Metric": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "enum": [
+              "matched_rows",
+              "total_bytes",
+              "packet_count",
+              "sensor_count",
+              "c2_eligible_rows",
+              "suppressed_control_rows",
+              "eligibility_unavailable_rows",
+              "inbound_rows",
+              "outbound_rows",
+              "internal_rows",
+              "unknown_rows",
+              "inbound_bytes",
+              "outbound_bytes",
+              "internal_bytes",
+              "unknown_bytes"
+            ],
+            "title": "Name",
+            "type": "string"
+          },
+          "observed_rows": {
+            "title": "Observed Rows",
+            "type": "integer"
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "unavailable_rows": {
+            "title": "Unavailable Rows",
+            "type": "integer"
+          },
+          "unit": {
+            "enum": [
+              "rows",
+              "bytes",
+              "packets",
+              "sensors"
+            ],
+            "title": "Unit",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "ref",
+          "name",
+          "unit",
+          "value",
+          "observed_rows",
+          "unavailable_rows"
+        ],
+        "title": "Metric",
+        "type": "object"
+      },
+      "Observation": {
+        "additionalProperties": false,
+        "properties": {
+          "certificate_fingerprint": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "pattern": "^[a-zA-Z0-9:_-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Certificate Fingerprint"
+          },
+          "destination_ip": {
+            "title": "Destination Ip",
+            "type": "string"
+          },
+          "destination_port": {
+            "anyOf": [
+              {
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Destination Port"
+          },
+          "direction": {
+            "enum": [
+              "INBOUND",
+              "OUTBOUND",
+              "INTERNAL",
+              "UNKNOWN"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "maxLength": 253,
+                "pattern": "^[a-zA-Z0-9_.-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Domain"
+          },
+          "duration_seconds": {
+            "anyOf": [
+              {
+                "maximum": 1000000000,
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Duration Seconds"
+          },
+          "ordinal": {
+            "exclusiveMaximum": 8192,
+            "minimum": 0,
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "packet_count": {
+            "anyOf": [
+              {
+                "maximum": 1099511627775,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Packet Count"
+          },
+          "payload_length": {
+            "anyOf": [
+              {
+                "maximum": 1099511627775,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Payload Length"
+          },
+          "payload_length_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "payload_length",
+                  "complete_transport_packet"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Payload Length Source"
+          },
+          "present_fields": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Present Fields",
+            "type": "array"
+          },
+          "protocol": {
+            "enum": [
+              "TCP",
+              "UDP",
+              "ICMP",
+              "ICMPV6",
+              "OTHER"
+            ],
+            "title": "Protocol",
+            "type": "string"
+          },
+          "row_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Row Sha256",
+            "type": "string"
+          },
+          "sensor_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Sensor Id",
+            "type": "string"
+          },
+          "source_ip": {
+            "title": "Source Ip",
+            "type": "string"
+          },
+          "source_port": {
+            "anyOf": [
+              {
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source Port"
+          },
+          "tcp_flags": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/$defs/TCPFlag"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tcp Flags"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "tls_fingerprint": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "pattern": "^[a-zA-Z0-9:_-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tls Fingerprint"
+          },
+          "total_bytes": {
+            "anyOf": [
+              {
+                "maximum": 1099511627775,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Total Bytes"
+          },
+          "unavailable_fields": {
+            "default": [],
+            "items": {
+              "enum": [
+                "protocol",
+                "direction",
+                "domain",
+                "tls_fingerprint",
+                "certificate_fingerprint"
+              ],
+              "type": "string"
+            },
+            "maxItems": 5,
+            "title": "Unavailable Fields",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ordinal",
+          "row_sha256",
+          "sensor_id",
+          "timestamp",
+          "source_ip",
+          "destination_ip",
+          "protocol",
+          "direction",
+          "present_fields"
+        ],
+        "title": "Observation",
+        "type": "object"
+      },
+      "ProtocolObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "c2_eligibility": {
+            "enum": [
+              "ELIGIBLE",
+              "UNAVAILABLE",
+              "SUPPRESSED_OUTBOUND_CONTROL"
+            ],
+            "title": "C2 Eligibility",
+            "type": "string"
+          },
+          "certificate_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Certificate Fingerprint"
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain"
+          },
+          "payload_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payload Length"
+          },
+          "payload_length_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "payload_length",
+                  "complete_transport_packet"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Payload Length Source"
+          },
+          "ref": {
+            "$ref": "#/$defs/RowReference"
+          },
+          "tcp_flags": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/$defs/TCPFlag"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tcp Flags"
+          },
+          "tls_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tls Fingerprint"
+          }
+        },
+        "required": [
+          "ref",
+          "domain",
+          "tls_fingerprint",
+          "certificate_fingerprint",
+          "payload_length",
+          "tcp_flags",
+          "c2_eligibility"
+        ],
+        "title": "ProtocolObservation",
+        "type": "object"
+      },
+      "RowReference": {
+        "additionalProperties": false,
+        "properties": {
+          "ordinal": {
+            "exclusiveMaximum": 8192,
+            "minimum": 0,
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "row_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Row Sha256",
+            "type": "string"
+          },
+          "source_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_sha256",
+          "ordinal",
+          "row_sha256"
+        ],
+        "title": "RowReference",
+        "type": "object"
+      },
+      "Sample": {
+        "additionalProperties": false,
+        "properties": {
+          "c2_eligibility": {
+            "enum": [
+              "ELIGIBLE",
+              "UNAVAILABLE",
+              "SUPPRESSED_OUTBOUND_CONTROL"
+            ],
+            "title": "C2 Eligibility",
+            "type": "string"
+          },
+          "ref": {
+            "$ref": "#/$defs/RowReference"
+          },
+          "row": {
+            "$ref": "#/$defs/Observation"
+          },
+          "selection": {
+            "const": "SOURCE_ORDER",
+            "default": "SOURCE_ORDER",
+            "title": "Selection",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ref",
+          "row",
+          "c2_eligibility"
+        ],
+        "title": "Sample",
+        "type": "object"
+      },
+      "SourceBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "dataset_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Dataset Id",
+            "type": "string"
+          },
+          "job_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "metadata_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Metadata Sha256",
+            "type": "string"
+          },
+          "projection_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Projection Sha256",
+            "type": "string"
+          },
+          "rows_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Rows Sha256",
+            "type": "string"
+          },
+          "source_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Sha256",
+            "type": "string"
+          },
+          "version": {
+            "const": "ip-evidence-v1",
+            "default": "ip-evidence-v1",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "dataset_id",
+          "metadata_sha256",
+          "rows_sha256",
+          "projection_sha256",
+          "source_sha256"
+        ],
+        "title": "SourceBinding",
+        "type": "object"
+      },
+      "TCPFlag": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "maximum": 1099511627775,
+            "minimum": 0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "name": {
+            "enum": [
+              "syn",
+              "ack",
+              "fin",
+              "rst",
+              "psh",
+              "urg",
+              "ece",
+              "cwr"
+            ],
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "count"
+        ],
+        "title": "TCPFlag",
+        "type": "object"
+      },
+      "TimelineBucket": {
+        "additionalProperties": false,
+        "properties": {
+          "aggregate_rows": {
+            "title": "Aggregate Rows",
+            "type": "integer"
+          },
+          "end_time": {
+            "title": "End Time",
+            "type": "string"
+          },
+          "packet_interval_mean_seconds": {
+            "default": null,
+            "title": "Packet Interval Mean Seconds",
+            "type": "null"
+          },
+          "packet_rows": {
+            "title": "Packet Rows",
+            "type": "integer"
+          },
+          "rows": {
+            "title": "Rows",
+            "type": "integer"
+          },
+          "sensor_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$",
+            "title": "Sensor Id",
+            "type": "string"
+          },
+          "start_time": {
+            "title": "Start Time",
+            "type": "string"
+          },
+          "unavailable_rows": {
+            "title": "Unavailable Rows",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sensor_id",
+          "start_time",
+          "end_time",
+          "rows",
+          "packet_rows",
+          "aggregate_rows",
+          "unavailable_rows"
+        ],
+        "title": "TimelineBucket",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "args_sha256": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Args Sha256",
+        "type": "string"
+      },
+      "cohort": {
+        "default": [],
+        "items": {
+          "$ref": "#/$defs/CohortPeer"
+        },
+        "title": "Cohort",
+        "type": "array"
+      },
+      "cohort_omitted": {
+        "default": 0,
+        "title": "Cohort Omitted",
+        "type": "integer"
+      },
+      "cohort_total": {
+        "default": 0,
+        "title": "Cohort Total",
+        "type": "integer"
+      },
+      "cohort_unavailable_rows": {
+        "default": 0,
+        "maximum": 8192,
+        "minimum": 0,
+        "title": "Cohort Unavailable Rows",
+        "type": "integer"
+      },
+      "counts": {
+        "$ref": "#/$defs/Counts"
+      },
+      "evidence_id": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Evidence Id",
+        "type": "string"
+      },
+      "limit": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Limit"
+      },
+      "limitations": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Limitations",
+        "type": "array"
+      },
+      "metrics": {
+        "items": {
+          "$ref": "#/$defs/Metric"
+        },
+        "title": "Metrics",
+        "type": "array"
+      },
+      "protocols": {
+        "default": [],
+        "items": {
+          "$ref": "#/$defs/ProtocolObservation"
+        },
+        "title": "Protocols",
+        "type": "array"
+      },
+      "samples": {
+        "default": [],
+        "items": {
+          "$ref": "#/$defs/Sample"
+        },
+        "title": "Samples",
+        "type": "array"
+      },
+      "scope": {
+        "$ref": "#/$defs/InvestigationScope"
+      },
+      "source": {
+        "$ref": "#/$defs/SourceBinding"
+      },
+      "status": {
+        "enum": [
+          "OBSERVED",
+          "NOT_OBSERVED",
+          "UNAVAILABLE",
+          "NOT_FOUND_IN_INSPECTED_SCOPE"
+        ],
+        "title": "Status",
+        "type": "string"
+      },
+      "timeline": {
+        "default": [],
+        "items": {
+          "$ref": "#/$defs/TimelineBucket"
+        },
+        "title": "Timeline",
+        "type": "array"
+      },
+      "tool": {
+        "enum": [
+          "peer_overview",
+          "peer_flow_samples",
+          "peer_timeline",
+          "peer_protocol_observations",
+          "compare_peer_cohort"
+        ],
+        "title": "Tool",
+        "type": "string"
+      },
+      "version": {
+        "const": "ip-evidence-v1",
+        "default": "ip-evidence-v1",
+        "title": "Version",
+        "type": "string"
+      }
+    },
+    "required": [
+      "evidence_id",
+      "source",
+      "scope",
+      "tool",
+      "args_sha256",
+      "status",
+      "counts",
+      "metrics",
+      "limitations"
+    ],
+    "title": "Evidence",
+    "type": "object"
+  },
+  "action": {
+    "$defs": {
+      "AssessmentAction": {
+        "additionalProperties": false,
+        "properties": {
+          "counterevidence": {
+            "items": {
+              "$ref": "#/$defs/JobInterpretation"
+            },
+            "maxItems": 2,
+            "title": "Counterevidence",
+            "type": "array"
+          },
+          "next_checks": {
+            "items": {
+              "maxLength": 300,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 2,
+            "title": "Next Checks",
+            "type": "array"
+          },
+          "peer_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Peer Id",
+            "type": "string"
+          },
+          "support": {
+            "items": {
+              "$ref": "#/$defs/JobInterpretation"
+            },
+            "maxItems": 2,
+            "title": "Support",
+            "type": "array"
+          },
+          "uncertainty": {
+            "items": {
+              "maxLength": 300,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 2,
+            "minItems": 1,
+            "title": "Uncertainty",
+            "type": "array"
+          },
+          "verdict": {
+            "enum": [
+              "SUSPICIOUS_C2",
+              "BENIGN_HYPOTHESIS",
+              "NEEDS_REVIEW",
+              "INCONCLUSIVE"
+            ],
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "peer_id",
+          "verdict",
+          "support",
+          "counterevidence",
+          "uncertainty",
+          "next_checks"
+        ],
+        "title": "AssessmentAction",
+        "type": "object"
+      },
+      "CohortArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 20,
+            "ge": 1,
+            "le": 20,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "CohortArgs",
+        "type": "object"
+      },
+      "CohortCall": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/CohortArgs"
+          },
+          "peer_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Peer Id",
+            "type": "string"
+          },
+          "tool": {
+            "const": "compare_peer_cohort",
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "peer_id",
+          "tool",
+          "arguments"
+        ],
+        "title": "CohortCall",
+        "type": "object"
+      },
+      "EmptyArgs": {
+        "additionalProperties": false,
+        "properties": {},
+        "title": "EmptyArgs",
+        "type": "object"
+      },
+      "Finish": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "finish",
+            "title": "Action",
+            "type": "string"
+          },
+          "assessments": {
+            "items": {
+              "$ref": "#/$defs/AssessmentAction"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Assessments",
+            "type": "array"
+          }
+        },
+        "required": [
+          "action",
+          "assessments"
+        ],
+        "title": "Finish",
+        "type": "object"
+      },
+      "JobInterpretation": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_ids": {
+            "items": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Evidence Ids",
+            "type": "array"
+          },
+          "metric_refs": {
+            "items": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "maxItems": 3,
+            "title": "Metric Refs",
+            "type": "array"
+          },
+          "text": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "evidence_ids",
+          "metric_refs"
+        ],
+        "title": "JobInterpretation",
+        "type": "object"
+      },
+      "OverviewCall": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/EmptyArgs"
+          },
+          "peer_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Peer Id",
+            "type": "string"
+          },
+          "tool": {
+            "const": "peer_overview",
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "peer_id",
+          "tool",
+          "arguments"
+        ],
+        "title": "OverviewCall",
+        "type": "object"
+      },
+      "RequestTools": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "request_tools",
+            "title": "Action",
+            "type": "string"
+          },
+          "tools": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "compare_peer_cohort": "#/$defs/CohortCall",
+                  "peer_flow_samples": "#/$defs/SampleCall",
+                  "peer_overview": "#/$defs/OverviewCall",
+                  "peer_protocol_observations": "#/$defs/SampleCall",
+                  "peer_timeline": "#/$defs/TimelineCall"
+                },
+                "propertyName": "tool"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/OverviewCall"
+                },
+                {
+                  "$ref": "#/$defs/SampleCall"
+                },
+                {
+                  "$ref": "#/$defs/TimelineCall"
+                },
+                {
+                  "$ref": "#/$defs/CohortCall"
+                }
+              ]
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Tools",
+            "type": "array"
+          }
+        },
+        "required": [
+          "action",
+          "tools"
+        ],
+        "title": "RequestTools",
+        "type": "object"
+      },
+      "SampleArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 50,
+            "ge": 1,
+            "le": 50,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "SampleArgs",
+        "type": "object"
+      },
+      "SampleCall": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/SampleArgs"
+          },
+          "peer_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Peer Id",
+            "type": "string"
+          },
+          "tool": {
+            "enum": [
+              "peer_flow_samples",
+              "peer_protocol_observations"
+            ],
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "peer_id",
+          "tool",
+          "arguments"
+        ],
+        "title": "SampleCall",
+        "type": "object"
+      },
+      "SelectPeers": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "select_peers",
+            "title": "Action",
+            "type": "string"
+          },
+          "peer_ids": {
+            "items": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Peer Ids",
+            "type": "array"
+          },
+          "pool_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Pool Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "pool_sha256",
+          "peer_ids"
+        ],
+        "title": "SelectPeers",
+        "type": "object"
+      },
+      "TimelineArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 120,
+            "ge": 1,
+            "le": 120,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "TimelineArgs",
+        "type": "object"
+      },
+      "TimelineCall": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": {
+            "$ref": "#/$defs/TimelineArgs"
+          },
+          "peer_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Peer Id",
+            "type": "string"
+          },
+          "tool": {
+            "const": "peer_timeline",
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "peer_id",
+          "tool",
+          "arguments"
+        ],
+        "title": "TimelineCall",
+        "type": "object"
+      }
+    },
+    "discriminator": {
+      "mapping": {
+        "finish": "#/$defs/Finish",
+        "request_tools": "#/$defs/RequestTools",
+        "select_peers": "#/$defs/SelectPeers"
+      },
+      "propertyName": "action"
+    },
+    "oneOf": [
+      {
+        "$ref": "#/$defs/SelectPeers"
+      },
+      {
+        "$ref": "#/$defs/RequestTools"
+      },
+      {
+        "$ref": "#/$defs/Finish"
+      }
+    ]
+  },
+  "request": {
+    "additionalProperties": false,
+    "properties": {
+      "version": {
+        "const": "job-investigation-v1",
+        "title": "Version",
+        "type": "string"
+      },
+      "mode": {
+        "const": "JOB",
+        "title": "Mode",
+        "type": "string"
+      },
+      "experimental": {
+        "const": true,
+        "title": "Experimental",
+        "type": "boolean"
+      },
+      "question": {
+        "maxLength": 2000,
+        "minLength": 1,
+        "title": "Question",
+        "type": "string"
+      },
+      "language": {
+        "enum": [
+          "ko",
+          "en"
+        ],
+        "title": "Language",
+        "type": "string"
+      },
+      "idempotency_key": {
+        "maxLength": 200,
+        "minLength": 1,
+        "pattern": "^[!-~]+$",
+        "title": "Idempotency Key",
+        "type": "string"
+      },
+      "expected_source_sha256": {
+        "anyOf": [
+          {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Expected Source Sha256"
+      },
+      "allow_remote": {
+        "title": "Allow Remote",
+        "type": "boolean"
+      },
+      "baseline_mode": {
+        "const": "off",
+        "title": "Baseline Mode",
+        "type": "string"
+      }
+    },
+    "required": [
+      "version",
+      "mode",
+      "experimental",
+      "question",
+      "language",
+      "idempotency_key",
+      "expected_source_sha256",
+      "allow_remote",
+      "baseline_mode"
+    ],
+    "title": "JobRequest",
+    "type": "object"
+  },
+  "pool": {
+    "$defs": {
+      "DiscoveryCoverage": {
+        "additionalProperties": false,
+        "properties": {
+          "state": {
+            "enum": [
+              "AVAILABLE",
+              "PARTIAL",
+              "UNAVAILABLE"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "examined_peers": {
+            "anyOf": [
+              {
+                "ge": 0,
+                "le": 16384,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Examined Peers"
+          },
+          "excluded_peers": {
+            "anyOf": [
+              {
+                "ge": 0,
+                "le": 16384,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Excluded Peers"
+          },
+          "warnings": {
+            "items": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "maxItems": 32,
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "state",
+          "examined_peers",
+          "excluded_peers",
+          "warnings"
+        ],
+        "title": "DiscoveryCoverage",
+        "type": "object"
+      },
+      "PeerSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "peer_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Peer Id",
+            "type": "string"
+          },
+          "ip": {
+            "title": "Ip",
+            "type": "string"
+          },
+          "matched_rows": {
+            "ge": 1,
+            "le": 8192,
+            "title": "Matched Rows",
+            "type": "integer"
+          },
+          "eligible_rows": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Eligible Rows",
+            "type": "integer"
+          },
+          "suppressed_control_rows": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Suppressed Control Rows",
+            "type": "integer"
+          },
+          "eligibility_unavailable_rows": {
+            "ge": 0,
+            "le": 8192,
+            "title": "Eligibility Unavailable Rows",
+            "type": "integer"
+          },
+          "behavior_state": {
+            "enum": [
+              "PRIORITIZED",
+              "NOT_PRIORITIZED",
+              "UNAVAILABLE"
+            ],
+            "title": "Behavior State",
+            "type": "string"
+          },
+          "behavior_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Behavior Score"
+          }
+        },
+        "required": [
+          "peer_id",
+          "ip",
+          "matched_rows",
+          "eligible_rows",
+          "suppressed_control_rows",
+          "eligibility_unavailable_rows",
+          "behavior_state",
+          "behavior_score"
+        ],
+        "title": "PeerSummary",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "version": {
+        "const": "job-investigation-pool-v1",
+        "title": "Version",
+        "type": "string"
+      },
+      "source_sha256": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Source Sha256",
+        "type": "string"
+      },
+      "policy_version": {
+        "const": "job-investigation-policy-v1",
+        "title": "Policy Version",
+        "type": "string"
+      },
+      "pool_sha256": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Pool Sha256",
+        "type": "string"
+      },
+      "entries": {
+        "items": {
+          "$ref": "#/$defs/PeerSummary"
+        },
+        "maxItems": 32,
+        "title": "Entries",
+        "type": "array"
+      },
+      "observed_peers": {
+        "ge": 0,
+        "le": 16384,
+        "title": "Observed Peers",
+        "type": "integer"
+      },
+      "omitted_peers": {
+        "ge": 0,
+        "le": 16384,
+        "title": "Omitted Peers",
+        "type": "integer"
+      },
+      "omitted_identities": {
+        "enum": [
+          "NOT_RETAINED",
+          "NONE"
+        ],
+        "title": "Omitted Identities",
+        "type": "string"
+      },
+      "legacy_membership": {
+        "const": "NOT_READ",
+        "title": "Legacy Membership",
+        "type": "string"
+      },
+      "discovery": {
+        "$ref": "#/$defs/DiscoveryCoverage"
+      },
+      "limitations": {
+        "items": {
+          "maxLength": 128,
+          "type": "string"
+        },
+        "maxItems": 32,
+        "title": "Limitations",
+        "type": "array"
+      }
+    },
+    "required": [
+      "version",
+      "source_sha256",
+      "policy_version",
+      "pool_sha256",
+      "entries",
+      "observed_peers",
+      "omitted_peers",
+      "omitted_identities",
+      "legacy_membership",
+      "discovery",
+      "limitations"
+    ],
+    "title": "JobPool",
+    "type": "object"
+  }
+}

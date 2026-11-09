@@ -2,7 +2,9 @@ import { Fragment, FormEvent, ReactNode, useCallback, useEffect, useRef, useStat
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { api } from './api';
+import { captureAuthentication, setAuthentication } from './authentication';
 import { AIInvestigationEntry, type InvestigationSelection } from './AIInvestigationPanel';
+import { JobInvestigationEntry } from './JobInvestigationPanel';
 import NetworkAIInterpretation from './NetworkAIInterpretation';
 import NetworkSourceCapability from './NetworkSourceCapability';
 import NetworkAnomalyPanel, { type NetworkAnomalyReport } from './NetworkAnomalyPanel';
@@ -299,7 +301,7 @@ function AsyncState<T>({ query, children, empty }: { query: ReturnType<typeof us
 
 function Login() {
   const [username, setUsername] = useState('analyst'); const [error, setError] = useState('');
-  const login = async (event: FormEvent) => { event.preventDefault(); setError(''); try { const result = await api.post<{ access_token: string }>('/auth/dev-login', { username }); localStorage.setItem('c2hunter-token', result.access_token); window.location.assign('/'); } catch (e) { setError(e instanceof Error ? e.message : 'Login failed'); } };
+  const login = async (event: FormEvent) => { event.preventDefault(); setError(''); try { const result = await api.post<{ access_token: string }>('/auth/dev-login', { username }); setAuthentication(result.access_token); window.location.assign('/'); } catch (e) { setError(e instanceof Error ? e.message : 'Login failed'); } };
   return <main className="login"><form className="panel" onSubmit={login}><div className="brand">C2<span>Hunter</span></div><h1>Defensive analysis console</h1><p className="muted">Development login is enabled only when the Controller explicitly permits it.</p><label>Username<input value={username} onChange={e => setUsername(e.target.value)} required /></label>{error && <p role="alert" className="error-text">{error}</p>}<button type="submit">Development login</button></form></main>;
 }
 
@@ -307,7 +309,7 @@ function Shell({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const [navigationOpen, setNavigationOpen] = useState(false);
   const navigationButton = useRef<HTMLButtonElement>(null);
-  return <div className="shell"><aside onKeyDown={event => { if (event.key === 'Escape' && navigationOpen) { setNavigationOpen(false); navigationButton.current?.focus(); } }}><div className="brand">C2<span>Hunter</span></div><button ref={navigationButton} type="button" className="navigation-toggle secondary" aria-expanded={navigationOpen} aria-controls="shell-navigation" onClick={() => setNavigationOpen(!navigationOpen)}>메뉴 / Menu</button><div id="shell-navigation" className={`shell-navigation${navigationOpen ? ' is-open' : ''}`}><nav aria-label="Primary" onClick={event => { if ((event.target as HTMLElement).closest('a')) { setNavigationOpen(false); if (window.matchMedia('(max-width: 800px)').matches) navigationButton.current?.focus(); } }}><NavLink end to="/">Dashboard</NavLink><NavLink to="/sensors">Sensors</NavLink><NavLink to="/sensor-pcaps">Sensor PCAPs</NavLink><NavLink to="/external-sensors">External sensors</NavLink><NavLink className="nav-child" to="/external-sensors/enroll">Enroll sensor</NavLink><NavLink to="/analyses">Analysis history</NavLink><NavLink className="nav-child" to="/analyses/new">New analysis</NavLink><NavLink className="nav-child" to="/analyses/upload">Upload PCAP</NavLink><NavLink to="/candidates">Candidates</NavLink><NavLink to="/payload-signatures">Payload signatures</NavLink><NavLink to="/allowlist">Allowlist</NavLink><NavLink to="/settings/integrations">Integration settings</NavLink></nav><button className="quiet" onClick={() => { localStorage.removeItem('c2hunter-token'); navigate('/login'); }}>Sign out</button></div></aside><main className="content">{children}</main></div>;
+  return <div className="shell"><aside onKeyDown={event => { if (event.key === 'Escape' && navigationOpen) { setNavigationOpen(false); navigationButton.current?.focus(); } }}><div className="brand">C2<span>Hunter</span></div><button ref={navigationButton} type="button" className="navigation-toggle secondary" aria-expanded={navigationOpen} aria-controls="shell-navigation" onClick={() => setNavigationOpen(!navigationOpen)}>메뉴 / Menu</button><div id="shell-navigation" className={`shell-navigation${navigationOpen ? ' is-open' : ''}`}><nav aria-label="Primary" onClick={event => { if ((event.target as HTMLElement).closest('a')) { setNavigationOpen(false); if (window.matchMedia('(max-width: 800px)').matches) navigationButton.current?.focus(); } }}><NavLink end to="/">Dashboard</NavLink><NavLink to="/sensors">Sensors</NavLink><NavLink to="/sensor-pcaps">Sensor PCAPs</NavLink><NavLink to="/external-sensors">External sensors</NavLink><NavLink className="nav-child" to="/external-sensors/enroll">Enroll sensor</NavLink><NavLink to="/analyses">Analysis history</NavLink><NavLink className="nav-child" to="/analyses/new">New analysis</NavLink><NavLink className="nav-child" to="/analyses/upload">Upload PCAP</NavLink><NavLink to="/candidates">Candidates</NavLink><NavLink to="/payload-signatures">Payload signatures</NavLink><NavLink to="/allowlist">Allowlist</NavLink><NavLink to="/settings/integrations">Integration settings</NavLink></nav><button className="quiet" onClick={() => { setAuthentication(null); navigate('/login'); }}>Sign out</button></div></aside><main className="content">{children}</main></div>;
 }
 
 function Dashboard() {
@@ -873,7 +875,9 @@ function JobDetail() {
     refetchInterval: () => terminalStatuses.has(q.data?.status ?? '') ? false : 3000,
   });
   const cancel = useMutation({ mutationFn: () => api.post(`/analysis-jobs/${id}/cancel`, { reason: 'operator requested from web console' }), onSuccess: () => { setNotice('Cancellation requested'); q.refetch(); } });
-  return <AsyncState query={q}>{j => {
+  return <>
+    {id && (!q.data || (q.data.analysis?.module ?? 'c2') === 'c2') && <JobInvestigationEntry key={`job-investigation-entry-${id}`} jobId={id} sourceAvailable={!q.isError && Boolean(q.data)}/> }
+    <AsyncState query={q}>{j => {
     const terminal = terminalStatuses.has(j.status);
     const source = j.source;
     const module = j.analysis?.module ?? 'c2';
@@ -908,7 +912,7 @@ function JobDetail() {
       {module === 'c2' && <JobFlowReviewPanel key={`flow-review-${j.id}`} jobId={j.id} onInvestigate={investigate} />}
       {(module === 'c2' || detailsOwner === j.id) && <><section className="panel compact"><h2>State transitions</h2>{j.transitions?.length ? <ol className="timeline">{j.transitions.map((transition, index) => <li key={`${transition.to_status}-${transition.occurred_at}-${index}`}><strong>{transition.to_status}</strong><span>{fmt(transition.occurred_at)}</span><p>{transition.reason ?? 'No transition reason recorded'}{transition.from_status ? ` · from ${transition.from_status}` : ''}</p></li>)}</ol> : <p className="muted">No state transition history was recorded.</p>}</section></>}
     </>;
-  }}</AsyncState>;
+  }}</AsyncState></>;
 }
 
 const workflowPresentation = {
@@ -1517,13 +1521,14 @@ function Allowlist() {
 }
 
 export default function App() {
-  const [authenticated, setAuthenticated] = useState(
-    Boolean(localStorage.getItem('c2hunter-token')),
-  );
+  const [authentication, setCurrentAuthentication] = useState(captureAuthentication);
+  const queryClient = useQueryClient();
+  const authenticated = Boolean(authentication.token);
   useEffect(() => {
-    const invalidate = () => setAuthenticated(false);
-    window.addEventListener('c2hunter-auth-invalid', invalidate);
-    return () => window.removeEventListener('c2hunter-auth-invalid', invalidate);
-  }, []);
-  return <Routes><Route path="/login" element={<Login/>}/><Route path="*" element={!authenticated ? <Navigate to="/login" replace/> : <Shell><Routes><Route path="/" element={<Dashboard/>}/><Route path="/sensors" element={<Sensors/>}/><Route path="/sensors/:id" element={<SensorDetail/>}/><Route path="/sensor-pcaps" element={<SensorPCAPs/>}/><Route path="/external-sensors" element={<ExternalSensors/>}/><Route path="/external-sensors/enroll" element={<EnrollSensor/>}/><Route path="/analyses" element={<AnalysisHistory/>}/><Route path="/analyses/new" element={<NewAnalysis/>}/><Route path="/analyses/upload" element={<PcapUpload/>}/><Route path="/analyses/:id" element={<JobDetail/>}/><Route path="/candidates" element={<Candidates/>}/><Route path="/candidates/:id" element={<CandidateDetail/>}/><Route path="/payload-signatures" element={<PayloadSignatures/>}/><Route path="/allowlist" element={<Allowlist/>}/><Route path="/settings/integrations" element={<IntegrationSettingsPage/>}/><Route path="*" element={<div className="state"><h1>Page not found</h1><Link to="/">Return to dashboard</Link></div>}/></Routes></Shell>}/></Routes>;
+    const transition = () => { queryClient.clear(); setCurrentAuthentication(captureAuthentication()); };
+    window.addEventListener('c2hunter-auth-changed', transition);
+    window.addEventListener('c2hunter-auth-invalid', transition);
+    return () => { window.removeEventListener('c2hunter-auth-changed', transition); window.removeEventListener('c2hunter-auth-invalid', transition); };
+  }, [queryClient]);
+  return <Routes><Route path="/login" element={<Login/>}/><Route path="*" element={!authenticated ? <Navigate to="/login" replace/> : <Shell key={authentication.epoch}><Routes><Route path="/" element={<Dashboard/>}/><Route path="/sensors" element={<Sensors/>}/><Route path="/sensors/:id" element={<SensorDetail/>}/><Route path="/sensor-pcaps" element={<SensorPCAPs/>}/><Route path="/external-sensors" element={<ExternalSensors/>}/><Route path="/external-sensors/enroll" element={<EnrollSensor/>}/><Route path="/analyses" element={<AnalysisHistory/>}/><Route path="/analyses/new" element={<NewAnalysis/>}/><Route path="/analyses/upload" element={<PcapUpload/>}/><Route path="/analyses/:id" element={<JobDetail/>}/><Route path="/candidates" element={<Candidates/>}/><Route path="/candidates/:id" element={<CandidateDetail/>}/><Route path="/payload-signatures" element={<PayloadSignatures/>}/><Route path="/allowlist" element={<Allowlist/>}/><Route path="/settings/integrations" element={<IntegrationSettingsPage/>}/><Route path="*" element={<div className="state"><h1>Page not found</h1><Link to="/">Return to dashboard</Link></div>}/></Routes></Shell>}/></Routes>;
 }
