@@ -191,7 +191,11 @@ it.each([10, 20])('bounds actual mounted maximum100×10 report and %s×20×3 AI 
   const { calls } = await setup(maximum.many, run);
   const measure = () => expect(document.querySelectorAll('*').length).toBeLessThanOrEqual(2500);
   measure();
-  fireEvent.click(screen.getAllByRole('button', { name: maximum.many.issues[19].id })[0]);
+  // Find the first citation's small group before checking its accessible role/name;
+  // a document-wide role query computes names for up to 1,200 citation controls.
+  const id = maximum.many.issues[19].id;
+  const citationGroup = screen.getAllByText(id, { selector: 'button' })[0].parentElement!;
+  fireEvent.click(within(citationGroup).getByRole('button', { name: id }));
   expect(screen.getByText('Page 3 of 13')).toBeVisible(); measure();
   expect(screen.getAllByRole('region', { name: 'Representative flow evidence' })).toHaveLength(1);
   expect(screen.queryByRole('article', { name: 'Full AI interpretation' })).not.toBeInTheDocument();

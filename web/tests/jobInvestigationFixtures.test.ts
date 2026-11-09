@@ -12,7 +12,7 @@ it('fresh ordinary loader invokes checkout-local real offline producer and accou
   expect(producer.network_events).toEqual([]);
   expect(Object.keys(producer.fixtures)).toHaveLength(23);
   expect(producer.executable).toBe(resolve(dirname(fileURLToPath(import.meta.url)), '../../.venv/bin/python'));
-  expect(producer.origins['tests.test_ai_job_investigation_fixtures']).toContain('/checkout/controller/tests/');
+  expect(producer.origins['tests.test_ai_job_investigation_fixtures']).toBe(resolve(dirname(fileURLToPath(import.meta.url)), '../../controller/tests/test_ai_job_investigation_fixtures.py'));
 });
 it.each(['', '/nonexistent-job-python'])('explicit invalid interpreter %j fails closed', async override => {
   vi.resetModules(); vi.stubEnv('C2HUNTER_JOB_TEST_PYTHON', override);
