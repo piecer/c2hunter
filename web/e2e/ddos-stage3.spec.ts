@@ -80,11 +80,12 @@ for (const width of [1280, 390]) for (const language of ['ko', 'en']) {
   });
 }
 
-for (const width of [1280, 390]) for (const language of ['ko', 'en']) test(`real producer scenarios ${width} ${language} retain every finding with bounded single-owner DOM`, async ({ page }, info) => {
-  await page.setViewportSize({ width, height: 900 });
-  await install(page, language);
-  const observations = [];
-  for (const name of Object.keys(fixture.reports)) {
+for (const width of [1280, 390]) for (const language of ['ko', 'en']) {
+  // Independent producer reports must not share one cumulative test deadline.
+  for (const name of Object.keys(fixture.reports)) test(`real producer scenarios ${width} ${language} ${name} retain every finding with bounded single-owner DOM`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 900 });
+    await install(page, language);
+    const observations = [];
     await page.goto('/analyses/' + name);
     await expect(page.getByRole('region', { name: language === 'en' ? 'DDoS at a glance' : 'DDoS 한눈에 보기' })).toBeVisible();
     await expect(page.getByText('Unsupported DDoS report. Review coverage and update the client.')).toHaveCount(0);
@@ -120,9 +121,9 @@ for (const width of [1280, 390]) for (const language of ['ko', 'en']) test(`real
     } while (reached < report.findings.length);
     expect(reached).toBe(report.findings.length); expect(peak).toBeLessThan(900);
     observations.push({ name, reached, peak });
-  }
-  await info.attach('scenario-dom', { body: JSON.stringify(observations), contentType: 'application/json' });
-});
+    await info.attach('scenario-dom', { body: JSON.stringify(observations), contentType: 'application/json' });
+  });
+}
 
 for (const width of [1280, 390]) for (const language of ['ko', 'en']) test(`reference picker ${width} ${language} pages, explicit assertion, clear, inherit and current-route payloads`, async ({ page }, info) => {
   await page.setViewportSize({ width, height: 900 });

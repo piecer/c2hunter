@@ -37,6 +37,11 @@ for (const width of [1280, 390]) {
       await expect(page.locator('.network-report article')).toHaveCount(0);
       const action = page.getByRole('region', { name: language === 'ko' ? '다음 행동' : 'Next action' });
       const actionBox = await action.boundingBox();
+      await page.screenshot({ path: testInfo.outputPath('overview-before-assertions.png'), fullPage: true });
+      await testInfo.attach('layout-diagnostics', { body: JSON.stringify(await page.locator('.shell>aside,.content,.content>*,.network-report>*,.network-glance>*,.network-guidance>*').evaluateAll(elements => elements.map(element => ({
+        tag: element.tagName, class: element.className, text: element.textContent?.slice(0, 150), box: element.getBoundingClientRect().toJSON(),
+        margin: getComputedStyle(element).margin, padding: getComputedStyle(element).padding, lineHeight: getComputedStyle(element).lineHeight,
+      })))), contentType: 'application/json' });
       expect(actionBox!.y + actionBox!.height).toBeLessThanOrEqual(900);
       const geometry = await page.evaluate(() => ({ width: innerWidth, body: document.body.scrollWidth, document: document.documentElement.scrollWidth, nodes: document.querySelectorAll('*').length }));
       expect(geometry.body).toBeLessThanOrEqual(width);
@@ -56,6 +61,15 @@ for (const width of [1280, 390]) {
       await page.getByRole('button', { name: language === 'ko' ? '전체 이상 항목 보기' : 'View all anomaly items', exact: true }).click();
       await expect(page.locator('.network-report article')).toHaveCount(8);
       await expect(evidence).toHaveCount(0);
+      // The primary report must precede the optional investigation entry in
+      // reading/tab order as well as visually; do not hide or clip either.
+      const entry = page.locator('#ip-investigation-entry');
+      expect(await glance.evaluate(element => Boolean(element.compareDocumentPosition(document.getElementById('ip-investigation-entry')!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+      const entryBox = await entry.boundingBox();
+      const currentActionBox = await action.boundingBox();
+      expect(currentActionBox!.y + currentActionBox!.height).toBeLessThanOrEqual(entryBox!.y);
+      await entry.getByRole('button', { name: 'IP 조사 열기 / Open IP investigation', exact: true }).click();
+      await expect(entry.getByLabel('대상 IP / Target IP')).toBeVisible();
       expect(errors).toEqual([]);
       expect(writes).toEqual([]);
       await testInfo.attach('geometry', { body: JSON.stringify(geometry), contentType: 'application/json' });

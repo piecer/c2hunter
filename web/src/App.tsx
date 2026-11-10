@@ -882,10 +882,11 @@ function JobDetail() {
     const source = j.source;
     const module = j.analysis?.module ?? 'c2';
     const showGuidance = (module === 'ddos_attack' && j.source_type === 'PCAP_UPLOAD') || Object.hasOwn(j, 'pcap_attack_guidance');
+    const investigationEntry = <AIInvestigationEntry key={`investigation-entry-${j.id}`} jobId={j.id} selection={investigation?.jobId === j.id ? investigation : undefined}/>;
     return <>
       <header className="header-actions"><div><p className="eyebrow">ANALYSIS DETAIL</p><h1>{j.name}</h1><span className={`badge ${j.status.toLowerCase()}`}>{j.status}</span><p className="record-id">Job {j.id}{j.dataset_id ? ` · Dataset ${j.dataset_id}` : ''}</p></div><Link to="/analyses">Back to analysis history</Link></header>
       {(j.source_type === 'PCAP_UPLOAD' || j.processing) && <PcapAnalysisLifecycle job={j}/>}
-      <AIInvestigationEntry key={`investigation-entry-${j.id}`} jobId={j.id} selection={investigation?.jobId === j.id ? investigation : undefined}/>
+      {module !== 'network_anomaly' && investigationEntry}
       {j.description && <section className="panel"><h2>Analyst note</h2><p>{j.description}</p></section>}
       {(module === 'c2' || !terminal || ('error_code' in j && j.error_code === 'LIVE_CAPTURE_RESTART_INCOMPLETE') || strings(j.warnings).length > 0 || cancel.error || notice) && <section className="panel">
         {(module === 'c2' || (!terminal && typeof j.progress_percent === 'number')) && <label>Progress <progress value={terminal ? 100 : j.progress_percent ?? 0} max="100">{terminal ? 100 : j.progress_percent}%</progress></label>}
@@ -896,6 +897,8 @@ function JobDetail() {
         {cancel.error && <p role="alert" className="error-text">{cancel.error.message}</p>}{notice && <p role="status">{notice}</p>}
       </section>}
       {module === 'network_anomaly' ? <NetworkAnomalyPanel key={j.id} report={j.network_anomaly} job={j}><NetworkAIInterpretation key={j.id} jobId={j.id} completed={j.status === 'COMPLETED' && Boolean(j.network_anomaly)}/></NetworkAnomalyPanel> : module === 'ddos_attack' && j.ddos_attack ? <DDoSAttackPanel key={`${j.id}:${j.ddos_attack.primary_finding_id ?? 'none'}:${String(j.ddos_attack.summary?.finding_count ?? 'unknown')}`} report={j.ddos_attack} job={{ id: j.id, dataset_id: j.dataset_id, source_type: j.source_type, source: j.source, internal_networks: j.internal_networks }} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}>{showGuidance && <PcapAttackGuidance job={j} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}/>}<PcapGuidanceAIScope/><DDoSAIInterpretation jobId={j.id} completed={j.status === 'COMPLETED'}/></DDoSAttackPanel> : module === 'ddos_attack' ? <DDoSReportPending job={j}/> : module === 'c2' ? <ReportLanguageScope key={`c2-ai-${j.id}`}><AIAnalysisPanel job={j} knownCandidateIds={items(candidates.data).map(candidate => candidate.id)}/></ReportLanguageScope> : <p role="alert">Unsupported analysis module.</p>}
+      {/* Keep the network verdict and next action ahead of optional IP investigation. */}
+      {module === 'network_anomaly' && investigationEntry}
       {showGuidance && !(module === 'ddos_attack' && j.ddos_attack) && <ReportLanguageScope key={`pcap-guide-${j.id}`}><PcapAttackGuidance job={j} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}/></ReportLanguageScope>}
       {module !== 'c2' && <button type="button" className="secondary" aria-expanded={detailsOwner === j.id} onClick={() => setDetailsOwner(detailsOwner === j.id ? undefined : j.id)}>작업 상세 / Job details</button>}
       {(module === 'c2' || detailsOwner === j.id) && <>

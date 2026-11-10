@@ -71,6 +71,33 @@ for (const width of [1280, 390]) {
         return box.width > 0 && (box.right > innerWidth + 1 || box.left < -1);
       }).map(control => control.textContent),
     }));
+    await testInfo.attach('document-layout', { body: await page.screenshot({ fullPage: true }), contentType: 'image/png' });
+    await testInfo.attach('layout-diagnostics', { body: JSON.stringify(await page.locator('.shell,.content,.content>*,.table-wrap,table').evaluateAll(elements => elements.map(element => ({
+      tag: element.tagName, class: element.className, box: element.getBoundingClientRect().toJSON(), client: element.clientWidth, scroll: element.scrollWidth,
+      minWidth: getComputedStyle(element).minWidth, overflowX: getComputedStyle(element).overflowX, grid: getComputedStyle(element).gridTemplateColumns,
+    })))), contentType: 'application/json' });
+    const candidates = page.getByRole('table', { name: 'Analysis candidates', exact: true });
+    await expect(candidates.getByRole('link', { name: longIP, exact: true })).toHaveText(longIP);
+    const tableGeometry = await candidates.evaluate(table => {
+      const wrapper = table.parentElement!;
+      const content = table.closest('main')!;
+      wrapper.scrollLeft = 0;
+      const firstEdge = table.getBoundingClientRect().left - wrapper.getBoundingClientRect().left;
+      wrapper.scrollLeft = wrapper.scrollWidth;
+      const lastEdge = table.getBoundingClientRect().right - wrapper.getBoundingClientRect().right;
+      const scrolled = wrapper.scrollLeft;
+      wrapper.scrollLeft = 0;
+      return { contentWidth: content.getBoundingClientRect().width, available: innerWidth - content.getBoundingClientRect().left - scrollX,
+        wrapperClient: wrapper.clientWidth, wrapperScroll: wrapper.scrollWidth, overflowX: getComputedStyle(wrapper).overflowX, firstEdge, lastEdge, scrolled };
+    });
+    await testInfo.attach('candidate-table-geometry', { body: JSON.stringify(tableGeometry), contentType: 'application/json' });
+    expect(tableGeometry.contentWidth).toBeLessThanOrEqual(tableGeometry.available + 1);
+    expect(tableGeometry.wrapperScroll).toBeGreaterThan(tableGeometry.wrapperClient);
+    expect(tableGeometry.overflowX).toBe('auto');
+    expect(tableGeometry.scrolled).toBeGreaterThan(0);
+    expect(Math.abs(tableGeometry.firstEdge)).toBeLessThanOrEqual(1);
+    // A negative right-edge delta is already inside the wrapper (including borders).
+    expect(tableGeometry.lastEdge).toBeLessThanOrEqual(1);
     expect(geometry.panelScroll).toBeLessThanOrEqual(geometry.panelClient + 1);
     expect(geometry.document).toBeLessThanOrEqual(geometry.viewport + 1);
     expect(geometry.overflowingControls).toEqual([]);
