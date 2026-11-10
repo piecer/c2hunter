@@ -129,7 +129,7 @@ it.each(Array.from({length:13},(_,i)=>i))('every retained ICMP detail on maximum
       if(example+1<issue.examples.length) fireEvent.click(within(region).getByRole('button',{name:'Next representative'}));
     }
   }
-});
+}, 20_000); // Retain every maximum-page detail check on shared CI runners.
 it('maximum valid analyzer report stays bounded inside the full App/AI owner', async () => {
   const {fetcher} = await setupApp(true);
   expect(document.querySelectorAll('*').length).toBeLessThanOrEqual(2500);

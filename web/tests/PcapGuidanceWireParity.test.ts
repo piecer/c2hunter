@@ -166,11 +166,11 @@ assert set(actual)=={p.name for p in builder.FIXTURES.iterdir() if p.is_file()}
 for name,wire in actual.items():
  assert builder.FIXTURES.joinpath(name).read_bytes()==wire, name
 print(json.dumps({name:hashlib.sha256(wire).hexdigest() for name,wire in actual.items()},sort_keys=True))
-`, resolve(root, 'controller/tests')], { encoding: 'utf8', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONPATH: ['controller/src', 'analysis/src', 'shared/src', 'sensor/worker/src'].map(p => resolve(root, p)).join(':') } });
+`, resolve(root, 'controller/tests')], { encoding: 'utf8', timeout: 15_000, killSignal: 'SIGKILL', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONPATH: ['controller/src', 'analysis/src', 'shared/src', 'sensor/worker/src'].map(p => resolve(root, p)).join(':') } });
   expect(result.status, result.stderr).toBe(0);
   expect(Object.keys(JSON.parse(result.stdout))).toHaveLength(names.length * 2 + 2);
   console.info(`producerFixtureDigests ${result.stdout.trim()}`);
-});
+}, 20_000); // Fresh Python producer work has its own shorter process deadline.
 it('accepts every exact producer job byte string and its identical guide without rewriting fixtures', () => {
   expect(names).toHaveLength(18);
   const wires = names.map(name => readFileSync(resolve(fixtures, name), 'utf8'));

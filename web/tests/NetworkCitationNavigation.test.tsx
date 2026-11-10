@@ -208,7 +208,7 @@ it.each([10, 20])('bounds actual mounted maximum100×10 report and %s×20×3 AI 
   }
   expect(screen.getByText(maximum.many.issues[99].id)).toBeVisible();
   expect(calls.filter(c => !c.startsWith('GET '))).toEqual([]);
-});
+}, 20_000); // Exhaustive maximum-data traversal, not a 5s latency assertion.
 it('deduplicates citation controls within an item and preserves raw ordinal through invalid siblings', async () => {
   const report = structuredClone(fixture.many), run = structuredClone(fixture.run);
   report.issues[0].scope = null;
