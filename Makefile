@@ -17,7 +17,7 @@ setup:
 	@test -f .env || cp .env.example .env
 	@mkdir -p artifacts testdata/generated
 	$(PYTHON) -m venv $(VENV)
-	$(PIP) install --upgrade pip==25.1.1
+	$(PIP) install --upgrade pip==26.3
 	$(PIP) install -r requirements.lock
 	$(PIP) install --no-deps -e ./controller -e ./analysis
 	npm --prefix web ci --ignore-scripts

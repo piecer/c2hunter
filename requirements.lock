@@ -4,7 +4,7 @@ annotated-types==0.7.0
 anyio==4.14.2
 argon2-cffi==25.1.0
 argon2-cffi-bindings==25.1.0
-certifi==2026.6.17
+certifi==2026.10.23
 cffi==2.1.0
 click==8.4.2
 coverage==7.15.2
@@ -19,6 +19,7 @@ mypy_extensions==1.1.0
 minio==7.2.15
 packaging==26.2
 pathspec==1.1.1
+pip==26.3
 pluggy==1.6.0
 prometheus_client==0.22.1
 psycopg==3.2.9
@@ -39,4 +40,4 @@ structlog==25.4.0
 typing-inspection==0.4.2
 typing_extensions==4.16.0
 uvicorn==0.35.0
-urllib3==2.7.0
+urllib3==2.8.0

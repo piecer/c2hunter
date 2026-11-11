@@ -132,7 +132,70 @@ jobs:
                   print(f'  - {name} ({severity}): {title_str}')
               print('npm audit passed (no blocking vulnerabilities).')
           "
-      - run: pip install pip-audit==2.9.0 && pip-audit -r requirements.lock
+      - name: Audit Python dependencies
+        run: |
+          set -euo pipefail
+          AUDIT_VENV="${RUNNER_TEMP}/c2hunter-pip-audit"
+          test ! -e "$AUDIT_VENV"
+          python -m venv "$AUDIT_VENV"
+          "$AUDIT_VENV/bin/python" -m pip install --upgrade pip==26.3
+          "$AUDIT_VENV/bin/python" -m pip install pip-audit==2.9.0
+          "$AUDIT_VENV/bin/python" -m pip check
+          # Audit every resolved pin, including pip; resolver mode can silently omit it.
+          "$AUDIT_VENV/bin/python" -m pip_audit -r requirements.lock --strict --disable-pip --no-deps --format json --output "$AUDIT_VENV/lock-audit.json"
+          "$AUDIT_VENV/bin/python" -m pip_audit --strict --format json --output "$AUDIT_VENV/self-audit.json"
+          "$AUDIT_VENV/bin/python" - <<'PY'
+          import importlib.metadata
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          def inventory(rows):
+              result = {}
+              for row in rows:
+                  name, version = row.get('name'), row.get('version')
+                  require(isinstance(name, str) and bool(name), 'Missing package name')
+                  require(isinstance(version, str) and bool(version), 'Missing package version')
+                  name = re.sub(r'[-_.]+', '-', name).lower()
+                  require(name not in result, f'Duplicate package: {name}')
+                  result[name] = version
+              require(bool(result), 'Empty inventory')
+              return result
+
+          def validate(report, expected):
+              require(isinstance(report, dict), 'Invalid audit report')
+              require(not any(report.get(k) for k in ('error', 'errors', 'skipped')), 'Audit errors')
+              rows = report.get('dependencies')
+              require(isinstance(rows, list) and bool(rows), 'Empty audit report')
+              for row in rows:
+                  require(isinstance(row, dict), 'Invalid dependency row')
+                  require(not any(row.get(k) for k in ('error', 'errors', 'skip_reason')), 'Skipped dependency')
+                  require(row.get('vulns') == [], 'Missing vulnerability verdict or vulnerabilities found')
+              require(inventory(rows) == expected, 'Audit coverage differs from complete inventory')
+
+          def main():
+              pins = []
+              for line in Path('requirements.lock').read_text().splitlines():
+                  if not line.strip() or line.startswith('#'):
+                      continue
+                  match = re.fullmatch(r'([A-Za-z0-9_.-]+)==([^\s;]+)', line)
+                  require(match is not None, f'Not an exact pin: {line}')
+                  pins.append(dict(zip(('name', 'version'), match.groups())))
+              installed = [dict(name=d.metadata['Name'], version=d.version)
+                           for d in importlib.metadata.distributions()]
+              root = Path(sys.prefix)
+              validate(json.loads((root / 'lock-audit.json').read_text()), inventory(pins))
+              validate(json.loads((root / 'self-audit.json').read_text()), inventory(installed))
+              print(f'Complete clean audits: {len(pins)} lock pins, {len(installed)} auditor distributions')
+
+          if __name__ == '__main__':
+              main()
+          PY
       - uses: gitleaks/gitleaks-action@v2
         env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
