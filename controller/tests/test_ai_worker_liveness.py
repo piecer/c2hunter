@@ -396,20 +396,105 @@ def test_real_historical_service_stays_live_without_early_queue_ack(
 
     monkeypatch.setattr(http, "request", blocked)
     monkeypatch.setattr(worker, "_publish_health", observe)
-    result = []
-    thread = Thread(target=lambda: result.append(worker.run_once(timeout=0)))
+    errors = []
+
+    def check_liveness():
+        try:
+            assert entered.wait(2)
+            assert repo.get_ai_run(run["id"])["status"] == "ANALYZING"
+            Clock.value += timedelta(seconds=31)
+            assert refreshed.wait(1)
+            assert module._healthy(worker.health_path, 30)
+            assert queue.acked == []
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            release.set()
+
+    # Observe the blocked request concurrently, but keep real validation and
+    # persistence on the calling thread. A two-second helper join is not a
+    # completion budget for that work (especially under native coverage).
+    thread = Thread(target=check_liveness)
     thread.start()
     try:
-        assert entered.wait(2)
-        assert repo.get_ai_run(run["id"])["status"] == "ANALYZING"
-        Clock.value += timedelta(seconds=31)
-        assert refreshed.wait(1)
-        assert module._healthy(worker.health_path, 30)
-        assert queue.acked == []
+        result = worker.run_once(timeout=0)
     finally:
         release.set()
-        thread.join(2)
-    assert not thread.is_alive() and result == [True]
+        # The observer's waits are bounded and it releases the request even on
+        # assertion failure. Retire it before pytest restores any monkeypatches.
+        thread.join()
+    if errors:
+        raise errors[0]
+    assert not thread.is_alive() and result is True
     assert repo.get_ai_run(run["id"])["status"] == "COMPLETED"
     assert len(http.requests) == 1 and queue.acked == ["receipt"]
     assert len(heartbeat_threads) == 1
+
+
+@pytest.mark.parametrize("observer_fails", [False, True])
+def test_real_historical_liveness_waits_for_persistence_before_returning(
+    tmp_path, monkeypatch, heartbeat_threads, observer_fails
+):
+    """A health assertion (including failure) cannot abandon real persistence."""
+    from tests import test_c2_failure_diagnostics as diagnostics
+
+    parked, release, returned = Event(), Event(), Event()
+    owners, outcomes, instances = [], [], []
+    exercise = diagnostics.exercise
+    thread_class = Thread
+    fault = AssertionError("health observation failed")
+
+    def factory(*args, **kwargs):
+        thread = thread_class(*args, **kwargs)
+        owners.append(thread)
+        return thread
+
+    def slow_persistence(*args, **kwargs):
+        result = exercise(*args, **kwargs)
+        repo, run, http, queue, worker = result
+        instances.append(result)
+        save = repo.save_ai_artifact
+
+        def blocked(artifact):
+            parked.set()
+            assert release.wait(15), "test failed to release real persistence"
+            return save(artifact)
+
+        monkeypatch.setattr(repo, "save_ai_artifact", blocked)
+        return result
+
+    def fail_health(*args):
+        raise fault
+
+    def invoke():
+        try:
+            test_real_historical_service_stays_live_without_early_queue_ack(
+                tmp_path, monkeypatch, heartbeat_threads
+            )
+        except BaseException as exc:
+            outcomes.append(exc)
+        finally:
+            returned.set()
+
+    monkeypatch.setattr(diagnostics, "exercise", slow_persistence)
+    monkeypatch.setitem(globals(), "Thread", factory)
+    if observer_fails:
+        monkeypatch.setattr(module, "_healthy", fail_health)
+    caller = thread_class(target=invoke)
+    caller.start()
+    try:
+        assert parked.wait(5), "real service did not reach artifact persistence"
+        # Keep the real save blocked beyond the old two-second owner join.
+        # This is a regression observation window, not a service latency SLA.
+        assert not returned.wait(3), "liveness test returned with live service work"
+    finally:
+        release.set()
+        caller.join(30)
+        for thread in owners:
+            thread.join(30)
+        assert not caller.is_alive()
+        assert all(not thread.is_alive() for thread in owners + heartbeat_threads)
+    assert outcomes == ([fault] if observer_fails else [])
+    repo, run, http, queue, worker = instances[0]
+    assert repo.get_ai_run(run["id"])["status"] == "COMPLETED"
+    assert len(http.requests) == 1 and queue.acked == ["receipt"]
