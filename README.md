@@ -8,7 +8,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/piecer/c2hunter?style=flat-square)](https://github.com/piecer/c2hunter/stargazers)
 [![GitHub last commit](https://img.shields.io/github/last-commit/piecer/c2hunter?style=flat-square)](https://github.com/piecer/c2hunter/commits/master)
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)
-![Go](https://img.shields.io/badge/Go-1.25-00ADD8?style=flat-square&logo=go&logoColor=white)
+![Go](https://img.shields.io/badge/Go-1.26.11-00ADD8?style=flat-square&logo=go&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white)
 
 [![C2Hunter workflow demo](docs/assets/c2hunter-demo.gif)](docs/assets/c2hunter-demo.gif)
@@ -356,7 +356,7 @@ For the containerized stack:
 For local development, tests, or building a sensor tarball, also install:
 
 - Python `3.12` (the Makefile defaults to `python3.12`)
-- Go (CI uses `1.25.12`)
+- Go (minimum and CI version: `1.26.11`)
 - Node.js (CI uses `22.14.0`) and npm `10+`
 - A C compiler/toolchain for the sensor's CGO/static-link build
 

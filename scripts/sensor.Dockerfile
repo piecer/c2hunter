@@ -1,4 +1,4 @@
-FROM golang:1.25.12-alpine3.23@sha256:cc985ef6f9c3bf9ece7488129c9abe0a150388ccdfa428d886fc709dca0b230a AS build
+FROM golang:1.26.11-alpine3.23@sha256:db99415e2625ce0ee03eed09edf7f32ae8c58dc399f28cc602a87fe7238119e4 AS build
 RUN apk add --no-cache build-base linux-headers
 WORKDIR /src
 COPY sensor/go.mod sensor/go.sum ./
