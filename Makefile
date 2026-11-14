@@ -16,6 +16,8 @@ SENSOR_CORE_PACKAGES := ./internal/direction ./internal/flow ./internal/capture 
 COMPOSE := docker compose --env-file .env
 
 .PHONY: setup lint lint-security test test-unit test-integration test-coverage test-coverage-controller test-coverage-analysis test-coverage-sensor test-e2e test-ai evaluate-ai benchmark-ai benchmark-ddos-analysis benchmark-pcap-export backtest-high-volume build sensor-agent up down generate-test-pcaps benchmark-1m clean
+.PHONY: test-unit-go test-unit-python test-unit-worker test-unit-tools test-unit-web test-scenarios
+.PHONY: ci-plan ci-test-python ci-verify-python ci-test-coverage-controller ci-merge-coverage-controller
 
 setup:
 	@test -f .env || cp .env.example .env
@@ -58,21 +60,56 @@ lint-security:
 	$(RUFF) check controller/src analysis/src tools --select S
 	cd sensor && go run github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION) ./...
 
-test: test-unit test-integration
+# The full plain selection already contains test-integration's not-e2e subset.
+test: test-unit test-scenarios
 
 test-unit:
+	$(MAKE) test-unit-go
+	$(MAKE) test-unit-python
+	$(MAKE) test-unit-worker
+	$(MAKE) test-unit-tools
+	$(MAKE) test-unit-web
+
+test-unit-go:
 	cd sensor && go test ./...
+
+test-unit-python:
 	$(PYTEST) -q controller/tests analysis/tests
+
+test-unit-worker:
 	PYTHONPATH=sensor/worker/src $(PYTEST) -q sensor/worker/tests
+
+test-unit-tools:
 	$(VENV)/bin/python tools/traffic-generator/test_generate.py
 	$(VENV)/bin/python tools/benchmark/test_benchmark.py
 	$(VENV)/bin/python tools/benchmark/test_ddos_analysis.py
 	PYTHONPATH=controller/src:analysis/src $(VENV)/bin/python tools/benchmark/test_pcap_export_benchmark.py
+
+test-unit-web:
 	npm --prefix web run test
 
 test-integration:
 	$(PYTEST) -q controller/tests analysis/tests -m "not e2e"
 	$(VENV)/bin/python tools/traffic-generator/generate.py --output testdata/generated
+
+test-scenarios:
+	$(VENV)/bin/python tools/traffic-generator/generate.py --output testdata/generated
+
+# CI_SHARD is supplied by the matrix. Missing/invalid indices fail in the engine.
+ci-plan:
+	$(VENV)/bin/python tools/ci_shards.py plan --output artifacts/ci-shards/plan.json
+
+ci-test-python:
+	$(VENV)/bin/python tools/ci_shards.py run --plan artifacts/ci-shards/plan.json --suite plain --shard $(CI_SHARD) --output artifacts/ci-shards/plain-$(CI_SHARD)
+
+ci-verify-python:
+	$(VENV)/bin/python tools/ci_shards.py verify --plan artifacts/ci-shards/plan.json --suite plain --results artifacts/ci-shards/downloaded-plain
+
+ci-test-coverage-controller:
+	$(VENV)/bin/python tools/ci_shards.py run --plan artifacts/ci-shards/plan.json --suite controller-coverage --shard $(CI_SHARD) --output artifacts/ci-shards/controller-coverage-$(CI_SHARD)
+
+ci-merge-coverage-controller:
+	$(VENV)/bin/python tools/ci_shards.py combine --plan artifacts/ci-shards/plan.json --results artifacts/ci-shards/downloaded-controller-coverage --output artifacts/ci-shards/combined-controller-coverage
 
 test-coverage:
 	# Ratchet current package baselines separately so aggregate coverage cannot hide a regression.

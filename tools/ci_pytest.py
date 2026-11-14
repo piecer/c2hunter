@@ -212,11 +212,11 @@ def supervise(args: list[str], environment: dict[str, str], evidence: Path) -> i
     return receipt["exit"]
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/pytest"))
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER)
-    options = parser.parse_args()
+    options = parser.parse_args(argv)
     args = options.pytest_args
     if args[:1] == ["--"]:
         args = args[1:]

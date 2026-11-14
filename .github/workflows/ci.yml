@@ -184,7 +184,7 @@ jobs:
           path: |
             artifacts/
             ${{ runner.temp }}/c2hunter-pip-audit/*-audit.json
-  unit:
+  shard-plan:
     needs: lint
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -198,7 +198,7 @@ jobs:
         with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
       - run: make setup
         timeout-minutes: 330
-      - name: Run test-unit
+      - name: Collect complete inventories and plan time-balanced shards
         env:
           CI_PYTEST_EVIDENCE: '1'
         timeout-minutes: 330
@@ -206,15 +206,101 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p artifacts/ci
-          make test-unit 2>&1 | tee artifacts/ci/unit.log
+          make ci-plan 2>&1 | tee artifacts/ci/shard-plan.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ci-unit-${{ github.run_attempt }}
+          name: ci-shard-plan-${{ github.run_attempt }}
+          if-no-files-found: error
+          path: artifacts/ci-shards/plan.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-shard-plan-log-${{ github.run_attempt }}
           include-hidden-files: true
           path: |
             artifacts/
-  coverage-controller:
+  python:
+    needs: shard-plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: make setup
+        timeout-minutes: 330
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-shard-plan-${{ github.run_attempt }}
+          path: artifacts/ci-shards
+      - name: Run complete plain Python partition
+        env:
+          CI_SHARD: '${{ matrix.shard }}'
+        timeout-minutes: 330
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/ci
+          make ci-test-python 2>&1 | tee artifacts/ci/python.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-python-${{ github.run_attempt }}-${{ matrix.shard }}
+          include-hidden-files: true
+          if-no-files-found: error
+          path: artifacts/ci-shards/plain-${{ matrix.shard }}/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-python-log-${{ github.run_attempt }}-${{ matrix.shard }}
+          include-hidden-files: true
+          path: artifacts/ci/
+  python-verify:
+    needs: [shard-plan, python]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: make setup
+        timeout-minutes: 330
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-shard-plan-${{ github.run_attempt }}
+          path: artifacts/ci-shards
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ci-python-${{ github.run_attempt }}-*
+          merge-multiple: false
+          path: artifacts/ci-shards/downloaded-plain
+      - name: Require exact plain inventory completion
+        timeout-minutes: 330
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/ci
+          make ci-verify-python 2>&1 | tee artifacts/ci/python-verify.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-python-verify-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: artifacts/
+  unit-go:
     needs: lint
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -228,7 +314,34 @@ jobs:
         with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
       - run: make setup
         timeout-minutes: 330
-      - name: Run test-coverage-controller
+      - name: Run test-unit-go
+        timeout-minutes: 330
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/ci
+          make test-unit-go 2>&1 | tee artifacts/ci/unit-go.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-unit-go-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: artifacts/
+  unit-worker:
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: make setup
+        timeout-minutes: 330
+      - name: Run test-unit-worker
         env:
           CI_PYTEST_EVIDENCE: '1'
         timeout-minutes: 330
@@ -236,11 +349,145 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p artifacts/ci
-          make test-coverage-controller 2>&1 | tee artifacts/ci/coverage-controller.log
+          make test-unit-worker 2>&1 | tee artifacts/ci/unit-worker.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ci-coverage-controller-${{ github.run_attempt }}
+          name: ci-unit-worker-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: artifacts/
+  unit-tools:
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: make setup
+        timeout-minutes: 330
+      - name: Run test-unit-tools
+        timeout-minutes: 330
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/ci
+          make test-unit-tools 2>&1 | tee artifacts/ci/unit-tools.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-unit-tools-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: artifacts/
+  unit-web:
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: make setup
+        timeout-minutes: 330
+      - name: Run test-unit-web
+        timeout-minutes: 330
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/ci
+          make test-unit-web 2>&1 | tee artifacts/ci/unit-web.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-unit-web-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: artifacts/
+  coverage-controller:
+    needs: shard-plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: make setup
+        timeout-minutes: 330
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-shard-plan-${{ github.run_attempt }}
+          path: artifacts/ci-shards
+      - name: Measure complete Controller coverage partition
+        env:
+          CI_SHARD: '${{ matrix.shard }}'
+        timeout-minutes: 330
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/ci
+          make ci-test-coverage-controller 2>&1 | tee artifacts/ci/coverage-controller.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-coverage-controller-${{ github.run_attempt }}-${{ matrix.shard }}
+          include-hidden-files: true
+          if-no-files-found: error
+          path: artifacts/ci-shards/controller-coverage-${{ matrix.shard }}/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-coverage-controller-log-${{ github.run_attempt }}-${{ matrix.shard }}
+          include-hidden-files: true
+          path: artifacts/ci/
+  coverage-controller-merge:
+    needs: [shard-plan, coverage-controller]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: make setup
+        timeout-minutes: 330
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-shard-plan-${{ github.run_attempt }}
+          path: artifacts/ci-shards
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ci-coverage-controller-${{ github.run_attempt }}-*
+          merge-multiple: false
+          path: artifacts/ci-shards/downloaded-controller-coverage
+      - name: Require complete raw union and Controller coverage floor
+        timeout-minutes: 330
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/ci
+          make ci-merge-coverage-controller 2>&1 | tee artifacts/ci/coverage-controller-merge.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-coverage-controller-merge-${{ github.run_attempt }}
           include-hidden-files: true
           path: |
             artifacts/
@@ -304,7 +551,7 @@ jobs:
             artifacts/
             /tmp/c2hunter-sensor-coverage.out
             /tmp/c2hunter-sensor-core-coverage.out
-  integration:
+  scenarios:
     needs: lint
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -318,7 +565,7 @@ jobs:
         with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
       - run: make setup
         timeout-minutes: 330
-      - name: Run test-integration
+      - name: Run test-scenarios
         env:
           CI_PYTEST_EVIDENCE: '1'
         timeout-minutes: 330
@@ -326,11 +573,11 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p artifacts/ci
-          make test-integration 2>&1 | tee artifacts/ci/integration.log
+          make test-scenarios 2>&1 | tee artifacts/ci/scenarios.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ci-integration-${{ github.run_attempt }}
+          name: ci-scenarios-${{ github.run_attempt }}
           include-hidden-files: true
           path: |
             artifacts/
@@ -394,7 +641,7 @@ jobs:
             artifacts/
   ci:
     if: always()
-    needs: [lint, security, unit, coverage-controller, coverage-analysis, coverage-sensor, integration, e2e, build]
+    needs: [lint, security, shard-plan, python, python-verify, unit-go, unit-worker, unit-tools, unit-web, coverage-controller, coverage-controller-merge, coverage-analysis, coverage-sensor, scenarios, e2e, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -409,8 +656,10 @@ jobs:
           import sys
 
           expected = {
-              'lint', 'security', 'unit', 'coverage-controller', 'coverage-analysis',
-              'coverage-sensor', 'integration', 'e2e', 'build',
+              'lint', 'security', 'shard-plan', 'python', 'python-verify',
+              'unit-go', 'unit-worker', 'unit-tools', 'unit-web',
+              'coverage-controller', 'coverage-controller-merge', 'coverage-analysis',
+              'coverage-sensor', 'scenarios', 'e2e', 'build',
           }
           needs = json.loads(os.environ['NEEDS_JSON'])
           if not isinstance(needs, dict) or set(needs) != expected:
@@ -419,5 +668,5 @@ jobs:
                     if not isinstance(needs[name], dict) or needs[name].get('result') != 'success']
           if failed:
               sys.exit('CI jobs did not succeed: ' + ', '.join(failed))
-          print('All nine required CI jobs succeeded')
+          print('All required CI jobs, shard reconciliation and coverage floors succeeded')
           PY
