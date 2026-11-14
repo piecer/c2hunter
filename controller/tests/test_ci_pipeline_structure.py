@@ -1,9 +1,12 @@
-"""Full CI contracts: all commands retained, complete shards and required gates."""
+"""CI contracts: unchanged full checks and explicitly planned CSS-only skips."""
 
+import copy
+import hashlib
 import json
 import os
 import re
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -92,6 +95,8 @@ WORK_JOBS = (
     "build",
 )
 
+FRONTEND_JOBS = {"lint", "security", "unit-web", "e2e", "build"}
+
 SHARD_TARGETS = {
     "shard-plan": "ci-plan",
     "python": "ci-test-python",
@@ -115,24 +120,28 @@ def job_blocks() -> dict[str, str]:
 
 def test_job_graph_has_parallel_work_and_a_complete_always_gate() -> None:
     jobs = job_blocks()
-    assert set(jobs) == {*WORK_JOBS, "ci"}
+    assert set(jobs) == {*WORK_JOBS, "change-plan", "ci"}
     for name in WORK_JOBS:
         needs = re.findall(r"^    needs: (.+)$", jobs[name], re.MULTILINE)
         expected = {
             "lint": [],
             "security": [],
-            "python": ["shard-plan"],
-            "coverage-controller": ["shard-plan"],
-            "python-verify": ["[shard-plan, python]"],
-            "coverage-controller-merge": ["[shard-plan, coverage-controller]"],
-        }.get(name, ["lint"])
+            "python": ["[change-plan, shard-plan]"],
+            "coverage-controller": ["[change-plan, shard-plan]"],
+            "python-verify": ["[change-plan, shard-plan, python]"],
+            "coverage-controller-merge": ["[change-plan, shard-plan, coverage-controller]"],
+        }.get(name, ["[change-plan, lint]"])
         assert needs == expected
         assert "    timeout-minutes: 360\n" in jobs[name]
+        conditions = re.findall(r"^    if: (.+)$", jobs[name], re.MULTILINE)
+        assert conditions == (
+            [] if name in FRONTEND_JOBS else ["needs.change-plan.outputs.mode == 'full'"]
+        )
     gate = jobs["ci"]
     assert "    if: always()\n" in gate
     needs = re.search(r"^    needs: \[(.*)\]$", gate, re.MULTILINE)
     assert needs
-    assert needs[1].split(", ") == list(WORK_JOBS)
+    assert needs[1].split(", ") == ["change-plan", *WORK_JOBS]
     assert "NEEDS_JSON: ${{ toJSON(needs) }}" in gate
 
 
@@ -143,28 +152,188 @@ def gate_script() -> str:
     return textwrap.dedent(gate.split(marker, 1)[1])
 
 
-@pytest.mark.parametrize(
-    "state", ["success", "failure", "cancelled", "skipped", "unknown", "", None]
-)
-@pytest.mark.parametrize("job", WORK_JOBS)
-def test_actual_final_gate_requires_every_success(job: str, state: str | None) -> None:
-    results = {name: {"result": "success"} for name in WORK_JOBS}
-    results[job]["result"] = state
-    result = subprocess.run(
+def test_selector_and_final_gate_bind_current_attempt_policy() -> None:
+    jobs = job_blocks()
+    selector, gate = jobs["change-plan"], jobs["ci"]
+    assert "      mode: ${{ steps.plan.outputs.mode }}\n" in selector
+    assert "      plan_sha256: ${{ steps.plan.outputs.plan_sha256 }}\n" in selector
+    assert "        id: plan\n" in selector
+    assert (
+        "run: python tools/ci_change_plan.py plan --output artifacts/ci-change-plan/plan.json"
+        in selector
+    )
+    assert "          if-no-files-found: error\n" in selector
+    assert "uses: actions/upload-artifact@v4\n        if: always()\n" in selector
+    for block in (selector, gate):
+        assert "        with: { fetch-depth: 0 }\n" in block
+        assert "actions/setup-python@v5" in block
+        assert "          name: ci-change-plan-${{ github.run_attempt }}\n" in block
+        assert "continue-on-error" not in block
+        assert "pattern:" not in block
+    assert "uses: actions/download-artifact@v4" in gate
+    assert "        if: needs.change-plan.result == 'success'\n" in gate
+    assert "          path: artifacts/ci-change-plan\n" in gate
+    assert gate_script().strip() == (
+        "python3 tools/ci_change_plan.py gate --plan artifacts/ci-change-plan/plan.json"
+    )
+    assert "  workflow_dispatch:\n" in (ROOT / ".github/workflows/ci.yml").read_text()
+
+
+def test_selected_frontend_jobs_have_no_skipped_backend_ancestors() -> None:
+    jobs = job_blocks()
+    graph = {}
+    for name, block in jobs.items():
+        match = re.search(r"^    needs: (.+)$", block, re.MULTILINE)
+        graph[name] = set(match[1].strip("[]").split(", ")) if match else set()
+
+    def ancestors(name: str, trail: frozenset[str] = frozenset()) -> set[str]:
+        assert name not in trail, "Workflow dependency cycle"
+        return graph[name] | {
+            ancestor for parent in graph[name] for ancestor in ancestors(parent, trail | {name})
+        }
+
+    for name in FRONTEND_JOBS | {"change-plan"}:
+        assert ancestors(name) <= FRONTEND_JOBS | {"change-plan"}
+    assert graph["ci"] == {*WORK_JOBS, "change-plan"}
+
+
+@pytest.fixture(scope="module")
+def gate_worlds(tmp_path_factory):
+    """Real local Git/producer fixtures; these are not hosted job executions."""
+    worlds = {}
+    for mode in ("full", "frontend-only"):
+        root = tmp_path_factory.mktemp("actual-yaml-gate-" + mode)
+        home = root / "home"
+        home.mkdir()
+        temporary = root / "tmp"
+        temporary.mkdir()
+        # These children execute only the CI policy, not product code. Keep an
+        # outer native collector intact without inheriting COV_CORE_* startup.
+        env = {
+            "PATH": str(Path(sys.executable).parent) + os.pathsep + os.defpath,
+            "TMPDIR": str(temporary),
+            "LANG": "C.UTF-8",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        env.update(
+            HOME=str(home),
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_GLOBAL=os.devnull,
+            GITHUB_EVENT_NAME="push",
+            GITHUB_REF="refs/heads/fixture",
+            GITHUB_REPOSITORY="fixture/ci-selection",
+            GITHUB_RUN_ID="12345",
+            GITHUB_RUN_ATTEMPT="1",
+        )
+
+        def git(*arguments, cwd=root, environment=env):
+            return subprocess.run(
+                ["git", *arguments],
+                cwd=cwd,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            ).stdout.strip()
+
+        git("init", "--quiet", "--template=")
+        git("config", "user.name", "CI fixture")
+        git("config", "user.email", "ci-fixture@example.invalid")
+        git("config", "core.hooksPath", os.devnull)
+        for relative in ("tools/ci_change_plan.py", ".github/workflows/ci.yml"):
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes((ROOT / relative).read_bytes())
+        css = root / "web/src/styles.css"
+        css.parent.mkdir(parents=True)
+        for name in ("styles.css", "investigation.css", "jobInvestigation.css"):
+            (css.parent / name).write_text(".fixture { color: black; }\n")
+        git("add", "tools", ".github", "web")
+        git("commit", "--quiet", "--no-gpg-sign", "-m", "Fixture baseline")
+        before = git("rev-parse", "HEAD")
+        if mode == "frontend-only":
+            css.write_text(".fixture { color: blue; }\n")
+            git("add", "web")
+        else:
+            (root / "backend-change.txt").write_text("Unknown dependency requires full CI\n")
+            git("add", "backend-change.txt")
+        git("commit", "--quiet", "--no-gpg-sign", "-m", "Fixture candidate")
+        after = git("rev-parse", "HEAD")
+        event = root / "event.json"
+        event.write_text(
+            json.dumps(
+                {
+                    "before": before,
+                    "after": after,
+                    "ref": env["GITHUB_REF"],
+                    "repository": {"full_name": env["GITHUB_REPOSITORY"]},
+                }
+            )
+        )
+        outputs = root / "github-output"
+        env.update(GITHUB_SHA=after, GITHUB_EVENT_PATH=str(event), GITHUB_OUTPUT=str(outputs))
+        plan_path = root / "artifacts/ci-change-plan/plan.json"
+        produced = subprocess.run(
+            [sys.executable, "tools/ci_change_plan.py", "plan", "--output", str(plan_path)],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert produced.returncode == 0, produced.stdout + produced.stderr
+        plan = json.loads(plan_path.read_text())
+        assert plan["mode"] == mode
+        assert plan["jobs"] == {name: mode == "full" or name in FRONTEND_JOBS for name in WORK_JOBS}
+        published = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
+        assert published == {
+            "mode": mode,
+            "plan_sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+        }
+        del env["GITHUB_OUTPUT"]
+        results: dict[str, dict] = {
+            name: {"result": "success" if selected else "skipped"}
+            for name, selected in plan["jobs"].items()
+        }
+        results["change-plan"] = {"result": "success", "outputs": published}
+        worlds[mode] = (root, env, results)
+    return worlds
+
+
+def run_actual_gate(world, payload):
+    root, env, _ = world
+    return subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c", gate_script()],
-        env={**os.environ, "NEEDS_JSON": json.dumps(results)},
+        cwd=root,
+        env={**env, "NEEDS_JSON": payload},
         capture_output=True,
         text=True,
         timeout=10,
     )
-    assert (result.returncode == 0) == (state == "success"), result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("mode", ["full", "frontend-only"])
+@pytest.mark.parametrize(
+    "state", ["success", "failure", "cancelled", "skipped", "unknown", "", None]
+)
+@pytest.mark.parametrize("job", (*WORK_JOBS, "change-plan"))
+def test_actual_final_gate_requires_every_success(gate_worlds, mode, job, state) -> None:
+    world = gate_worlds[mode]
+    results = copy.deepcopy(world[2])
+    expected = results[job]["result"]
+    results[job]["result"] = state
+    result = run_actual_gate(world, json.dumps(results))
+    assert (result.returncode == 0) == (state == expected), result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(
     "fault", ["missing-job", "extra-job", "missing-result", "non-object", "bad-json"]
 )
-def test_actual_final_gate_rejects_incomplete_or_malformed_needs(fault: str) -> None:
-    results = {name: {"result": "success"} for name in WORK_JOBS}
+@pytest.mark.parametrize("mode", ["full", "frontend-only"])
+def test_actual_final_gate_rejects_incomplete_or_malformed_needs(gate_worlds, mode, fault):
+    world = gate_worlds[mode]
+    results = copy.deepcopy(world[2])
     if fault == "missing-job":
         del results["security"]
     elif fault == "extra-job":
@@ -176,13 +345,26 @@ def test_actual_final_gate_rejects_incomplete_or_malformed_needs(fault: str) -> 
         payload = "[]"
     elif fault == "bad-json":
         payload = "not-json"
-    result = subprocess.run(
-        ["bash", "-e", "-o", "pipefail", "-c", gate_script()],
-        env={**os.environ, "NEEDS_JSON": payload},
-        capture_output=True,
-        timeout=10,
-    )
+    result = run_actual_gate(world, payload)
     assert result.returncode != 0
+
+
+@pytest.mark.parametrize("mode", ["full", "frontend-only"])
+@pytest.mark.parametrize("fault", ["missing", "no-outputs", "wrong-mode", "wrong-hash"])
+def test_actual_gate_rejects_unbound_selector_outputs(gate_worlds, mode, fault):
+    world = gate_worlds[mode]
+    results = copy.deepcopy(world[2])
+    if fault == "missing":
+        del results["change-plan"]
+    elif fault == "no-outputs":
+        del results["change-plan"]["outputs"]
+    elif fault == "wrong-mode":
+        results["change-plan"]["outputs"]["mode"] = (
+            "full" if mode == "frontend-only" else "frontend-only"
+        )
+    else:
+        results["change-plan"]["outputs"]["plan_sha256"] = "0" * 64
+    assert run_actual_gate(world, json.dumps(results)).returncode != 0
 
 
 def test_jobs_keep_runtime_dependencies_commands_and_diagnostic_reserve() -> None:

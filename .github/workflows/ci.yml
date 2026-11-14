@@ -2,12 +2,34 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
   group: c2hunter-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  change-plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      plan_sha256: ${{ steps.plan.outputs.plan_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Select complete validation groups
+        id: plan
+        timeout-minutes: 4
+        run: python tools/ci_change_plan.py plan --output artifacts/ci-change-plan/plan.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-change-plan-${{ github.run_attempt }}
+          path: artifacts/ci-change-plan/plan.json
+          if-no-files-found: error
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -185,7 +207,8 @@ jobs:
             artifacts/
             ${{ runner.temp }}/c2hunter-pip-audit/*-audit.json
   shard-plan:
-    needs: lint
+    needs: [change-plan, lint]
+    if: needs.change-plan.outputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -221,7 +244,8 @@ jobs:
           path: |
             artifacts/
   python:
-    needs: shard-plan
+    needs: [change-plan, shard-plan]
+    if: needs.change-plan.outputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     strategy:
@@ -265,7 +289,8 @@ jobs:
           include-hidden-files: true
           path: artifacts/ci/
   python-verify:
-    needs: [shard-plan, python]
+    needs: [change-plan, shard-plan, python]
+    if: needs.change-plan.outputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -301,7 +326,8 @@ jobs:
           include-hidden-files: true
           path: artifacts/
   unit-go:
-    needs: lint
+    needs: [change-plan, lint]
+    if: needs.change-plan.outputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -328,7 +354,8 @@ jobs:
           include-hidden-files: true
           path: artifacts/
   unit-worker:
-    needs: lint
+    needs: [change-plan, lint]
+    if: needs.change-plan.outputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -357,7 +384,8 @@ jobs:
           include-hidden-files: true
           path: artifacts/
   unit-tools:
-    needs: lint
+    needs: [change-plan, lint]
+    if: needs.change-plan.outputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -384,7 +412,7 @@ jobs:
           include-hidden-files: true
           path: artifacts/
   unit-web:
-    needs: lint
+    needs: [change-plan, lint]
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -411,7 +439,8 @@ jobs:
           include-hidden-files: true
           path: artifacts/
   coverage-controller:
-    needs: shard-plan
+    needs: [change-plan, shard-plan]
+    if: needs.change-plan.outputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     strategy:
@@ -455,7 +484,8 @@ jobs:
           include-hidden-files: true
           path: artifacts/ci/
   coverage-controller-merge:
-    needs: [shard-plan, coverage-controller]
+    needs: [change-plan, shard-plan, coverage-controller]
+    if: needs.change-plan.outputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -492,7 +522,8 @@ jobs:
           path: |
             artifacts/
   coverage-analysis:
-    needs: lint
+    needs: [change-plan, lint]
+    if: needs.change-plan.outputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -522,7 +553,8 @@ jobs:
           path: |
             artifacts/
   coverage-sensor:
-    needs: lint
+    needs: [change-plan, lint]
+    if: needs.change-plan.outputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -552,7 +584,8 @@ jobs:
             /tmp/c2hunter-sensor-coverage.out
             /tmp/c2hunter-sensor-core-coverage.out
   scenarios:
-    needs: lint
+    needs: [change-plan, lint]
+    if: needs.change-plan.outputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -582,7 +615,7 @@ jobs:
           path: |
             artifacts/
   e2e:
-    needs: lint
+    needs: [change-plan, lint]
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -612,7 +645,7 @@ jobs:
             web/test-results/
             web/playwright-report/
   build:
-    needs: lint
+    needs: [change-plan, lint]
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -641,32 +674,22 @@ jobs:
             artifacts/
   ci:
     if: always()
-    needs: [lint, security, shard-plan, python, python-verify, unit-go, unit-worker, unit-tools, unit-web, coverage-controller, coverage-controller-merge, coverage-analysis, coverage-sensor, scenarios, e2e, build]
+    needs: [change-plan, lint, security, shard-plan, python, python-verify, unit-go, unit-worker, unit-tools, unit-web, coverage-controller, coverage-controller-merge, coverage-analysis, coverage-sensor, scenarios, e2e, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require every CI job to succeed
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: actions/download-artifact@v4
+        if: needs.change-plan.result == 'success'
+        with:
+          name: ci-change-plan-${{ github.run_attempt }}
+          path: artifacts/ci-change-plan
+      - name: Require every planned check and verify deliberate skips
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         shell: bash
         run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import sys
-
-          expected = {
-              'lint', 'security', 'shard-plan', 'python', 'python-verify',
-              'unit-go', 'unit-worker', 'unit-tools', 'unit-web',
-              'coverage-controller', 'coverage-controller-merge', 'coverage-analysis',
-              'coverage-sensor', 'scenarios', 'e2e', 'build',
-          }
-          needs = json.loads(os.environ['NEEDS_JSON'])
-          if not isinstance(needs, dict) or set(needs) != expected:
-              sys.exit('Missing or unexpected CI jobs')
-          failed = [name for name in sorted(expected)
-                    if not isinstance(needs[name], dict) or needs[name].get('result') != 'success']
-          if failed:
-              sys.exit('CI jobs did not succeed: ' + ', '.join(failed))
-          print('All required CI jobs, shard reconciliation and coverage floors succeeded')
-          PY
+          python3 tools/ci_change_plan.py gate --plan artifacts/ci-change-plan/plan.json
