@@ -109,8 +109,11 @@ def test_frozen_predecessor_claims_only_ip_in_real_mixed_sqlite_queue(tmp_path):
     api = job_api()
     frozen = zlib.decompress(base64.b85decode(_FROZEN_IP_ZLIB_BASE85))
     assert hashlib.sha256(frozen).hexdigest() == _FROZEN_IP_SHA256
-    spec = importlib.util.spec_from_loader("c2hunter_controller._frozen_ip_custody", loader=None)
+    # Keep the predecessor test-owned: package coverage must not count its virtual source.
+    spec = importlib.util.spec_from_loader(__name__ + "._frozen_ip_custody", loader=None)
     old = importlib.util.module_from_spec(spec)
+    old.__spec__ = None  # Executed fixture, not an importable child of its test module.
+    old.__package__ = "c2hunter_controller"  # Preserve the frozen source's relative imports.
     old.__file__ = __file__  # The frozen source is embedded in this test module.
     sys.modules[spec.name] = old
     exec(compile(frozen, __file__ + "::frozen_ip_custody", "exec"), old.__dict__)
