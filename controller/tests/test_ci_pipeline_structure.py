@@ -1,4 +1,4 @@
-"""Phase-one CI contract: split scheduling, not test selection or policy."""
+"""Full CI contracts: all commands retained, complete shards and required gates."""
 
 import json
 import os
@@ -76,14 +76,29 @@ def test_coverage_is_factored_without_reordering_or_changing_commands() -> None:
 WORK_JOBS = (
     "lint",
     "security",
-    "unit",
+    "shard-plan",
+    "python",
+    "python-verify",
+    "unit-go",
+    "unit-worker",
+    "unit-tools",
+    "unit-web",
     "coverage-controller",
+    "coverage-controller-merge",
     "coverage-analysis",
     "coverage-sensor",
-    "integration",
+    "scenarios",
     "e2e",
     "build",
 )
+
+SHARD_TARGETS = {
+    "shard-plan": "ci-plan",
+    "python": "ci-test-python",
+    "python-verify": "ci-verify-python",
+    "coverage-controller": "ci-test-coverage-controller",
+    "coverage-controller-merge": "ci-merge-coverage-controller",
+}
 
 
 def job_blocks() -> dict[str, str]:
@@ -103,7 +118,15 @@ def test_job_graph_has_parallel_work_and_a_complete_always_gate() -> None:
     assert set(jobs) == {*WORK_JOBS, "ci"}
     for name in WORK_JOBS:
         needs = re.findall(r"^    needs: (.+)$", jobs[name], re.MULTILINE)
-        assert needs == ([] if name in ("lint", "security") else ["lint"])
+        expected = {
+            "lint": [],
+            "security": [],
+            "python": ["shard-plan"],
+            "coverage-controller": ["shard-plan"],
+            "python-verify": ["[shard-plan, python]"],
+            "coverage-controller-merge": ["[shard-plan, coverage-controller]"],
+        }.get(name, ["lint"])
+        assert needs == expected
         assert "    timeout-minutes: 360\n" in jobs[name]
     gate = jobs["ci"]
     assert "    if: always()\n" in gate
@@ -147,7 +170,7 @@ def test_actual_final_gate_rejects_incomplete_or_malformed_needs(fault: str) -> 
     elif fault == "extra-job":
         results["unexpected"] = {"result": "success"}
     elif fault == "missing-result":
-        results["unit"] = {}
+        results["python-verify"] = {}
     payload = json.dumps(results)
     if fault == "non-object":
         payload = "[]"
@@ -167,7 +190,9 @@ def test_jobs_keep_runtime_dependencies_commands_and_diagnostic_reserve() -> Non
     artifact_names = []
     for name in WORK_JOBS:
         block = jobs[name]
-        artifact_names.extend(re.findall(r"^          name: (.+)$", block, re.MULTILINE))
+        for step in block.split("      - ")[1:]:
+            if step.startswith("uses: actions/upload-artifact@v4"):
+                artifact_names.extend(re.findall(r"^          name: (.+)$", step, re.MULTILINE))
         assert "      - uses: actions/upload-artifact@v4\n        if: always()\n" in block
         assert "          include-hidden-files: true\n" in block
         if name == "security":
@@ -178,17 +203,29 @@ def test_jobs_keep_runtime_dependencies_commands_and_diagnostic_reserve() -> Non
         assert "go-version: '1.25.12'" in block
         assert "node-version: '22.14.0'" in block
         assert "run: make setup\n" in block
-        target = name if name in ("lint", "build") else "test-" + name
+        target = SHARD_TARGETS.get(name, name if name in ("lint", "build") else "test-" + name)
         assert f"make {target} 2>&1 | tee artifacts/ci/{name}.log" in block
         assert "          set -o pipefail\n" in block
         assert "        timeout-minutes: 330\n" in block
-        targets = re.findall(r"make (test-[a-z0-9-]+)", block)
+        targets = re.findall(r"make ((?:test|ci)-[a-z0-9-]+)", block)
         assert targets == ([] if name in ("lint", "build") else [target])
-    assert len(artifact_names) == len(set(artifact_names)) == len(WORK_JOBS)
+    assert len(artifact_names) == len(set(artifact_names)) >= len(WORK_JOBS)
 
 
 def test_ci_opt_in_wraps_only_top_level_pytest_without_changing_local_commands() -> None:
     assert recipe("test-unit") == [
+        "\t$(MAKE) test-unit-go",
+        "\t$(MAKE) test-unit-python",
+        "\t$(MAKE) test-unit-worker",
+        "\t$(MAKE) test-unit-tools",
+        "\t$(MAKE) test-unit-web",
+    ]
+    commands = [
+        line
+        for target in ("go", "python", "worker", "tools", "web")
+        for line in recipe("test-unit-" + target)
+    ]
+    assert commands == [
         "\tcd sensor && go test ./...",
         "\t$(PYTEST) -q controller/tests analysis/tests",
         "\tPYTHONPATH=sensor/worker/src $(PYTEST) -q sensor/worker/tests",
@@ -232,13 +269,44 @@ def test_ci_opt_in_wraps_only_top_level_pytest_without_changing_local_commands()
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     assert "PYTEST_ADDOPTS" not in text and "PYTEST_PLUGINS" not in text
     jobs = job_blocks()
-    for job in ("unit", "coverage-controller", "coverage-analysis", "integration"):
+    for job in ("unit-worker", "coverage-analysis"):
         assert "          CI_PYTEST_EVIDENCE: '1'\n" in jobs[job]
+
+
+def test_make_test_runs_every_distinct_command_once_without_plain_replay() -> None:
+    env = {key: value for key, value in os.environ.items() if key != "CI_PYTEST_EVIDENCE"}
+    result = subprocess.run(
+        ["make", "--no-print-directory", "-n", "test"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+    commands = [
+        "cd sensor && go test ./...",
+        ".venv/bin/pytest -q controller/tests analysis/tests",
+        "PYTHONPATH=sensor/worker/src .venv/bin/pytest -q sensor/worker/tests",
+        ".venv/bin/python tools/traffic-generator/test_generate.py",
+        ".venv/bin/python tools/benchmark/test_benchmark.py",
+        ".venv/bin/python tools/benchmark/test_ddos_analysis.py",
+        "PYTHONPATH=controller/src:analysis/src .venv/bin/python "
+        "tools/benchmark/test_pcap_export_benchmark.py",
+        "npm --prefix web run test",
+        ".venv/bin/python tools/traffic-generator/generate.py --output testdata/generated",
+    ]
+    lines = result.stdout.splitlines()
+    assert all(lines.count(command) == 1 for command in commands), result.stdout
+    assert '-m "not e2e"' not in result.stdout
+    assert recipe("test-scenarios") == [
+        "\t$(VENV)/bin/python tools/traffic-generator/generate.py --output testdata/generated"
+    ]
 
 
 def test_existing_job_setup_action_options_and_order_are_retained() -> None:
     jobs = job_blocks()
-    for name in ("integration", "build"):
+    for name in ("build",):
         block = jobs[name]
         assert block.index("actions/setup-python@v5") < block.index("actions/setup-node@v4")
         assert block.index("actions/setup-node@v4") < block.index("actions/setup-go@v5")
@@ -250,3 +318,47 @@ def test_setup_and_security_execution_also_reserve_upload_time() -> None:
         for step in job_blocks()[name].split("      - ")[1:]:
             if "run:" in step or step.startswith(("uses: gitleaks/", "uses: aquasecurity/")):
                 assert "        timeout-minutes: 330\n" in step, (name, step.splitlines()[0])
+
+
+@pytest.mark.parametrize("job,indices", [("python", "0, 1"), ("coverage-controller", "0, 1, 2, 3")])
+def test_matrix_shards_keep_siblings_running_and_publish_distinct_evidence(job, indices):
+    block = job_blocks()[job]
+    assert "      fail-fast: false\n" in block
+    assert f"        shard: [{indices}]\n" in block
+    assert "          CI_SHARD: '${{ matrix.shard }}'\n" in block
+    assert (
+        f"          name: ci-{job}-${{{{ github.run_attempt }}}}-${{{{ matrix.shard }}}}\n" in block
+    )
+    assert "          name: ci-shard-plan-${{ github.run_attempt }}\n" in block
+    assert "          path: artifacts/ci-shards\n" in block
+
+
+@pytest.mark.parametrize(
+    "job,producer",
+    [("python-verify", "python"), ("coverage-controller-merge", "coverage-controller")],
+)
+def test_reconciliation_downloads_all_raw_artifacts_without_flattening(job, producer):
+    block = job_blocks()[job]
+    assert "uses: actions/download-artifact@v4" in block
+    assert f"          pattern: ci-{producer}-${{{{ github.run_attempt }}}}-*\n" in block
+    assert "          merge-multiple: false\n" in block
+    assert "continue-on-error" not in block
+    assert "if: always()" in job_blocks()["ci"]
+
+
+def test_ci_make_targets_bind_the_real_engine_and_separate_input_output_roots():
+    expected = {
+        "ci-plan": "plan --output artifacts/ci-shards/plan.json",
+        "ci-test-python": "run --plan artifacts/ci-shards/plan.json --suite plain "
+        "--shard $(CI_SHARD) --output artifacts/ci-shards/plain-$(CI_SHARD)",
+        "ci-test-coverage-controller": "run --plan artifacts/ci-shards/plan.json "
+        "--suite controller-coverage --shard $(CI_SHARD) "
+        "--output artifacts/ci-shards/controller-coverage-$(CI_SHARD)",
+        "ci-verify-python": "verify --plan artifacts/ci-shards/plan.json --suite plain "
+        "--results artifacts/ci-shards/downloaded-plain",
+        "ci-merge-coverage-controller": "combine --plan artifacts/ci-shards/plan.json "
+        "--results artifacts/ci-shards/downloaded-controller-coverage "
+        "--output artifacts/ci-shards/combined-controller-coverage",
+    }
+    for target, arguments in expected.items():
+        assert recipe(target) == ["\t$(VENV)/bin/python tools/ci_shards.py " + arguments]
