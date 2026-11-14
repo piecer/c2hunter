@@ -200,7 +200,7 @@ def test_jobs_keep_runtime_dependencies_commands_and_diagnostic_reserve() -> Non
         for runtime in ("actions/setup-python@v5", "actions/setup-go@v5", "actions/setup-node@v4"):
             assert runtime in block
         assert "python-version: '3.12'" in block
-        assert "go-version: '1.25.12'" in block
+        assert "go-version: '1.26.11'" in block
         assert "node-version: '22.14.0'" in block
         assert "run: make setup\n" in block
         target = SHARD_TARGETS.get(name, name if name in ("lint", "build") else "test-" + name)
