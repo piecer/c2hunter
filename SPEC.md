@@ -135,7 +135,7 @@ DDoS 봇넷에 감염된 여러 단말은 공격 명령 수신, 상태 보고, �
 
 ## 5.1 Sensor Agent
 
-* 언어: Go 1.25
+* 언어: Go 1.26.11
 * 패킷 캡처:
   * Linux AF_PACKET
   * TPACKET_V3 사용 우선
