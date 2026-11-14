@@ -3,6 +3,10 @@ PYTHON ?= python3.12
 VENV := .venv
 PIP := $(VENV)/bin/pip
 PYTEST := $(VENV)/bin/pytest
+# Opt in only for CI's top-level Make invocations; never export pytest plugins/options.
+ifeq ($(CI_PYTEST_EVIDENCE),1)
+PYTEST := $(VENV)/bin/python tools/ci_pytest.py --
+endif
 RUFF := $(VENV)/bin/ruff
 MYPY := $(VENV)/bin/mypy
 GOSEC_VERSION := v2.22.10
@@ -11,7 +15,7 @@ SENSOR_CORE_COVERAGE_MIN := 80.0
 SENSOR_CORE_PACKAGES := ./internal/direction ./internal/flow ./internal/capture ./internal/metadata ./internal/packet ./internal/spool ./internal/batch ./internal/flowbatch
 COMPOSE := docker compose --env-file .env
 
-.PHONY: setup lint lint-security test test-unit test-integration test-coverage test-e2e test-ai evaluate-ai benchmark-ai benchmark-ddos-analysis benchmark-pcap-export backtest-high-volume build sensor-agent up down generate-test-pcaps benchmark-1m clean
+.PHONY: setup lint lint-security test test-unit test-integration test-coverage test-coverage-controller test-coverage-analysis test-coverage-sensor test-e2e test-ai evaluate-ai benchmark-ai benchmark-ddos-analysis benchmark-pcap-export backtest-high-volume build sensor-agent up down generate-test-pcaps benchmark-1m clean
 
 setup:
 	@test -f .env || cp .env.example .env
@@ -72,9 +76,18 @@ test-integration:
 
 test-coverage:
 	# Ratchet current package baselines separately so aggregate coverage cannot hide a regression.
+	$(MAKE) test-coverage-controller
+	$(MAKE) test-coverage-analysis
+	$(MAKE) test-coverage-sensor
+
+test-coverage-controller:
 	$(PYTEST) -q controller/tests --cov=c2hunter_controller --cov-config=controller/pyproject.toml --cov-report=term --cov-fail-under=80
+
+test-coverage-analysis:
 	$(PYTEST) -q analysis/tests --cov=c2hunter_analysis --cov-report=term --cov-fail-under=86
 	$(PYTEST) -q analysis/tests --cov=c2hunter_analysis.detectors --cov-report=term --cov-fail-under=90
+
+test-coverage-sensor:
 	cd sensor && go test -coverprofile=/tmp/c2hunter-sensor-coverage.out ./...
 	@actual="$$(cd sensor && go tool cover -func=/tmp/c2hunter-sensor-coverage.out | awk '/^total:/ { gsub("%", "", $$3); print $$3 }')"; \
 	$(PYTHON) -c 'import sys; actual = float(sys.argv[1]); minimum = float(sys.argv[2]); print(f"Sensor coverage: {actual:.1f}% (minimum {minimum:.1f}%)"); raise SystemExit(actual < minimum)' "$$actual" "$(SENSOR_COVERAGE_MIN)"

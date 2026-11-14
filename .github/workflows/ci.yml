@@ -10,6 +10,7 @@ concurrency:
 jobs:
   lint:
     runs-on: ubuntu-24.04
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -19,54 +20,24 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
       - run: make setup
-      - run: make lint
-  unit:
-    needs: lint
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.12', cache: pip }
-      - uses: actions/setup-go@v5
-        with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
-      - uses: actions/setup-node@v4
-        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
-      - run: make setup
-      - run: make test-unit
-      - run: make test-coverage
-  integration:
-    needs: unit
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.12', cache: pip }
-      - uses: actions/setup-node@v4
-        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
-      - uses: actions/setup-go@v5
-        with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
-      - run: make setup
-      - run: make test-integration
-      - run: make test-e2e
+        timeout-minutes: 330
+      - name: Run lint
+        timeout-minutes: 330
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/ci
+          make lint 2>&1 | tee artifacts/ci/lint.log
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: integration-artifacts, path: artifacts/ }
-  build:
-    needs: integration
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.12' }
-      - uses: actions/setup-node@v4
-        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
-      - uses: actions/setup-go@v5
-        with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
-      - run: make setup
-      - run: make build
+        with:
+          name: ci-lint-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: |
+            artifacts/
   security:
-    needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
@@ -75,7 +46,9 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
       - run: npm --prefix web ci --ignore-scripts
+        timeout-minutes: 330
       - name: npm audit (except react-router RSC-only advisories)
+        timeout-minutes: 330
         run: |
           cd web
           # Print summary for CI logs (ignore exit code so step keeps going)
@@ -133,6 +106,7 @@ jobs:
               print('npm audit passed (no blocking vulnerabilities).')
           "
       - name: Audit Python dependencies
+        timeout-minutes: 330
         run: |
           set -euo pipefail
           AUDIT_VENV="${RUNNER_TEMP}/c2hunter-pip-audit"
@@ -197,6 +171,253 @@ jobs:
               main()
           PY
       - uses: gitleaks/gitleaks-action@v2
+        timeout-minutes: 330
         env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        timeout-minutes: 330
         with: { scan-type: fs, scan-ref: '.', ignore-file: .trivyignore, severity: 'HIGH,CRITICAL', ignore-unfixed: true, exit-code: '1' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-security-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: |
+            artifacts/
+            ${{ runner.temp }}/c2hunter-pip-audit/*-audit.json
+  unit:
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: make setup
+        timeout-minutes: 330
+      - name: Run test-unit
+        env:
+          CI_PYTEST_EVIDENCE: '1'
+        timeout-minutes: 330
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/ci
+          make test-unit 2>&1 | tee artifacts/ci/unit.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-unit-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: |
+            artifacts/
+  coverage-controller:
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: make setup
+        timeout-minutes: 330
+      - name: Run test-coverage-controller
+        env:
+          CI_PYTEST_EVIDENCE: '1'
+        timeout-minutes: 330
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/ci
+          make test-coverage-controller 2>&1 | tee artifacts/ci/coverage-controller.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-coverage-controller-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: |
+            artifacts/
+  coverage-analysis:
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: make setup
+        timeout-minutes: 330
+      - name: Run test-coverage-analysis
+        env:
+          CI_PYTEST_EVIDENCE: '1'
+        timeout-minutes: 330
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/ci
+          make test-coverage-analysis 2>&1 | tee artifacts/ci/coverage-analysis.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-coverage-analysis-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: |
+            artifacts/
+  coverage-sensor:
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: make setup
+        timeout-minutes: 330
+      - name: Run test-coverage-sensor
+        timeout-minutes: 330
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/ci
+          make test-coverage-sensor 2>&1 | tee artifacts/ci/coverage-sensor.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-coverage-sensor-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: |
+            artifacts/
+            /tmp/c2hunter-sensor-coverage.out
+            /tmp/c2hunter-sensor-core-coverage.out
+  integration:
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
+      - run: make setup
+        timeout-minutes: 330
+      - name: Run test-integration
+        env:
+          CI_PYTEST_EVIDENCE: '1'
+        timeout-minutes: 330
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/ci
+          make test-integration 2>&1 | tee artifacts/ci/integration.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-integration-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: |
+            artifacts/
+  e2e:
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: make setup
+        timeout-minutes: 330
+      - name: Run test-e2e
+        timeout-minutes: 330
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/ci
+          make test-e2e 2>&1 | tee artifacts/ci/e2e.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-e2e-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: |
+            artifacts/
+            web/test-results/
+            web/playwright-report/
+  build:
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.14.0', cache: npm, cache-dependency-path: web/package-lock.json }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.12', cache-dependency-path: sensor/go.sum }
+      - run: make setup
+        timeout-minutes: 330
+      - name: Run build
+        timeout-minutes: 330
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/ci
+          make build 2>&1 | tee artifacts/ci/build.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-build-${{ github.run_attempt }}
+          include-hidden-files: true
+          path: |
+            artifacts/
+  ci:
+    if: always()
+    needs: [lint, security, unit, coverage-controller, coverage-analysis, coverage-sensor, integration, e2e, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every CI job to succeed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          expected = {
+              'lint', 'security', 'unit', 'coverage-controller', 'coverage-analysis',
+              'coverage-sensor', 'integration', 'e2e', 'build',
+          }
+          needs = json.loads(os.environ['NEEDS_JSON'])
+          if not isinstance(needs, dict) or set(needs) != expected:
+              sys.exit('Missing or unexpected CI jobs')
+          failed = [name for name in sorted(expected)
+                    if not isinstance(needs[name], dict) or needs[name].get('result') != 'success']
+          if failed:
+              sys.exit('CI jobs did not succeed: ' + ', '.join(failed))
+          print('All nine required CI jobs succeeded')
+          PY
