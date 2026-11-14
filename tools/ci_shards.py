@@ -6,7 +6,11 @@ import importlib.metadata
 import json
 import math
 import os
+import re
 import shutil
+import sqlite3
+import stat
+from contextlib import closing
 import subprocess
 import sys
 from pathlib import Path
@@ -321,6 +325,77 @@ def progress_check(path, expected):
     return counts
 
 
+def empty_coverage_sidecar(path, version):
+    """Recognize only bounded, canonical, empty parallel coverage databases.
+
+    Never use CoverageData.read here: it can initialize/normalize databases.
+    Inspect a bounded private memory snapshot, leaving every artifact byte intact.
+    """
+    from coverage.sqldata import SCHEMA, SCHEMA_VERSION
+
+    require(SCHEMA_VERSION == 7, "unsupported empty coverage schema")
+    require(
+        re.fullmatch(
+            r"\.coverage\.[A-Za-z0-9_-]{1,255}\.pid[0-9]{1,20}"
+            r"\.X[A-Za-z0-9]{6}x(?:\.H[A-Za-z0-9]{10}h)?",
+            path.name,
+        ),
+        "unexpected coverage sidecar name",
+    )
+    require(stat.S_ISREG(path.lstat().st_mode), "nonregular coverage sidecar")
+    limit = 128 * 1024
+    require(0 < path.stat().st_size <= limit, "coverage sidecar size")
+    with path.open("rb") as stream:
+        body = stream.read(limit + 1)
+    require(0 < len(body) <= limit, "coverage sidecar size")
+    schema_query = "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY name"
+    try:
+        with closing(sqlite3.connect(":memory:")) as reference:
+            reference.executescript(SCHEMA)
+            schema = reference.execute(schema_query).fetchall()
+        with closing(sqlite3.connect(":memory:")) as db:
+            db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, limit)
+            db.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, limit)
+            db.deserialize(body)
+            db.execute("PRAGMA query_only=ON")
+            db.execute("PRAGMA trusted_schema=OFF")
+            db.set_progress_handler(lambda: 1, 100000)
+            require(
+                db.execute("PRAGMA page_count").fetchone()[0]
+                * db.execute("PRAGMA page_size").fetchone()[0]
+                == len(body),
+                "coverage sidecar physical size",
+            )
+            require(
+                db.execute(schema_query).fetchall() == schema, "coverage sidecar schema"
+            )
+            require(
+                db.execute("PRAGMA integrity_check").fetchall() == [("ok",)],
+                "coverage sidecar integrity",
+            )
+            require(
+                db.execute("SELECT * FROM coverage_schema").fetchall() == [(7,)],
+                "coverage sidecar schema version",
+            )
+            rows = db.execute("SELECT key, value FROM meta").fetchall()
+            meta = dict(rows)
+            require(
+                len(meta) == len(rows)
+                and set(meta) <= {"version", "has_arcs", "sys_argv", "when", "hash"}
+                and meta.get("version") == version
+                and meta.get("has_arcs") == "0"
+                and all(isinstance(v, str) for v in meta.values()),
+                "coverage sidecar metadata",
+            )
+            for table in ("file", "context", "line_bits", "arc", "tracer"):
+                require(
+                    db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is None,  # noqa: S608 -- fixed table allowlist.
+                    "nonempty coverage sidecar",
+                )
+    except sqlite3.Error as error:
+        raise ValueError("invalid coverage sidecar database") from error
+
+
 def check_receipt(output, receipt, data, suite_name, root):
     require(
         all(
@@ -350,7 +425,6 @@ def check_receipt(output, receipt, data, suite_name, root):
         and receipt["cleanup"] == "complete",
         "unsuccessful invocation",
     )
-    require(receipt["artifacts"] == artifacts(output), "artifact set/hash mismatch")
     invocation = output / receipt["invocation"]
     require(invocation.resolve().is_relative_to(output.resolve()), "invocation escape")
     actual = read(invocation / "invocation.json")
@@ -392,7 +466,23 @@ def check_receipt(output, receipt, data, suite_name, root):
         )
         diagnostic_names.update({".coverage", "coverage.xml"})
     names.update(str(Path(receipt["invocation"]) / name) for name in diagnostic_names)
+    sidecars = set(receipt["artifacts"]) - names
+    if suite_name == "controller-coverage":
+        require(len(sidecars) <= 16, "coverage sidecar cardinality")
+        for name in sorted(sidecars):
+            path = Path(name)
+            require(
+                path.parent == Path(receipt["invocation"])
+                and str(path) == name
+                and not path.is_absolute(),
+                "unexpected coverage sidecar path",
+            )
+            empty_coverage_sidecar(
+                output / path, data["source"]["toolchain"]["coverage"]
+            )
+        names.update(sidecars)
     require(set(receipt["artifacts"]) == names, "unexpected artifact set")
+    require(receipt["artifacts"] == artifacts(output), "artifact set/hash mismatch")
     require(actual["pytest_args"] == expected_args, "actual argv mismatch")
     require(
         actual["child_exit"] == 0
@@ -447,7 +537,11 @@ def check_receipt(output, receipt, data, suite_name, root):
         sum(c.find("skipped") is not None for c in cases) == counts["skipped"],
         "JUnit skips",
     )
-    raw = list(output.rglob(".coverage*"))
+    raw = [
+        p
+        for p in output.rglob(".coverage*")
+        if str(p.relative_to(output)) not in sidecars
+    ]
     if suite_name == "controller-coverage":
         require(raw == [invocation / ".coverage"], "raw coverage cardinality")
         require(receipt["raw_sha256"] == digest(raw[0]), "raw coverage hash")

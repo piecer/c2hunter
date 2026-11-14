@@ -5,6 +5,63 @@ from pathlib import Path
 
 import pytest
 
+# Only these fixed paths can appear in diagnostics, never request keys or values.
+_IDENTITY_FIELDS = {
+    "cwd": (),
+    "rootpath": (),
+    "inipath": (),
+    "ini": (
+        "addopts",
+        "testpaths",
+        "markers",
+        "filterwarnings",
+        "xfail_strict",
+        "junit_family",
+        "junit_suite_name",
+        "junit_duration_report",
+        "pythonpath",
+    ),
+    "options": (
+        "keyword",
+        "markexpr",
+        "importmode",
+        "noconftest",
+        "deselect",
+        "ignore",
+        "ignore_glob",
+        "keepduplicates",
+        "strict_markers",
+        "strict_config",
+        "cov_source",
+        "cov_config",
+        "cov_fail_under",
+    ),
+}
+
+
+def mismatch_fields(actual, expected):
+    """Describe a rejected identity using a bounded, fixed field allowlist."""
+    if not isinstance(expected, dict):
+        return "identity"
+    missing = object()
+    fields = []
+    if len(expected) != sum(name in expected for name in _IDENTITY_FIELDS):
+        fields.append("identity")
+    for name, children in _IDENTITY_FIELDS.items():
+        value = expected.get(name, missing)
+        if not children:
+            if actual[name] != value:
+                fields.append(name)
+        elif not isinstance(value, dict):
+            fields.append(name)
+        else:
+            if len(value) != sum(child in value for child in children):
+                fields.append(name)
+            for child in children:
+                if actual[name][child] != value.get(child, missing):
+                    fields.append(f"{name}.{child}")
+    return ", ".join(fields)
+
 
 def pytest_addoption(parser):
     parser.addoption("--ci-shard-request")
@@ -24,6 +81,7 @@ class ShardObserver:
         self.encode = json.JSONEncoder(sort_keys=True).encode
         self.config = config
         self.full = []
+        self.collection_complete = False
 
     def rows(self, items):
         root = Path(self.request["root"])
@@ -50,8 +108,13 @@ class ShardObserver:
                 raise pytest.UsageError("zero selection")
             config.hook.pytest_deselected(items=deselected)
             items[:] = selected
+        self.collection_complete = True
 
     def pytest_collection_finish(self, session):
+        # Pytest calls this even when collection_modifyitems raised. Keep that
+        # original failure and never publish a selection for incomplete collection.
+        if not self.collection_complete:
+            return
         selected = self.rows(session.items)
         identity = {
             "cwd": str(Path.cwd()),
@@ -95,8 +158,12 @@ class ShardObserver:
                 )
             },
         }
+        # Plugins append declarations in discovery order; this list is not ordered
+        # policy. Preserve every declaration's exact text and multiplicity.
+        identity["ini"]["markers"] = sorted(identity["ini"]["markers"])
         if self.request["mode"] == "run" and identity != self.request["identity"]:
-            raise pytest.UsageError("collection identity mismatch")
+            fields = mismatch_fields(identity, self.request["identity"])
+            raise pytest.UsageError(f"collection identity mismatch (fields: {fields})")
         self.write(
             "selection.json",
             {"inventory": selected, "full": self.full, "identity": identity},
