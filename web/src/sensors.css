@@ -1,0 +1,6 @@
+.sensor-pagination { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-block: .75rem; }
+.sensor-selector-dialog { width: min(44rem, calc(100vw - 2rem)); max-height: 80vh; overflow: auto; background: var(--panel, #142033); color: inherit; border: 1px solid #64748b; border-radius: .75rem; padding: 1rem; }
+.sensor-selector-dialog::backdrop { background: #0009; }
+.sensor-selection small, .sensor-selector-dialog small { display: block; overflow-wrap: anywhere; }
+.sensor-selection { padding-block: .05rem; }
+.sensor-selection > legend > button { margin-inline: .75rem; padding-block: .4rem; }

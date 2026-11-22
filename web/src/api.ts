@@ -5,7 +5,7 @@ export class ApiError extends Error {
   constructor(message: string, public status: number, public code = 'HTTP_ERROR', public details?: unknown) { super(message); this.name = 'ApiError'; }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, onStatus?: (status: number) => void): Promise<T> {
   const authority = captureAuthentication(), token = authority.token;
   const headers = new Headers(init.headers);
   headers.set('accept', 'application/json');
@@ -13,6 +13,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (token) headers.set('authorization', `Bearer ${token}`);
   const response = await fetch(`/api/v1${path}`, { ...init, headers: Object.fromEntries(headers.entries()) });
   invalidateAuthentication(response.status, authority, init.signal);
+  onStatus?.(response.status);
   // Read a clone so repeated test adapters and cache layers that return the same
   // Response object cannot make a later request lose the structured error body.
   const body = response.status === 204 ? undefined : await response.clone().json().catch(() => undefined);
@@ -111,6 +112,12 @@ async function boundedRequest(path: string, init: RequestInit = {}, onHeaders?: 
 }
 
 export const api = {
+  // Preserve DELETE status as well as body for target-specific policy ACK contracts.
+  deleteReceipt: async (path: string): Promise<{ status: number; body: unknown }> => {
+    let status = 0;
+    const body = await request<unknown>(path, { method: 'DELETE' }, value => { status = value; });
+    return { status, body };
+  },
   boundedRequest,
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body?: unknown) => request<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) }),

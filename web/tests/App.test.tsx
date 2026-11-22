@@ -36,11 +36,13 @@ const responses: Record<string, unknown> = {
   '/api/v1/payload-signatures?page_size=200': { items: [{ id: 'signature-1', name: 'TCP beacon payload', description: 'Confirmed implant beacon', version: 1, enabled: true, source_job_id: 'job-1', source_flow_id: '0123456789abcdef01234567', source_label_id: 'label-1', protocol: 'TCP', direction: 'OUTBOUND', service_port: 443, payload_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_prefix_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_length: 6, payload_entropy: 2.585, payload_printable_ratio: 1, payload_simhash: 'e627bf19152d67b3', payload_feature_version: '1', length_tolerance_ratio: 0.15, entropy_tolerance: 0.75, simhash_max_distance: 8, created_by: 'analyst', created_at: '2026-07-20T10:06:00Z', updated_at: '2026-07-20T10:06:00Z' }] },
   '/api/v1/allowlist': { items: [] },
 };
+responses['/api/v1/payload-signatures?page=1&page_size=10'] = responses['/api/v1/payload-signatures?page_size=200'];
+responses['/api/v1/allowlist?page=1&page_size=10'] = responses['/api/v1/allowlist'];
 responses['/api/v1/analysis-jobs/job-1/flows?page=1&page_size=50&include_filter=%7B%22has_payload%22%3Atrue%7D'] =
   responses['/api/v1/analysis-jobs/job-1/flows?candidate_ip=203.0.113.9&page=1&page_size=50'];
 responses['/api/v1/candidates?page=1&page_size=50&minimum_score=0&sort=-last_seen'] =
   responses['/api/v1/candidates'];
-responses['/api/v1/sensor-pcaps?analysis_job_id=job-1&page_size=200'] = { items: [], total: 0, page: 1, page_size: 200 };
+responses['/api/v1/sensor-pcaps?analysis_job_id=job-1&page=1&page_size=50'] = { items: [], total: 0, page: 1, page_size: 50 };
 responses['/api/v1/analysis-jobs/job-1/ai-runs'] = {
   items: [{ id: 'ai-run-1', analysis_job_id: 'job-1', status: 'COMPLETED', candidate_count: 1, created_at: '2026-07-20T10:11:00Z' }],
   total: 1,
@@ -549,6 +551,7 @@ describe('C2Hunter UI', () => {
     });
 
     expect(await screen.findByRole('heading', { name: 'Threat intelligence & MISP' })).toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: 'Edit integration settings' }));
     await screen.findByRole('form', { name: '외부 TI 및 MISP 설정' });
     expect(screen.queryByLabelText(/API key/i)).not.toBeInTheDocument();
     const delayInput = screen.getByLabelText(/^외부 TI 요청 간격\(초\)/);
@@ -1570,6 +1573,7 @@ describe('C2Hunter UI', () => {
       return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404, headers: { 'content-type': 'application/json' } });
     });
     renderAt('/allowlist');
+    fireEvent.click(screen.getByRole('button', { name: 'Create entry' }));
     vi.stubGlobal('fetch', fetchMock);
     const user = userEvent.setup();
 
@@ -1598,6 +1602,7 @@ describe('C2Hunter UI', () => {
       return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404, headers: { 'content-type': 'application/json' } });
     });
     renderAt('/allowlist');
+    fireEvent.click(screen.getByRole('button', { name: 'Create entry' }));
     vi.stubGlobal('fetch', fetchMock);
     const user = userEvent.setup();
 
@@ -1618,6 +1623,7 @@ describe('C2Hunter UI', () => {
     vi.setSystemTime(now);
     try {
       renderAt('/allowlist');
+    fireEvent.click(screen.getByRole('button', { name: 'Create entry' }));
 
       const expected = new Date(now);
       expected.setSeconds(0, 0);
@@ -1635,6 +1641,7 @@ describe('C2Hunter UI', () => {
       return new Response(JSON.stringify(responses[path]), { status: responses[path] ? 200 : 404, headers: { 'content-type': 'application/json' } });
     });
     renderAt('/allowlist');
+    fireEvent.click(screen.getByRole('button', { name: 'Create entry' }));
     vi.stubGlobal('fetch', fetchMock);
 
     fireEvent.change(screen.getByLabelText('Value'), { target: { value: '203.0.113.17' } });

@@ -1,0 +1,29 @@
+.policy-pagination { display:flex; align-items:center; flex-wrap:wrap; gap:.75rem; margin:1rem 0; }
+.policy-records { min-width:0; max-width:100%; }
+.policy-records table { table-layout:fixed; width:100%; min-width:0; }
+.policy-records th, .policy-records td { white-space:normal; overflow-wrap:anywhere; vertical-align:top; }
+.policy-records code, .policy-records .hash-value { display:block; white-space:normal; overflow-wrap:anywhere; word-break:break-word; max-width:100%; }
+.policy-records .row-actions { display:flex; flex-wrap:wrap; gap:.4rem; }
+.policy-records .row-actions button { max-width:100%; }
+.entries.policy-records > li { display:grid; grid-template-columns:minmax(0,1fr); gap:.4rem; overflow-wrap:anywhere; }
+.entries.policy-records > li > button { justify-self:start; max-width:100%; }
+.policy-settings { min-width:0; overflow-wrap:anywhere; }
+.policy-settings dl { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,15rem),1fr)); gap:1rem; }
+.policy-settings dl > div { min-width:0; }
+.policy-settings dt { color:var(--muted); }
+.policy-settings dd { margin:.3rem 0 0; white-space:normal; overflow-wrap:anywhere; }
+.policy-delete-dialog { width:min(36rem,calc(100vw - 2rem)); max-height:calc(100dvh - 2rem); overflow:auto; color:inherit; }
+.policy-delete-dialog::backdrop { background:#000a; }
+.policy-delete-dialog code, .policy-delete-receipts code { display:block; white-space:normal; overflow-wrap:anywhere; }
+.policy-delete-dialog > button { margin:.35rem .35rem .35rem 0; }
+.policy-delete-receipts { min-width:0; overflow-wrap:anywhere; }
+.policy-delete-receipts article { padding:.7rem 0; border-top:1px solid var(--border); }
+.policy-delete-receipts article > button { margin:.25rem .4rem .25rem 0; max-width:100%; }
+.policy-delete-notice { overflow-wrap:anywhere; }
+@media(max-width:800px) {
+  .policy-records table, .policy-records tbody { display:block; }
+  .policy-records thead { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+  .policy-records tr { display:grid; grid-template-columns:minmax(0,1fr); border-bottom:2px solid var(--border); }
+  .policy-records td { display:block; border:0; padding:.6rem; }
+  .policy-records td::before { content:attr(data-label); display:block; color:var(--muted); font-size:.8rem; margin-bottom:.25rem; }
+}

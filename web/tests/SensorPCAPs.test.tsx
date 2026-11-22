@@ -63,7 +63,7 @@ it('shows and downloads only PCAP archives linked to the current analysis', asyn
     if (path === '/api/v1/analysis-jobs/job-a/candidates?page=1&page_size=25&minimum_score=0&sort=-score') return json({ items: [], page: 1, page_size: 25, total: 0 });
     if (path.startsWith('/api/v1/analysis-jobs/job-a/flows?')) return json({ items: [], page: 1, page_size: 50, total: 0 });
     if (path === '/api/v1/detector-weight-presets') return json({ items: [] });
-    if (path === '/api/v1/sensor-pcaps?analysis_job_id=job-a&page_size=200') return json({
+    if (path === '/api/v1/sensor-pcaps?analysis_job_id=job-a&page=1&page_size=50') return json({
       items: [
         { id: 'segment-a', sensor_id: 'sensor-a', sensor_name: 'Edge sensor', analysis_job_id: 'job-a', filename: 'job-a--eth0-000001.pcap', size_bytes: 24, uploaded_at: '2026-08-01T01:02:03Z' },
       ],
@@ -89,7 +89,7 @@ it('shows and downloads only PCAP archives linked to the current analysis', asyn
   expect(await screen.findByText('job-a--eth0-000001.pcap')).toBeInTheDocument();
   expect(screen.queryByText('job-b--eth1-000001.pcap')).not.toBeInTheDocument();
   expect(fetchMock).toHaveBeenCalledWith(
-    '/api/v1/sensor-pcaps?analysis_job_id=job-a&page_size=200',
+    '/api/v1/sensor-pcaps?analysis_job_id=job-a&page=1&page_size=50',
     expect.any(Object),
   );
   await userEvent.click(screen.getByRole('button', { name: 'Download job-a--eth0-000001.pcap' }));
