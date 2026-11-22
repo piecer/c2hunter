@@ -53,30 +53,32 @@ for (const width of [1280, 390]) {
     await page.goto('/analyses/job');
     // The retained run owner and editable form are sibling regions in this entry.
     const investigation = page.locator('#ip-investigation-entry');
-    const panel = investigation.getByRole('region', { name: 'IP 조사 / IP investigation', exact: true });
-    const selectedRun = investigation.getByRole('region', { name: '선택 조사 / Selected investigation', exact: true });
+    const panel = investigation.getByRole('region', { name: 'IP 조사', exact: true });
+    const selectedRun = investigation.getByRole('region', { name: '선택 조사', exact: true });
     await page.getByRole('button', { name: `Investigate candidate ${longIP}`, exact: true }).click();
-    await expect(panel.getByLabel('대상 IP / Target IP')).toHaveValue(longIP);
-    await expect(panel.getByLabel('대상 IP / Target IP')).toBeFocused();
+    await panel.getByRole('button', { name: '새 조사 요청', exact: true }).click();
+    await expect(panel.getByLabel('대상 IP')).toHaveValue(longIP);
+    await expect(panel.getByLabel('대상 IP')).toBeFocused();
     await page.getByRole('button', { name: '작업 정보', exact: true }).click();
     await page.getByRole('button', { name: 'Investigate source 10.0.0.12', exact: true }).click();
-    await expect(panel.getByLabel('대상 IP / Target IP')).toHaveValue('10.0.0.12');
+    await expect(panel.getByLabel('대상 IP')).toHaveValue('10.0.0.12');
     await page.getByRole('button', { name: '작업 정보', exact: true }).click();
     await page.getByRole('button', { name: `Investigate destination ${longIP}`, exact: true }).click();
-    await expect(panel.getByLabel('대상 IP / Target IP')).toHaveValue(longIP);
-    await panel.getByText('범위 제한 / Scope filters', { exact: true }).click();
-    await panel.getByLabel('엔드포인트 / Endpoint').selectOption('either');
-    await panel.getByLabel('대상 IP / Target IP').fill('2001:db8::1');
-    await panel.getByLabel('질문 / Question').fill('<img src=x onerror=alert(1)> ' + '분석 질문 '.repeat(200));
-    await panel.getByRole('button', { name: '범위 미리보기 / Preview scope', exact: true }).click();
-    await panel.getByRole('button', { name: '조사 시작 / Start investigation', exact: true }).click();
+    await expect(panel.getByLabel('대상 IP')).toHaveValue(longIP);
+    await panel.getByText('범위 제한', { exact: true }).click();
+    await panel.getByLabel('엔드포인트').selectOption('either');
+    await panel.getByLabel('대상 IP').fill('2001:db8::1');
+    await panel.getByLabel('질문').fill('<img src=x onerror=alert(1)> ' + '분석 질문 '.repeat(200));
+    await panel.getByRole('button', { name: '범위 미리보기', exact: true }).click();
+    await panel.getByRole('button', { name: '조사 시작', exact: true }).click();
     // No refresh, route change, selector action or priming GET before terminal.
     await expect(selectedRun.getByText('관측된 통신은 추가 검토가 필요합니다.', { exact: true })).toBeVisible({ timeout: 10000 });
     expect(admissions).toHaveLength(1);
     expect(JSON.parse(admissions[0]).allow_remote).toBe(false);
     await expect(investigation.locator('img')).toHaveCount(0);
     const evidence = fixture('evidence_protocol') as { evidence_id: string };
-    await selectedRun.getByRole('button', { name: `근거 보기 / Evidence ${evidence.evidence_id}`, exact: true }).click();
+    await selectedRun.getByRole('button', { name: '발급된 근거', exact: true }).click();
+    await selectedRun.getByRole('button', { name: `근거 보기 ${evidence.evidence_id}`, exact: true }).click();
     await expect(selectedRun.getByText('updates.example.test', { exact: true })).toBeVisible();
     const geometry = await investigation.evaluate(element => ({
       panelClient: element.clientWidth, panelScroll: element.scrollWidth,
@@ -93,6 +95,7 @@ for (const width of [1280, 390]) {
       tag: element.tagName, class: element.className, box: element.getBoundingClientRect().toJSON(), client: element.clientWidth, scroll: element.scrollWidth,
       minWidth: getComputedStyle(element).minWidth, overflowX: getComputedStyle(element).overflowX, grid: getComputedStyle(element).gridTemplateColumns,
     })))), contentType: 'application/json' });
+    await page.getByRole('button', { name: '근거 닫기', exact: true }).click();
     await page.getByRole('button', { name: '결과·근거', exact: true }).click();
     const candidates = page.getByRole('table', { name: 'Analysis candidates', exact: true });
     await expect(candidates.getByRole('link', { name: longIP, exact: true })).toHaveText(longIP);

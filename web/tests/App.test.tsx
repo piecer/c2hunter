@@ -260,7 +260,7 @@ describe('C2Hunter UI', () => {
     expect(posts[0].discovery_mode ?? 'legacy').toBe('legacy');
     await user.click(checkbox);
     await user.selectOptions(within(panel).getByLabelText('Candidate limit'), '2');
-    await user.selectOptions(screen.getByLabelText('보고서 언어 / Report language'), 'en');
+    await user.selectOptions(screen.getByLabelText(/^(보고서 언어|Report language)$/), 'en');
     await user.click(within(panel).getByRole('button', { name: 'Run AI analysis' }));
     await waitFor(() => expect(posts).toHaveLength(2));
     expect(posts[1]).toMatchObject({ candidate_limit: 2, discovery_mode: 'shadow', language: 'en', allow_remote: false });
@@ -321,7 +321,7 @@ describe('C2Hunter UI', () => {
     expect(requested.filter(path => path.includes('/selection?'))).toEqual(['/api/v1/ai-runs/shadow-1/selection?offset=0&limit=20', '/api/v1/ai-runs/shadow-1/selection?offset=7&limit=20']);
     await user.click(within(coverage).getByRole('button', { name: '이전 선택 목록' }));
     expect(await within(table).findByText('198.51.100.1')).toBeInTheDocument();
-    await user.selectOptions(screen.getByLabelText('보고서 언어 / Report language'), 'en');
+    await user.selectOptions(screen.getByLabelText(/^(보고서 언어|Report language)$/), 'en');
     expect(screen.getByText('Candidate pool 31 · Selected 2 · Omitted 29')).toBeInTheDocument();
     expect(screen.getByText(/Omitted does not mean benign/)).toBeInTheDocument();
   });
@@ -359,7 +359,7 @@ describe('C2Hunter UI', () => {
     expect(within(panel).getByText(/distinct_hosts/)).toBeInTheDocument();
     await user.click(within(panel).getByRole('button', { name: '저장된 증거 보기' }));
     expect(within(panel).queryByText('Observed on common service')).not.toBeInTheDocument();
-    await user.selectOptions(screen.getByLabelText('보고서 언어 / Report language'), 'en');
+    await user.selectOptions(screen.getByLabelText(/^(보고서 언어|Report language)$/), 'en');
     expect(within(panel).getByText('Review periodic traffic evidence.')).toBeInTheDocument();
     expect(within(panel).queryByText('주기 통신 근거를 검토해야 합니다.')).not.toBeInTheDocument();
     expect(within(panel).getByText(/not a calibrated probability of maliciousness/)).toBeInTheDocument();

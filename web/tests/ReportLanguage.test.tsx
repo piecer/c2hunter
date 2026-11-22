@@ -12,7 +12,7 @@ it('defaults the report to Korean and switches immediately using one accessible 
   render(<NetworkAnomalyPanel report={{ version: 'network-anomaly-v1', summary: {}, flows: [], warnings: [], limitations: [] }}/>);
   expect(screen.getByRole('heading', { name: '이전 형식 보고서' })).toBeVisible();
   expect(screen.getAllByRole('combobox')).toHaveLength(1);
-  fireEvent.change(screen.getByRole('combobox', { name: '보고서 언어 / Report language' }), { target: { value: 'en' } });
+  fireEvent.change(screen.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ }), { target: { value: 'en' } });
   expect(screen.getByRole('heading', { name: 'Legacy report' })).toBeVisible();
   expect(localStorage.getItem('c2hunter-report-language')).toBe('en');
 });
@@ -35,7 +35,7 @@ it('explains the real legacy per-flow correlation limit in both languages', () =
   render(<NetworkAnomalyPanel report={report}/>);
   fireEvent.click(screen.getByRole('button'));
   expect(screen.getByText('흐름별 연관 분석 상태 추적 한도에 도달하여 해당 흐름의 추가 전송 패턴을 평가하지 못했습니다. (FLOW_STATE_LIMIT_REACHED)')).toBeVisible();
-  fireEvent.change(screen.getByRole('combobox', { name: '보고서 언어 / Report language' }), { target: { value: 'en' } });
+  fireEvent.change(screen.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ }), { target: { value: 'en' } });
   expect(screen.getByText('The per-flow correlation state tracking limit was reached; additional transport patterns in this flow were not evaluated. (FLOW_STATE_LIMIT_REACHED)')).toBeVisible();
 });
 it('localizes the real legacy producer with one selector and unchanged metrics', () => {
@@ -47,7 +47,7 @@ it('localizes the real legacy producer with one selector and unchanged metrics',
   for (const text of legacyFixture.limitations) expect(container.textContent).not.toContain(text);
   expect(container.textContent).not.toContain('원문:');
   expect(screen.getAllByRole('combobox')).toHaveLength(1);
-  fireEvent.change(screen.getByRole('combobox', { name: '보고서 언어 / Report language' }), { target: { value: 'en' } });
+  fireEvent.change(screen.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ }), { target: { value: 'en' } });
   for (const text of legacyFixture.limitations) expect(container.textContent).toContain(text);
   expect(JSON.stringify(legacyFixture)).toBe(original);
 });
@@ -61,15 +61,15 @@ it.each(Object.entries(fixtures))('localizes real producer %s without changing o
   const coverage = [report.summary.narrative, ...report.limitations];
   for (const text of coverage) expect(container.textContent).not.toContain(text);
   expect(container.textContent).not.toContain('원문');
-  fireEvent.change(screen.getByRole('combobox', { name: '보고서 언어 / Report language' }), { target: { value: 'en' } });
+  fireEvent.change(screen.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ }), { target: { value: 'en' } });
   for (const text of coverage) expect(container.textContent).toContain(text);
   for (const [index, issue] of (report.issues ?? []).entries()) {
-    fireEvent.change(screen.getByRole('combobox', { name: '보고서 언어 / Report language' }), { target: { value: 'ko' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ }), { target: { value: 'ko' } });
     openEvidence(index);
     const prose = [...issue.evidence, ...issue.uncertainty, ...issue.next_checks];
     for (const text of prose) expect(container.textContent).not.toContain(text);
     expect(container.textContent).not.toContain('원문');
-    fireEvent.change(screen.getByRole('combobox', { name: '보고서 언어 / Report language' }), { target: { value: 'en' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ }), { target: { value: 'en' } });
     for (const text of prose) expect(container.textContent).toContain(text);
   }
   expect(screen.getByText('OVERALL NETWORK REPORT')).toBeVisible();
@@ -78,14 +78,14 @@ it.each(Object.entries(fixtures))('localizes real producer %s without changing o
 it.each(['en', 'ko', 'invalid', 'EN', ''])('validates stored preference %s', value => {
   localStorage.setItem('c2hunter-report-language', value);
   render(<NetworkAnomalyPanel/>);
-  expect(screen.getByRole('combobox', { name: '보고서 언어 / Report language' })).toHaveValue(value === 'en' ? 'en' : 'ko');
+  expect(screen.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ })).toHaveValue(value === 'en' ? 'en' : 'ko');
 });
 it('works when storage reads and writes throw', () => {
   vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
   vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('blocked'); });
   render(<NetworkAnomalyPanel/>);
-  expect(screen.getByRole('combobox', { name: '보고서 언어 / Report language' })).toHaveValue('ko');
-  fireEvent.change(screen.getByRole('combobox', { name: '보고서 언어 / Report language' }), { target: { value: 'en' } });
+  expect(screen.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ })).toHaveValue('ko');
+  fireEvent.change(screen.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ }), { target: { value: 'en' } });
   expect(screen.getByRole('heading', { name: 'Overall network report' })).toBeVisible();
 });
 it('retains expansion, literal evidence and saved preference through both language changes and remount', () => {
@@ -97,13 +97,13 @@ it('retains expansion, literal evidence and saved preference through both langua
   const rawEndpoint = report.issues![0].examples[0].endpoint_a.ip;
   expect(region).toHaveTextContent(rawEndpoint);
   expect(region).toHaveTextContent('TCP 확인 번호: 101');
-  fireEvent.change(screen.getByRole('combobox', { name: '보고서 언어 / Report language' }), { target: { value: 'en' } });
+  fireEvent.change(screen.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ }), { target: { value: 'en' } });
   expect(screen.getByRole('region', { name: 'Representative flow evidence' })).toBe(region);
   expect(region).toHaveTextContent('tcp_acknowledgment: 101');
   unmount();
   render(<NetworkAnomalyPanel report={report}/>);
-  expect(screen.getByRole('combobox', { name: '보고서 언어 / Report language' })).toHaveValue('en');
-  fireEvent.change(screen.getByRole('combobox', { name: '보고서 언어 / Report language' }), { target: { value: 'ko' } });
+  expect(screen.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ })).toHaveValue('en');
+  fireEvent.change(screen.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ }), { target: { value: 'ko' } });
   expect(localStorage.getItem('c2hunter-report-language')).toBe('ko');
   expect(screen.getByRole('heading', { name: '이상 징후 관찰됨' })).toBeVisible();
 });
@@ -112,7 +112,7 @@ it.each(Object.entries(warnings))('localizes coverage warning %s while retaining
   render(<NetworkAnomalyPanel report={report}/>);
   openCoverage();
   expect(screen.getByText(`${ko} (${code})`)).toBeVisible();
-  fireEvent.change(screen.getByRole('combobox', { name: '보고서 언어 / Report language' }), { target: { value: 'en' } });
+  fireEvent.change(screen.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ }), { target: { value: 'en' } });
   expect(screen.getByText(`${en} (${code})`)).toBeVisible();
 });
 it('fails closed for unknown codes without hiding their original spelling', () => {

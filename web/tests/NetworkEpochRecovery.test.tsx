@@ -74,7 +74,7 @@ it('shows recovered SYN evidence with sticky cap and actual parser omission in t
   expect(report.issues[0].event_count).toBe(1);
   expect(report.issues[0].examples[0].measurements.reasons).toContain('CORRELATION_LIMIT_REACHED');
   expect(fetcher).toHaveBeenCalled();
-  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'ko' } });
+  fireEvent.change(screen.getByLabelText(/^(보고서 언어|Report language)$/), { target: { value: 'ko' } });
   expect(screen.getByRole('heading', { name: '이상 징후 관찰됨' })).toBeVisible();
 });
 

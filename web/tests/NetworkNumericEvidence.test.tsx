@@ -69,7 +69,20 @@ it.each([false, true])('actual App numeric facts and maximum=%s preserve full sc
   if (!maximum) expect(screen.getByText('AI says 1100 ms')).toBeVisible();
   if (maximum) {
     fireEvent.click(screen.getByRole('button', { name: 'View full AI text' }));
-    expect(within(screen.getByRole('article', { name: 'Full AI interpretation' })).getAllByText('😀'.repeat(1200)).length).toBe(53);
+    const fullText = screen.getByRole('article', { name: 'Full AI interpretation' });
+    let retained = 1; // The full summary appears on every page; count it once.
+    for (const section of ['Possible causes (AI hypotheses)', 'Prioritized next checks', 'Possible correlations', 'Limitations']) {
+      fireEvent.click(within(fullText).getByRole('button', { name: section }));
+      for (;;) {
+        expect(fullText).toBeInTheDocument();
+        retained += within(screen.getByRole('article', { name: 'Full AI interpretation' })).getAllByText('😀'.repeat(1200)).length - 1;
+        expect(document.querySelectorAll('*').length).toBeLessThanOrEqual(2500);
+        const next = within(fullText).getByRole('button', { name: 'Next AI claims' });
+        if (next.hasAttribute('disabled')) break;
+        fireEvent.click(next);
+      }
+    }
+    expect(retained).toBe(53);
     expect(document.querySelectorAll('*').length).toBeLessThanOrEqual(2500);
   }
   expect(screen.getByText('AI prose — numerical claims are unverified.')).toBeVisible();

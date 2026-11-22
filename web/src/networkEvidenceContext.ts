@@ -12,6 +12,7 @@ export type EvidenceContext = {
   generation: object;
   current: () => boolean;
   selection?: EvidenceSelection;
+  returnFromCitation?: () => void;
   navigate: (index: number, detail?: Omit<EvidenceSelection, 'index'>) => void;
 };
 export const NetworkEvidenceContext = createContext<EvidenceContext | undefined>(undefined);

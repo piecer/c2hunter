@@ -10,6 +10,7 @@ import { captureAuthentication, setAuthentication } from './authentication';
 import { AIInvestigationEntry, type InvestigationSelection } from './AIInvestigationPanel';
 import { JobInvestigationEntry } from './JobInvestigationPanel';
 import NetworkAIInterpretation from './NetworkAIInterpretation';
+import AppJobDetailOwner from './AppJobDetailOwner';
 import NetworkSourceCapability from './NetworkSourceCapability';
 import NetworkAnomalyPanel, { type NetworkAnomalyReport } from './NetworkAnomalyPanel';
 import DDoSAttackPanel, { type DDoSAttackReport } from './DDoSAttackPanel';
@@ -960,13 +961,12 @@ function JobDetailOwner({ id }: { id: string }) {
     enabled: aiOpened && q.data !== undefined && (q.data.analysis?.module ?? 'c2') === 'c2',
   });
   const cancel = useMutation({ mutationFn: () => api.post(`/analysis-jobs/${encodeURIComponent(id)}/cancel`, { reason: 'operator requested from web console' }), onSuccess: () => { setNotice('Cancellation requested'); q.refetch(); } });
-  return <>
+  return <AppJobDetailOwner jobId={id} sourceError={q.isError}>
     <AsyncState query={q}>{j => {
     const terminal = terminalStatuses.has(j.status);
     const source = j.source;
     const module = j.analysis?.module ?? 'c2';
     const showGuidance = (module === 'ddos_attack' && j.source_type === 'PCAP_UPLOAD') || Object.hasOwn(j, 'pcap_attack_guidance');
-    const investigationEntry = <AIInvestigationEntry key={`investigation-entry-${j.id}`} jobId={j.id} selection={investigation?.jobId === j.id ? investigation : undefined}/>;
     // Exact apply_job_packet_limit producer contract, including saved reports
     // that predate coverage propagation. Never classify unknown prose as benign.
     const networkCaptureWarnings = module === 'network_anomaly' ? strings(j.warnings).flatMap(warning => {
@@ -976,7 +976,6 @@ function JobDetailOwner({ id }: { id: string }) {
     return <>
       <header className={`header-actions ${module === 'c2' ? 'c2-result-header' : module === 'network_anomaly' ? 'network-job-header' : module === 'ddos_attack' ? 'ddos-result-header' : ''}`}><div><p className="eyebrow">{module === 'c2' ? t('C2 ANALYSIS', 'C2 분석') : 'ANALYSIS DETAIL'}</p><h1>{module === 'ddos_attack' && j.name?.length > 80 ? t('DDoS analysis', 'DDoS 분석') : j.name}</h1><span className={`badge ${j.status.toLowerCase()}`}>{j.status}</span>{module !== 'c2' && module !== 'network_anomaly' && module !== 'ddos_attack' && <p className="record-id">Job {j.id}{j.dataset_id ? ` · Dataset ${j.dataset_id}` : ''}</p>}</div><div className="c2-header-actions"><Link to="/analyses">{module === 'c2' ? t('Back to analysis history', '분석 이력으로') : 'Back to analysis history'}</Link>{module === 'c2' && <ReportLanguageSelector/>}</div></header>
       {module !== 'c2' && module !== 'network_anomaly' && module !== 'ddos_attack' && (j.source_type === 'PCAP_UPLOAD' || j.processing) && <PcapAnalysisLifecycle job={j}/>}
-      {module !== 'network_anomaly' && module !== 'c2' && module !== 'ddos_attack' && investigationEntry}
       {j.description && module !== 'c2' && module !== 'network_anomaly' && module !== 'ddos_attack' && <section className="panel"><h2>Analyst note</h2><p>{j.description}</p></section>}
       {(module !== 'c2' && (!terminal || ('error_code' in j && j.error_code === 'LIVE_CAPTURE_RESTART_INCOMPLETE') || (module !== 'network_anomaly' && strings(j.warnings).length > 0) || cancel.error || notice)) && <section className={module === 'ddos_attack' ? 'panel ddos-job-warnings' : 'panel'}>
         {(!terminal && typeof j.progress_percent === 'number') && <label>Progress <progress value={terminal ? 100 : j.progress_percent ?? 0} max="100">{terminal ? 100 : j.progress_percent}%</progress></label>}
@@ -987,7 +986,7 @@ function JobDetailOwner({ id }: { id: string }) {
         {cancel.error && <p role="alert" className="error-text">{cancel.error.message}</p>}{notice && <p role="status">{notice}</p>}
       </section>}
       {networkCaptureWarnings.map(({ warning, retained, excluded }) => <p className="warning" key={warning}>{t(`Capture limit: ${retained} packets retained · ${excluded} excluded. Excluded traffic was not analyzed.`, `캡처 제한: 패킷 ${retained}개 보존 · ${excluded}개 제외. 제외된 트래픽은 분석되지 않았습니다.`)}</p>)}
-      {module === 'network_anomaly' ? <NetworkAnomalyPanel inheritLanguage key={j.id} report={j.network_anomaly} job={j}><NetworkAIInterpretation key={j.id} jobId={j.id} completed={j.status === 'COMPLETED' && Boolean(j.network_anomaly)}/></NetworkAnomalyPanel> : module === 'ddos_attack' && j.ddos_attack ? <DDoSAttackPanel key={`${j.id}:${j.ddos_attack.primary_finding_id ?? 'none'}:${String(j.ddos_attack.summary?.finding_count ?? 'unknown')}`} report={j.ddos_attack} job={{ id: j.id, dataset_id: j.dataset_id, source_type: j.source_type, source: j.source, internal_networks: j.internal_networks }} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}>{showGuidance && <PcapAttackGuidance job={j} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}/>}<PcapGuidanceAIScope/><DDoSAIInterpretation jobId={j.id} completed={j.status === 'COMPLETED'}/></DDoSAttackPanel> : module === 'ddos_attack' ? <DDoSReportPending job={j}/> : module === 'c2' ? null : <p role="alert">Unsupported analysis module.</p>}
+      {module === 'network_anomaly' ? <NetworkAnomalyPanel inheritLanguage key={j.id} report={j.network_anomaly} job={j}><NetworkAIInterpretation key={j.id} jobId={j.id} completed={j.status === 'COMPLETED' && Boolean(j.network_anomaly)}/></NetworkAnomalyPanel> : module === 'ddos_attack' && j.ddos_attack ? <DDoSAttackPanel inheritLanguage savedResult={<DDoSAIInterpretation key={j.id} jobId={j.id} completed={false}/>} key={`${j.id}:${j.ddos_attack.primary_finding_id ?? 'none'}:${String(j.ddos_attack.summary?.finding_count ?? 'unknown')}`} report={j.ddos_attack} job={{ id: j.id, dataset_id: j.dataset_id, source_type: j.source_type, source: j.source, internal_networks: j.internal_networks }} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}>{showGuidance && <PcapAttackGuidance job={j} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}/>}<PcapGuidanceAIScope/><DDoSAIInterpretation jobId={j.id} completed={j.status === 'COMPLETED'}/></DDoSAttackPanel> : module === 'ddos_attack' ? <><ReportLanguageSelector/><DDoSReportPending job={j}/><DDoSAIInterpretation key={j.id} jobId={j.id} completed={false}/></> : module === 'c2' ? null : <p role="alert">Unsupported analysis module.</p>}
       {module === 'network_anomaly' && terminal && strings(j.warnings).length > 0 && <section className="panel" aria-label={t('Original job warnings', '원본 작업 경고')}><h2>{t('Original job warnings', '원본 작업 경고')}</h2>{strings(j.warnings).map(warning => <p className="warning" key={warning}>{warning}</p>)}</section>}
       {module === 'c2' && <section aria-label={t('C2 result summary', 'C2 결과 요약')} className="panel c2-result-summary" lang={language}>
         <h2>{j.status === 'FAILED' ? t('Analysis failed · No final conclusion', '분석 실패 · 최종 결론 없음') : j.status === 'CANCELLED' ? t('Analysis cancelled · No final conclusion', '분석 취소 · 최종 결론 없음') : j.status === 'PARTIALLY_COMPLETED' ? t('Partially completed · Limited coverage', '부분 완료 · 관측 범위 제한') : !terminal ? t('Analysis in progress · Awaiting a final conclusion', '분석 진행 중 · 최종 결론 대기') : candidates.isError ? t('Candidate read failed · Coverage unconfirmed', '후보 조회 실패 · 범위 확인 불가') : candidates.data?.total === 0 ? t('0 retained candidates · Not a safety verdict', '보존된 탐지 후보 0건 · 안전 판정 아님') : candidates.data?.total !== undefined ? t(`${candidates.data.total} detected candidates · Review required`, `탐지 후보 ${candidates.data.total}건 · 검토 필요`) : t('Candidate count unconfirmed', '탐지 후보 수 확인 중')}</h2>
@@ -1020,11 +1019,7 @@ function JobDetailOwner({ id }: { id: string }) {
         </tr>)}</tbody></table></div>}</AsyncState>}{candidates.data?.total !== undefined && <CandidatePagination data={candidates.data} page={candidatePage} onPage={setCandidatePage} language={language}/>}</div>{preview.opened && <ResultDetailPanel headingLabel={t('Selected candidate detail', '선택한 후보 상세')} closeLabel={t('Close candidate detail', '후보 상세 닫기')} focusOnSelection={!preview.restoring} selection={preview.selected} onClose={preview.close} returnFocus={preview.returnFocus}>{preview.selected && <CandidateQueuePreview key={preview.selected} id={preview.selected} jobId={id} language={language} onOpenFull={preview.depart}/>}</ResultDetailPanel>}</div></section>}
       {module === 'c2' && aiOpened && <section aria-label="AI 조사">
         <AIAnalysisPanel visible={view === 'ai'} job={j} knownCandidateIds={knownCandidates.isError ? [] : items(knownCandidates.data).map(candidate => candidate.id)}/>
-        <AIInvestigationEntry key={`investigation-entry-${j.id}`} jobId={j.id} selection={investigation?.jobId === j.id ? investigation : undefined} visible={view === 'ai'}/>
       </section>}
-      {/* Keep the network verdict and next action ahead of optional IP investigation. */}
-      {module === 'network_anomaly' && investigationEntry}
-      {module === 'ddos_attack' && investigationEntry}
       {showGuidance && !(module === 'ddos_attack' && j.ddos_attack) && <ReportLanguageScope key={`pcap-guide-${j.id}`}><PcapAttackGuidance job={j} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}/></ReportLanguageScope>}
       {module !== 'c2' && <button type="button" className="secondary" aria-expanded={detailsOwner === j.id} onClick={() => setDetailsOwner(detailsOwner === j.id ? undefined : j.id)}>{module === 'network_anomaly' ? t('Work information', '작업 정보') : '작업 상세 / Job details'}</button>}
       {((module === 'c2' && view === 'work') || detailsOwner === j.id) && <>
@@ -1044,8 +1039,10 @@ function JobDetailOwner({ id }: { id: string }) {
       {((module === 'c2' && view === 'work') || detailsOwner === j.id) && <><section className="panel compact"><h2>State transitions</h2>{j.transitions?.length ? <ol className="timeline">{j.transitions.map((transition, index) => <li key={`${transition.to_status}-${transition.occurred_at}-${index}`}><strong>{transition.to_status}</strong><span>{fmt(transition.occurred_at)}</span><p>{transition.reason ?? 'No transition reason recorded'}{transition.from_status ? ` · from ${transition.from_status}` : ''}</p></li>)}</ol> : <p className="muted">No state transition history was recorded.</p>}</section></>}
     </>;
   }}</AsyncState>
+    {/* Admission/history belong to the route, not the mutable source query. */}
+    <AIInvestigationEntry key={`investigation-entry-${id}`} jobId={id} sourceAvailable={!q.isError && Boolean(q.data)} selection={investigation?.jobId === id ? investigation : undefined} visible={view === 'ai' || q.isError || (q.data?.analysis?.module ?? 'c2') !== 'c2'}/>
     {(!q.data || (q.data.analysis?.module ?? 'c2') === 'c2') && <JobInvestigationEntry key={`job-investigation-entry-${id}`} jobId={id} sourceAvailable={!q.isError && Boolean(q.data)} visible={view === 'ai' || q.isError}/>}
-  </>;
+  </AppJobDetailOwner>;
 }
 
 const workflowPresentation = {

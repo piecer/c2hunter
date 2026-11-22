@@ -41,7 +41,7 @@ it.each(['job', 'legacy', 'missing'] as const)('localizes known source meaning w
   const job = era === 'missing' ? { ...witness.job, network_anomaly: undefined } : witness[era];
   mount(job);
   await screen.findByRole('region', { name: 'Original job warnings' });
-  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'ko' } });
+  fireEvent.change(screen.getByLabelText(/^(보고서 언어|Report language)$/), { target: { value: 'ko' } });
   expect(screen.getByText('캡처 제한: 패킷 3개 보존 · 2개 제외. 제외된 트래픽은 분석되지 않았습니다.')).toBeVisible();
   expect(within(screen.getByRole('region', { name: '원본 작업 경고' })).getByText(witness.warning, { exact: true })).toBeVisible();
   fireEvent.click(screen.getByRole('button', { name: '작업 정보' }));

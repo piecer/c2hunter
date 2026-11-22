@@ -46,7 +46,7 @@ it.each(['en', 'ko'])('distinguishes same-capture low-bucket statistics from ope
 
 it('scopes the three axes to the selected target and leads with patterns and next check', () => {
   render(<DDoSAttackPanel report={report}/>);
-  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'en' } });
+  fireEvent.change(screen.getByLabelText(/^(보고서 언어|Report language)$/), { target: { value: 'en' } });
   const glance = screen.getByRole('region', { name: 'DDoS at a glance' });
   expect(within(glance).getByText(/Selected target assessment — not a report-wide classification/)).toBeVisible();
   expect(within(glance).getByRole('heading', { name: 'Key observed patterns' })).toBeVisible();
@@ -56,7 +56,7 @@ it('scopes the three axes to the selected target and leads with patterns and nex
 });
 it('mounts only the selected candidate, includes complete denominators and removes it on owner replacement', () => {
   const { rerender } = render(<DDoSAttackPanel report={report}/>);
-  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'en' } });
+  fireEvent.change(screen.getByLabelText(/^(보고서 언어|Report language)$/), { target: { value: 'en' } });
   fireEvent.click(screen.getByRole('button', { name: /Show detailed evidence/ }));
   expect(screen.queryByText('Evaluated conditions (AND):')).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: /Inspect candidate/ }));
@@ -78,7 +78,7 @@ it('revokes successful downloads and denies captured export callbacks after a ca
   let captured: Parameters<typeof actual> | undefined;
   vi.spyOn(exports, 'downloadDDoSExport').mockImplementation((...args) => { captured = args; return actual(...args); });
   const { rerender } = render(<DDoSAttackPanel report={report} job={job}/>);
-  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'en' } });
+  fireEvent.change(screen.getByLabelText(/^(보고서 언어|Report language)$/), { target: { value: 'en' } });
   fireEvent.click(screen.getByRole('button', { name: /Show detailed evidence/ }));
   fireEvent.click(screen.getByRole('button', { name: /Inspect candidate/ }));
   fireEvent.click(screen.getByRole('button', { name: 'Download reviewed candidate JSON' }));

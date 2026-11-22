@@ -1,4 +1,5 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { render } from './investigationDisplayRender';
+import { fireEvent, screen } from '@testing-library/react';
 import { expect, it } from 'vitest';
 import { InvestigationEvidence } from '../src/InvestigationResult';
 import { parseInvestigation } from '../src/investigationContract';
@@ -12,7 +13,7 @@ it.each(['peer_overview', 'peer_flow_samples', 'peer_timeline', 'peer_protocol_o
     for (const metric of evidence.metrics) if (screen.queryByText(metric.ref, { exact: true })) reached.add(metric.ref);
     expect(view.container.querySelectorAll('.investigation-fact').length).toBeLessThanOrEqual(4);
     expect(view.container.querySelectorAll('*').length).toBeLessThan(900);
-    const next = screen.queryByRole('button', { name: '다음 / Next facts' });
+    const next = screen.queryByRole('button', { name: 'Next facts' });
     if (!next || next.hasAttribute('disabled')) break;
     fireEvent.click(next);
   }

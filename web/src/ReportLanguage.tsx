@@ -8,7 +8,7 @@ function initialLanguage(): ReportLanguage {
 export function ReportLanguageSelector() {
   const language = useContext(Context);
   const setLanguage = useContext(ReportLanguageChangeContext);
-  return <label>보고서 언어 / Report language <select value={language} onChange={event => {
+  return <label>{language === 'ko' ? '보고서 언어' : 'Report language'} <select value={language} onChange={event => {
     const next = event.target.value;
     if (next !== 'ko' && next !== 'en') return;
     setLanguage(next);

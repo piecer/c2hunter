@@ -73,7 +73,7 @@ for (const width of [1280, 390]) {
     await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
     await page.goto('/analyses/job-1');
     await page.getByRole('button', { name: 'AI 조사', exact: true }).click();
-    await page.getByLabel('보고서 언어 / Report language').selectOption('en');
+    await page.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ }).selectOption('en');
     const coverage = page.getByRole('region', { name: 'Discovery coverage' });
     const toggle = coverage.getByRole('button', { name: 'View selection inventory' });
     await expect(toggle).toBeVisible();

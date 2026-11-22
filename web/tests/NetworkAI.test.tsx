@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process';
+import { resolve } from 'node:path';
 import { openAI } from './reportDisclosure';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
@@ -13,11 +15,13 @@ it('shares the report language with the adjacent AI interpretation controls', ()
   localStorage.setItem('c2hunter-report-language', 'ko');
   render(<NetworkAnomalyPanel><LanguageProbe/></NetworkAnomalyPanel>);
   expect(screen.getByText('AI context: ko')).toBeVisible();
-  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'en' } });
+  fireEvent.change(screen.getByLabelText(/^(보고서 언어|Report language)$/), { target: { value: 'en' } });
   expect(screen.getByText('AI context: en')).toBeVisible();
 });
 
-async function setup({ status = 'COMPLETED', remote = false, available = true, savedRun, runResponse, failPath, failMethod, reveal = true }: { status?: string; remote?: boolean; available?: boolean; savedRun?: Record<string, unknown>; runResponse?: () => Record<string, unknown>; failPath?: string; failMethod?: string; reveal?: boolean } = {}) {
+const supportedSource = JSON.parse(execFileSync(process.env.C2HUNTER_TEST_PYTHON ?? resolve('../.venv/bin/python'), ['tests/network_report_fixture.py', '--pagination'], { encoding: 'utf8' }))['20'];
+const unsupportedSource = { version: 'network-anomaly-v1', summary: {}, flows: [], warnings: [], limitations: [] };
+async function setup({ status = 'COMPLETED', remote = false, available = true, savedRun, runResponse, failPath, failMethod, reveal = true, source = supportedSource }: { source?: Record<string, unknown>; status?: string; remote?: boolean; available?: boolean; savedRun?: Record<string, unknown>; runResponse?: () => Record<string, unknown>; failPath?: string; failMethod?: string; reveal?: boolean } = {}) {
   localStorage.setItem('c2hunter-token', 'test-token');
   localStorage.setItem('c2hunter-report-language', 'ko');
   const posts: Array<{ url: string; body: Record<string, unknown> }> = [];
@@ -25,21 +29,27 @@ async function setup({ status = 'COMPLETED', remote = false, available = true, s
     const url = String(input);
     if (url.endsWith(failPath ?? '/never') && (!failMethod || failMethod === init?.method)) return Response.json({ error: { code: 'AI_UNAVAILABLE', message: 'Service unavailable' } }, { status: 503 });
     if (url.endsWith('/ai-runs/run-1') && init?.method !== 'POST') return Response.json(runResponse?.() ?? savedRun);
-    if (url.endsWith('/network/ai-runs') && init?.method !== 'POST') return Response.json({ items: savedRun ? [savedRun] : [] });
+    if (url.endsWith('/network/ai-runs') && init?.method !== 'POST') return Response.json({ items: savedRun ? [savedRun] : [], current_page: 1, page_size: 50, total: savedRun ? 1 : 0 });
     if (init?.method === 'POST') {
       posts.push({ url, body: JSON.parse(String(init.body)) });
       return Response.json({ id: 'run-1', status: 'QUEUED', analysis_kind: 'NETWORK_ANOMALY', language: 'en', created_at: '2026-09-11T00:00:00Z' });
     }
-    if (url.endsWith('/analysis-jobs/network')) return Response.json({ id: 'network', name: 'Network job', status, analysis: { module: 'network_anomaly' }, network_anomaly: { version: 'network-anomaly-v1', summary: {}, flows: [], warnings: [], limitations: [] } });
+    if (url.endsWith('/analysis-jobs/network')) return Response.json({ id: 'network', name: 'Network job', status, analysis: { module: 'network_anomaly' }, network_anomaly: source });
     if (url.endsWith('/ai-capabilities')) return Response.json({ network_interpretation: true, available, provider: 'ollama', model_name: 'configured-model', destination: 'http://model.internal:11434', remote, reason: available ? null : 'AI_MODEL_UNAVAILABLE' });
     return Response.json({ items: [] });
   });
   vi.stubGlobal('fetch', fetcher);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/analyses/network']}><App/></MemoryRouter></QueryClientProvider>);
-  if (reveal) await openAI();
+  if (reveal) { await openAI(); fireEvent.click(screen.getByRole('button', { name: '새 AI 해석' })); }
   return { posts, fetcher, client };
 }
+it('blocks creation for the retained unsupported legacy placeholder source', async () => {
+  const { client, posts } = await setup({ source: unsupportedSource });
+  await waitFor(() => expect(client.isFetching()).toBe(0));
+  expect(screen.getByRole('button', { name: 'AI 해석' })).toBeDisabled();
+  expect(posts).toEqual([]);
+});
 it.each(['ANALYZING', 'PARTIALLY_COMPLETED', 'FAILED'])('does not start inference for %s jobs', async status => {
   const { posts, client } = await setup({ status });
   await screen.findByRole('button', { name: 'AI 해석' });
@@ -71,7 +81,7 @@ it.each([
 ])('renders safe bilingual %s failure category without inference', async (type, ko, en) => {
   const { posts } = await setup({ savedRun: { ...queued, status: 'FAILED', error_code: 'MODEL_OUTPUT_INVALID', error_message: 'Model output failed validation.', failure_diagnostic: { ...failureDiagnostic, type } } });
   expect(await screen.findByText(ko)).toBeVisible();
-  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'en' } });
+  fireEvent.change(screen.getByLabelText(/^(보고서 언어|Report language)$/), { target: { value: 'en' } });
   expect(screen.getByText(en)).toBeVisible();
   expect(posts).toEqual([]);
 });
@@ -101,8 +111,10 @@ it('loads saved interpretation through run GET and changes labels without transl
   fireEvent.click(screen.getByRole('button', { name: 'AI 원문 전체 보기' }));
   expect(screen.getByText('Capture loss is possible.')).toBeVisible();
   expect(screen.getByText('Single vantage cannot confirm loss.')).toBeVisible();
-  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'en' } });
+  fireEvent.change(screen.getByLabelText(/^(보고서 언어|Report language)$/), { target: { value: 'en' } });
   expect(screen.getByRole('heading', { name: 'Possible causes (AI hypotheses)' })).toBeVisible();
+  const metadata = screen.getByText('Saved run metadata', { selector: 'summary' });
+  fireEvent.click(metadata); fireEvent(metadata.closest('details')!, new Event('toggle'));
   expect(screen.getByText(/not automatically translated/)).toBeVisible();
   expect(screen.getByText('Review capture visibility.')).toHaveAttribute('lang', 'en');
   expect(posts).toEqual([]);
@@ -130,6 +142,8 @@ it.each(['/ai-capabilities', '/network/ai-runs', '/ai-runs/run-1'])('shows truth
 it('keeps saved model provenance separate from the currently configured destination', async () => {
   await setup({ savedRun: { ...interpreted, provider: 'saved-provider', model_name: 'saved-model', completed_at: '2026-09-11T00:01:00Z' } });
   fireEvent.click(await screen.findByRole('button', { name: 'AI 원문 전체 보기' }));
+  const metadata = screen.getByText('저장 실행 메타데이터', { selector: 'summary' });
+  fireEvent.click(metadata); fireEvent(metadata.closest('details')!, new Event('toggle'));
   expect(await screen.findByText(/saved-provider · saved-model/)).toBeVisible();
   expect(screen.getByText(/2026-09-11T00:01:00Z/)).toBeVisible();
 });
@@ -137,6 +151,7 @@ it('bounds untrusted model prose and renders markup as plain text', async () => 
   const { posts } = await setup({ savedRun: { ...interpreted, network_interpretation: { ...interpreted.network_interpretation, summary: '<img src=x onerror=alert(1)>', limitations: Array.from({ length: 25 }, (_, i) => `limit-${i}:` + 'x'.repeat(3000)) } } });
   expect(await screen.findByText('<img src=x onerror=alert(1)>')).toBeVisible();
   fireEvent.click(await screen.findByRole('button', { name: 'AI 원문 전체 보기' }));
+  fireEvent.click(screen.getByRole('button', { name: '한계' }));
   expect(document.querySelector('.ai-assessment img')).toBeNull();
   expect(screen.queryByText(/^limit-20:/)).not.toBeInTheDocument();
   expect(screen.getByText(/^limit-0:/).textContent?.length).toBe(2001);
@@ -159,7 +174,7 @@ it.each(['ko', 'en'])('manually submits selected %s language via existing AI run
   const { posts } = await setup();
   await waitFor(() => expect(screen.getByRole('button', { name: 'AI 해석' })).toBeEnabled());
   expect(posts).toEqual([]);
-  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: language } });
+  fireEvent.change(screen.getByLabelText(/^(보고서 언어|Report language)$/), { target: { value: language } });
   expect(posts).toEqual([]);
   fireEvent.click(screen.getByRole('button', { name: language === 'ko' ? 'AI 해석' : 'AI interpretation' }));
   await waitFor(() => expect(posts).toHaveLength(1));

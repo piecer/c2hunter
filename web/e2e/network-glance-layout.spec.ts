@@ -30,7 +30,7 @@ for (const width of [1280, 390]) {
       await page.getByRole('button', { name: 'Development login' }).click();
       await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
       await page.goto('/analyses/glance-layout');
-      await page.getByLabel('보고서 언어 / Report language').selectOption(language);
+      await page.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ }).selectOption(language);
       const glance = page.getByRole('region', { name: language === 'ko' ? '한눈에 보기' : 'At a glance', exact: true });
       await expect(glance).toBeVisible();
       await expect(glance.getByTestId('top-observation')).toHaveCount(3);
@@ -68,8 +68,9 @@ for (const width of [1280, 390]) {
       const entryBox = await entry.boundingBox();
       const currentActionBox = await action.boundingBox();
       expect(currentActionBox!.y + currentActionBox!.height).toBeLessThanOrEqual(entryBox!.y);
-      await entry.getByRole('button', { name: 'IP 조사 열기 / Open IP investigation', exact: true }).click();
-      await expect(entry.getByLabel('대상 IP / Target IP')).toBeVisible();
+      await entry.getByRole('button', { name: language === 'ko' ? 'IP 조사 열기' : 'Open IP investigation', exact: true }).click();
+      await entry.getByRole('button', { name: language === 'ko' ? '새 조사 요청' : 'New investigation request', exact: true }).click();
+      await expect(entry.getByLabel(language === 'ko' ? '대상 IP' : 'Target IP', { exact: true })).toBeVisible();
       expect(errors).toEqual([]);
       expect(writes).toEqual([]);
       await testInfo.attach('geometry', { body: JSON.stringify(geometry), contentType: 'application/json' });

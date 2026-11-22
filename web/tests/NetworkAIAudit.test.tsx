@@ -41,41 +41,57 @@ async function setup(options: {
   localStorage.setItem('c2hunter-token', 'fixture-token');
   localStorage.setItem('c2hunter-report-language', 'ko');
   const requests: { url: string; method: string; body?: unknown }[] = [];
+  let admitted = queued;
   const fetcher = vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? 'GET';
     requests.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
     if (url === '/api/v1/ai-capabilities') return Response.json(options.capabilities ?? capability);
-    if (url === '/api/v1/analysis-jobs/first/ai-runs' && method === 'POST') return options.submit?.() ?? Response.json(queued);
-    if (url === '/api/v1/ai-runs/audit-run') return options.readRun?.() ?? Response.json(options.run ?? queued);
-    if (url === '/api/v1/analysis-jobs/first/ai-runs') return Response.json({ items: options.run ? [options.run] : [] });
+    if (url === '/api/v1/analysis-jobs/first/ai-runs' && method === 'POST') {
+      // The real admission receipt echoes the captured requested language.
+      admitted = { ...queued, language: JSON.parse(String(init?.body)).language };
+      return options.submit?.() ?? Response.json(admitted);
+    }
+    if (url === '/api/v1/ai-runs/audit-run') return options.readRun?.() ?? Response.json(options.run ?? admitted);
+    if (url === '/api/v1/analysis-jobs/first/ai-runs') return Response.json({ items: options.run ? [options.run] : [], current_page: 1, page_size: 50, total: options.run ? 1 : 0 });
     if (url === '/api/v1/analysis-jobs/first' || url === '/api/v1/analysis-jobs/second') {
       const id = url.split('/').at(-1)!;
       return Response.json({ id, name: `${id} network job`, status: 'COMPLETED', analysis: { module: 'network_anomaly' }, ...(options.savedReport === false ? {} : { network_anomaly: report }) });
     }
-    return Response.json({ items: [] });
+    return Response.json({ items: [], current_page: 1, page_size: 50, total: 0 });
   });
   vi.stubGlobal('fetch', fetcher);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   clients.push(client);
   const view = render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/analyses/first']}><Navigation/><App/></MemoryRouter></QueryClientProvider>);
   await openAI();
+  fireEvent.click(screen.getByRole('button', { name: '새 AI 해석' }));
   if (options.run?.status === 'COMPLETED' && (options.run.network_interpretation as { schema_version?: string; kind?: string } | undefined)?.schema_version === 'network-interpretation-v1' && (options.run.network_interpretation as { kind?: string }).kind === 'MODEL_INTERPRETATION') fireEvent.click(await screen.findByRole('button', { name: 'AI 원문 전체 보기' }));
   return { ...view, client, requests, posts: () => requests.filter(request => request.method === 'POST') };
 }
 
+function allSectionText(text: string | RegExp | ((text: string) => boolean)) {
+  const matches: HTMLElement[] = [];
+  const names = localStorage.getItem('c2hunter-report-language') === 'ko' ? ['가능한 원인 (AI 가설)', '우선순위별 다음 확인 사항', '가능한 연관성'] : ['Possible causes (AI hypotheses)', 'Prioritized next checks', 'Possible correlations'];
+  for (const name of names) {
+    fireEvent.click(screen.getByRole('button', { name }));
+    matches.push(...within(screen.getByRole('article', { name: /Full AI interpretation|AI 해석 전체 원문/ })).getAllByText(text));
+  }
+  fireEvent.click(screen.getByRole('button', { name: names[0] }));
+  return matches;
+}
 it('shares one persisted language across the actual producer report and AI while preserving citations and source observations', async () => {
   const original = JSON.stringify(report);
   const { posts, unmount } = await setup({ run: completed });
   expect(await screen.findByText(completed.network_interpretation.summary)).toHaveAttribute('lang', 'en');
   expect(screen.getByRole('heading', { name: '이상 징후 관찰됨' })).toBeVisible();
   const ai = screen.getByRole('heading', { name: 'AI 생성 해석 — 분석가 검토 필요' }).closest('article')!;
-  expect(within(ai).getAllByText(issueId)).toHaveLength(3);
+  expect(allSectionText(issueId)).toHaveLength(3);
   expect(screen.getAllByRole('combobox')).toHaveLength(1);
   fireEvent.change(screen.getByRole('combobox'), { target: { value: 'en' } });
   expect(screen.getByRole('heading', { name: 'Anomaly observed' })).toBeVisible();
   expect(within(ai).getByRole('heading', { name: 'Possible causes (AI hypotheses)' })).toBeVisible();
-  expect(within(ai).getAllByText(issueId)).toHaveLength(3);
+  expect(allSectionText(issueId)).toHaveLength(3);
   expect(screen.getByText(completed.network_interpretation.summary)).toHaveAttribute('lang', 'en');
   expect(localStorage.getItem('c2hunter-report-language')).toBe('en');
   expect(JSON.stringify(report)).toBe(original);
@@ -87,7 +103,9 @@ it('does not substitute configured model provenance when the saved run omitted i
   await setup({ run: { ...completed, provider: undefined, model_name: undefined } });
   const heading = await screen.findByRole('heading', { name: 'AI 생성 해석 — 분석가 검토 필요' });
   const ai = within(heading.closest('article')!);
-  expect(ai.getByText('저장된 실행 제공자 / 모델: 보고되지 않음 · 보고되지 않음')).toBeVisible();
+  fireEvent.click(screen.getByText('저장 실행 메타데이터', { selector: 'summary' }));
+  fireEvent(screen.getByText('저장 실행 메타데이터', { selector: 'summary' }).closest('details')!, new Event('toggle'));
+  expect(screen.getByText('저장된 실행 제공자 / 모델: 보고되지 않음 · 보고되지 않음')).toBeVisible();
   expect(ai.queryByText(/fixture-model/)).not.toBeInTheDocument();
 });
 
@@ -104,8 +122,8 @@ it('bounds literal issue references in every AI section without interpreting mar
   await setup({ run });
   const heading = await screen.findByRole('heading', { name: 'AI 생성 해석 — 분석가 검토 필요' });
   const article = heading.closest('article')!;
-  expect(within(article).getAllByText(text => text.startsWith(refs[0]))).toHaveLength(3);
-  expect(within(article).getAllByText(/citation-19$/)).toHaveLength(3);
+  expect(allSectionText(text => text.startsWith(refs[0]))).toHaveLength(3);
+  expect(allSectionText(/citation-19$/)).toHaveLength(3);
   expect(within(article).queryByText('citation-20')).not.toBeInTheDocument();
   expect(article.querySelector('a')).toBeNull();
 });
@@ -171,6 +189,7 @@ it('does not carry a submitted AI run or its polling into a different job route'
   await act(async () => { await vi.advanceTimersByTimeAsync(100); });
   expect(screen.getByRole('heading', { name: 'second network job' })).toBeVisible();
   fireEvent.click(screen.getByRole('button', { name: 'AI 해석 열기' }));
+  fireEvent.click(screen.getByRole('button', { name: '새 AI 해석' }));
   expect(screen.getByRole('button', { name: 'AI 해석' })).toBeEnabled();
   expect(screen.queryByRole('button', { name: 'AI 실행 취소' })).not.toBeInTheDocument();
   const reads = requests.filter(request => request.url === '/api/v1/ai-runs/audit-run').length;

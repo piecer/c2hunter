@@ -85,7 +85,7 @@ it('shows a distinct low-confidence cause hypothesis and lazy supporting measure
 it('presents the actual leading hypothesis in the overall report without inventing one for controls', () => {
   const { rerender } = render(<NetworkAnomalyPanel report={fixtures.supporting}/>);
   expect(screen.getByRole('heading', { name: 'Leading possible cause — hypothesis' })).toBeVisible();
-  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'ko' } });
+  fireEvent.change(screen.getByLabelText(/^(보고서 언어|Report language)$/), { target: { value: 'ko' } });
   expect(screen.getByRole('heading', { name: '주요 가능한 원인 — 가설' })).toBeVisible();
   rerender(<NetworkAnomalyPanel report={fixtures.normal}/>);
   expect(screen.queryByRole('heading', { name: '주요 가능한 원인 — 가설' })).not.toBeInTheDocument();
@@ -135,7 +135,7 @@ it('explains missing metadata rather than displaying invented zero TTL values', 
   const detail = screen.getByRole('region', { name: 'Supporting measurements' });
   expect(detail).toHaveTextContent('A → B: Samples 0 · min / max Unknown / Unknown · changes 0 · missing 2');
   expect(detail).toHaveTextContent('TTL / Hop Limit metadata is missing. (MISSING_TTL)');
-  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'ko' } });
+  fireEvent.change(screen.getByLabelText(/^(보고서 언어|Report language)$/), { target: { value: 'ko' } });
   expect(detail).toHaveTextContent('알 수 없음 / 알 수 없음');
   expect(detail).toHaveTextContent('TTL / 홉 제한 메타데이터가 없습니다. (MISSING_TTL)');
 });
@@ -149,7 +149,7 @@ it('labels actual IPv6 hop limits and preserves measured zero and variation with
   expect(detail).toHaveTextContent('IPv4 TTL / IPv6 Hop Limit');
   expect(detail).toHaveTextContent('A → B: Samples 3 · min / max 0 / 64 · changes 2 · missing 0');
   expect(detail).toHaveTextContent('variation is not proof of route changes');
-  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'ko' } });
+  fireEvent.change(screen.getByLabelText(/^(보고서 언어|Report language)$/), { target: { value: 'ko' } });
   expect(detail).toHaveTextContent('IPv4 TTL / IPv6 홉 제한');
   expect(detail).toHaveTextContent('최소 / 최대 0 / 64 · 변화 2');
 });

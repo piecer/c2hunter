@@ -11,7 +11,7 @@ it('actual C2 job page exposes a quiet experimental sibling without default prom
   const client=new QueryClient({defaultOptions:{queries:{retry:false}}});
   const view=render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/analyses/job']}><App/></MemoryRouter></QueryClientProvider>);
   fireEvent.click(await screen.findByRole('button',{name:'AI 조사'}));
-  await screen.findByRole('button',{name:/Open IP investigation/});
-  expect(screen.getByRole('button',{name:/Open experimental investigation/})).toBeInTheDocument();
+  await screen.findByRole('button',{name:/IP 조사 열기/});
+  expect(screen.getByRole('button',{name:/실험적 조사 열기/})).toBeInTheDocument();
   expect(post).not.toHaveBeenCalled();expect(fetch).not.toHaveBeenCalled();view.unmount();client.clear();
 });

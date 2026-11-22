@@ -1,0 +1,34 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import NetworkAIInterpretation from '../src/NetworkAIInterpretation';
+import DDoSAIInterpretation from '../src/DDoSAIInterpretation';
+import { ReportLanguageContext } from '../src/reportLanguageContext';
+const clients: QueryClient[] = [];
+afterEach(() => clients.splice(0).forEach(c => c.clear()));
+const variants = [{ kind: 'NETWORK_ANOMALY', Component: NetworkAIInterpretation, open: 'Open AI interpretation', submit: 'AI interpretation' }, { kind: 'DDOS_ATTACK', Component: DDoSAIInterpretation, open: 'Open DDoS AI interpretation', submit: 'Run DDoS AI interpretation' }];
+it.each(variants.flatMap(v => ['status', 'null', 'rejected', 'id', 'kind', 'job', 'dataset'].map(fault => ({ ...v, fault }))))('$kind keeps unknown $fault detail distinct from terminal readiness and recovers by GET', async ({ kind, Component, open, submit, fault }) => {
+  const known = { id: 'A', analysis_kind: kind, language: 'en', status: 'ANALYZING', analysis_job_id: 'job', dataset_id: 'dataset' };
+  let detail: unknown = fault === 'null' ? null : fault === 'rejected' ? { id: 'A' } : Object.assign({ ...known, status: 'COMPLETED' }, ({ status: { status: 'FUTURE' }, id: { id: 'foreign' }, kind: { analysis_kind: 'C2' }, job: { analysis_job_id: 'foreign' }, dataset: { dataset_id: 'foreign' } }[fault] ?? {}));
+  const posts: string[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: unknown, init?: RequestInit) => {
+    const path = String(input); if (init?.method === 'POST') posts.push(path);
+    if (path.endsWith('/ai-capabilities')) return Response.json({ available: true, network_interpretation: true, ddos_interpretation: true, remote: false });
+    if (path.endsWith('/job/ai-runs')) return Response.json({ items: [known], current_page: 1, page_size: 50, total: 1 });
+    return Response.json(detail);
+  }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } }); clients.push(client);
+  render(<QueryClientProvider client={client}><ReportLanguageContext value="en"><Component jobId="job" completed/></ReportLanguageContext></QueryClientProvider>);
+  fireEvent.click(screen.getByRole('button', { name: open }));
+  fireEvent.click(screen.getByRole('button', { name: 'New AI interpretation' }));
+  await waitFor(() => expect(client.getQueryState(['ai-run', 'A'])?.status).toBe('success'));
+  expect(screen.getByRole('button', { name: submit })).toBeDisabled();
+  const cancel = screen.queryByRole('button', { name: 'Cancel AI run' });
+  if (cancel) expect(cancel).toBeDisabled();
+  expect(screen.getByText('Current AI run status is unconfirmed.')).toBeVisible();
+  detail = { ...known, status: 'COMPLETED' };
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry status lookup' })); });
+  await waitFor(() => expect(screen.getByRole('button', { name: submit })).toBeEnabled());
+  expect(screen.queryByText('Current AI run status is unconfirmed.')).not.toBeInTheDocument();
+  expect(posts).toEqual([]);
+});

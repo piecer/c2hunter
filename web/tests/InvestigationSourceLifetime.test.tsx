@@ -1,0 +1,103 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import { expect, it, vi } from 'vitest';
+import App from '../src/App';
+import { api } from '../src/api';
+import { investigationApi } from '../src/investigationApi';
+import { fixture } from './investigationFixtures';
+import type { InvestigationRun, SourcePreview } from '../src/investigationTypes';
+
+function mount(missing: boolean) {
+  localStorage.setItem('c2hunter-token', 'test');
+  localStorage.setItem('c2hunter-report-language', 'en');
+  const get = vi.spyOn(api, 'get').mockImplementation(async path => {
+    if (path === '/analysis-jobs/job') { if (missing) throw new Error('Source deleted'); return { id: 'job', name: 'Source job', status: 'COMPLETED', analysis: { module: 'c2' } }; }
+    return { items: [] };
+  });
+  vi.spyOn(investigationApi, 'capabilities').mockResolvedValue({ document: fixture('capabilities') as Awaited<ReturnType<typeof investigationApi.capabilities>>['document'], unavailableReason: null });
+  vi.spyOn(investigationApi, 'history').mockResolvedValue({ items: [fixture('run_completed') as InvestigationRun], next_cursor: null });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/analyses/job']}><App/></MemoryRouter></QueryClientProvider>);
+  return { client, view, get };
+}
+it('A1 initial source failure leaves saved IP evidence readable but fresh admission blocked', async () => {
+  mount(true);
+  const create = vi.spyOn(investigationApi, 'create');
+  const preview = vi.spyOn(investigationApi, 'preview');
+  vi.spyOn(investigationApi, 'evidence').mockImplementation(() => new Promise(() => {}));
+  await screen.findByText('Source deleted');
+  fireEvent.click(screen.getByRole('button', { name: 'Open IP investigation' }));
+  fireEvent.click(await screen.findByRole('button', { name: /2001:db8::1 · COMPLETED/ }));
+  fireEvent.click(screen.getByRole('button', { name: 'Issued evidence' }));
+  fireEvent.click(screen.getAllByRole('button', { name: /^Evidence / })[0]);
+  expect(screen.getByRole('region', { name: 'Selected evidence' })).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: 'Close evidence' }));
+  fireEvent.click(screen.getByRole('button', { name: 'New investigation request' }));
+  fireEvent.change(screen.getByLabelText('Target IP'), { target: { value: '2001:db8::1' } });
+  expect(screen.getByRole('button', { name: 'Preview scope' })).toBeDisabled();
+  expect(create).not.toHaveBeenCalled(); expect(preview).not.toHaveBeenCalled();
+});
+it.each(['pending', 'unconfirmed'] as const)('N1 source-error entry retains %s cancellation and selection through C2 source recovery', async phase => {
+  const { get } = mount(true);
+  const queued = fixture('run_queued') as InvestigationRun;
+  vi.mocked(investigationApi.history).mockResolvedValue({ items: [queued], next_cursor: null });
+  vi.spyOn(investigationApi, 'run').mockImplementation(() => new Promise(() => {}));
+  let reject!: (e: Error) => void;
+  const cancel = vi.spyOn(investigationApi, 'cancel').mockImplementation(() => new Promise((_yes, no) => { reject = no; }));
+  const create = vi.spyOn(investigationApi, 'create');
+  const preview = vi.spyOn(investigationApi, 'preview');
+  await screen.findByText('Source deleted');
+  fireEvent.click(screen.getByRole('button', { name: 'Open IP investigation' }));
+  fireEvent.click(await screen.findByRole('button', { name: /2001:db8::1 · QUEUED/ }));
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel investigation' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm cancel this run' }));
+  const signal = cancel.mock.calls[0][2];
+  if (phase === 'unconfirmed') await act(async () => reject(new Error('lost cancellation ACK')));
+  get.mockImplementation(async path => path === '/analysis-jobs/job' ? { id: 'job', name: 'Recovered source', status: 'COMPLETED', analysis: { module: 'c2' } } : { items: [] });
+  fireEvent.click(screen.getByRole('button', { name: '다시 시도' }));
+  await screen.findByRole('heading', { name: 'Recovered source' });
+  expect(signal.aborted).toBe(false);
+  expect(screen.getByRole('region', { name: 'Cancellation receipt' })).toHaveTextContent(phase === 'pending' ? 'Cancellation acknowledgment pending' : 'cancellation unconfirmed');
+  expect(screen.queryByLabelText('Target IP')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /Return to active investigation/ }));
+  expect(screen.getByRole('region', { name: 'Selected investigation' })).toHaveTextContent(queued.id);
+  expect(cancel).toHaveBeenCalledTimes(1);
+  expect(create).not.toHaveBeenCalled(); expect(preview).not.toHaveBeenCalled();
+  if (phase === 'unconfirmed') fireEvent.click(screen.getByRole('button', { name: 'Retry cancellation' }));
+  const liveSignal = cancel.mock.calls.at(-1)![2];
+  fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+  expect(liveSignal.aborted).toBe(true);
+  expect(screen.queryByRole('region', { name: 'Cancellation receipt' })).not.toBeInTheDocument();
+});
+
+it('A1 source refresh failure preserves IP owner, unknown admission and exact recovery without stale job actions', async () => {
+  const { client, get } = mount(false);
+  vi.spyOn(investigationApi, 'preview').mockResolvedValue(fixture('source_preview') as SourcePreview);
+  let reject!: (e: Error) => void;
+  const create = vi.spyOn(investigationApi, 'create').mockImplementation(() => new Promise((_yes, no) => { reject = no; }));
+  fireEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Open IP investigation' }));
+  fireEvent.click(screen.getByRole('button', { name: 'New investigation request' }));
+  fireEvent.change(screen.getByLabelText('Target IP'), { target: { value: '2001:db8::1' } });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Preview scope' })).toBeEnabled());
+  fireEvent.click(screen.getByRole('button', { name: 'Preview scope' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Start investigation' }));
+  const body = create.mock.calls[0][1], signal = create.mock.calls[0][2];
+  get.mockRejectedValue(new Error('Source deleted'));
+  await act(async () => { await client.invalidateQueries({ queryKey: ['job', 'job'] }); });
+  await screen.findByText('Source deleted');
+  expect(screen.getByRole('region', { name: 'Investigation history' })).toBeVisible();
+  expect(signal.aborted).toBe(false);
+  expect(screen.getByText('Awaiting admission acknowledgment')).toBeVisible();
+  expect(screen.queryByRole('heading', { name: 'Source job' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Work information' })).not.toBeInTheDocument();
+  await act(async () => { reject(new Error('Admission lost')); });
+  fireEvent.click(screen.getByRole('button', { name: 'Retry captured request' }));
+  expect(create).toHaveBeenCalledTimes(2);
+  expect(create.mock.calls[1][1]).toBe(body);
+  expect(JSON.parse(create.mock.calls[1][1]).idempotency_key).toBe(JSON.parse(body).idempotency_key);
+  fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+  expect(create.mock.calls[1][2].aborted).toBe(true);
+  expect(screen.queryByRole('region', { name: 'Investigation history' })).not.toBeInTheDocument();
+});
