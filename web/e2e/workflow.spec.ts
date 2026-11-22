@@ -41,14 +41,15 @@ test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', 
   await filteredCandidates;
   await page.getByRole('link', { name: '203.0.113.10' }).click();
   await expect(page.getByRole('img', { name: 'Traffic over time' })).toBeVisible();
+  await page.getByRole('button', { name: '근거 1 · 주기적 비콘', exact: true }).click();
   await expect(page.getByRole('heading', { name: '탐지 근거' })).toBeVisible();
-  await expect(page.getByText('주기적 비콘')).toBeVisible();
+  await expect(page.getByText('주기적 비콘', { exact: true })).toBeVisible();
   const metricDisclosure = page.locator('.evidence-metric-details').first();
   await expect(metricDisclosure).not.toHaveAttribute('open', '');
-  await expect(page.getByText('Timing Window')).not.toBeVisible();
+  await expect(page.getByText('Timing Window', { exact: true })).not.toBeVisible();
   await metricDisclosure.locator('summary').click();
   await expect(metricDisclosure).toHaveAttribute('open', '');
-  await expect(page.getByText('Timing Window')).toBeVisible();
+  await expect(page.getByText('Timing Window', { exact: true })).toBeVisible();
   const nestedScalar = metricDisclosure.locator('.structured-fields dd > span').first();
   await expect(nestedScalar).toBeVisible();
   expect(await nestedScalar.evaluate(element => getComputedStyle(element).display)).not.toBe('grid');
@@ -56,10 +57,15 @@ test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', 
   const evidenceCard = page.locator('.evidence.detailed').first();
   await expect(evidenceCard).toBeVisible();
   expect(await evidenceCard.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.getByRole('button', { name: 'Close candidate detail' }).click();
+  await page.getByRole('button', { name: '점수 조정 및 작업', exact: true }).click();
   await page.getByRole('button', { name: 'Export candidate PCAP' }).click();
   await expect(page.getByText('Candidate PCAP downloaded (1 packets).')).toBeVisible();
   await page.getByRole('button', { name: 'Reanalyze' }).click();
   await expect(page.getByText('Reanalysis created')).toBeVisible();
+  await page.getByRole('button', { name: 'Close candidate detail' }).click();
+  await page.getByRole('button', { name: 'Flow review', exact: true }).click();
+  await page.getByRole('button', { name: 'Inspect flow e2e-flow', exact: true }).click();
   await page.getByRole('button', { name: 'Mark C2 e2e-flow' }).click();
   await page.getByLabel('Analyst note').fill('Manually confirmed C2');
   await page.getByRole('button', { name: 'Save C2 label' }).click();
@@ -67,6 +73,7 @@ test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', 
   await expect(page.getByText('현재 5점 · 후보 기준 20점 · 15점 부족')).toBeVisible();
   await expect(page.getByText('주기 통신 가중치 조정으로 후보 기준에 도달합니다.')).toBeVisible();
 
+  await page.getByRole('button', { name: 'Close candidate detail' }).click();
   await page.getByRole('button', { name: '메뉴 / Menu' }).click();
   await page.getByRole('link', { name: 'Allowlist' }).click();
   await page.getByLabel('Value').fill('203.0.113.10');
@@ -90,8 +97,9 @@ test('administrator validates a candidate with TI and exports it to MISP', async
   await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
   await page.goto('/candidates/candidate-1');
 
+  await page.getByRole('button', { name: '판정 및 외부 검증', exact: true }).click();
   await expect(page.getByRole('heading', { name: '판정 및 외부 검증' })).toBeVisible();
-  await expect(page.getByText('자동 조회 완료')).toBeVisible();
+  await expect(page.getByRole('region', { name: '판정 및 외부 검증' }).getByText('자동 조회 완료')).toBeVisible();
   await expect(page.getByText('MISP 이벤트 1개')).toBeVisible();
   await expect(page.getByRole('button', { name: 'MISP로 전송' })).toBeDisabled();
   await page.getByLabel('Candidate verdict').selectOption('CONFIRMED_C2');
@@ -101,13 +109,13 @@ test('administrator validates a candidate with TI and exports it to MISP', async
   await expect(page.getByText('확정 C2', { exact: true })).toBeVisible();
 
   await expect(page.getByRole('heading', { name: '후속 대응 조치' })).toBeVisible();
-  await expect(page.locator('.workflow-badge', { hasText: '조치 필요' })).toBeVisible();
+  await expect(page.getByRole('region', { name: '후속 대응 조치' }).locator('.workflow-badge', { hasText: '조치 필요' })).toBeVisible();
   await page.getByLabel('조치 내용').fill('Endpoint isolation started');
   await page.getByRole('button', { name: '조치 시작' }).click();
-  await expect(page.locator('.workflow-badge', { hasText: '조치 중' })).toBeVisible();
+  await expect(page.getByRole('region', { name: '후속 대응 조치' }).locator('.workflow-badge', { hasText: '조치 중' })).toBeVisible();
   await page.getByLabel('조치 내용').fill('Endpoint isolated and IOC blocked');
   await page.getByRole('button', { name: '조치 완료' }).click();
-  await expect(page.locator('.workflow-badge', { hasText: '조치 완료' })).toBeVisible();
+  await expect(page.getByRole('region', { name: '후속 대응 조치' }).locator('.workflow-badge', { hasText: '조치 완료' })).toBeVisible();
 
   await page.getByRole('button', { name: '외부 TI 다시 조회' }).click();
   await expect(page.getByText('악성 8')).toBeVisible();
@@ -224,6 +232,7 @@ test('analyst can run bounded AI analysis and inspect the candidate assessment',
   await expect(aiPanel.getByText(/AI-generated, analyst review required/).first()).toBeVisible();
 
   await aiPanel.getByRole('link', { name: '203.0.113.10' }).click();
+  await page.getByRole('button', { name: 'AI assessment', exact: true }).click();
   const candidateAI = page.getByRole('region', { name: 'AI C2 판정' });
   await expect(candidateAI.getByText('LIKELY_C2')).toBeVisible();
   await expect(candidateAI.getByText('Stable periodic callback')).toBeVisible();

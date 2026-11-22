@@ -1,0 +1,13 @@
+/* Full identities remain behind an ordinary, lazy, source-independent disclosure. */
+.candidate-result .candidate-identifier { margin-top: .5rem; }
+.candidate-result .candidate-identifier summary { cursor: pointer; font-size: .85rem; }
+.candidate-result .candidate-navigation { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .5rem; align-items: stretch; margin: .75rem 0; }
+.candidate-result .candidate-navigation button { min-width: 0; padding: .5rem; }
+.candidate-result .candidate-evidence-selector { grid-column: 1 / -1; display: flex; align-items: center; gap: .75rem; margin: 0; }
+.candidate-result .candidate-evidence-selector select { flex: 1; width: auto; }
+@media (max-width: 640px) {
+  .candidate-result .candidate-navigation { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .candidate-result > header { gap: .5rem; margin-bottom: .75rem; }
+  .candidate-result > .panel { margin-bottom: .75rem; }
+  .candidate-result > .panel .chart { max-height: 90px; }
+}

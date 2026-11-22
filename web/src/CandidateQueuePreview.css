@@ -1,0 +1,24 @@
+.content:has(.candidate-queue), .candidate-queue, .candidate-queue > *, .candidate-queue .table-wrap { min-width: 0; max-width: 100%; }
+.candidate-queue { overflow-wrap: anywhere; }
+.candidate-queue .record-id { white-space: normal; overflow-wrap: anywhere; }
+.candidate-queue .table-wrap { overflow-x: auto; }
+.candidate-queue .pagination { flex-wrap: wrap; }
+.candidate-queue button[aria-expanded="true"] { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (min-width: 1200px) {
+  .candidate-queue.is-selected { display: grid; grid-template-columns: minmax(0, 3fr) minmax(18rem, 2fr); gap: 1rem; align-items: start; }
+  .candidate-queue .candidate-detail-surface { margin-top: 0; position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow: auto; }
+}
+
+.candidate-queue .queue-score { font-weight: 700; }
+
+.candidate-queue .queue-ti > * { display: block; }
+
+/* Preserve legible cells beside the preview; overflowing tables scroll locally. */
+.candidate-queue table { min-width: 48rem; }
+.candidate-queue table[aria-label="C2 candidates"] { min-width: 64rem; }
+.candidate-queue th { overflow-wrap: normal; }
+.candidate-queue td:nth-child(2) { min-width: 12rem; }
+.candidate-queue table[aria-label="C2 candidates"] td:nth-child(3) { min-width: 4rem; }
+.candidate-queue .queue-ti { min-width: 9rem; }
+.candidate-queue button[aria-controls="candidate-selected-detail"] { min-width: 6rem; }
+.candidate-queue a { color: var(--accent); }
