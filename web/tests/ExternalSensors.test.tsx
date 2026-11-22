@@ -53,7 +53,7 @@ afterEach(() => vi.unstubAllGlobals());
 describe('External sensor enrollment', () => {
   it('adds accessible navigation and lists all enrollment states', async () => {
     renderAt('/external-sensors');
-    const nav = screen.getByRole('navigation', { name: 'Primary' });
+    const nav = screen.getByRole('navigation', { name: 'Management' });
     expect(within(nav).getByRole('link', { name: 'External sensors' })).toHaveAttribute('href', '/external-sensors');
     expect(within(nav).getByRole('link', { name: 'Enroll sensor' })).toHaveAttribute('href', '/external-sensors/enroll');
     expect(await screen.findByRole('table', { name: 'External sensor enrollments' })).toBeInTheDocument();

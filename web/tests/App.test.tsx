@@ -441,6 +441,41 @@ describe('C2Hunter UI', () => {
     expect(screen.getByText('Sensor B 오프라인')).toBeInTheDocument();
   });
 
+  it.each([
+    ['NEEDS_REVIEW', '미분석'], ['IN_REVIEW', '분석 중'],
+    ['ACTION_REQUIRED', '조치 필요'], ['ACTION_IN_PROGRESS', '조치 중'],
+    [undefined, '처리 상태 미보고'],
+  ])('shows the dashboard producer workflow %s without inferring it from severity or AI', async (workflow, label) => {
+    const dashboard = responses['/api/v1/dashboard'] as { priority_candidates: Record<string, unknown>[] };
+    renderAt('/', async () => Response.json({ ...dashboard, priority_candidates: [
+      { ...dashboard.priority_candidates[0], workflow_status: workflow, severity: 'CRITICAL', score: 99 },
+    ] }));
+    const queue = await screen.findByRole('list', { name: '분석 및 조치 필요 후보' });
+    expect(within(queue).getByText(label)).toBeInTheDocument();
+    expect(within(queue).getByRole('link', { name: /203\.0\.113\.20/ })).toHaveAttribute('href', '/candidates/candidate-new');
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual(['/api/v1/dashboard']);
+  });
+
+  it('puts actionable review, actual collection limitations and aggregation time before dashboard charts', async () => {
+    renderAt('/');
+    const queue = (await screen.findByRole('heading', { name: '분석 및 조치 필요 후보' })).closest('article')!;
+    const chart = screen.getByRole('img', { name: '최근 24시간 시간별 신규 후보' });
+    const trust = screen.getByRole('region', { name: '집계 범위 및 수집 제한' });
+    const freshness = screen.getByText(/마지막 집계/);
+    expect(freshness.querySelector('time')).toHaveAttribute('dateTime', '2026-07-20T10:10:00Z');
+    expect(trust).toHaveTextContent('오프라인 1 · 성능 저하 0 · 누락 패킷 6');
+    expect(trust).toHaveTextContent('최근 24시간 부분 완료 1건 · 실패 1건');
+    expect(trust).toHaveTextContent('집계 시각은 개별 관측의 최신성을 보장하지 않습니다.');
+    for (const element of [queue, trust, freshness, screen.getByText('Sensor B 오프라인'), screen.getByText('capture stopped')]) {
+      expect(element.compareDocumentPosition(chart) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(element.closest('details')).toBeNull();
+    }
+    expect(within(queue).getAllByRole('link').filter(link => link.getAttribute('href')?.startsWith('/candidates/')).map(link => link.getAttribute('href'))).toEqual(['/candidates/candidate-new', '/candidates/candidate-1']);
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual(['/api/v1/dashboard']);
+    await userEvent.click(within(queue).getByRole('link', { name: /203\.0\.113\.9/ }));
+    expect(await screen.findByRole('heading', { name: '203.0.113.9' })).toBeInTheDocument();
+  });
+
   it('shows sensor status and direction with an accessible table', async () => {
     renderAt('/sensors');
     expect(await screen.findByRole('link', { name: 'Sensor A' })).toBeInTheDocument();
