@@ -1088,6 +1088,7 @@ describe('C2Hunter UI', () => {
     await screen.findByLabelText('Sensor A');
     await user.type(screen.getByLabelText('Analysis name'), 'Web analysis');
     await user.click(screen.getByLabelText('Sensor A'));
+    await user.click(screen.getByText('Advanced options / 고급 설정'));
     await user.click(screen.getByRole('button', { name: '대형 서비스 노이즈 줄이기' }));
     await user.click(screen.getByRole('button', { name: 'Start analysis' }));
 
@@ -1153,6 +1154,7 @@ describe('C2Hunter UI', () => {
     render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/new']}><App /></MemoryRouter></QueryClientProvider>);
     const user = userEvent.setup();
 
+    await user.click(screen.getByText('Advanced options / 고급 설정'));
     await waitFor(() => expect(screen.getByLabelText(/공통 목적지/)).toHaveValue(0.25));
     expect(screen.getByLabelText('저장된 탐지 가중치 프리셋')).toHaveValue('preset-default');
     await user.type(screen.getByLabelText('새 프리셋 이름'), 'Case preset');
@@ -1716,8 +1718,9 @@ describe('C2Hunter UI', () => {
     Object.defineProperty(file, 'size', { value: 500 * 1024 * 1024 });
     await user.type(screen.getByLabelText('Analysis name'), 'Offline case');
     await user.upload(screen.getByLabelText('Capture file'), file);
+    await user.click(screen.getByText('Advanced options / 고급 설정'));
     await user.click(screen.getByRole('button', { name: '대형 서비스 노이즈 줄이기' }));
-    expect(screen.getByRole('status')).toHaveTextContent('500.0 MiB');
+    expect(screen.getByText('500.0 MiB').closest('[role="status"]')).toHaveTextContent('500.0 MiB');
     fireEvent.submit(screen.getByRole('button', { name: 'Upload and analyze' }).closest('form')!);
 
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => String(url) === '/api/v1/pcap-analysis-jobs/initiate' && init?.method === 'POST')).toBe(true));
