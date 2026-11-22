@@ -1963,7 +1963,14 @@ function FlowReviewPanel({ candidate, navigation, visible = true, available = tr
     {visible && <p aria-label="Flow review retention">{owners.length} of 8 retained flow reviews. All source flow pages remain available.</p>}
     {capacityNotice && <p role="alert">{capacityNotice}</p>}
     {flowMissing && <p role="status">Selected flow is not available on this source page. Select a retained flow explicitly.</p>}
-    <div className="table-wrap"><table aria-label="Selected candidate flow">{owners.map(owner => <tbody key={owner.key} aria-label={`Retained flow review ${owner.flow.flow_id}`}><FlowReviewRow flow={owner.flow} authority={owner.authority} retention={owner.retention} onRetentionChange={retentionChanged} onRelease={() => releaseOwner(owner)} candidateIp={candidate.candidate_ip} visible={visible && !historyRetired && selectedKey === owner.key && owner.page === page && owner.authority.current}/></tbody>)}</table></div>
+    <div className="table-wrap"><table aria-label="Selected candidate flow">{owners.map(owner => {
+      // Refresh label presentation, not the retained operation/draft or its latched authority.
+      const currentFlow = available && owner.authority.current && owner.scope === scope && owner.page === page && query.isSuccess && (query.data.page === undefined || query.data.page === page)
+        ? items(query.data).find(flow => flow.flow_id === owner.flow.flow_id && flow.job_id === owner.flow.job_id)
+        : undefined;
+      const flow = currentFlow ? { ...owner.flow, current_label: currentFlow.current_label } : owner.flow;
+      return <tbody key={owner.key} aria-label={`Retained flow review ${owner.flow.flow_id}`}><FlowReviewRow flow={flow} authority={owner.authority} retention={owner.retention} onRetentionChange={retentionChanged} onRelease={() => releaseOwner(owner)} candidateIp={candidate.candidate_ip} visible={visible && !historyRetired && selectedKey === owner.key && owner.page === page && owner.authority.current}/></tbody>;
+    })}</table></div>
   </section>;
 }
 
