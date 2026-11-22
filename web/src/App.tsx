@@ -329,7 +329,21 @@ function Shell({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const [navigationOpen, setNavigationOpen] = useState(false);
   const navigationButton = useRef<HTMLButtonElement>(null);
-  return <div className="shell"><aside onKeyDown={event => { if (event.key === 'Escape' && navigationOpen) { setNavigationOpen(false); navigationButton.current?.focus(); } }}><div className="brand">C2<span>Hunter</span></div><button ref={navigationButton} type="button" className="navigation-toggle secondary" aria-expanded={navigationOpen} aria-controls="shell-navigation" onClick={() => setNavigationOpen(!navigationOpen)}>메뉴 / Menu</button><div id="shell-navigation" className={`shell-navigation${navigationOpen ? ' is-open' : ''}`}><nav aria-label="Primary" onClick={event => { if ((event.target as HTMLElement).closest('a')) { setNavigationOpen(false); if (window.matchMedia('(max-width: 800px)').matches) navigationButton.current?.focus(); } }}><NavLink end to="/">Dashboard</NavLink><NavLink to="/sensors">Sensors</NavLink><NavLink to="/sensor-pcaps">Sensor PCAPs</NavLink><NavLink to="/external-sensors">External sensors</NavLink><NavLink className="nav-child" to="/external-sensors/enroll">Enroll sensor</NavLink><NavLink to="/analyses">Analysis history</NavLink><NavLink className="nav-child" to="/analyses/new">New analysis</NavLink><NavLink className="nav-child" to="/analyses/upload">Upload PCAP</NavLink><NavLink to="/candidates">Candidates</NavLink><NavLink to="/payload-signatures">Payload signatures</NavLink><NavLink to="/allowlist">Allowlist</NavLink><NavLink to="/settings/integrations">Integration settings</NavLink></nav><button className="quiet" onClick={() => { setAuthentication(null); navigate('/login'); }}>Sign out</button></div></aside><main className="content">{children}</main></div>;
+  return <div className="shell"><aside onKeyDown={event => { if (event.key === 'Escape' && navigationOpen) { setNavigationOpen(false); navigationButton.current?.focus(); } }}>
+    <div className="brand">C2<span>Hunter</span></div>
+    <button ref={navigationButton} type="button" className="navigation-toggle secondary" aria-expanded={navigationOpen} aria-controls="shell-navigation" onClick={() => setNavigationOpen(!navigationOpen)}>메뉴 / Menu</button>
+    <div id="shell-navigation" className={`shell-navigation${navigationOpen ? ' is-open' : ''}`} onClick={event => { if ((event.target as HTMLElement).closest('a')) { setNavigationOpen(false); if (window.matchMedia('(max-width: 800px)').matches) navigationButton.current?.focus(); } }}>
+      <nav aria-label="Primary">
+        <h2 className="navigation-label">분석 / Analysis</h2>
+        <NavLink end to="/">Dashboard</NavLink><NavLink to="/candidates">Candidates</NavLink><NavLink to="/analyses">Analysis history</NavLink><NavLink className="nav-child" to="/analyses/new">New analysis</NavLink><NavLink className="nav-child" to="/analyses/upload">Upload PCAP</NavLink><NavLink to="/sensor-pcaps">Sensor PCAPs</NavLink>
+      </nav>
+      <nav aria-label="Management">
+        <h2 className="navigation-label">관리 / Management</h2>
+        <NavLink to="/sensors">Sensors</NavLink><NavLink to="/external-sensors">External sensors</NavLink><NavLink className="nav-child" to="/external-sensors/enroll">Enroll sensor</NavLink><NavLink to="/payload-signatures">Payload signatures</NavLink><NavLink to="/allowlist">Allowlist</NavLink><NavLink to="/settings/integrations">Integration settings</NavLink>
+      </nav>
+      <button className="quiet" onClick={() => { setAuthentication(null); navigate('/login'); }}>Sign out</button>
+    </div>
+  </aside><main className="content">{children}</main></div>;
 }
 
 function Dashboard() {
@@ -338,7 +352,190 @@ function Dashboard() {
     queryFn: () => api.get('/dashboard'),
     refetchInterval: 30_000,
   });
-  return <><header className="header-actions"><div><p className="eyebrow">OPERATIONS OVERVIEW</p><h1>Dashboard</h1><p className="muted">센서 상태와 탐지 결과를 한눈에 확인하고 우선 조사 대상을 바로 처리합니다.</p></div><div className="actions"><Link className="button-link secondary-link" to="/analyses/upload">PCAP 업로드</Link><Link className="button-link" to="/analyses/new">새 분석</Link></div></header><AsyncState query={query}>{d => <div className="dashboard"><section className="metrics dashboard-metrics" aria-label="운영 핵심 지표"><article className="metric"><span>온라인 센서</span><strong>{d.fleet.online} / {d.fleet.total}</strong><small>오프라인 {d.fleet.offline} · 성능 저하 {d.fleet.degraded}</small></article><article className="metric"><span>통신 상태</span><strong>{d.candidates.communication_status}</strong><small>C2 위협 점수와 분리된 운영 관측</small></article><article className={`metric ${d.candidates.action_required + (d.candidates.action_in_progress ?? 0) ? 'threat' : ''}`}><span>조치 필요</span><strong>{d.candidates.action_required + (d.candidates.action_in_progress ?? 0)}</strong><small>대기 {d.candidates.action_required} · 진행 중 {d.candidates.action_in_progress ?? 0}</small></article><article className="metric"><span>분석 필요</span><strong>{d.candidates.needs_review}</strong><small>최근 24시간 신규 {d.candidates.new_24h}</small></article><article className="metric"><span>진행 중 분석</span><strong>{d.analyses.active}</strong><small>24시간 내 완료 {d.analyses.completed_24h}</small></article><article className={`metric ${d.analyses.failed_24h ? 'warning' : ''}`}><span>24시간 내 실패</span><strong>{d.analyses.failed_24h}</strong><small>전체 분석 {d.analyses.total}</small></article><article className={`metric ${d.fleet.dropped_packets ? 'warning' : ''}`}><span>센서 누락 패킷</span><strong>{d.fleet.dropped_packets.toLocaleString()}</strong><small>전체 센서 누적 보고값</small></article></section><section className="dashboard-overview-grid"><article className="panel"><div className="section-heading"><div><p className="eyebrow">THREAT TREND</p><h2>최근 24시간 후보 추세</h2></div><Link to="/candidates">전체 후보 보기</Link></div><MiniChart values={d.candidate_trend.map(bucket => bucket.count)} label="최근 24시간 시간별 신규 후보" /></article><article className="panel"><div className="section-heading"><div><p className="eyebrow">SEVERITY</p><h2>후보 심각도</h2></div><strong>{d.candidates.total}</strong></div><div className="severity-bars">{(['critical', 'high', 'medium', 'low'] as const).map(severity => { const value = d.candidates[severity]; const percent = d.candidates.total ? value / d.candidates.total * 100 : 0; return <div key={severity}><div><span className={`badge ${severity}`}>{severity.toUpperCase()}</span><strong>{value}</strong></div><span className={`severity-track ${severity}`}><span style={{ width: `${percent}%` }} /></span></div>; })}</div></article></section><section className="dashboard-action-grid"><article className="panel attention-panel"><div className="section-heading"><div><p className="eyebrow">ACTION QUEUE</p><h2>지금 확인할 항목</h2></div><strong>{d.attention.length}</strong></div>{d.attention.length ? <ul className="dashboard-list">{d.attention.map((item, index) => <li key={`${item.kind}-${item.href}-${index}`}><Link to={item.href}><span className={`badge ${item.severity.toLowerCase()}`}>{item.severity}</span><strong>{item.title}</strong><small>{item.detail}</small></Link></li>)}</ul> : <div className="state compact-state">즉시 확인할 운영 경고가 없습니다.</div>}</article><article className="panel"><div className="section-heading"><div><p className="eyebrow">REVIEW QUEUE</p><h2>분석 및 조치 필요 후보</h2></div><span className="queue-summary">분석 필요 {d.candidates.needs_review} · 분석 중 {d.candidates.in_review} · 조치 필요 {d.candidates.action_required}</span><Link to="/candidates">후보 목록</Link></div>{d.priority_candidates.length ? <ul className="dashboard-list candidates" aria-label="분석 및 조치 필요 후보">{d.priority_candidates.map(candidate => <li key={candidate.id}><Link to={`/candidates/${candidate.id}`}><span className={`badge ${candidate.severity.toLowerCase()}`}>{candidate.severity}</span><strong>{candidate.candidate_ip}</strong><small>점수 {candidate.score} · 근거 {candidate.evidence_count ?? candidate.evidence?.length ?? 0}개 · 마지막 관측 {fmt(candidate.last_seen)}</small></Link></li>)}</ul> : <div className="state compact-state">분석이 필요한 Candidate가 없습니다.</div>}</article></section><section className="dashboard-overview-grid"><article className="panel"><div className="section-heading"><div><p className="eyebrow">PIPELINE</p><h2>분석 파이프라인</h2></div><Link to="/analyses">전체 상태 보기</Link></div><div className="pipeline-status-grid">{([['WAITING_FOR_SENSOR', '센서 대기'], ['CAPTURING', '캡처'], ['UPLOADING', '업로드'], ['INGESTING', '적재'], ['ANALYZING', '분석']] as const).map(([status, label]) => <div key={status}><span>{label}</span><strong>{d.analyses.by_status[status] ?? 0}</strong></div>)}</div><p className="muted">최근 24시간 부분 완료 {d.analyses.partially_completed_24h}건 · 실패 {d.analyses.failed_24h}건</p></article><article className="panel"><div className="section-heading"><div><p className="eyebrow">COLLECTION QUALITY</p><h2>센서 수집 품질</h2></div><Link to="/sensors">전체 센서 보기</Link></div>{d.sensor_quality.length ? <ul className="dashboard-list">{d.sensor_quality.slice(0, 5).map(sensor => <li key={sensor.sensor_id}><Link to={`/sensors/${sensor.sensor_id}`}><span className={`badge ${sensor.status.toLowerCase()}`}>{sensor.status}</span><strong>{sensor.name}</strong><small>수신 {sensor.received_packets.toLocaleString()} · 누락 {sensor.dropped_packets.toLocaleString()} · 드롭률 {sensor.drop_rate_percent.toFixed(2)}%</small>{sensor.last_error && <small className="error-text">{sensor.last_error}</small>}</Link></li>)}</ul> : <div className="state compact-state">등록된 센서가 없습니다.</div>}</article></section><section className="panel"><div className="section-heading"><div><p className="eyebrow">RECENT ACTIVITY</p><h2>최근 분석</h2></div><Link to="/analyses">분석 기록 보기</Link></div>{d.recent_analyses.length ? <div className="table-wrap"><table aria-label="최근 분석"><thead><tr><th>분석</th><th>상태</th><th>후보</th><th>Packets / Flows</th><th>생성</th></tr></thead><tbody>{d.recent_analyses.map(job => <tr key={job.id}><td><Link to={`/analyses/${job.id}`}>{job.name}</Link></td><td><span className={`badge ${job.status.toLowerCase()}`}>{job.status}</span></td><td>{job.candidate_count ?? 0}</td><td>{(job.packet_count ?? 0).toLocaleString()} / {(job.flow_count ?? 0).toLocaleString()}</td><td>{fmt(job.created_at)}</td></tr>)}</tbody></table></div> : <div className="state compact-state">아직 생성된 분석이 없습니다.</div>}</section><p className="dashboard-updated">마지막 집계 {fmt(d.generated_at)} · 30초마다 자동 갱신</p></div>}</AsyncState></>;
+  return <>
+<header className="header-actions">
+<div>
+<p className="eyebrow">OPERATIONS OVERVIEW</p>
+<h1>Dashboard</h1>
+<p className="muted">센서 상태와 탐지 결과를 한눈에 확인하고 우선 조사 대상을 바로 처리합니다.</p>
+</div>
+<div className="actions">
+<Link className="button-link secondary-link" to="/analyses/upload">PCAP 업로드</Link>
+<Link className="button-link" to="/analyses/new">새 분석</Link>
+</div>
+</header>
+<AsyncState query={query}>{d => <div className="dashboard">
+<p className="dashboard-updated">마지막 집계 <time dateTime={d.generated_at}>{fmt(d.generated_at)}</time> · 30초마다 자동 갱신</p>
+<section className="dashboard-trust" aria-labelledby="dashboard-trust-heading">
+<h2 id="dashboard-trust-heading">집계 범위 및 수집 제한</h2>
+<p>
+<Link to="/sensors">오프라인 {d.fleet.offline} · 성능 저하 {d.fleet.degraded} · 누락 패킷 {d.fleet.dropped_packets.toLocaleString()}</Link> (전체 센서 누적 보고값)</p>
+<p>
+<Link to="/analyses">최근 24시간 부분 완료 {d.analyses.partially_completed_24h}건 · 실패 {d.analyses.failed_24h}건</Link>
+</p>
+<p className="muted">집계 시각은 개별 관측의 최신성을 보장하지 않습니다. 후보의 마지막 관측과 센서 heartbeat를 함께 확인하세요.</p>
+</section>
+<section className="dashboard-action-grid">
+<article className="panel">
+<div className="section-heading">
+<div>
+<p className="eyebrow">REVIEW QUEUE</p>
+<h2>분석 및 조치 필요 후보</h2>
+</div>
+<span className="queue-summary">분석 필요 {d.candidates.needs_review} · 분석 중 {d.candidates.in_review} · 조치 필요 {d.candidates.action_required}</span>
+<Link to="/candidates">후보 목록</Link>
+</div>{d.priority_candidates.length ? <ul className="dashboard-list candidates" aria-label="분석 및 조치 필요 후보">{d.priority_candidates.map(candidate => <li key={candidate.id}>
+<Link to={`/candidates/${candidate.id}`}>
+<span className={`badge ${candidate.severity.toLowerCase()}`}>{candidate.severity}</span>
+<strong>{candidate.candidate_ip}</strong>
+<small className="dashboard-workflow">{candidate.workflow_status ? <CandidateWorkflowBadge candidate={candidate}/> : '처리 상태 미보고'}</small>
+<small>점수 {candidate.score} · 근거 {candidate.evidence_count ?? candidate.evidence?.length ?? 0}개 · 마지막 관측 {fmt(candidate.last_seen)}</small>
+</Link>
+</li>)}</ul> : <div className="state compact-state">분석이 필요한 Candidate가 없습니다.</div>}</article>
+<article className="panel attention-panel">
+<div className="section-heading">
+<div>
+<p className="eyebrow">ACTION QUEUE</p>
+<h2>지금 확인할 항목</h2>
+</div>
+<strong>{d.attention.length}</strong>
+</div>{d.attention.length ? <ul className="dashboard-list">{d.attention.map((item, index) => <li key={`${item.kind}-${item.href}-${index}`}>
+<Link to={item.href}>
+<span className={`badge ${item.severity.toLowerCase()}`}>{item.severity}</span>
+<strong>{item.title}</strong>
+<small>{item.detail}</small>
+</Link>
+</li>)}</ul> : <div className="state compact-state">즉시 확인할 운영 경고가 없습니다.</div>}</article>
+</section>
+<section className="dashboard-overview-grid">
+<article className="panel">
+<div className="section-heading">
+<div>
+<p className="eyebrow">PIPELINE</p>
+<h2>분석 파이프라인</h2>
+</div>
+<Link to="/analyses">전체 상태 보기</Link>
+</div>
+<div className="pipeline-status-grid">{([['WAITING_FOR_SENSOR', '센서 대기'], ['CAPTURING', '캡처'], ['UPLOADING', '업로드'], ['INGESTING', '적재'], ['ANALYZING', '분석']] as const).map(([status, label]) => <div key={status}>
+<span>{label}</span>
+<strong>{d.analyses.by_status[status] ?? 0}</strong>
+</div>)}</div>
+<p className="muted">최근 24시간 부분 완료 {d.analyses.partially_completed_24h}건 · 실패 {d.analyses.failed_24h}건</p>
+</article>
+<article className="panel">
+<div className="section-heading">
+<div>
+<p className="eyebrow">COLLECTION QUALITY</p>
+<h2>센서 수집 품질</h2>
+</div>
+<Link to="/sensors">전체 센서 보기</Link>
+</div>{d.sensor_quality.length ? <ul className="dashboard-list">{d.sensor_quality.slice(0, 5).map(sensor => <li key={sensor.sensor_id}>
+<Link to={`/sensors/${sensor.sensor_id}`}>
+<span className={`badge ${sensor.status.toLowerCase()}`}>{sensor.status}</span>
+<strong>{sensor.name}</strong>
+<small>수신 {sensor.received_packets.toLocaleString()} · 누락 {sensor.dropped_packets.toLocaleString()} · 드롭률 {sensor.drop_rate_percent.toFixed(2)}%</small>{sensor.last_error && <small className="error-text">{sensor.last_error}</small>}</Link>
+</li>)}</ul> : <div className="state compact-state">등록된 센서가 없습니다.</div>}</article>
+</section>
+<section className="metrics dashboard-metrics" aria-label="운영 핵심 지표">
+<article className="metric">
+<span>온라인 센서</span>
+<strong>{d.fleet.online} / {d.fleet.total}</strong>
+<small>오프라인 {d.fleet.offline} · 성능 저하 {d.fleet.degraded}</small>
+</article>
+<article className="metric">
+<span>통신 상태</span>
+<strong>{d.candidates.communication_status}</strong>
+<small>C2 위협 점수와 분리된 운영 관측</small>
+</article>
+<article className={`metric ${d.candidates.action_required + (d.candidates.action_in_progress ?? 0) ? 'threat' : ''}`}>
+<span>조치 필요</span>
+<strong>{d.candidates.action_required + (d.candidates.action_in_progress ?? 0)}</strong>
+<small>대기 {d.candidates.action_required} · 진행 중 {d.candidates.action_in_progress ?? 0}</small>
+</article>
+<article className="metric">
+<span>분석 필요</span>
+<strong>{d.candidates.needs_review}</strong>
+<small>최근 24시간 신규 {d.candidates.new_24h}</small>
+</article>
+<article className="metric">
+<span>진행 중 분석</span>
+<strong>{d.analyses.active}</strong>
+<small>24시간 내 완료 {d.analyses.completed_24h}</small>
+</article>
+<article className={`metric ${d.analyses.failed_24h ? 'warning' : ''}`}>
+<span>24시간 내 실패</span>
+<strong>{d.analyses.failed_24h}</strong>
+<small>전체 분석 {d.analyses.total}</small>
+</article>
+<article className={`metric ${d.fleet.dropped_packets ? 'warning' : ''}`}>
+<span>센서 누락 패킷</span>
+<strong>{d.fleet.dropped_packets.toLocaleString()}</strong>
+<small>전체 센서 누적 보고값</small>
+</article>
+</section>
+<section className="dashboard-overview-grid">
+<article className="panel">
+<div className="section-heading">
+<div>
+<p className="eyebrow">THREAT TREND</p>
+<h2>최근 24시간 후보 추세</h2>
+</div>
+<Link to="/candidates">전체 후보 보기</Link>
+</div>
+<MiniChart values={d.candidate_trend.map(bucket => bucket.count)} label="최근 24시간 시간별 신규 후보" />
+</article>
+<article className="panel">
+<div className="section-heading">
+<div>
+<p className="eyebrow">SEVERITY</p>
+<h2>후보 심각도</h2>
+</div>
+<strong>{d.candidates.total}</strong>
+</div>
+<div className="severity-bars">{(['critical', 'high', 'medium', 'low'] as const).map(severity => { const value = d.candidates[severity]; const percent = d.candidates.total ? value / d.candidates.total * 100 : 0; return <div key={severity}>
+<div>
+<span className={`badge ${severity}`}>{severity.toUpperCase()}</span>
+<strong>{value}</strong>
+</div>
+<span className={`severity-track ${severity}`}>
+<span style={{ width: `${percent}%` }} />
+</span>
+</div>; })}</div>
+</article>
+</section>
+<section className="panel">
+<div className="section-heading">
+<div>
+<p className="eyebrow">RECENT ACTIVITY</p>
+<h2>최근 분석</h2>
+</div>
+<Link to="/analyses">분석 기록 보기</Link>
+</div>{d.recent_analyses.length ? <div className="table-wrap">
+<table aria-label="최근 분석">
+<thead>
+<tr>
+<th>분석</th>
+<th>상태</th>
+<th>후보</th>
+<th>Packets / Flows</th>
+<th>생성</th>
+</tr>
+</thead>
+<tbody>{d.recent_analyses.map(job => <tr key={job.id}>
+<td>
+<Link to={`/analyses/${job.id}`}>{job.name}</Link>
+</td>
+<td>
+<span className={`badge ${job.status.toLowerCase()}`}>{job.status}</span>
+</td>
+<td>{job.candidate_count ?? 0}</td>
+<td>{(job.packet_count ?? 0).toLocaleString()} / {(job.flow_count ?? 0).toLocaleString()}</td>
+<td>{fmt(job.created_at)}</td>
+</tr>)}</tbody>
+</table>
+</div> : <div className="state compact-state">아직 생성된 분석이 없습니다.</div>}</section>
+</div>}</AsyncState>
+</>;
 }
 
 function MiniChart({ values, label }: { values: number[]; label: string }) {
