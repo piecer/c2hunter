@@ -7,7 +7,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, expect, it, vi } from 'vitest';
 import App from '../src/App';
 import { warningLabel } from '../src/reportTranslations';
-import { openCoverage, openEvidence } from './reportDisclosure';
+import { openCoverage, openEvidence, openMeasurements } from './reportDisclosure';
 
 const python = process.env.C2HUNTER_TEST_PYTHON ?? process.env.C2HUNTER_PYTHON ?? resolve('../.venv/bin/python');
 const generate = () => JSON.parse(execFileSync(python, ['tests/network_epoch_fixture.py', '--projection'], { encoding: 'utf8', timeout: 60000, maxBuffer: 16 * 1024 * 1024 }));
@@ -66,6 +66,7 @@ it('shows recovered SYN evidence with sticky cap and actual parser omission in t
   openCoverage();
   for (const code of report.warnings) expect(screen.getByText(warningLabel('en', code))).toBeVisible();
   openEvidence();
+  openMeasurements();
   const article = within(screen.getByRole('article'));
   for (const text of [...report.issues[0].evidence, ...report.issues[0].uncertainty, ...report.issues[0].next_checks]) expect(article.getByText(text)).toBeVisible();
   expect(article.getByRole('region', { name: 'Representative flow evidence' })).toBeVisible();
@@ -73,7 +74,7 @@ it('shows recovered SYN evidence with sticky cap and actual parser omission in t
   expect(report.issues[0].event_count).toBe(1);
   expect(report.issues[0].examples[0].measurements.reasons).toContain('CORRELATION_LIMIT_REACHED');
   expect(fetcher).toHaveBeenCalled();
-  fireEvent.change(screen.getByRole('combobox'), { target: { value: 'ko' } });
+  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'ko' } });
   expect(screen.getByRole('heading', { name: '이상 징후 관찰됨' })).toBeVisible();
 });
 

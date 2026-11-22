@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import NetworkAIInterpretation from '../src/NetworkAIInterpretation';
-import { openAI, openEvidence } from './reportDisclosure';
+import { openAI, openEvidence, openMeasurements } from './reportDisclosure';
 import { vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
@@ -82,14 +82,22 @@ it('bounds the full report and AI with one lazy detail owner and all three real 
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const { container } = render(<QueryClientProvider client={client}><NetworkAnomalyPanel report={report}><NetworkAIInterpretation jobId="glance" completed/></NetworkAnomalyPanel></QueryClientProvider>);
   openEvidence();
-  expect(screen.getAllByRole('region', { name: 'Supporting measurements' })).toHaveLength(3);
+  for (let example = 0; example < 3; example++) {
+    openMeasurements(example);
+    expect(screen.getAllByRole('region', { name: 'Supporting measurements' })).toHaveLength(1);
+    expect(container.querySelectorAll('*').length).toBeLessThan(500);
+  }
   await openAI(true);
   expect(screen.queryByRole('region', { name: 'Supporting measurements' })).not.toBeInTheDocument();
   expect(document.querySelectorAll('*').length).toBeLessThanOrEqual(2500);
   expect(screen.getByRole('article', { name: 'Full AI interpretation' })).toHaveTextContent(refs[19]);
   openEvidence(1);
   expect(screen.queryByRole('article', { name: 'Full AI interpretation' })).not.toBeInTheDocument();
-  expect(screen.getAllByRole('region', { name: 'Supporting measurements' })).toHaveLength(3);
+  for (let example = 0; example < 3; example++) {
+    openMeasurements(example);
+    expect(screen.getAllByRole('region', { name: 'Supporting measurements' })).toHaveLength(1);
+    expect(container.querySelectorAll('*').length).toBeLessThan(500);
+  }
   expect(container.querySelectorAll('*').length).toBeLessThan(500);
   expect(fetcher.mock.calls.length).toBeGreaterThan(0);
   client.clear();

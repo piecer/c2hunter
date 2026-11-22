@@ -67,7 +67,9 @@ for (const width of [1280, 390]) for (const language of ['ko', 'en']) {
     const expanded = await geometry(page); expect(expanded.document).toBeLessThanOrEqual(width); expect(expanded.nodes).toBeLessThan(900);
     await detail.screenshot({ path: info.outputPath('candidate.png') });
     await inspect.focus(); await page.keyboard.press('Enter'); await expect(inspect).toBeFocused(); await expect(detail).toHaveCount(0);
-    await toggle.focus(); await page.keyboard.press('Enter'); await expect(toggle).toBeFocused();
+    if (width < 600) await page.getByRole('button', { name: /Close detail|상세 닫기/ }).click();
+    else { await toggle.focus(); await page.keyboard.press('Enter'); }
+    await expect(toggle).toBeFocused();
     expect((await geometry(page)).nodes).toBe(initial.nodes);
     expect(errors).toEqual([]); expect(writes).toEqual([]);
     await info.attach('geometry', { body: JSON.stringify({ initial, expanded, collapsed: await geometry(page) }), contentType: 'application/json' });
@@ -108,12 +110,19 @@ for (const width of [1280, 390]) for (const language of ['ko', 'en']) {
           peak = Math.max(peak, bounds.nodes);
           if (name === 'maximum' && reached === 0 && c === 0) {
             const action = page.getByLabel(language === 'en' ? 'Normal reference action' : '정상 참조 작업');
+            if (width < 600) await page.getByRole('button', { name: /Close detail|상세 닫기/ }).click();
             await action.selectOption('select'); await expect(page.getByRole('radio')).toHaveCount(20);
+            if (width < 600) await toggles.nth(i).click();
             const combined = await geometry(page); expect(combined.document).toBeLessThanOrEqual(width);
-            peak = Math.max(peak, combined.nodes); await action.selectOption('clear');
+            peak = Math.max(peak, combined.nodes);
+            if (width < 600) await page.getByRole('button', { name: /Close detail|상세 닫기/ }).click();
+            await action.selectOption('clear');
+            if (width < 600) await toggles.nth(i).click();
           }
         }
-        await toggles.nth(i).click(); reached++;
+        if (width < 600) await page.getByRole('button', { name: /Close detail|상세 닫기/ }).click();
+        else await toggles.nth(i).click();
+        reached++;
       }
       const next = page.getByRole('navigation', { name: language === 'en' ? 'DDoS finding pages' : 'DDoS 발견 항목 페이지' }).getByRole('button', { name: language === 'en' ? 'Next' : '다음', exact: true });
       if (!(await next.count()) || await next.isDisabled()) break;

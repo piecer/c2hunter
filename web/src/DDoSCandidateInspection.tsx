@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { type ReactNode, useState } from 'react';
 import { downloadDDoSExport, passiveSelection, type ExportJob } from './ddosExport';
 import type { DDoSAttackReport, DDoSFinding } from './ddosReportContract';
 import type { MatchResult } from './ddosSignatures';
@@ -21,7 +21,7 @@ const filterReasons: Record<string, [string, string]> = {
   SAME_CAPTURE_DECODED_IPV4_UDP_PREDICATE: ['Direction uses internal-network membership, not the capture-interface inbound keyword.', '방향은 캡처 인터페이스의 inbound 키워드가 아닌 내부 네트워크 소속으로 판정합니다.'],
 };
 
-export default function DDoSCandidateInspection({ finding, current, report, job }: { finding: DDoSFinding; current: () => boolean; report: DDoSAttackReport; job?: ExportJob }) {
+export default function DDoSCandidateInspection({ finding, current, report, job, visible = true, children }: { finding: DDoSFinding; current: () => boolean; report: DDoSAttackReport; job?: ExportJob; visible?: boolean; children?: (inspection: ReactNode) => ReactNode }) {
   const language = useReportLanguage();
   const t = (en: string, ko: string) => language === 'ko' ? ko : en;
   const [selected, setSelected] = useState<string>();
@@ -34,7 +34,9 @@ export default function DDoSCandidateInspection({ finding, current, report, job 
     <p>{t('Evidence digest:', '근거 다이제스트:')} <code>{result.evidence_digest}</code></p>
     <p>{t('Matched evidence references (at most 8):', '일치 근거 참조 (최대 8개):')} {result.evidence_refs.join(', ') || '—'}</p>
   </>;
-  return <><h5>{t('Signature candidates', '시그니처 후보')}</h5>
+  // The bounded report owns this controller, not its optional evidence body.
+  // Selection and refused export receipts survive page and surface switches.
+  const inspection = visible && Boolean(finding.signature_candidates?.length) ? <><h5>{t('Signature candidates', '시그니처 후보')}</h5>
     <ul>{finding.signature_candidates?.map(signature => {
       const selection = selected === signature.id && signature.evaluation && job ? passiveSelection(signature.evaluation.predicate, job) : null;
       return <li key={signature.id}>
@@ -61,5 +63,6 @@ export default function DDoSCandidateInspection({ finding, current, report, job 
         <ul>{signature.false_positive_codes.map(code => <li key={code}>{choose(language, falsePositiveCodes[code])}</li>)}</ul>
       </section>}
     </li>; })}</ul>
-  </>;
+  </> : null;
+  return children ? children(inspection) : inspection;
 }

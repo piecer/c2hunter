@@ -36,7 +36,7 @@ for (const width of [1280, 390]) for (const language of ['en', 'ko']) {
     await page.goto('/analyses/citation-job');
     await expect(page.getByRole('heading', { name: ko ? '이상 징후 관찰됨' : 'Anomaly observed', exact: true })).toBeVisible();
     await expect(page.getByRole('region', { name: ko ? '입력 지원 범위' : 'Source capability', exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: /Job details/ })).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.getByRole('button', { name: ko ? '작업 정보' : 'Work information', exact: true })).toHaveAttribute('aria-expanded', 'false');
     await measure('initial');
     for (const key of ['Enter', 'Space']) {
       await page.getByRole('button', { name: ko ? 'AI 해석 열기' : 'Open AI interpretation', exact: true }).click();

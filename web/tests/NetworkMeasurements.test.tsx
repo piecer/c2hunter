@@ -1,4 +1,4 @@
-import { openGroups, openEvidence, openCoverage } from './reportDisclosure';
+import { openGroups, openEvidence, openCoverage, openMeasurements, selectExample } from './reportDisclosure';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -12,6 +12,7 @@ import NetworkAnomalyPanel, { type NetworkAnomalyReport } from '../src/NetworkAn
 const python = process.env.C2HUNTER_TEST_PYTHON ?? (existsSync('../.venv/bin/python') ? resolve('../.venv/bin/python') : 'python3');
 const generate = () => execFileSync(python, ['tests/network_report_fixture.py'], { encoding: 'utf8' });
 const fixtures = JSON.parse(generate()) as Record<string, NetworkAnomalyReport>;
+const maximumReport = JSON.parse(execFileSync(python, ['tests/network_report_fixture.py', '--maximum'], { encoding: 'utf8', maxBuffer: 20000000 })).many as NetworkAnomalyReport;
 const qualityBytes = readFileSync('tests/fixtures/network-measurement-quality.json', 'utf8');
 const qualityCases = JSON.parse(qualityBytes) as Record<string, { measurement: Record<string, unknown>; projected: unknown; accepted: boolean }>;
 it.each(['object', 'array'])('rejects non-string measurement status %s locally without losing positive or sibling evidence', kind => {
@@ -27,10 +28,13 @@ it.each(['object', 'array'])('rejects non-string measurement status %s locally w
   expect(screen.getByRole('heading', { name: 'Anomaly observed' })).toBeVisible();
   expect(screen.getAllByTestId('top-observation').length).toBeGreaterThan(1);
   openEvidence();
+  openMeasurements();
   const measurements = screen.getAllByRole('region', { name: 'Supporting measurements' });
-  expect(measurements).toHaveLength(2);
+  expect(measurements).toHaveLength(1);
   expect(measurements[0]).toHaveTextContent('Invalid measurement qualification');
-  expect(measurements[1]).toHaveTextContent('Detailed measurement analysis');
+  openMeasurements(1);
+  expect(screen.getAllByRole('region', { name: 'Supporting measurements' })).toHaveLength(1);
+  expect(screen.getByRole('region', { name: 'Supporting measurements' })).toHaveTextContent('Detailed measurement analysis');
   expect(JSON.stringify(report)).toBe(raw);
 });
 it('freezes exact actual producer and AI projection bytes', () => {
@@ -68,6 +72,7 @@ it('shows a distinct low-confidence cause hypothesis and lazy supporting measure
   openGroups();
   const article = within(screen.getAllByRole('article')[0]);
   openEvidence();
+  openMeasurements();
   expect(article.getByRole('heading', { name: 'Possible cause — hypothesis' })).toBeVisible();
   expect(article.getByText(/Low causal confidence/)).toBeVisible();
   expect(screen.queryByText(/measurements are not computed/)).not.toBeInTheDocument();
@@ -80,7 +85,7 @@ it('shows a distinct low-confidence cause hypothesis and lazy supporting measure
 it('presents the actual leading hypothesis in the overall report without inventing one for controls', () => {
   const { rerender } = render(<NetworkAnomalyPanel report={fixtures.supporting}/>);
   expect(screen.getByRole('heading', { name: 'Leading possible cause — hypothesis' })).toBeVisible();
-  fireEvent.change(screen.getByRole('combobox'), { target: { value: 'ko' } });
+  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'ko' } });
   expect(screen.getByRole('heading', { name: '주요 가능한 원인 — 가설' })).toBeVisible();
   rerender(<NetworkAnomalyPanel report={fixtures.normal}/>);
   expect(screen.queryByRole('heading', { name: '주요 가능한 원인 — 가설' })).not.toBeInTheDocument();
@@ -102,6 +107,7 @@ it('displays real eligible RTT, exclusion counts and directional dispersion with
   render(<NetworkAnomalyPanel report={fixtures.supporting}/>);
   openGroups();
   openEvidence();
+  openMeasurements();
   const detail = screen.getByRole('region', { name: 'Supporting measurements' });
   expect(detail).toHaveTextContent('Observed RTT (ms) — Samples: 2 · mean / min / max: 100 / 100 / 100 · dispersion (population stddev): 0');
   expect(detail).toHaveTextContent('Eligible RTT samples: SYN/ACK 1 · Data/ACK 1. Excluded candidate matches: ambiguous / retransmitted 1');
@@ -114,6 +120,7 @@ it('distinguishes absent RTT from zero when the actual producer excludes retrans
   render(<NetworkAnomalyPanel report={fixtures.ambiguous_rtt}/>);
   openGroups();
   openEvidence();
+  openMeasurements();
   const detail = screen.getByRole('region', { name: 'Supporting measurements' });
   expect(detail).toHaveTextContent('Observed RTT (ms) — Samples: 0 · mean / min / max: Unknown / Unknown / Unknown');
   expect(detail).toHaveTextContent('ambiguous / retransmitted 1');
@@ -124,10 +131,11 @@ it('explains missing metadata rather than displaying invented zero TTL values', 
   render(<NetworkAnomalyPanel report={fixtures.missing_metadata}/>);
   openGroups();
   openEvidence();
+  openMeasurements();
   const detail = screen.getByRole('region', { name: 'Supporting measurements' });
   expect(detail).toHaveTextContent('A → B: Samples 0 · min / max Unknown / Unknown · changes 0 · missing 2');
   expect(detail).toHaveTextContent('TTL / Hop Limit metadata is missing. (MISSING_TTL)');
-  fireEvent.change(screen.getByRole('combobox'), { target: { value: 'ko' } });
+  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'ko' } });
   expect(detail).toHaveTextContent('알 수 없음 / 알 수 없음');
   expect(detail).toHaveTextContent('TTL / 홉 제한 메타데이터가 없습니다. (MISSING_TTL)');
 });
@@ -136,11 +144,12 @@ it('labels actual IPv6 hop limits and preserves measured zero and variation with
   render(<NetworkAnomalyPanel report={fixtures.ipv6_hop_limit}/>);
   openGroups();
   openEvidence();
+  openMeasurements();
   const detail = screen.getByRole('region', { name: 'Supporting measurements' });
   expect(detail).toHaveTextContent('IPv4 TTL / IPv6 Hop Limit');
   expect(detail).toHaveTextContent('A → B: Samples 3 · min / max 0 / 64 · changes 2 · missing 0');
   expect(detail).toHaveTextContent('variation is not proof of route changes');
-  fireEvent.change(screen.getByRole('combobox'), { target: { value: 'ko' } });
+  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'ko' } });
   expect(detail).toHaveTextContent('IPv4 TTL / IPv6 홉 제한');
   expect(detail).toHaveTextContent('최소 / 최대 0 / 64 · 변화 2');
 });
@@ -157,6 +166,7 @@ it('does not upgrade old saved reports and clears new measurements on report rep
   delete old.measurement_version;
   const { rerender } = render(<NetworkAnomalyPanel report={fixtures.supporting}/>);
   openEvidence();
+  openMeasurements();
   expect(screen.getByRole('region', { name: 'Supporting measurements' })).toBeVisible();
   rerender(<NetworkAnomalyPanel report={old}/>);
   openCoverage();
@@ -164,12 +174,13 @@ it('does not upgrade old saved reports and clears new measurements on report rep
   expect(screen.queryByRole('region', { name: 'Supporting measurements' })).not.toBeInTheDocument();
   expect(screen.queryByRole('heading', { name: 'Possible cause — hypothesis' })).not.toBeInTheDocument();
   openEvidence();
+  selectExample();
   expect(screen.getByText('tcp_sequence: 104')).toBeVisible();
   expect(screen.queryByRole('region', { name: 'Supporting measurements' })).not.toBeInTheDocument();
 });
 
-it('bounds new reports to eight groups and three lazily mounted examples with one detail owner', () => {
-  const report = JSON.parse(execFileSync(python, ['tests/network_report_fixture.py', '--maximum'], { encoding: 'utf8', maxBuffer: 20000000 })).many as NetworkAnomalyReport;
+it('bounds new reports to eight groups and all ten sequentially mounted examples with one detail owner', () => {
+  const report = maximumReport;
   expect(report.issues).toHaveLength(100);
   expect(report.issues!.every(issue => issue.examples.length === 10)).toBe(true);
   const { container, rerender } = render(<NetworkAnomalyPanel report={report}/>);
@@ -179,7 +190,11 @@ it('bounds new reports to eight groups and three lazily mounted examples with on
   for (const button of screen.getAllByRole('button', { name: /representative evidence/ })) {
     fireEvent.click(button);
     expect(screen.getAllByRole('region', { name: 'Representative flow evidence' })).toHaveLength(1);
-    expect(screen.getAllByRole('region', { name: 'Supporting measurements' })).toHaveLength(3);
+    for (let example = 0; example < 10; example++) {
+      openMeasurements(example);
+      expect(screen.getAllByRole('region', { name: 'Supporting measurements' })).toHaveLength(1);
+      expect(container.querySelectorAll('*').length).toBeLessThan(500);
+    }
     expect(container.querySelectorAll('*').length).toBeLessThan(500);
   }
   rerender(<NetworkAnomalyPanel report={fixtures.normal}/>);
@@ -195,9 +210,11 @@ it('fails closed for unsupported cause codes and suppresses untrusted cause and 
   openGroups();
   const article = within(screen.getByRole('article'));
   openEvidence();
+  openMeasurements();
   expect(article.getByText(/no supported cause hypothesis/)).toBeVisible();
   expect(article.queryByText(/Low causal confidence/)).not.toBeInTheDocument();
   openEvidence();
+  openMeasurements();
   expect(container).not.toHaveTextContent('POISON');
   expect(screen.getByRole('region', { name: 'Supporting measurements' })).not.toHaveTextContent('123');
 });

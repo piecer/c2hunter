@@ -1,0 +1,42 @@
+/* DDoS-only hierarchy. No global typography or shared report styles changed. */
+.ddos-report .ddos-glance { display: block; }
+.ddos-result-header { margin-bottom: .75rem; }
+.ddos-report .ddos-glance h3 { margin-block: .4rem; font-size: 1rem; }
+.ddos-report .ddos-glance .ddos-primary { padding: 0; }
+.ddos-report .ddos-primary .eyebrow { letter-spacing: normal; }
+.ddos-glance > *, .ddos-glance .ddos-primary > *, .ddos-glance .ddos-next > * { margin-block: .5rem; }
+.ddos-glance .ddos-primary { margin-block: .8rem; }
+.ddos-glance .ddos-top-patterns { margin-block: .4rem; padding-left: 1.25rem; }
+.ddos-glance .ddos-top-patterns li { margin-block: .25rem; }
+.ddos-glance .ddos-next { margin-block: .8rem; padding: .75rem; }
+.ddos-report code, .pcap-guidance code { overflow-wrap: anywhere; }
+.ddos-report button, .pcap-guidance button { max-width: 100%; white-space: normal; }
+.ddos-full-name { overflow-wrap: anywhere; }
+.content:has(.ddos-result-header) input, .content:has(.ddos-result-header) select { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.ddos-responsive-detail { position: static; color: inherit; background: #101827; border: 1px solid #394459; border-radius: 12px; padding: 1rem; width: 100%; max-width: 100%; margin: 1rem 0; box-sizing: border-box; overflow-wrap: anywhere; }
+.ddos-responsive-detail::backdrop { background: #000a; }
+@media (max-width: 599px) {
+  .ddos-responsive-detail { position: fixed; inset: 0; margin: auto; width: calc(100% - 1rem); max-height: calc(100dvh - 1rem); overflow: auto; overscroll-behavior: contain; }
+}
+@media (max-width: 600px) {
+  .shell:has(.ddos-result-header) > aside { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .shell:has(.ddos-result-header) .brand { min-width: 0; overflow-wrap: anywhere; }
+  .shell:has(.ddos-result-header) .navigation-toggle { max-width: 100%; white-space: normal; }
+  .ddos-job-warnings { padding: .5rem .75rem; margin-bottom: .5rem; }
+  .ddos-job-warnings p { margin-block: .25rem; }
+  .ddos-report { padding: 12px; }
+  .ddos-glance > *, .ddos-glance .ddos-primary > *, .ddos-glance .ddos-next > * { margin-block: .25rem; }
+  .ddos-glance .ddos-primary, .ddos-glance .ddos-next { margin-block: .4rem; }
+  .ddos-glance .ddos-top-patterns { display: flex; flex-wrap: wrap; gap: .2rem 1.2rem; }
+  .ddos-result-header h1 { margin-block: .25rem; }
+  .ddos-report .ddos-glance { padding: 0; }
+  .ddos-report .ddos-glance h2 { font-size: 1.25rem; margin-block: .25rem; }
+  .ddos-report .ddos-next details { padding: 0; margin-block: .125rem; }
+  .ddos-report .ddos-glance h3 { margin-block: .25rem; }
+  .ddos-report .ddos-primary { display: flex; align-items: baseline; flex-wrap: wrap; gap: .25rem .75rem; }
+  .ddos-report .ddos-primary .eyebrow { flex-basis: 100%; }
+  .ddos-report .ddos-top-patterns { margin-block: .125rem; }
+  .ddos-result-header h1 { font-size: 1.35rem; }
+  .ddos-result-header .eyebrow { margin-block: .3rem; }
+  .ddos-glance .ddos-next { padding: .5rem; }
+}

@@ -83,6 +83,7 @@ it('keeps accepting stored v1 reports without v2-only fields', () => {
 it('renders v2 delivery source authenticity patterns and review-only signatures', () => {
   render(<DDoSAttackPanel report={scenarios.possible_reflection}/>);
   const glance = screen.getByRole('region', { name: 'DDoS 한눈에 보기' });
+  fireEvent.click(screen.getByRole('button', { name: '해석 범위와 주의 사항' }));
   expect(within(glance).getByText(/반사·증폭 전달/)).toBeVisible();
   expect(within(glance).getByText(/reflector 집합/)).toBeVisible();
   expect(within(glance).getByText(/Spoofing 미확인/)).toBeVisible();
@@ -143,8 +144,12 @@ it('shows one DDoS verdict type and investigation first, with reviewed responses
   const glance = screen.getByRole('region', { name: 'DDoS 한눈에 보기' });
   expect(within(glance).getByRole('heading', { name: '의심스러운 DDoS 형태 관찰' })).toBeVisible();
   expect(within(glance).getByText('TCP SYN 플러드')).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: '해석 범위와 주의 사항' }));
   expect(within(glance).getByText(/연결 상태 자원 고갈/)).toBeVisible();
   expect(within(glance).queryByText(/SYN 프록시 또는 SYN 쿠키/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: '해석 범위와 주의 사항' }));
+  fireEvent.click(within(glance).getByText('유형별 확인과 관찰 시각').closest('details')!.querySelector('summary')!);
+  fireEvent(within(glance).getByText('유형별 확인과 관찰 시각').closest('details')!, new Event('toggle'));
   expect(within(glance).getByText(/SYN-ACK 응답/)).toBeVisible();
   fireEvent.click(screen.getByRole('button', { name: /상세 근거 보기/ }));
   expect(within(screen.getByRole('region', { name: 'DDoS 발견 근거' })).getByText(/SYN 프록시 또는 SYN 쿠키/)).toBeVisible();
@@ -154,7 +159,9 @@ it('shows one DDoS verdict type and investigation first, with reviewed responses
   expect(screen.getByRole('heading', { name: 'Suspicious DDoS-shaped traffic observed' })).toBeVisible();
   const englishGlance = screen.getByRole('region', { name: 'DDoS at a glance' });
   expect(within(englishGlance).getByText('TCP SYN flood')).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: 'Interpretation scope and caveats' }));
   expect(within(englishGlance).getByText(/connection-state resource exhaustion/i)).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: /Show detailed evidence/ }));
   expect(within(screen.getByRole('region', { name: 'DDoS finding evidence' })).getByText(/Enable a SYN proxy or SYN cookies/)).toBeVisible();
 });
 

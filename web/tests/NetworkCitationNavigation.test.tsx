@@ -112,6 +112,8 @@ it.each(['quality-extra', 'quality-absent-to-null', 'quality-removed', 'measurem
   const captured = Object.values(button()).find(value => value && typeof value === 'object' && 'onClick' in value) as { onClick: () => void };
   expect(captured.onClick).toBeTypeOf('function');
   fireEvent.click(button()); expect(region()).toHaveFocus();
+  fireEvent.change(screen.getByLabelText('Representative example'), { target: { value: '0' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Full measurements' }));
   expect(region()).toHaveTextContent('Detailed measurement analysis');
   const changed = structuredClone(job), example = changed.network_anomaly.issues[19].examples[0], m = example.measurements;
   if (fault === 'quality-extra') m.metric_quality.extra = null;

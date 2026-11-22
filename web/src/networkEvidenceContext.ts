@@ -5,13 +5,14 @@ import { projectNetworkReport, record, safeCount } from './networkReportValidati
 import { parseMeasurementQuality } from './networkMeasurementQuality';
 export type NetworkEvidenceJob = { id: string; dataset_id?: string; status: string };
 export type EvidenceRun = { id: string; analysis_job_id?: string; dataset_id?: string; analysis_kind: string; status: string; network_input?: unknown };
+export type EvidenceSelection = { index: number; exampleIndex?: number; measurement?: 'rtt' | 'spacing' | 'ttl' | 'full' };
 export type EvidenceContext = {
   job?: NetworkEvidenceJob;
   projection: ReturnType<typeof projectNetworkReport>;
   generation: object;
   current: () => boolean;
-  selection?: { index: number };
-  navigate: (index: number) => void;
+  selection?: EvidenceSelection;
+  navigate: (index: number, detail?: Omit<EvidenceSelection, 'index'>) => void;
 };
 export const NetworkEvidenceContext = createContext<EvidenceContext | undefined>(undefined);
 export const useNetworkEvidence = () => useContext(NetworkEvidenceContext);

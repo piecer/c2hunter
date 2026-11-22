@@ -22,6 +22,8 @@ it.each([
     const primary = scenario.findings.find((item: { id: string }) => item.id === scenario.primary_finding_id);
     const { unmount } = render(<DDoSAttackPanel report={scenario}/>);
     const next = screen.getByRole('region', { name: language === 'en' ? 'Next check' : '다음 확인' });
+    fireEvent.click(within(next).getByText(/Family check and observed time|유형별 확인과 관찰 시각/).closest('details')!.querySelector('summary')!);
+    fireEvent(within(next).getByText(/Family check and observed time|유형별 확인과 관찰 시각/).closest('details')!, new Event('toggle'));
     expect(next).toHaveTextContent(language === 'en' ? en : ko);
     expect(next).toHaveTextContent(primary.first_seen);
     expect(next).toHaveTextContent(primary.last_seen);
@@ -37,6 +39,7 @@ it.each([
 it.each(['en', 'ko'])('distinguishes same-capture low-bucket statistics from operator-selected predicate reference in %s', language => {
   localStorage.setItem('c2hunter-report-language', language);
   render(<DDoSAttackPanel report={report}/>);
+  fireEvent.click(screen.getByRole('button', { name: /Interpretation scope and caveats|해석 범위와 주의 사항/ }));
   expect(screen.getByText(language === 'en' ? /same-capture low-traffic buckets/ : /같은 캡처의 저트래픽 버킷/)).toBeVisible();
   expect(screen.getByText(language === 'en' ? /operator-selected normal reference.*predicate evaluation.*does not upgrade/ : /운영자가 선택한 정상 참조.*조건식 평가.*상향하지/)).toBeVisible();
 });
@@ -48,6 +51,7 @@ it('scopes the three axes to the selected target and leads with patterns and nex
   expect(within(glance).getByText(/Selected target assessment — not a report-wide classification/)).toBeVisible();
   expect(within(glance).getByRole('heading', { name: 'Key observed patterns' })).toBeVisible();
   expect(within(glance).getByRole('heading', { name: 'Next check' })).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: 'Interpretation scope and caveats' }));
   expect(within(glance).getByText(/Botnet-like is not confirmed botnet/)).toBeVisible();
 });
 it('mounts only the selected candidate, includes complete denominators and removes it on owner replacement', () => {

@@ -1,4 +1,6 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useLayoutEffect, useId, useRef, useState } from 'react';
+import DDoSResponsiveDetail from './DDoSResponsiveDetail';
+import { useDDoSDetail } from './ddosDetailContext';
 import { useReportLanguage } from './reportLanguageContext';
 import { validatePcapGuidanceJob, type GuidanceCandidate, type GuidanceCode, type PcapGuidance } from './pcapAttackGuidance';
 import { guidanceText } from './pcapGuidanceTranslations';
@@ -44,13 +46,17 @@ function OwnedGuidance({ job, guide, signature, detailOwner, setDetailOwner }: P
   const t = (en: string, ko: string) => language === 'en' ? en : ko;
   const [page, setPage] = useState(0);
   const [localOwner, setLocalOwner] = useState<string>();
-  const owner = setDetailOwner ? detailOwner : localOwner;
-  const setOwner = setDetailOwner ?? setLocalOwner;
+  const [coverageOpen, setCoverageOpen] = useState(false);
+  const shared = useDDoSDetail();
+  const owner = shared ? shared.owner : setDetailOwner ? detailOwner : localOwner;
+  const setOwner = shared?.select ?? setDetailOwner ?? setLocalOwner;
   const prefix = useId();
+  const listKey = `${prefix}:windows`;
+  const open = owner === listKey || Boolean(owner?.startsWith(`${prefix}:candidate:`));
   const alive = useRef(true);
-  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const current = () => {
-    if (!alive.current) return false;
+    if (!alive.current || (shared && !shared.current())) return false;
     const result = validatePcapGuidanceJob(job);
     return result.state === 'VALID' && JSON.stringify(result.guide) === signature;
   };
@@ -61,11 +67,15 @@ function OwnedGuidance({ job, guide, signature, detailOwner, setDetailOwner }: P
       : t('Insufficient observations for window review', '구간 검토를 위한 관찰 부족');
   return <section className="panel pcap-guidance" role="region" aria-label={t('PCAP review guidance', 'PCAP 검토 안내')}>
     <p className="eyebrow">{t('Deterministic offline PCAP review', '결정적 오프라인 PCAP 검토')}</p><h3>{heading}</h3>
-    <ul>{guide.limitations.map(code => <li key={code}>{guidanceText[code][language === 'en' ? 0 : 1]}</li>)}</ul>
+    <p>{guidanceText.REVIEW_NOT_ATTACK_CLASSIFICATION[language === 'en' ? 0 : 1]} {guidanceText.NO_CANDIDATE_NOT_CLEAN[language === 'en' ? 0 : 1]}</p>
     <h4>{t('Coverage and omissions', '관찰 범위와 생략')}</h4>
     <p>{s.coverage_complete ? t('Coverage complete for eligible observations; this is not comprehensive attack coverage.', '적격 관찰의 범위는 완전하지만 모든 공격을 평가한 것은 아닙니다.') : t('Coverage is incomplete or qualified; interpret all counts with these limits.', '관찰 범위가 불완전하거나 조건부입니다. 수치를 다음 한계와 함께 해석하세요.')}</p>
     <ul>{guide.coverage_codes.map(code => <li key={code}>{guidanceText[code][language === 'en' ? 0 : 1]} <code>{code}</code></li>)}</ul>
     <p>{t('Retained candidates:', '보존된 후보:')} {s.candidate_count} · {t('Omitted candidates:', '생략된 후보:')} {s.omitted_candidate_count}</p>
+    <p>{t('Omitted observations:', '생략된 관찰:')} {s.omitted_observation_count} · {t('Omitted matching observations:', '생략된 매칭 관찰:')} {s.response_omitted_count}</p>
+    <button type="button" className="secondary" aria-expanded={coverageOpen} onClick={() => { if (current()) setCoverageOpen(!coverageOpen); }}>{t('PCAP coverage and limitations', 'PCAP 관찰 범위와 한계')}</button>
+    {coverageOpen && <section role="region" aria-label={t('PCAP coverage and limitations', 'PCAP 관찰 범위와 한계')}>
+    <ul>{guide.limitations.map(code => <li key={code}>{guidanceText[code][language === 'en' ? 0 : 1]} <code>{code}</code></li>)}</ul>
     <p>{t('Scanned / evaluated / rejected records:', '검사 / 평가 / 거부 레코드:')} {s.scanned_records} / {s.evaluated_records} / {s.rejected_record_count}</p>
     <p>{t('Observed packets / bytes:', '관찰 패킷 / 바이트:')} {s.packet_count} / {s.byte_count} · {t('Eligible packet observations:', '적격 패킷 관찰:')} {s.eligible_packet_count} · {t('Excluded records:', '제외 레코드:')} {s.excluded_record_count}</p>
     <p>{t('Retained targets / windows:', '보존된 대상 / 구간:')} {s.retained_target_count} / {s.retained_window_count} · {t('Omitted observations:', '생략된 관찰:')} {s.omitted_observation_count}</p>
@@ -74,22 +84,26 @@ function OwnedGuidance({ job, guide, signature, detailOwner, setDetailOwner }: P
     <p>{t('Temporal reply evidence is heuristic: it does not prove completed TCP handshakes, successful requests or service health.', '시간순 응답 근거는 휴리스틱이며 TCP handshake 완료, 요청 성공 또는 서비스 정상을 입증하지 않습니다.')}</p>
     <p>{t('Observed capture bounds (UTC):', '관찰 캡처 범위 (UTC):')} {s.first_seen ?? t('Unavailable', '사용 불가')} → {s.last_seen ?? t('Unavailable', '사용 불가')}</p>
     <p>{t('Before any response, preserve the capture and correlate target/time with existing service logs. These checks do not execute mitigation.', '대응 전 캡처를 보존하고 대상·시각을 기존 서비스 로그와 대조하세요. 이 확인 절차는 완화 조치를 실행하지 않습니다.')}</p>
+    </section>}
+    {guide.candidates.length > 0 && <button type="button" className="secondary" aria-expanded={open} onClick={() => { if (current()) setOwner(open ? undefined : listKey); }}>{open ? t('Close PCAP review windows', 'PCAP 검토 구간 닫기') : t('Open PCAP review windows', 'PCAP 검토 구간 열기')}</button>}
+    {open && <section role="region" aria-label={t('PCAP review windows', 'PCAP 검토 구간')}>
     {guide.candidates.slice(page * 8, page * 8 + 8).map((c, offset) => {
-      const index = page * 8 + offset, key = `${prefix}:${index}`, open = owner === key;
+      const index = page * 8 + offset, key = `${prefix}:candidate:${index}`, open = owner === key;
       return <article className="panel compact" key={index}>
         <h4>{guidanceText[c.family][language === 'en' ? 0 : 1]}</h4>
         <p><code>{c.target.ip}</code> · {c.target.port ?? '—'} · {c.target.protocol} · {c.packet_count} {t('observed packets', '관찰 패킷')}</p>
         <p>{c.first_seen} → {c.last_seen}</p>
         <p>{guidanceText[c.reason_codes[0]][language === 'en' ? 0 : 1]}</p>
-        <button type="button" aria-expanded={open} aria-controls={open ? key : undefined} onClick={() => { if (current()) setOwner(open ? undefined : key); }}>{t('Review window', '검토 구간')} {index + 1}</button>
-        {open && <div id={key}><Evidence candidate={c}/></div>}
+        <button type="button" aria-expanded={open} aria-controls={open ? key : undefined} onClick={() => { if (current()) setOwner(open ? listKey : key); }}>{t('Review window', '검토 구간')} {index + 1}</button>
+        {open && <DDoSResponsiveDetail title={t('PCAP window detail', 'PCAP 구간 상세')} onClose={() => { if (current()) setOwner(listKey); }}><div id={key}><Evidence candidate={c}/></div></DDoSResponsiveDetail>}
       </article>;
     })}
     {guide.candidates.length > 0 && <nav aria-label={t('Review candidate pages', '검토 후보 페이지')}>
-      <button type="button" disabled={page === 0} onClick={() => { if (current()) { setPage(page - 1); setOwner(undefined); } }}>{t('Previous candidate page', '이전 후보 페이지')}</button>
+      <button type="button" disabled={page === 0} onClick={() => { if (current()) { setPage(page - 1); setOwner(listKey); } }}>{t('Previous candidate page', '이전 후보 페이지')}</button>
       <span role="status" aria-live="polite">{t(`Page ${page + 1} of ${pages}`, `${pages}페이지 중 ${page + 1}페이지`)}</span>
-      <button type="button" disabled={page + 1 >= pages} onClick={() => { if (current()) { setPage(page + 1); setOwner(undefined); } }}>{t('Next candidate page', '다음 후보 페이지')}</button>
+      <button type="button" disabled={page + 1 >= pages} onClick={() => { if (current()) { setPage(page + 1); setOwner(listKey); } }}>{t('Next candidate page', '다음 후보 페이지')}</button>
     </nav>}
+    </section>}
   </section>;
 }
 export function PcapGuidanceAIScope() {

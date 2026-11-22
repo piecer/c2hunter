@@ -331,6 +331,7 @@ test('analyst reviews a bounded bilingual DDoS report with isolated AI output', 
   await expect(page.getByRole('heading', { name: '의심스러운 DDoS 형태 관찰' })).toBeVisible();
   const glance = page.getByRole('region', { name: 'DDoS 한눈에 보기' });
   await expect(glance.getByRole('heading', { name: 'TCP SYN 플러드' })).toBeVisible();
+  await page.getByRole('button', { name: '해석 범위와 주의 사항' }).click();
   await expect(glance.getByText('연결 상태 자원 고갈')).toBeVisible();
   await page.getByLabel('보고서 언어 / Report language').selectOption('en');
   await expect(page.getByRole('heading', { name: 'Suspicious DDoS-shaped traffic observed' })).toBeVisible();

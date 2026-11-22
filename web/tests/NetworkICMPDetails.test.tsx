@@ -1,3 +1,4 @@
+import { selectExample } from './reportDisclosure';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -73,6 +74,7 @@ it.each(['absent','null','extra','reporter'])('blocks captured/new old-run callb
   fireEvent.click(screen.getByRole('button',{name:'View full AI text'}));
   expect(button()).toBeEnabled(); fireEvent.click(button());
   expect(screen.getByRole('region',{name:'Representative flow evidence'})).toHaveFocus();
+  selectExample();
   fireEvent.click(screen.getByRole('button',{name:'ICMP event details'}));
   expect(fetcher.mock.calls).toHaveLength(before);
   expect(document.querySelectorAll('*').length).toBeLessThanOrEqual(2500);
@@ -93,6 +95,7 @@ it('supports keyboard disclosure/paging and removes the collapsed event subtree'
   render(<ReportLanguageContext value="en"><NetworkPatternReport report={report}/></ReportLanguageContext>);
   const inspect = screen.getByRole('button',{name:/Inspect evidence/}); inspect.focus();
   await user.keyboard('{Enter}');
+  selectExample();
   const toggle = screen.getByRole('button',{name:'ICMP event details'}); toggle.focus();
   await user.keyboard('{Enter}');
   const next = screen.getByRole('button',{name:'Next event detail'}); next.focus(); await user.keyboard('{Enter}');
@@ -114,6 +117,7 @@ it.each(Array.from({length:13},(_,i)=>i))('every retained ICMP detail on maximum
     const issue = r.issues[page*8+group];
     expect(articles[group]).toHaveTextContent(issue.id);
     fireEvent.click(within(articles[group]).getByRole('button',{name:/representative evidence/}));
+    selectExample();
     fireEvent.click(screen.getByRole('button',{name:'ICMP event details'}));
     for(let example=0;example<issue.examples.length;example++) {
       const d = issue.examples[example].icmp_details;
@@ -126,7 +130,7 @@ it.each(Array.from({length:13},(_,i)=>i))('every retained ICMP detail on maximum
         if(sample+1<d.samples.length) fireEvent.click(within(region).getByRole('button',{name:'Next event detail'}));
       }
       expect(document.querySelectorAll('*').length).toBeLessThan(500);
-      if(example+1<issue.examples.length) fireEvent.click(within(region).getByRole('button',{name:'Next representative'}));
+      if(example+1<issue.examples.length) { selectExample(example+1); fireEvent.click(screen.getByRole('button',{name:'ICMP event details'})); }
     }
   }
 }, 20_000); // Retain every maximum-page detail check on shared CI runners.
@@ -135,6 +139,7 @@ it('maximum valid analyzer report stays bounded inside the full App/AI owner', a
   expect(document.querySelectorAll('*').length).toBeLessThanOrEqual(2500);
   const before = fetcher.mock.calls.length;
   fireEvent.click(screen.getByRole('button',{name:'pattern-1'}));
+  selectExample();
   fireEvent.click(screen.getByRole('button',{name:'ICMP event details'}));
   expect(document.querySelectorAll('*').length).toBeLessThanOrEqual(2500);
   expect(fetcher.mock.calls).toHaveLength(before);
@@ -145,6 +150,7 @@ it.each(['en','ko'] as const)('malformed present details show local feedback and
   render(<ReportLanguageContext value={language}><NetworkPatternReport report={r}/></ReportLanguageContext>);
   expect(screen.getByRole('heading',{name:language === 'en' ? 'Anomaly observed' : '이상 징후 관찰됨'})).toBeVisible();
   fireEvent.click(screen.getByRole('button',{name:language === 'en' ? /Inspect evidence/ : /근거 확인/}));
+  selectExample();
   fireEvent.click(screen.getByRole('button',{name:language === 'en' ? 'ICMP event details' : 'ICMP 이벤트 상세'}));
   expect(screen.getByRole('alert')).toHaveTextContent(language === 'en' ? 'Invalid ICMP details' : '잘못된 ICMP 상세');
   expect(JSON.stringify(r.issues[0].examples[0].facts)).toBe(before);
@@ -159,6 +165,7 @@ it.each(['en', 'ko'] as const)('lazily displays distinct reporters and direction
   render(<ReportLanguageContext value={language}><NetworkPatternReport report={report}/></ReportLanguageContext>);
   expect(screen.queryByText(/192\.0\.2\.2/)).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: language === 'en' ? /Inspect evidence/ : /근거 확인/ }));
+  selectExample();
   fireEvent.click(screen.getByRole('button', { name: language === 'en' ? 'ICMP event details' : 'ICMP 이벤트 상세' }));
   expect(screen.getByText(/192\.0\.2\.1/)).toBeVisible();
   fireEvent.click(screen.getByRole('button', { name: language === 'en' ? 'Next event detail' : '다음 이벤트 상세' }));
@@ -270,6 +277,7 @@ it('keeps actual 100x10 production-bounded details valid and the mounted report 
   const bound = () => expect(document.querySelectorAll('*').length).toBeLessThan(500);
   bound();
   fireEvent.click(screen.getAllByRole('button',{name:/Inspect evidence/})[0]);
+  selectExample();
   fireEvent.click(screen.getByRole('button',{name:'ICMP event details'}));
   bound();
   for (let index=0; index<10; index++) {
@@ -279,6 +287,6 @@ it('keeps actual 100x10 production-bounded details valid and the mounted report 
       bound();
       if (event+1<samples.length) fireEvent.click(screen.getByRole('button',{name:'Next event detail'}));
     }
-    if(index<9) fireEvent.click(screen.getByRole('button',{name:'Next representative'}));
+    if(index<9) { selectExample(index+1); fireEvent.click(screen.getByRole('button',{name:'ICMP event details'})); }
   }
 });

@@ -148,7 +148,7 @@ it('shows independent bidirectional network observations instead of C2 controls'
   expect(screen.getByRole('table', { name: 'Bidirectional network flows' }).querySelector('.structured-fields')).toBeNull();
   expect(screen.getByText(/INCOMPLETE_PACKET_EVIDENCE/)).toBeInTheDocument();
   expect(screen.queryByText('Candidates', { selector: 'span', exact: true })).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button', { name: '작업 상세 / Job details' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Work information' }));
   expect(screen.getByText('Observed bidirectional flows')).toBeInTheDocument();
   expect(screen.queryByText('최소 후보 점수')).not.toBeInTheDocument();
   expect(screen.queryByText('Run AI analysis')).not.toBeInTheDocument();

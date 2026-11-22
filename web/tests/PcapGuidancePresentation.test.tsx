@@ -19,7 +19,8 @@ it.each(['en', 'ko'])('explains every producer scenario and renders owned eviden
     expect(screen.queryByRole('region', { name: /Candidate evidence|후보 근거/ })).not.toBeInTheDocument();
     expect(container.querySelectorAll('a')).toHaveLength(0);
     if (guide.candidates.length) {
-      fireEvent.click(within(region).getAllByRole('button', { name: /Review window|검토 구간/ })[0]);
+      fireEvent.click(within(region).getByRole('button', { name: /Open PCAP review windows|PCAP 검토 구간 열기/ }));
+      fireEvent.click(within(region).getAllByRole('button', { name: /Review window \d|검토 구간 \d/ })[0]);
       const evidence = screen.getByRole('region', { name: language === 'en' ? 'Candidate evidence' : '후보 근거' });
       const c = guide.candidates[0];
       for (const label of language === 'en' ? ['Observed evidence', 'Why review this window', 'Caveats', 'Benign alternatives', 'Passive next checks', 'Within-capture baseline'] : ['관찰 근거', '이 구간을 검토하는 이유', '주의 사항', '정상 트래픽의 대안 설명', '수동 후속 확인', '캡처 내 기준선']) expect(within(evidence).getByRole('heading', { name: label })).toBeVisible();
@@ -35,6 +36,7 @@ it.each(['en', 'ko'])('qualifies temporal replies without claiming completed han
     const value = job(name);
     expect(value.pcap_attack_guidance.candidates).toHaveLength(count);
     const { unmount } = render(view(value));
+    fireEvent.click(screen.getByRole('button', { name: /PCAP coverage and limitations|PCAP 관찰 범위와 한계/ }));
     expect(screen.getByText(language === 'en' ? /Temporal reply evidence is heuristic/ : /시간순 응답 근거는 휴리스틱/)).toBeVisible();
     expect(screen.getByText(language === 'en' ? /Retained SYN\/SYN-ACK matching observations/ : /보존된 SYN\/SYN-ACK 매칭 관찰/)).toHaveTextContent(String(value.pcap_attack_guidance.summary.response_state_count));
     unmount();
@@ -47,6 +49,7 @@ it('keeps all 32 candidates reachable in pages of eight with one bounded lazy ow
   const initial = document.querySelectorAll('*').length;
   expect(initial).toBeLessThan(300);
   expect(screen.getByText(/Omitted candidates: 224/)).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: 'Open PCAP review windows' }));
   const seen = new Set<string>(); let peak = initial;
   for (let page = 0; page < 4; page++) {
     const buttons = screen.getAllByRole('button', { name: /Review window/ });
@@ -73,6 +76,7 @@ it('resets pages and lazy state across cached A→B→A and rejects captured sta
   localStorage.setItem('c2hunter-report-language', 'en');
   const a = job('overflow'), b = job('mixed');
   const { rerender } = render(view(a));
+  fireEvent.click(screen.getByRole('button', { name: 'Open PCAP review windows' }));
   const old = screen.getAllByRole('button', { name: /Review window/ })[0];
   const propsKey = Object.keys(old).find(k => k.startsWith('__reactProps'))!;
   const callback = (old as unknown as Record<string, { onClick: () => void }>)[propsKey].onClick;
@@ -83,6 +87,7 @@ it('resets pages and lazy state across cached A→B→A and rejects captured sta
   rerender(view(a));
   act(() => callback());
   expect(screen.queryByRole('region', { name: 'Candidate evidence' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Open PCAP review windows' }));
   expect(screen.getByRole('status')).toHaveTextContent('Page 1 of 4');
   fireEvent.click(screen.getAllByRole('button', { name: /Review window/ })[0]);
   expect(screen.getByRole('region', { name: 'Candidate evidence' })).toBeVisible();

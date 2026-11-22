@@ -77,6 +77,12 @@ it.each([false, true])('actual App numeric facts and maximum=%s preserve full sc
   fireEvent.click(within(facts).getAllByRole('button', { name: /Source/ }).at(-1)!);
   expect(screen.getByRole('region', { name: 'Representative flow evidence' })).toHaveFocus();
   expect(calls).toEqual(before);
+  if (!maximum) {
+    expect(screen.getByLabelText('Representative example')).toHaveValue('0');
+    const measurement = screen.getByRole('region', { name: 'Supporting measurements' });
+    expect(measurement).toHaveTextContent('100 / 100 / 100');
+    expect(measurement).not.toHaveTextContent('Interarrival dispersion (ms)');
+  }
   expect(document.querySelectorAll('*').length).toBeLessThanOrEqual(2500);
   if (!maximum) {
     fireEvent.click(screen.getByRole('button', { name: 'Open AI interpretation' }));
@@ -88,4 +94,45 @@ it.each([false, true])('actual App numeric facts and maximum=%s preserve full sc
     expect(screen.queryByRole('region', { name: 'Verified numeric source facts' })).toBeNull();
     expect(screen.getByText(/integer precision cannot be confirmed/)).toBeVisible();
   }
+});
+
+it.each([
+  ['observed_rtt_ms-None-mean', 'RTT', 'Observed RTT (ms)'],
+  ['rtt_sources-None-syn_ack', 'RTT', 'Eligible RTT samples'],
+  ['rtt_excluded-None-ambiguous', 'RTT', 'Excluded candidate matches'],
+  ['interarrival_variation_ms-a_to_b-stddev', 'Packet spacing', 'Interarrival dispersion (ms)'],
+  ['ttl_observed-a_to_b-min', 'TTL / Hop Limit', 'IPv4 TTL / IPv6 Hop Limit'],
+])('opens exact measurement kind from the producer numeric citation %s without another selection', async (name, buttonName, fact) => {
+  const wire = fixture.cases.find((c: { name: string }) => c.name === name);
+  expect(wire.accepted).toBe(true);
+  const run = JSON.parse(wire.raw);
+  localStorage.setItem('c2hunter-token', 'fixture-token');
+  localStorage.setItem('c2hunter-report-language', 'en');
+  const calls: string[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: unknown, init?: RequestInit) => {
+    const path = String(input); calls.push(`${init?.method ?? 'GET'} ${path}`);
+    if (path.endsWith('/ai-capabilities')) return Response.json({ available: true, network_interpretation: true, remote: false });
+    if (path.endsWith('/ai-runs/' + run.id)) return Response.json(run);
+    if (path.endsWith('/numeric-job/ai-runs')) return Response.json({ items: [run] });
+    if (path.endsWith('/analysis-jobs/numeric-job')) return Response.json({ ...fixture.job, name: 'Numeric source' });
+    return Response.json({ items: [] });
+  }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } }); clients.push(client);
+  render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/analyses/numeric-job']}><App/></MemoryRouter></QueryClientProvider>);
+  await screen.findByRole('heading', { name: 'Numeric source' });
+  await waitFor(() => expect(client.isFetching()).toBe(0));
+  fireEvent.click(screen.getByRole('button', { name: 'Open AI interpretation' }));
+  const facts = screen.getByRole('region', { name: 'Verified numeric source facts' });
+  const before = [...calls];
+  fireEvent.click(within(facts).getByRole('button', { name: /Source:/ }));
+  expect(screen.getByRole('region', { name: 'Representative flow evidence' })).toHaveFocus();
+  expect(screen.getByLabelText('Representative example')).toHaveValue('0');
+  expect(screen.getByRole('button', { name: buttonName })).toHaveAttribute('aria-expanded', 'true');
+  expect(screen.getByRole('region', { name: 'Supporting measurements' })).toHaveTextContent(fact);
+  fireEvent.click(screen.getByRole('button', { name: /Hide representative evidence/ }));
+  fireEvent.click(screen.getByRole('button', { name: /Show representative evidence/ }));
+  expect(screen.getByLabelText('Representative example')).toHaveValue('');
+  expect(screen.queryByRole('region', { name: 'Supporting measurements' })).toBeNull();
+  expect(calls).toEqual(before);
+  expect(calls.every(c => c.startsWith('GET '))).toBe(true);
 });
