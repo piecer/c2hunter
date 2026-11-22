@@ -9,15 +9,15 @@ import './investigation.css';
 
 export type InvestigationSelection = { ip: string; side?: Scope['endpoint_side']; sequence: number };
 /** Keep the existing analysis page quiet until investigation is explicitly opened. */
-export function AIInvestigationEntry({ jobId, selection }: { jobId: string; selection?: InvestigationSelection }) {
+export function AIInvestigationEntry({ jobId, selection, visible = true }: { jobId: string; selection?: InvestigationSelection; visible?: boolean }) {
   const [opened, setOpened] = useState(false);
-  return <div id="ip-investigation-entry">{opened || selection ? <AIInvestigationPanel jobId={jobId} selection={selection}/> : <section className="panel investigation-panel" aria-label="IP 조사 시작점 / IP investigation entry"><h2>IP 조사 / IP investigation</h2><p>후보 또는 flow의 IP를 선택하거나 직접 주소를 입력하세요. / Select a candidate or flow endpoint, or enter any IP.</p><button type="button" onClick={() => setOpened(true)}>IP 조사 열기 / Open IP investigation</button></section>}</div>;
+  return <div id="ip-investigation-entry">{opened || selection ? <AIInvestigationPanel jobId={jobId} selection={selection} visible={visible}/> : visible ? <section className="panel investigation-panel" aria-label="IP 조사 시작점 / IP investigation entry"><h2>IP 조사 / IP investigation</h2><p>후보 또는 flow의 IP를 선택하거나 직접 주소를 입력하세요. / Select a candidate or flow endpoint, or enter any IP.</p><button type="button" onClick={() => setOpened(true)}>IP 조사 열기 / Open IP investigation</button></section> : null}</div>;
 }
-export default function AIInvestigationPanel({ jobId, selection }: { jobId: string; selection?: InvestigationSelection }) {
+export default function AIInvestigationPanel({ jobId, selection, visible = true }: { jobId: string; selection?: InvestigationSelection; visible?: boolean }) {
   // A job or endpoint switch retires every old callback before another can render.
-  return <InvestigationSession key={`${jobId}:${selection?.sequence ?? ''}`} jobId={jobId} selection={selection}/>;
+  return <InvestigationSession key={`${jobId}:${selection?.sequence ?? ''}`} jobId={jobId} selection={selection} visible={visible}/>;
 }
-function InvestigationSession({ jobId, selection }: { jobId: string; selection?: InvestigationSelection }) {
+function InvestigationSession({ jobId, selection, visible = true }: { jobId: string; selection?: InvestigationSelection; visible?: boolean }) {
   const [scope, setScope] = useState<Scope>(() => ({ ...emptyScope(selection?.ip), endpoint_side: selection?.side ?? 'either' }));
   const [language, setLanguage] = useState<'ko' | 'en'>(() => localStorage.getItem('c2hunter-report-language') === 'en' ? 'en' : 'ko');
   const [question, setQuestion] = useState('관측된 사실과 C2 가설, 반대 근거를 설명해 주세요.');
@@ -76,9 +76,15 @@ function InvestigationSession({ jobId, selection }: { jobId: string; selection?:
   };
   const resetDraft = () => { submitOwner.cancel(); setCaptured(undefined); setAckUncertain(false); setPending(false); pendingRef.current = false; invalidate(); };
   const available = capability?.availability === 'CONFIGURED_NOT_PROBED';
-  return <section id="ip-investigation" className="panel investigation-panel" aria-label="IP 조사 / IP investigation">
+
+  return <>
+    {selected && <InvestigationRunView key={`${selected.id}:${selectionEpoch}`} initial={selected} visible={visible}/>}
+    {!visible ? <section aria-label="IP 조사 상태">
+    {pending && <p role="status">수락 확인 중 / Awaiting admission acknowledgment</p>}
+    {ackUncertain && <p role="alert">수락 여부가 불확실합니다. / Admission is unconfirmed. AI 조사에서 동일 요청으로 복구하세요.</p>}
+    {error && <p role="alert">{error}</p>}
+  </section> : <section id="ip-investigation" className="panel investigation-panel" aria-label="IP 조사 / IP investigation">
     <header><p className="eyebrow">IP INVESTIGATION</p><h2>IP 조사 / IP investigation</h2><p className="muted">선택 작업의 보존 자료로만 조사합니다. 후보 여부·상위 5개 제한 없이 내부 IP와 IPv6도 선택할 수 있습니다. / Investigate retained evidence for any IP, including internal and IPv6 addresses, without changing candidates or scores.</p><p className="record-id">Job {jobId}</p></header>
-    {selected && <InvestigationRunView key={`${selected.id}:${selectionEpoch}`} initial={selected}/>}
     <div className="investigation-capability" role="status">{capability ? capability.availability === 'CONFIGURED_NOT_PROBED' ? '설정됨 · 연결/모델 미검증 / CONFIGURED_NOT_PROBED — configuration is not a readiness guarantee.' : '조사 시작 불가 / UNAVAILABLE — history remains readable.' : capabilityError || '기능 상태 확인 중 / Checking availability'}</div>
     {capability?.availability === 'UNAVAILABLE' && <p>기능 사유 / Capability reason: {capabilityReason ?? '보고되지 않음 / Not reported'}</p>}
     {capabilityReason === 'DISPATCH_UNAVAILABLE' && <p className="muted">관리자가 조사 실행기를 구성해야 합니다. C2HUNTER_AI_INVESTIGATION_INLINE_ENABLED는 기본 false이며, 승인된 inline 또는 AI-worker 실행 모드가 필요합니다. / An administrator must configure dispatch. C2HUNTER_AI_INVESTIGATION_INLINE_ENABLED defaults to false; an enabled inline or AI-worker mode is required. This screen does not change configuration.</p>}
@@ -99,7 +105,7 @@ function InvestigationSession({ jobId, selection }: { jobId: string; selection?:
     {error && <p role="alert">{error}</p>}
     {ackUncertain && <section className="warning"><p>수락 여부가 불확실합니다. 재시도는 동일 본문과 키를 사용하며 자동 제출하지 않습니다. / Admission is unconfirmed. Explicit retry sends the exact captured body and key; no automatic POST retries.</p><button type="button" onClick={submit} disabled={pending}>동일 요청 재시도 / Retry captured request</button><button type="button" className="secondary" disabled={pending} onClick={resetDraft}>캡처 해제 / Release captured draft</button><p>초안 해제·화면 전환은 서버 조사를 취소하지 않습니다. 이력에서 확인하세요. / Releasing the draft or leaving does not cancel server work; check history.</p></section>}
     <InvestigationHistory jobId={jobId} epoch={historyEpoch} selectedId={selected?.id} choose={choose}/>
-  </section>;
+  </section>}</>;
 }
 function InvestigationHistory({ jobId, epoch, selectedId, choose }: { jobId: string; epoch: number; selectedId?: string; choose: (run: InvestigationRun) => void }) {
   const owner = useInvestigationOwner();

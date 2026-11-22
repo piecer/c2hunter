@@ -118,6 +118,13 @@ export async function installApiFixture(page: Page, { aiAvailable = false }: { a
     if (path === '/pcap-analysis-jobs/initiate' && method === 'POST') return fulfill(route, { id: 'upload-job', name: 'Uploaded E2E capture', status: 'CREATED', processing: { phase: 'UPLOAD_PENDING' } }, 201);
     if (path === '/pcap-analysis-jobs/upload-job/capture' && method === 'PUT') return fulfill(route, { id: 'upload-job', name: 'Uploaded E2E capture', status: 'INGESTING', processing: { phase: 'UPLOAD_STORED' } }, 202);
     if (path === '/analysis-jobs/upload-job' && method === 'GET') return fulfill(route, { id: 'upload-job', name: 'Uploaded E2E capture', status: 'COMPLETED', source_type: 'PCAP_UPLOAD', processing: { phase: 'COMPLETED', phase_started_at: '2026-07-20T10:05:00Z' }, source: { filename: 'fixture.pcap', size_bytes: 4 }, packet_count: 1, flow_count: 1, candidate_count: 0 });
+    if (path === '/analysis-jobs/job-1/candidates' || path === '/analysis-jobs/upload-job/candidates') {
+      const params = new URL(request.url()).searchParams;
+      const page = Number(params.get('page') ?? '1');
+      const pageSize = Number(params.get('page_size'));
+      const candidates = path === '/analysis-jobs/job-1/candidates' ? [currentCandidate] : [];
+      return fulfill(route, { items: candidates.slice((page - 1) * pageSize, page * pageSize), page, page_size: pageSize, total: candidates.length });
+    }
     if (path === '/candidates') return fulfill(route, { items: [currentCandidate], workflow_counts: { needs_review: 1, in_review: 0, action_required: 0, action_in_progress: 0, action_completed: 0, false_positive: 0, done: 0 } });
     if (path === '/candidate-bulk-operations' && method === 'POST') return fulfill(route, { status: 'COMPLETED', total: 1, succeeded: 1, failed: 0, results: [{ candidate_id: 'candidate-1', status: 'SUCCEEDED' }] });
     if (path === '/candidates/candidate-1/verdicts' && method === 'POST') {

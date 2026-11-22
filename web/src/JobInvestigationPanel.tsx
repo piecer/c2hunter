@@ -10,13 +10,13 @@ import './jobInvestigation.css';
 type Language='ko'|'en';
 const errorText=(e:unknown)=>e instanceof Error?e.message:'Job investigation request failed';
 function useReads(){const [reads]=useState(()=>new JobReads());useEffect(()=>()=>reads.retire(),[reads]);return reads;}
-type EntryProps={jobId:string;sourceAvailable?:boolean};
-export function JobInvestigationEntry({jobId,sourceAvailable=true}:EntryProps){
+type EntryProps={jobId:string;sourceAvailable?:boolean;visible?:boolean};
+export function JobInvestigationEntry({jobId,sourceAvailable=true,visible=true}:EntryProps){
   const [open,setOpen]=useState(false);
-  return open?<JobInvestigationPanel key={jobId} jobId={jobId} sourceAvailable={sourceAvailable}/>:<section className="panel job-investigation" aria-label="Experimental job investigation entry"><h2>실험적 작업 조사 / Experimental job investigation</h2><p>보존된 피어 일부를 조사합니다. 전체 작업의 C2 유무를 판정하지 않습니다. / Investigate a bounded subset of retained peers, not whether the entire job contains C2.</p><button type="button" onClick={()=>setOpen(true)}>실험적 조사 열기 / Open experimental investigation</button></section>;
+  return open?<JobInvestigationPanel key={jobId} jobId={jobId} sourceAvailable={sourceAvailable} visible={visible}/>:visible?<section className="panel job-investigation" aria-label="Experimental job investigation entry"><h2>실험적 작업 조사 / Experimental job investigation</h2><p>보존된 피어 일부를 조사합니다. 전체 작업의 C2 유무를 판정하지 않습니다. / Investigate a bounded subset of retained peers, not whether the entire job contains C2.</p><button type="button" onClick={()=>setOpen(true)}>실험적 조사 열기 / Open experimental investigation</button></section>:null;
 }
-export default function JobInvestigationPanel({jobId,sourceAvailable=true}:EntryProps){return <Session key={jobId} jobId={jobId} sourceAvailable={sourceAvailable}/>;}
-function Session({jobId,sourceAvailable}:EntryProps){
+export default function JobInvestigationPanel({jobId,sourceAvailable=true,visible=true}:EntryProps){return <Session key={jobId} jobId={jobId} sourceAvailable={sourceAvailable} visible={visible}/>;}
+function Session({jobId,sourceAvailable,visible=true}:EntryProps){
   const reads=useReads();const [intent]=useState(()=>new JobIntent({getItem:key=>sessionStorage.getItem(key),setItem:(key,value)=>sessionStorage.setItem(key,value),removeItem:key=>sessionStorage.removeItem(key)}));
   const [language,setLanguage]=useState<Language>('ko'),[question,setQuestion]=useState('관측된 패턴, 반대 근거와 다음 확인 사항을 설명해 주세요.'),[remote,setRemote]=useState(false);
   const [cap,setCap]=useState<JobCapabilities>(),[error,setError]=useState(''),[capError,setCapError]=useState('');
@@ -52,9 +52,14 @@ function Session({jobId,sourceAvailable}:EntryProps){
     }catch(e){setError(errorText(e));}
   };
   const ready=sourceAvailable&&cap?.availability==='CONFIGURED_NOT_PROBED'&&cap.dispatch_scope==='OWNED_CAPABLE_RUNTIME';
-  return <section className="panel job-investigation" aria-label="Experimental job investigation">
+
+  return <>
+    {selected&&<RunView key={`${selected.run.id}:${selected.epoch}`} initial={selected.run} language={language} visible={visible}/>}
+    {!visible ? <section aria-label="작업 조사 상태">
+    {pending&&<section className="warning" aria-label="Unconfirmed admission"><p>수락 여부 미확인 · AI 조사에서 동일 요청으로 복구하세요. / Admission is unconfirmed or awaiting acknowledgment.</p><p>Job {pending.job}</p></section>}
+    {(error||storageError)&&<p role="alert">{error||storageError}</p>}
+  </section> : <section className="panel job-investigation" aria-label="Experimental job investigation">
     <header><h2>{l('실험적 작업 조사','Experimental job investigation')}</h2><p className="record-id">Job {jobId}</p><p>{l('전체 작업 결론은 확립되지 않았습니다. 제한된 관측 자료의 조사 가설입니다.','Whole-job conclusion is not established. This is a hypothesis from bounded observations.')}</p></header>
-    {selected&&<RunView key={`${selected.run.id}:${selected.epoch}`} initial={selected.run} language={language}/>}
     <p role="status">{cap?`${cap.availability} — ${cap.reason??l('설정됨, 연결·모델 건강 상태 미검증','configured, not proof of model health')}`:capError||l('기능 확인 중','Checking capability')}</p>
     <p>{l('AI_JOB_INVESTIGATION_ENABLED 기본값은 false입니다. UI는 서버 설정을 변경하지 않습니다.','AI_JOB_INVESTIGATION_ENABLED defaults to false. This UI does not change server configuration.')}</p>
     <p>{l('수락 시 저장 출처를 한 번 고정합니다.','Pin the stored source once at admission.')} <code>expected_source_sha256=null</code> — {l('미리보기나 현재 캡처 검증이 아닙니다. 동일 요청 재시도에서도 null 의도를 유지합니다.','not a preview or capture validation; exact retries retain this null intent.')}</p>
@@ -73,9 +78,9 @@ function Session({jobId,sourceAvailable}:EntryProps){
       {historyError&&<p role="alert">{historyError}</p>}{history?.items.map(r=><article key={r.id}><button type="button" onClick={()=>choose(r)}>{l('저장된 조사 보기','View saved run')} {r.status} <code>{r.id}</code></button><p>{r.request.question}</p></article>)}{history?.items.length===0&&<p>{l('저장된 조사 없음','No saved runs')}</p>}
       <div className="job-actions"><button type="button" onClick={()=>{setAfter(null);setRefresh(n=>n+1);}}>{l('처음 이력 / 다시 읽기','First history / Refresh')}</button><button type="button" disabled={!history?.next_cursor} onClick={()=>setAfter(history!.next_cursor)}>{l('다음 이력','Next history')}</button></div>
     </section>
-  </section>;
+  </section>}</>;
 }
-function RunView({initial,language}:{initial:JobRun;language:Language}){
+function RunView({initial,language,visible=true}:{initial:JobRun;language:Language;visible?:boolean}){
   const [run,setRun]=useState(initial),current=useRef(initial),reads=useReads();
   const [error,setError]=useState(''),[paused,setPaused]=useState(false),[busy,setBusy]=useState(false);
   const [page,setPage]=useState(0),[peer,setPeer]=useState<string|null>(null),[provenance,setProvenance]=useState(false);
@@ -98,6 +103,7 @@ function RunView({initial,language}:{initial:JobRun;language:Language}){
   const assessments=result?.assessments??[],completed=assessments.filter(a=>a.mode==='MODEL_ASSISTED');
   const verdict=completed.some(a=>a.verdict==='SUSPICIOUS_C2')?'SUSPICIOUS_C2':completed.some(a=>a.verdict==='NEEDS_REVIEW')?'NEEDS_REVIEW':completed.length&&completed.every(a=>a.verdict==='BENIGN_HYPOTHESIS')?'BENIGN_HYPOTHESIS':'INCONCLUSIVE';
   const c=run.coverage,selected=run.selection.peer_ids;
+  if(!visible)return <section aria-label="작업 조사 실행 상태"><p role="status">{run.status} · {run.id} · AI 조사에서 실행 상세 확인</p><p className="warning">capture completeness: UNKNOWN · whole-job conclusion: NOT_ESTABLISHED · AI assessment complete {c.investigated_peers}/{c.selected_peers}</p>{error&&<p role="alert">{error}</p>}</section>;
   return <section aria-label="Saved job investigation" className="job-run">
     <h3>{l('평가된 피어 범위의 결론','Scoped verdict for assessed peers')}: {verdict}</h3>
     <p>{run.status} · {l('AI 평가 완료','AI assessment complete')} {c.investigated_peers}/{c.selected_peers}. {l('전체 IP 검사나 C2 부재를 뜻하지 않습니다.','This does not mean all job IPs were inspected or C2 is absent.')}</p>

@@ -43,6 +43,7 @@ it.each(['scope', 'opt-out'])('ignores a late previous preview after %s ownershi
   let release!: (response: Response) => void;
   const late = new Promise<Response>(resolve => { release = resolve; });
   const { user } = setup(path => path.endsWith('/preview') ? late : fallback());
+  await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
   await optIn(user);
   await user.click(screen.getByRole('button', { name: 'Preview reference' }));
   if (change === 'scope') await user.selectOptions(screen.getByLabelText('Historical scope'), '');
@@ -57,6 +58,7 @@ it.each(['scope', 'opt-out'])('ignores a late previous preview after %s ownershi
 
 it.each(['source_job_id', 'scope_id', 'scope_revision', 'source_binding_sha256'])('refuses a preview with a mismatched or malformed %s', async field => {
   const { user, posts } = setup(path => path.endsWith('/preview') ? Response.json({ ...fixture.preview, [field]: field === 'scope_revision' ? 99 : 'invalid-owner' }) : fallback());
+  await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
   await optIn(user);
   await user.click(screen.getByRole('button', { name: 'Preview reference' }));
   expect(await screen.findByRole('alert')).toHaveTextContent(/preview|미리보기/i);
@@ -71,6 +73,7 @@ it('pins an empty generation as null, preserves remote consent, and drops histor
     if (path.endsWith('/preview')) return Response.json(emptyFixture.preview);
     return fallback();
   });
+  await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
   await optIn(user);
   await user.click(screen.getByRole('button', { name: 'Preview reference' }));
   await screen.findByText(/Reference pinned/);
@@ -98,6 +101,7 @@ it('renders the saved producer reference separately from AI, with lazy bounded c
     if (path === `/ai-runs/${fixture.run.id}/baseline-sources?offset=0&limit=20`) return Response.json(fixture.sources);
     return fallback();
   });
+  await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
   const saved = await screen.findByRole('region', { name: 'Saved historical reference' });
   expect(within(saved).getByText(scopeId)).toBeInTheDocument();
   expect(within(saved).getByText(fixture.run.baseline_summary.generation_id)).toBeInTheDocument();
@@ -140,6 +144,7 @@ it('uses server next_offset and replaces the mounted source page rather than acc
     if (path.endsWith('/baseline-sources?offset=1&limit=20')) return Response.json({ ...fixture.sources, offset: 1, items: fixture.sources.items.slice(1), next_offset: null });
     return fallback();
   });
+  await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
   const saved = await screen.findByRole('region', { name: 'Saved historical reference' });
   await user.click(within(saved).getByRole('button', { name: 'View sources' }));
   await within(saved).findByText(fixture.sources.items[0].source_receipt_id);
@@ -167,6 +172,7 @@ it.each(['comparisons', 'sources'])('keeps compact summary visible when saved %s
     if (path.includes(`/baseline-${tab}?`)) return Response.json({ error: { code: 'INSUFFICIENT_ROLE', message: 'ANALYST required' } }, { status: 403 });
     return fallback();
   });
+  await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
   const saved = await screen.findByRole('region', { name: 'Saved historical reference' });
   const button = within(saved).getByRole('button', { name: tab === 'comparisons' ? 'View comparisons' : 'View sources' });
   await user.click(button);
@@ -187,6 +193,7 @@ it('stops polling denied historical assessments and explains the role without hi
     return fallback();
   });
   try {
+    await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
     await screen.findByRole('region', { name: 'Saved historical reference' });
     expect(await screen.findByRole('alert')).toHaveTextContent('Sign in with an ANALYST or ADMIN account');
     await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
@@ -201,6 +208,7 @@ it('does not offer selection retry when historical selection access is denied', 
     if (path.includes('/selection?')) return Response.json({ error: { code: 'INSUFFICIENT_ROLE', message: 'denied' } }, { status: 403 });
     return fallback();
   });
+  await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
   await user.click(await screen.findByRole('button', { name: 'View selection inventory' }));
   expect(await screen.findByRole('alert')).toHaveTextContent('Sign in with an ANALYST or ADMIN account');
   expect(screen.queryByRole('button', { name: 'Retry selection' })).not.toBeInTheDocument();
@@ -216,6 +224,7 @@ it('selects cached saved runs with collapsed details and invalidates the preview
   client.setQueryData(['historical-reference-page', first.id, 'sources', 0], fixture.sources);
   client.setQueryData(['historical-reference-page', second.id, 'sources', 0], emptyFixture.sources);
   const { user } = setup(path => path === `/analysis-jobs/${jobId}/ai-runs` ? Response.json({ items: [first, second] }) : fallback(), client);
+  await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
   const saved = await screen.findByRole('region', { name: 'Saved historical reference' });
   await user.click(within(saved).getByRole('button', { name: 'Inspect frozen reference' }));
   await user.click(within(saved).getByRole('button', { name: 'View sources' }));
@@ -253,6 +262,7 @@ it('reaches all 128 actual producer comparisons while bounding mounted rows and 
     }
     return fallback();
   });
+  await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
   const saved = await screen.findByRole('region', { name: 'Saved historical reference' });
   const before = document.querySelectorAll('*').length;
   await user.click(within(saved).getByRole('button', { name: 'View comparisons' }));
@@ -292,6 +302,7 @@ it.each(['artifacts', 'feedback'])('explains denied %s without leaving authorize
     if (path === `/ai-assessments/assessment-fixture/${kind}`) return Response.json({ error: { code: 'INSUFFICIENT_ROLE', message: 'denied' } }, { status: 403 });
     return fallback();
   });
+  await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
   expect(await screen.findByRole('alert')).toHaveTextContent('Sign in with an ANALYST or ADMIN account');
   if (kind === 'feedback') {
     await user.type(screen.getByLabelText('Analyst note', { selector: 'textarea' }), 'do not send');
@@ -308,10 +319,12 @@ it('does not apply a late preview to another already cached job', async () => {
   let release!: (response: Response) => void;
   const late = new Promise<Response>(resolve => { release = resolve; });
   const { user } = setup(path => path.endsWith('/preview') ? late : fallback(), client, <Link to="/analyses/next-job">Switch fixture job</Link>);
+  await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
   await optIn(user);
   await user.click(screen.getByRole('button', { name: 'Preview reference' }));
   await user.click(screen.getByRole('link', { name: 'Switch fixture job' }));
   expect(await screen.findByRole('heading', { name: 'Next fixture job' })).toBeInTheDocument();
+  await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
   expect(screen.getByRole('checkbox', { name: /behavioral discovery/ })).not.toBeChecked();
   await optIn(user);
   await act(async () => { release(Response.json(fixture.preview)); });
@@ -321,6 +334,7 @@ it('does not apply a late preview to another already cached job', async () => {
 
 it('keeps action disabled after a failed explicit preview and translates opt-in controls to Korean', async () => {
   const { user, posts, fetcher } = setup(path => path.endsWith('/preview') ? Response.json({ error: { code: 'BASELINE_STORAGE_UNAVAILABLE', message: 'offline' } }, { status: 503 }) : fallback());
+  await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
   await optIn(user);
   await user.selectOptions(screen.getByLabelText('보고서 언어 / Report language'), 'ko');
   expect(screen.getByLabelText('과거 참조 범위')).toBeInTheDocument();
@@ -341,6 +355,7 @@ async function optIn(user: ReturnType<typeof userEvent.setup>) {
 
 it('keeps historical off by default and pins a real preview in the existing create request', async () => {
   const { user, posts, fetcher } = setup();
+  await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
   const panel = await screen.findByRole('region', { name: 'AI C2 분석' });
   expect(within(panel).queryByRole('checkbox', { name: /Use historical reference/ })).not.toBeInTheDocument();
   await user.click(within(panel).getByRole('button', { name: 'Run AI analysis' }));
@@ -365,6 +380,7 @@ it.each(['preview', 'create'])('requires an explicit fresh preview after a stale
     if (stale && init?.method === 'POST' && path.endsWith(phase === 'preview' ? '/preview' : '/ai-runs')) return Response.json({ error: { code: 'BASELINE_REVISION_CONFLICT', message: 'conflict' } }, { status: 409 });
     return fallback();
   });
+  await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
   await optIn(user);
   await user.click(screen.getByRole('button', { name: 'Preview reference' }));
   if (phase === 'create') {
@@ -389,6 +405,7 @@ it.each(['scopes', 'preview', 'create'])('explains authenticated analyst denial 
     if ((phase === 'scopes' && path.endsWith('/scopes')) || (phase === 'preview' && path.endsWith('/preview')) || (phase === 'create' && init?.method === 'POST' && path.endsWith('/ai-runs'))) return Response.json({ error: { code: 'BASELINE_AUTH_REQUIRED', message: 'denied' } }, { status: 403 });
     return fallback();
   });
+  await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
   await screen.findByRole('region', { name: 'AI C2 분석' });
   await user.click(screen.getByRole('checkbox', { name: /behavioral discovery/ }));
   await user.click(screen.getByRole('checkbox', { name: /Use historical reference/ }));

@@ -15,7 +15,7 @@ it('cross-tab authentication transition retires pending UI and cached source imm
   if(init?.method==='POST'){oldSignal=init.signal as AbortSignal;return new Promise<Response>(r=>{release=r;});}
   return Promise.resolve(new Response(path.endsWith('/capabilities')?producer.fixtures.capabilities:'{"items":[],"next_cursor":null}'));
  });vi.stubGlobal('fetch',fetcher);
- const app=mount();fireEvent.click(await screen.findByRole('button',{name:/Open experimental investigation/}));
+ const app=mount();fireEvent.click(await screen.findByRole('button',{name:'AI 조사'}));fireEvent.click(await screen.findByRole('button',{name:/Open experimental investigation/}));
  await waitFor(()=>expect(screen.getByRole('button',{name:/Start experimental investigation/})).toBeEnabled());
  fireEvent.change(screen.getByRole('textbox',{name:/Question/}),{target:{value:'A private pending question'}});
  fireEvent.click(screen.getByRole('button',{name:/Start experimental investigation/}));await waitFor(()=>expect(release).toBeTypeOf('function'));

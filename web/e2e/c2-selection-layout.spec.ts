@@ -25,7 +25,8 @@ async function installSelectionFixture(page: Page) {
     else if (path === '/analysis-jobs/job-1/ai-runs') body = { items: [run], total: 1 };
     else if (path === '/ai-runs/layout-run') body = run;
     else if (path === '/ai-capabilities') body = { available: true, remote: false, provider: 'fixture', model_name: 'layout-only' };
-    else if (path === '/ai-runs/layout-run/assessments' || path === '/analysis-jobs/job-1/candidates' || path === '/sensor-pcaps') body = { items: [], total: 0 };
+    else if (path === '/analysis-jobs/job-1/candidates') body = { items: [], total: 0, page: Number(url.searchParams.get('page')), page_size: Number(url.searchParams.get('page_size')) };
+    else if (path === '/ai-runs/layout-run/assessments' || path === '/sensor-pcaps') body = { items: [], total: 0 };
     else if (path === '/analysis-jobs/job-1/flows') body = { items: [], total: 0, page: 1, page_size: 50 };
     else if (path === '/ai-runs/layout-run/selection') {
       const offset = Number(url.searchParams.get('offset'));
@@ -71,13 +72,11 @@ for (const width of [1280, 390]) {
     await page.getByRole('button', { name: 'Development login' }).click();
     await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
     await page.goto('/analyses/job-1');
+    await page.getByRole('button', { name: 'AI 조사', exact: true }).click();
     await page.getByLabel('보고서 언어 / Report language').selectOption('en');
     const coverage = page.getByRole('region', { name: 'Discovery coverage' });
     const toggle = coverage.getByRole('button', { name: 'View selection inventory' });
     await expect(toggle).toBeVisible();
-    const datasetDescription = page.locator('.panel.compact > p').filter({ hasText: datasetId });
-    await expect(datasetDescription).toContainText(datasetId);
-    expect(await datasetDescription.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
     const savedRun = page.getByRole('combobox', { name: 'Saved AI run', exact: true });
     await expect(savedRun.locator('option:checked')).toHaveText(`${run.created_at} · ${run.status} · ${run.id}`);
     const collapsedGeometry = await page.evaluate(() => {
@@ -169,6 +168,14 @@ for (const width of [1280, 390]) {
     await toggle.click();
     await expect(table).toHaveCount(0);
     await expectPageFits(page);
+    await page.getByRole('button', { name: 'Work information', exact: true }).click();
+    const datasetDescription = page.locator('.panel.compact > p').filter({ hasText: datasetId });
+    await expect(datasetDescription).toContainText(datasetId);
+    await testInfo.attach('work-dataset-geometry', { body: JSON.stringify(await datasetDescription.evaluate(element => ({
+      client: element.clientWidth, scroll: element.scrollWidth, overflowWrap: getComputedStyle(element).overflowWrap,
+      viewport: innerWidth, document: document.documentElement.scrollWidth,
+    }))), contentType: 'application/json' });
+    expect(await datasetDescription.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
     expect(errors).toEqual([]);
   });
 }

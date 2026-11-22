@@ -5,7 +5,7 @@ import { InvestigationConclusion, InvestigationEvidence, InvestigationExecution,
 import type { Evidence, InvestigationRun, InvestigationStep, Page } from './investigationTypes';
 import { terminal } from './investigationTypes';
 
-export default function InvestigationRunView({ initial }: { initial: InvestigationRun }) {
+export default function InvestigationRunView({ initial, visible = true }: { initial: InvestigationRun; visible?: boolean }) {
   const [run, setRun] = useState(initial);
   const latest = useRef(initial);
   const [pollError, setPollError] = useState('');
@@ -49,6 +49,7 @@ export default function InvestigationRunView({ initial }: { initial: Investigati
       update(value); setCancelMessage('취소 상태는 작업자 종료의 증명이 아닙니다. / Cancellation status does not prove worker release.');
     }, error => setCancelMessage(`${investigationError(error)} — 취소 결과 미확인 / cancellation unconfirmed`));
   };
+  if (!visible) return <section aria-label="IP 조사 실행 상태"><p role="status">{run.target_ip} · {run.status} · AI 조사에서 실행 상세 확인</p>{pollError && <p role="alert">{pollError} · 상태 미확인 / status unconfirmed</p>}{cancelMessage && <p role="status">{cancelMessage}</p>}<p>관측 범위와 결론은 별개입니다. 화면 전환은 서버 작업을 취소하지 않습니다.</p></section>;
   return <section className="investigation-run" aria-label="선택 조사 / Selected investigation">
     <div className="investigation-run-heading"><h3>{run.target_ip}</h3><p role="status">{run.status}{pollError ? ' · 상태 미확인 / status unconfirmed' : ''}</p><code>Run {run.id}</code><p>{run.request.question}</p><p className="muted">Language: {run.language} · Endpoint: {run.scope.endpoint_side} · Sensor: {run.scope.sensor_id ?? 'All'}</p></div>
     {pollError && <div role="alert"><p>{pollError}</p><button type="button" className="secondary" onClick={() => setPollEpoch(value => value + 1)}>상태 다시 읽기 / Retry status read</button></div>}
