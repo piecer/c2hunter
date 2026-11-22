@@ -1,11 +1,12 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { render } from './investigationDisplayRender';
+import { act, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import AIInvestigationPanel from '../src/AIInvestigationPanel';
 import type { InvestigationRun } from '../src/investigationTypes';
 import { fixture } from './investigationFixtures';
 
-const selected = () => screen.getByRole('region', { name: '선택 조사 / Selected investigation' });
-const retry = () => screen.getByRole('button', { name: '상태 다시 읽기 / Retry status read' });
+const selected = () => screen.getByRole('region', { name: 'Selected investigation' });
+const retry = () => screen.getByRole('button', { name: 'Retry status read' });
 function held() {
   let resolve!: (response: Response) => void;
   return { promise: new Promise<Response>(done => { resolve = done; }), resolve: (response: Response) => resolve(response) };
@@ -14,30 +15,92 @@ async function coldHistory(revision = 0) {
   const queued = { ...fixture('run_queued') as InvestigationRun, revision };
   const calls: { url: string; init: RequestInit }[] = [];
   const state = {
+    history: [queued],
     get: (): Response | Promise<Response> => Promise.reject(new Error('temporary read failure')),
     cancel: (): Response | Promise<Response> => Response.json({ ...queued, status: 'CANCELLED', revision: queued.revision + 1, reason: 'USER_CANCELLED' }),
   };
   vi.stubGlobal('fetch', vi.fn(async (input: unknown, init: RequestInit = {}) => {
     const url = String(input); calls.push({ url, init });
     if (url.endsWith('/capabilities')) return Response.json(fixture('capabilities'));
-    if (url.includes('?limit=5')) return Response.json({ items: [queued], next_cursor: null });
+    if (url.includes('?limit=5')) return Response.json({ items: state.history, next_cursor: null });
     if (url.endsWith('/cancel')) return state.cancel();
     if (url.endsWith('/' + queued.id) && !init.method) return state.get();
     throw new Error('Unexpected request');
   }));
   const view = render(<AIInvestigationPanel jobId="job"/>);
   fireEvent.click(await screen.findByRole('button', { name: /2001:db8::1 · QUEUED/ }));
-  await screen.findByRole('button', { name: '상태 다시 읽기 / Retry status read' });
+  await screen.findByRole('button', { name: 'Retry status read' });
   expect(selected()).toHaveTextContent('status unconfirmed');
   return { queued, state, calls, view };
 }
 function confirmCancellation(run: InvestigationRun) {
-  fireEvent.click(screen.getByRole('button', { name: '조사 취소 / Cancel investigation' }));
-  const confirmation = screen.getByRole('group', { name: '취소 확인 / Confirm cancellation' });
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel investigation' }));
+  const confirmation = screen.getByRole('group', { name: 'Confirm cancellation' });
   expect(confirmation).toHaveTextContent(`Job job · IP ${run.target_ip} · Run ${run.id}`);
-  fireEvent.click(within(confirmation).getByRole('button', { name: '이 조사 취소 확인 / Confirm cancel this run' }));
+  fireEvent.click(within(confirmation).getByRole('button', { name: 'Confirm cancel this run' }));
 }
 afterEach(() => vi.useRealTimers());
+
+it.each([false, true])('N2 newer nonterminal history resumes one polling chain, pending cancellation=%s', async cancelling => {
+  const { queued, state, calls, view } = await coldHistory(2);
+  const pending = held(); state.cancel = () => pending.promise;
+  if (cancelling) confirmCancellation(queued);
+  const cancelSignal = calls.find(call => call.url.endsWith('/cancel'))?.init.signal;
+  const refreshed = { ...queued, revision: queued.revision + 1 };
+  state.history = [refreshed];
+  state.get = () => Response.json({ ...refreshed, revision: refreshed.revision + 1 });
+  vi.useFakeTimers();
+  fireEvent.click(screen.getByRole('button', { name: 'Retry history read' }));
+  await act(async () => vi.advanceTimersByTimeAsync(0));
+  fireEvent.click(screen.getByRole('button', { name: /2001:db8::1 · QUEUED/ }));
+  await act(async () => vi.advanceTimersByTimeAsync(0));
+  const reads = () => calls.filter(call => call.url.endsWith('/' + queued.id));
+  expect(reads()).toHaveLength(2);
+  expect(selected()).not.toHaveTextContent('status unconfirmed');
+  expect(screen.queryByRole('button', { name: 'Retry status read' })).not.toBeInTheDocument();
+  if (cancelling) {
+    expect(cancelSignal?.aborted).toBe(false);
+    expect(screen.getByText('Cancellation acknowledgment pending')).toBeVisible();
+  }
+  await act(async () => vi.advanceTimersByTimeAsync(1999));
+  expect(reads()).toHaveLength(2);
+  state.get = () => Response.json({ ...refreshed, revision: refreshed.revision + 2, status: 'CANCELLED' });
+  await act(async () => vi.advanceTimersByTimeAsync(1));
+  expect(reads()).toHaveLength(3);
+  expect(selected()).toHaveTextContent('CANCELLED');
+  if (cancelling) {
+    expect(screen.queryByRole('button', { name: /Acknowledge/ })).not.toBeInTheDocument();
+    expect(cancelSignal?.aborted).toBe(false);
+  }
+  await act(async () => vi.advanceTimersByTimeAsync(10000));
+  expect(reads()).toHaveLength(3);
+  expect(calls.filter(call => call.init.method === 'POST')).toHaveLength(cancelling ? 1 : 0);
+  view.unmount(); expect(vi.getTimerCount()).toBe(0);
+});
+
+it('N2 invalid or equal-revision history cannot silently clear a stopped poll or start parallel reads', async () => {
+  const { queued, state, calls, view } = await coldHistory(2);
+  vi.useFakeTimers();
+  for (const invalid of [
+    { ...queued, revision: 1 },
+    { ...queued, reason: 'changed at equal revision' },
+    { ...queued, revision: 3, owner_id: 'foreign' },
+    { ...queued, revision: 3, request: { ...queued.request, question: 'foreign request' } },
+    { ...queued, revision: 'malformed' } as unknown as InvestigationRun,
+  ]) {
+    state.history = [invalid];
+    fireEvent.click(screen.getByRole('button', { name: 'Retry history read' }));
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    const choose = screen.queryByRole('button', { name: /2001:db8::1 · QUEUED/ });
+    if (choose) fireEvent.click(choose);
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    expect(selected()).toHaveTextContent('status unconfirmed');
+    expect(retry()).toBeEnabled();
+    expect(calls.filter(call => call.url.endsWith('/' + queued.id))).toHaveLength(1);
+  }
+  expect(calls.filter(call => call.init.method === 'POST')).toHaveLength(0);
+  view.unmount(); expect(vi.getTimerCount()).toBe(0);
+});
 
 it('confirmed cold-history cancellation retires obsolete polling uncertainty, not the worker-release disclaimer', async () => {
   const { queued, calls, view } = await coldHistory();
@@ -46,7 +109,7 @@ it('confirmed cold-history cancellation retires obsolete polling uncertainty, no
   await screen.findByText(/does not prove worker release/);
   expect(selected()).toHaveTextContent('CANCELLED');
   expect(selected()).not.toHaveTextContent('status unconfirmed');
-  expect(screen.queryByRole('button', { name: '상태 다시 읽기 / Retry status read' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Retry status read' })).not.toBeInTheDocument();
   expect(screen.queryByText('temporary read failure')).not.toBeInTheDocument();
   expect(calls.filter(call => call.init.method === 'POST').map(call => call.url)).toEqual([
     `/api/v1/analysis-jobs/job/ai-investigations/${queued.id}/cancel`,

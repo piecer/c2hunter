@@ -105,7 +105,7 @@ it('uses one lazy detail across actual App finding → PCAP → AI → finding w
   localStorage.setItem('c2hunter-token', 'owned-fixture');
   const fetcher = vi.fn(async (input: unknown) => Response.json(String(input).endsWith(`/analysis-jobs/${job.id}`) ? job
     : String(input).endsWith('/ai-capabilities') ? { available: true, ddos_interpretation: true, remote: false, provider: 'fixture', model_name: 'fixture' }
-      : { items: [] }));
+      : { items: [], current_page: 1, page_size: 50, total: 0 }));
   vi.stubGlobal('fetch', fetcher);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[`/analyses/${job.id}`]}><App/></MemoryRouter></QueryClientProvider>);
@@ -117,6 +117,7 @@ it('uses one lazy detail across actual App finding → PCAP → AI → finding w
   fireEvent.click(screen.getByRole('button', { name: 'Review window 1' }));
   expect(screen.getByRole('region', { name: 'Candidate evidence' })).toBeVisible();
   fireEvent.click(screen.getByRole('button', { name: 'Open DDoS AI interpretation' }));
+  if (screen.getByRole('button', { name: 'New AI interpretation' }).getAttribute('aria-expanded') !== 'true') fireEvent.click(screen.getByRole('button', { name: 'New AI interpretation' }));
   expect(screen.queryByRole('region', { name: 'Candidate evidence' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Review window 1' })).not.toBeInTheDocument();
   const guide = screen.getByRole('region', { name: 'PCAP review guidance' });
@@ -137,7 +138,7 @@ it('pins pending AI admission, normal-reference submission and refused export th
   localStorage.setItem('c2hunter-token', 'owned-fixture');
   vi.spyOn(api, 'get').mockImplementation(async path => path === `/analysis-jobs/${job.id}` ? job
     : path === '/ai-capabilities' ? { available: true, ddos_interpretation: true, remote: true, destination: 'https://model.invalid', provider: 'fixture', model_name: 'fixture' }
-      : path === '/ai-runs/accepted-ai' ? accepted : path.startsWith('/analysis-jobs?') ? { items: [normal], total: 1, page: 1, page_size: 20 } : { items: [] });
+      : path === '/ai-runs/accepted-ai' ? accepted : path.startsWith('/analysis-jobs?') ? { items: [normal], total: 1, page: 1, page_size: 20 } : { items: [], current_page: 1, page_size: 50, total: 0 });
   let finishAI!: (value: unknown) => void, rejectReference!: (reason: Error) => void;
   const pendingAI = new Promise(resolve => { finishAI = resolve; });
   const pendingReference = new Promise((_, reject) => { rejectReference = reject; });
@@ -157,6 +158,7 @@ it('pins pending AI admission, normal-reference submission and refused export th
   fireEvent.click(screen.getByRole('button', { name: 'Open PCAP review windows' }));
   fireEvent.click(screen.getByRole('button', { name: 'Review window 1' }));
   fireEvent.click(screen.getByRole('button', { name: 'Open DDoS AI interpretation' }));
+  if (screen.getByRole('button', { name: 'New AI interpretation' }).getAttribute('aria-expanded') !== 'true') fireEvent.click(screen.getByRole('button', { name: 'New AI interpretation' }));
   fireEvent.click(screen.getByLabelText('I consent to this remote destination.'));
   const start = screen.getByRole('button', { name: 'Run DDoS AI interpretation' });
   await waitFor(() => expect(start).toBeEnabled());
@@ -173,6 +175,7 @@ it('pins pending AI admission, normal-reference submission and refused export th
   fireEvent.submit(form);
   fireEvent.click(screen.getByRole('button', { name: 'Open PCAP review windows' }));
   fireEvent.click(screen.getByRole('button', { name: 'Open DDoS AI interpretation' }));
+  if (screen.getByRole('button', { name: 'New AI interpretation' }).getAttribute('aria-expanded') !== 'true') fireEvent.click(screen.getByRole('button', { name: 'New AI interpretation' }));
   expect(screen.getByLabelText('I consent to this remote destination.')).toBeChecked();
   expect(screen.getByRole('button', { name: 'Starting…' })).toBeDisabled();
   act(() => capturedStart());
@@ -195,7 +198,7 @@ it.each(['success', 'error'])('keeps hidden admission visibly pending through de
   localStorage.setItem('c2hunter-token', 'owned-fixture');
   vi.spyOn(api, 'get').mockImplementation(async path => path === `/analysis-jobs/${job.id}` ? job
     : path === '/ai-capabilities' ? { available: true, ddos_interpretation: true, remote: false }
-      : path === '/ai-runs/deferred-ai' ? accepted : { items: [] });
+      : path === '/ai-runs/deferred-ai' ? accepted : { items: [], current_page: 1, page_size: 50, total: 0 });
   let resolve!: (value: unknown) => void, reject!: (error: Error) => void;
   const pending = new Promise((yes, no) => { resolve = yes; reject = no; });
   const post = vi.spyOn(api, 'post').mockReturnValue(pending as Promise<never>);
@@ -203,6 +206,7 @@ it.each(['success', 'error'])('keeps hidden admission visibly pending through de
   render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[`/analyses/${job.id}`]}><App/></MemoryRouter></QueryClientProvider>);
   await screen.findByRole('region', { name: 'DDoS at a glance' });
   fireEvent.click(screen.getByRole('button', { name: 'Open DDoS AI interpretation' }));
+  if (screen.getByRole('button', { name: 'New AI interpretation' }).getAttribute('aria-expanded') !== 'true') fireEvent.click(screen.getByRole('button', { name: 'New AI interpretation' }));
   const start = screen.getByRole('button', { name: 'Run DDoS AI interpretation' });
   await waitFor(() => expect(start).toBeEnabled());
   fireEvent.click(start);
@@ -227,7 +231,7 @@ it.each(['settle', 'retire'])('keeps deferred cancellation truthful across hidde
   localStorage.setItem('c2hunter-token', 'owned-fixture');
   vi.spyOn(api, 'get').mockImplementation(async path => path === `/analysis-jobs/${job.id}` ? job
     : path === '/ai-capabilities' ? { available: true, ddos_interpretation: true, remote: false }
-      : path === '/ai-runs/cancel-ai' ? accepted : path.endsWith('/ai-runs') ? { items: [accepted] } : { items: [] });
+      : path === '/ai-runs/cancel-ai' ? accepted : path.endsWith('/ai-runs') ? { items: [accepted], current_page: 1, page_size: 50, total: 1 } : { items: [], current_page: 1, page_size: 50, total: 0 });
   let finish!: (value: unknown) => void;
   const pending = new Promise(resolve => { finish = resolve; });
   const post = vi.spyOn(api, 'post').mockReturnValue(pending as Promise<never>);
@@ -258,7 +262,7 @@ it.each(['dataset', 'capture', 'topology', 'report', 'invalid-report', 'route', 
   localStorage.setItem('c2hunter-token', 'owned-fixture');
   vi.spyOn(api, 'get').mockImplementation(async path => path === `/analysis-jobs/${job.id}` ? job : path === `/analysis-jobs/${other.id}` ? other
     : path === '/ai-capabilities' ? { available: true, ddos_interpretation: true, remote: false }
-      : path.startsWith('/analysis-jobs?') ? { items: [job, other], total: 2 } : { items: [] });
+      : path.startsWith('/analysis-jobs?') ? { items: [job, other], total: 2 } : { items: [], current_page: 1, page_size: 50, total: 0 });
   const post = vi.spyOn(api, 'post').mockResolvedValue({});
   let exported: Parameters<typeof exports.downloadDDoSExport> | undefined;
   vi.spyOn(exports, 'downloadDDoSExport').mockImplementation((...args) => { exported = args; return false; });
@@ -271,6 +275,7 @@ it.each(['dataset', 'capture', 'topology', 'report', 'invalid-report', 'route', 
   fireEvent.click(screen.getByRole('button', { name: 'Open PCAP review windows' }));
   const pcap = handler(screen.getByRole('button', { name: 'Review window 1' }));
   fireEvent.click(screen.getByRole('button', { name: 'Open DDoS AI interpretation' }));
+  if (screen.getByRole('button', { name: 'New AI interpretation' }).getAttribute('aria-expanded') !== 'true') fireEvent.click(screen.getByRole('button', { name: 'New AI interpretation' }));
   const start = screen.getByRole('button', { name: 'Run DDoS AI interpretation' });
   await waitFor(() => expect(start).toBeEnabled());
   const ai = handler(start);

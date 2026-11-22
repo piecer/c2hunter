@@ -1,4 +1,5 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { render } from './investigationDisplayRender';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { expect, it, vi } from 'vitest';
 import AIInvestigationPanel from '../src/AIInvestigationPanel';
 import { InvestigationConclusion, InvestigationEvidence } from '../src/InvestigationResult';
@@ -10,7 +11,7 @@ import { fixture, freshFixture, producer } from './investigationFixtures';
 function revealLimitations(label: string) {
   for (let page = 0; page < 10; page++) {
     if (screen.queryByText('SOURCE_FIELDS_UNAVAILABLE', { exact: true })) return;
-    const next = screen.queryByRole('button', { name: `다음 / Next ${label}` });
+    const next = screen.queryByRole('button', { name: `Next ${label}` });
     if (!next || next.hasAttribute('disabled')) break;
     fireEvent.click(next);
   }
@@ -22,7 +23,7 @@ it('shows known retained zero and unknown scope separately on mixed evidence', (
   render(<InvestigationEvidence evidence={evidence}/>);
   expect(screen.getByText(/Scope unavailable 1/)).toBeVisible();
   expect(screen.getByText(/Known matches are retained; scope eligibility remains uncertain/)).toBeVisible();
-  expect(screen.getAllByText('확인 불가 / Unknown')).toHaveLength(4);
+  expect(screen.getAllByText('Unknown')).toHaveLength(4);
   expect(screen.getByText(/Retained 1/)).toBeVisible();
   revealLimitations('evidence limitations');
 });
@@ -30,7 +31,7 @@ it('shows known retained zero and unknown scope separately on mixed evidence', (
 it.each(['cohort', 'cohort_unknown'])('shows excluded input rows even with %s cohort and never adds them to peer totals', name => {
   const evidence = parseInvestigation('Evidence', freshFixture(name + '_compare_peer_cohort'));
   render(<InvestigationEvidence evidence={evidence}/>);
-  expect(screen.getByText(`관측된 비교 피어 / Observed comparison peers ${evidence.cohort_total} · 생략 / Omitted ${evidence.cohort_omitted}`)).toBeVisible();
+  expect(screen.getByText(`Observed comparison peers ${evidence.cohort_total} Omitted ${evidence.cohort_omitted}`)).toBeVisible();
   expect(screen.getByText(/Excluded input rows 1 — not additional peers/)).toBeVisible();
   expect(screen.getByText(/Comparison coverage is incomplete/)).toBeVisible();
   revealLimitations('evidence limitations');
@@ -41,9 +42,11 @@ it.each(['mixed', 'cohort'])('shows qualified TraceResult %s quality and limitat
   render(<InvestigationConclusion result={result} openEvidence={vi.fn()}/>);
   expect(screen.getByText('Needs review')).toBeVisible();
   expect(screen.getByText(/Some source fields or comparison inputs are unavailable; observed facts are qualified/)).toBeVisible();
-  const issued = within(screen.getByRole('region', { name: '발급된 근거 / Issued evidence' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Issued evidence' }));
+  const issued = within(screen.getByRole('region', { name: 'Issued evidence' }));
   expect(issued.getAllByText(new RegExp(`Scope unavailable ${result.counts.scope_unavailable}`))).toHaveLength(result.evidence_quality.length);
-  expect(within(screen.getByRole('region', { name: '관측 사실 / Observed facts' })).getByText('matched_rows')).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: 'Observed facts' }));
+  expect(within(screen.getByRole('region', { name: 'Observed facts' })).getByText('matched_rows')).toBeVisible();
   revealLimitations('limitations');
 });
 
@@ -65,14 +68,15 @@ it.each([
     throw new Error('No admission was requested');
   }));
   render(<AIInvestigationPanel jobId="job"/>);
-  fireEvent.change(screen.getByLabelText('대상 IP / Target IP'), { target: { value: preview.scope.target_ip } });
-  if (preview.scope.traffic_direction) fireEvent.change(screen.getByLabelText('방향 / Direction'), { target: { value: preview.scope.traffic_direction } });
-  await waitFor(() => expect(screen.getByRole('button', { name: '범위 미리보기 / Preview scope' })).toBeEnabled());
-  fireEvent.click(screen.getByRole('button', { name: '범위 미리보기 / Preview scope' }));
-  const region = await screen.findByRole('region', { name: '출처 미리보기 / Source preview' });
+  fireEvent.click(screen.getByRole('button', { name: 'New investigation request' }));
+  fireEvent.change(screen.getByLabelText('Target IP'), { target: { value: preview.scope.target_ip } });
+  if (preview.scope.traffic_direction) fireEvent.change(screen.getByLabelText('Direction'), { target: { value: preview.scope.traffic_direction } });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Preview scope' })).toBeEnabled());
+  fireEvent.click(screen.getByRole('button', { name: 'Preview scope' }));
+  const region = await screen.findByRole('region', { name: 'Source preview' });
   expect(within(region).getByRole('heading', { name: `${preview.scope.target_ip} · ${status}` })).toBeVisible();
   expect(within(region).getByText(new RegExp(explanation))).toBeVisible();
-  const start = within(region).getByRole('button', { name: '조사 시작 / Start investigation' });
+  const start = within(region).getByRole('button', { name: 'Start investigation' });
   if (admissible) expect(start).toBeEnabled();
   else { expect(start).toBeDisabled(); fireEvent.click(start); }
   expect(posts).toHaveLength(1);

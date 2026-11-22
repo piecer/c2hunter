@@ -79,6 +79,7 @@ describe('Job route frontend transport identity', () => {
     fireEvent.click(screen.getByRole('button', { name: /Open experimental/ }));
     await screen.findByRole('region', { name: 'Job investigation history' });
     expect(history.mock.calls[0][0]).toBe(id);
+    fireEvent.click(screen.getByRole('button', { name: 'New investigation request' }));
     expect(screen.getByRole('button', { name: /Start experimental/ })).toBeDisabled();
     expect(posts()).toHaveLength(0);
   });

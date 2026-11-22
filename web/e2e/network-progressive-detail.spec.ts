@@ -38,10 +38,10 @@ async function setup(page: Page, width: number, language: string, fullJob = publ
 test('Network language selector also updates job work information', async ({ page }) => {
   await setup(page, 390, 'en');
   await page.goto('/analyses/full-envelope-network-job');
-  await page.getByLabel('보고서 언어 / Report language').selectOption('ko');
+  await page.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ }).selectOption('ko');
   await page.getByRole('button', { name: '작업 정보', exact: true }).click();
   await expect(page.getByRole('region', { name: '작업 정보', exact: true })).toContainText(publicJob.description);
-  await page.getByLabel('보고서 언어 / Report language').selectOption('en');
+  await page.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ }).selectOption('en');
   await expect(page.getByRole('region', { name: 'Work information', exact: true })).toContainText(publicJob.name);
 });
 for (const width of [1280, 390]) for (const language of ['en', 'ko'] as const) {

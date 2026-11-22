@@ -128,7 +128,7 @@ it('renders the saved producer reference separately from AI, with lazy bounded c
   await user.click(within(sources).getAllByRole('button', { name: /Source details/ })[0]);
   expect(within(saved).getByText(fixture.sources.items[0].source_binding_sha256)).toBeInTheDocument();
   expect(within(saved).getByText(fixture.sources.items[0].approved_by)).toBeInTheDocument();
-  await user.selectOptions(screen.getByLabelText('보고서 언어 / Report language'), 'ko');
+  await user.selectOptions(screen.getByLabelText(/^(보고서 언어|Report language)$/), 'ko');
   expect(screen.getByRole('region', { name: '저장된 과거 참조' })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: '비교 결과 보기' })).toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: '원본 목록 보기' }));
@@ -336,7 +336,7 @@ it('keeps action disabled after a failed explicit preview and translates opt-in 
   const { user, posts, fetcher } = setup(path => path.endsWith('/preview') ? Response.json({ error: { code: 'BASELINE_STORAGE_UNAVAILABLE', message: 'offline' } }, { status: 503 }) : fallback());
   await userEvent.click(await screen.findByRole('button', { name: 'AI investigation' }));
   await optIn(user);
-  await user.selectOptions(screen.getByLabelText('보고서 언어 / Report language'), 'ko');
+  await user.selectOptions(screen.getByLabelText(/^(보고서 언어|Report language)$/), 'ko');
   expect(screen.getByLabelText('과거 참조 범위')).toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: '참조 미리보기' }));
   expect(await screen.findByRole('alert')).toHaveTextContent('과거 참조 요청 실패');

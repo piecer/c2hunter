@@ -33,7 +33,7 @@ function setup() {
         if (state.reflectPost) state.items = [a];
         return state.submitResponse?.() ?? Response.json({ ...a, status: 'QUEUED', network_interpretation: undefined });
       }
-      return state.readList?.() ?? Response.json({ items: state.items });
+      return state.readList?.() ?? Response.json({ items: state.items, current_page: 1, page_size: 50, total: state.items.length });
     }
     if (url.endsWith('/ai-runs/run-a')) return state.readA?.() ?? Response.json(a);
     if (url.endsWith('/ai-runs/run-b')) return Response.json(state.readB);
@@ -46,6 +46,7 @@ function setup() {
   const refresh = async () => { await act(async () => { await client.invalidateQueries({ queryKey: ['ai-runs', 'reconcile'] }); }); await waitFor(() => expect(client.isFetching()).toBe(0)); };
   const submit = async () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open AI interpretation' }));
+  fireEvent.click(screen.getByRole('button', { name: 'New AI interpretation' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'AI interpretation' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: 'AI interpretation' }));
     await screen.findByText('Saved hypothesis A');
@@ -111,6 +112,7 @@ it('retains the POST-created queued run while an empty list and delayed detail l
   state.reflectPost = false;
   state.readA = () => pending.promise;
   fireEvent.click(screen.getByRole('button', { name: 'Open AI interpretation' }));
+  fireEvent.click(screen.getByRole('button', { name: 'New AI interpretation' }));
   await waitFor(() => expect(screen.getByRole('button', { name: 'AI interpretation' })).toBeEnabled());
   fireEvent.click(screen.getByRole('button', { name: 'AI interpretation' }));
   expect(await screen.findByRole('button', { name: 'Cancel AI run' })).toBeVisible();
@@ -164,6 +166,7 @@ it('does not let a delayed POST response replace B already observed from the lis
   state.reflectPost = false;
   state.submitResponse = () => pending.promise;
   fireEvent.click(screen.getByRole('button', { name: 'Open AI interpretation' }));
+  fireEvent.click(screen.getByRole('button', { name: 'New AI interpretation' }));
   await waitFor(() => expect(screen.getByRole('button', { name: 'AI interpretation' })).toBeEnabled());
   fireEvent.click(screen.getByRole('button', { name: 'AI interpretation' }));
   await waitFor(() => expect(client.isMutating()).toBe(1));
@@ -192,6 +195,7 @@ for (const listState of ['empty', 'stale', 'failed'] as const) {
     state.readA = () => Response.json({ ...a, created_at: aTime });
     state.readB = { ...b, created_at: bTime, status: 'ANALYZING', network_interpretation: undefined };
     fireEvent.click(screen.getByRole('button', { name: 'Open AI interpretation' }));
+  fireEvent.click(screen.getByRole('button', { name: 'New AI interpretation' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'AI interpretation' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: 'AI interpretation' }));
     await waitFor(() => expect(client.isMutating()).toBe(1));
@@ -226,6 +230,7 @@ it.each([undefined, a.created_at])('accepts a manual new POST after known comple
   state.items = [state.readB];
   await refresh();
   fireEvent.click(screen.getByRole('button', { name: 'Open AI interpretation' }));
+  fireEvent.click(screen.getByRole('button', { name: 'New AI interpretation' }));
   expect(await screen.findByText('Latest hypothesis B')).toBeVisible();
   await waitFor(() => expect(screen.getByRole('button', { name: 'AI interpretation' })).toBeEnabled());
   const pending = deferredResponse();

@@ -245,7 +245,18 @@ export function networkRunDisplay(run: NumericRun | undefined): NetworkDisplay {
         for (const key of section === 'possible_causes' ? ['hypothesis', 'uncertainty'] : section === 'prioritized_checks' ? ['priority', 'check'] : ['interpretation']) scalar(item[key], 200000);
       }
     }
-    return { version: 'legacy', output: out };
+    const clip = (value: unknown) => { const text = value as string; return text.length > 2000 ? `${text.slice(0, 2000)}…` : text; };
+    const section = (name: string, keys: string[]) => (out[name] as Obj[]).slice(0, 20).map(item => ({
+      ...Object.fromEntries(keys.map(key => [key, clip(item[key])])),
+      issue_ids: (item.issue_ids as string[]).slice(0, 20).map(clip),
+    }));
+    return { version: 'legacy', output: {
+      schema_version: out.schema_version, kind: out.kind, language: out.language, summary: clip(out.summary),
+      possible_causes: section('possible_causes', ['hypothesis', 'uncertainty']),
+      prioritized_checks: section('prioritized_checks', ['priority', 'check']),
+      correlations: section('correlations', ['interpretation']),
+      limitations: (out.limitations as string[]).slice(0, 20).map(clip),
+    } };
   } catch { return { version: 'invalid' }; }
 }
 export function parseNumericRun(run: NumericRun): NumericResult | undefined {

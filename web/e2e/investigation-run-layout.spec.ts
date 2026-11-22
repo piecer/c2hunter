@@ -28,12 +28,13 @@ for (const width of [1280, 390]) {
     });
     await page.goto(`/analyses/${run.job_id}`);
     await page.getByRole('button', { name: 'AI 조사', exact: true }).click();
-    await page.getByRole('button', { name: 'IP 조사 열기 / Open IP investigation', exact: true }).click();
+    await page.getByRole('button', { name: 'IP 조사 열기', exact: true }).click();
     await page.getByRole('button', { name: `${run.target_ip} · ${run.status} ${run.id}`, exact: true }).click();
-    const selected = page.getByRole('region', { name: '선택 조사 / Selected investigation', exact: true });
+    const selected = page.getByRole('region', { name: '선택 조사', exact: true });
     await expect(selected).toBeVisible();
     const evidence = fixture('evidence_protocol') as { evidence_id: string };
-    await selected.getByRole('button', { name: `근거 보기 / Evidence ${evidence.evidence_id}`, exact: true }).click();
+    await selected.getByRole('button', { name: '발급된 근거', exact: true }).click();
+    await selected.getByRole('button', { name: `근거 보기 ${evidence.evidence_id}`, exact: true }).click();
     await expect(selected.getByText('updates.example.test', { exact: true })).toBeVisible();
     const geometry = await page.locator('#ip-investigation-entry').evaluate(element => ({
       client: element.clientWidth, scroll: element.scrollWidth, document: document.documentElement.scrollWidth,

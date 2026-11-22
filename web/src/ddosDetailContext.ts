@@ -7,6 +7,10 @@ export const DDoSDetailContext = createContext<{
   select: (owner: string | undefined) => void;
   current: () => boolean;
   prefix: string;
+  jobId?: string;
+  datasetId?: string;
+  hasFinding?: (id: string) => boolean;
+  navigateFinding?: (id: string) => void;
   statusTarget: HTMLElement | null;
   setStatusTarget: (target: HTMLElement | null) => void;
 } | undefined>(undefined);

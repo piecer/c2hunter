@@ -21,7 +21,7 @@ async function install(page: Page, language: string, name = 'positive') {
   await page.route('**/api/v1/**', async route => {
     const request = route.request(), path = new URL(request.url()).pathname.replace('/api/v1', '');
     if (request.method() !== 'GET') writes.push(path);
-    await route.fulfill({ contentType: 'application/json', body: JSON.stringify(path === `/analysis-jobs/${job.id}` ? job : path === '/ai-capabilities' ? { available: false, ddos_interpretation: false, reason: 'Offline fixture' } : { items: [] }) });
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify(path === `/analysis-jobs/${job.id}` ? job : path === '/ai-capabilities' ? { available: false, ddos_interpretation: false, reason: 'Offline fixture' } : { items: [], current_page: 1, page_size: 50, total: 0 }) });
   });
   await page.goto(`/analyses/${job.id}`);
   return { job, writes, errors };
@@ -202,13 +202,14 @@ for (const outcome of ['success', 'error']) test(`modal keeps pending AI accessi
   const accepted = { id: 'visible-ai', status: 'QUEUED', analysis_kind: 'DDOS_ATTACK', language: 'en' };
   await page.route('**/api/v1/ai-runs/visible-ai', route => route.fulfill({ json: accepted }));
   await page.route('**/api/v1/analysis-jobs/*/ai-runs', async route => {
-    if (route.request().method() === 'GET') return route.fulfill({ json: { items: [] } });
+    if (route.request().method() === 'GET') return route.fulfill({ json: { items: [], current_page: 1, page_size: 50, total: 0 } });
     posts.push(route.request().postDataJSON());
     await pending;
     await route.fulfill(outcome === 'success' ? { status: 201, json: accepted } : { status: 503, json: { error: { code: 'UNCONFIRMED', message: 'Deferred failure' } } });
   });
   try {
     await page.getByRole('button', { name: 'Open DDoS AI interpretation' }).click();
+    if (await page.getByRole('button', { name: 'New AI interpretation' }).getAttribute('aria-expanded') !== 'true') await page.getByRole('button', { name: 'New AI interpretation' }).click();
     await page.getByRole('button', { name: 'Run DDoS AI interpretation' }).click();
     await expect.poll(() => posts.length).toBe(1);
     await page.getByRole('button', { name: /Show detailed evidence/ }).click();
@@ -263,7 +264,7 @@ test('pending AI and explicit reference stay owned across finding, PCAP and AI s
   const accepted = { id: 'pending-ai', status: 'QUEUED', analysis_kind: 'DDOS_ATTACK', language: 'en' };
   await page.route('**/api/v1/ai-runs/pending-ai', route => route.fulfill({ json: accepted }));
   await page.route('**/api/v1/analysis-jobs/*/ai-runs', async route => {
-    if (route.request().method() === 'GET') return route.fulfill({ json: { items: [] } });
+    if (route.request().method() === 'GET') return route.fulfill({ json: { items: [], current_page: 1, page_size: 50, total: 0 } });
     posts.push({ path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() });
     await pending; await route.fulfill({ status: 201, json: accepted });
   });
@@ -275,6 +276,7 @@ test('pending AI and explicit reference stay owned across finding, PCAP and AI s
     await page.getByRole('button', { name: 'Open PCAP review windows' }).click();
     await page.getByRole('button', { name: 'Review window 1', exact: true }).click();
     await page.getByRole('button', { name: 'Open DDoS AI interpretation' }).click();
+    if (await page.getByRole('button', { name: 'New AI interpretation' }).getAttribute('aria-expanded') !== 'true') await page.getByRole('button', { name: 'New AI interpretation' }).click();
     await page.getByLabel('I consent to this remote destination.').check();
     await page.getByRole('button', { name: 'Run DDoS AI interpretation' }).click();
     await expect.poll(() => posts.length).toBe(1);
@@ -282,6 +284,7 @@ test('pending AI and explicit reference stay owned across finding, PCAP and AI s
     await expect(page.getByRole('region', { name: 'Candidate inspection' })).toBeVisible();
     await page.getByRole('button', { name: 'Open PCAP review windows' }).click();
     await page.getByRole('button', { name: 'Open DDoS AI interpretation' }).click();
+    if (await page.getByRole('button', { name: 'New AI interpretation' }).getAttribute('aria-expanded') !== 'true') await page.getByRole('button', { name: 'New AI interpretation' }).click();
     await expect(page.getByRole('button', { name: 'Starting…' })).toBeDisabled();
     await expect(page.getByLabel('I consent to this remote destination.')).toBeChecked();
     await expect(page.getByRole('radio')).toBeChecked();

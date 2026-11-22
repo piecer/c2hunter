@@ -9,7 +9,7 @@ import { jobApi } from '../src/jobInvestigationApi';
 import { producer } from './jobInvestigationFixtures';
 import { parseJobWire } from '../src/jobInvestigationContract';
 const record=(name:string,value:unknown)=>{if(process.env.C2HUNTER_JOB_CORPUS_OUTPUT)writeFileSync(process.env.C2HUNTER_JOB_CORPUS_OUTPUT+'.'+name,JSON.stringify(value,null,2));};
-beforeEach(()=>{sessionStorage.clear();localStorage.setItem('c2hunter-token','principal-A');vi.stubGlobal('matchMedia',()=>({matches:false}));});
+beforeEach(()=>{sessionStorage.clear();localStorage.setItem('c2hunter-token','principal-A');localStorage.setItem('c2hunter-report-language','en');vi.stubGlobal('matchMedia',()=>({matches:false,addEventListener:vi.fn(),removeEventListener:vi.fn()}));});
 function setupGet(){vi.spyOn(api,'get').mockImplementation(async(path:string)=>path==='/analysis-jobs/job'?{id:'job',name:'Saved job',status:'COMPLETED',analysis:{module:'c2'}}:path==='/analysis-jobs/B'?{id:'B',name:'Other job',status:'COMPLETED',analysis:{module:'c2'}}:path==='/ai-capabilities'?{available:false}:{items:[]});}
 function Nav(){const nav=useNavigate();return <><button onClick={()=>nav('/analyses/job')}>test route A</button><button onClick={()=>nav('/analyses/B')}>test route B</button></>;}
 function mount(path='/analyses/job'){const client=new QueryClient({defaultOptions:{queries:{retry:false,staleTime:Infinity}}});const view=render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[path]}><Nav/><App/></MemoryRouter></QueryClientProvider>);return {view,client,close(){view.unmount();client.clear();}};}
@@ -19,7 +19,7 @@ it('normal App sign-out/login must not transfer an unresolved principal-A POST t
   if(init?.method==='POST'){posts.push({token:new Headers(init.headers).get('authorization'),body:String(init.body)});throw new Error('acknowledgment lost');}
   return new Response(path.endsWith('/capabilities')?producer.fixtures.capabilities:'{"items":[],"next_cursor":null}');
  }));
- const first=mount();fireEvent.click(await screen.findByRole('button',{name:'AI 조사'}));fireEvent.click(await screen.findByRole('button',{name:/Open experimental investigation/}));
+ const first=mount();fireEvent.click(await screen.findByRole('button',{name:'AI investigation'}));fireEvent.click(await screen.findByRole('button',{name:/Open experimental investigation/}));fireEvent.click(screen.getByRole('button',{name:'New investigation request'}));
  await waitFor(()=>expect(screen.getByRole('button',{name:/Start experimental investigation/})).toBeEnabled());
  fireEvent.change(screen.getByRole('textbox',{name:/Question/}),{target:{value:'Principal A private analyst question'}});
  fireEvent.click(screen.getByRole('button',{name:/Start experimental investigation/}));await screen.findByRole('alert');
@@ -32,7 +32,7 @@ it('normal App sign-out/login must not transfer an unresolved principal-A POST t
  // jsdom cannot navigate: the actual Login stored B's token and called assign('/').
  // Explicit document remount models that ordinary full load, retaining sessionStorage.
  first.close();const second=mount();
- fireEvent.click(await screen.findByRole('button',{name:'AI 조사'}));fireEvent.click(await screen.findByRole('button',{name:/Open experimental investigation/}));
+ fireEvent.click(await screen.findByRole('button',{name:'AI investigation'}));fireEvent.click(await screen.findByRole('button',{name:/Open experimental investigation/}));fireEvent.click(screen.getByRole('button',{name:'New investigation request'}));
  await screen.findByText(/Admission intent is unreadable/);
  expect(screen.queryByRole('button',{name:/Retry exact request/})).toBeNull();
  expect(screen.getByRole('button',{name:/Start experimental investigation/})).toBeDisabled();
@@ -41,7 +41,7 @@ it('normal App sign-out/login must not transfer an unresolved principal-A POST t
  record('review-principal-replay.json',{posts,pendingAfterSignout:pending,storageAfterLogin:sessionStorage.getItem('c2hunter-job-investigation-pending-v1'),reload:'explicit App remount after actual Login; jsdom no navigation'});
  second.close();expect(posts.filter(p=>p.token==='Bearer principal-B')).toHaveLength(0);
  localStorage.setItem('c2hunter-token','principal-A');const third=mount();
- fireEvent.click(await screen.findByRole('button',{name:'AI 조사'}));fireEvent.click(await screen.findByRole('button',{name:/Open experimental investigation/}));
+ fireEvent.click(await screen.findByRole('button',{name:'AI investigation'}));fireEvent.click(await screen.findByRole('button',{name:/Open experimental investigation/}));fireEvent.click(screen.getByRole('button',{name:'New investigation request'}));
  const retry=await screen.findByRole('button',{name:/Retry exact request/});expect(retry).toBeEnabled();
  fireEvent.click(retry);await screen.findByText('acknowledgment lost');
  expect(posts).toHaveLength(2);expect(posts[1]).toEqual(posts[0]);third.close();
@@ -55,7 +55,7 @@ it('actual App route should retain saved investigations when mutable analysis so
  vi.stubGlobal('fetch',transport);
  const app=mount();await screen.findByText('Source deleted');
  const hasEntry=screen.queryByRole('button',{name:/Open experimental investigation/})!==null;
- expect(hasEntry).toBe(true);fireEvent.click(screen.getByRole('button',{name:/Open experimental investigation/}));
+ expect(hasEntry).toBe(true);fireEvent.click(screen.getByRole('button',{name:/Open experimental investigation/}));fireEvent.click(screen.getByRole('button',{name:'New investigation request'}));
  fireEvent.click(await screen.findByRole('button',{name:/View saved run/}));
  expect(screen.getByRole('button',{name:/Start experimental investigation/})).toBeDisabled();
  expect(screen.getByText('Source deleted')).toBeInTheDocument();
@@ -74,7 +74,7 @@ it('late 401 after route retirement must not invalidate the current App session'
   if(path.includes('/job/ai-job-investigations')){oldSignal=init?.signal as AbortSignal;return new Promise<Response>(r=>{release=(v)=>{fired=true;r(v);};});}
   return Promise.resolve(new Response('{"items":[],"next_cursor":null}'));
  }));
- const app=mount();fireEvent.click(await screen.findByRole('button',{name:'AI 조사'}));fireEvent.click(await screen.findByRole('button',{name:/Open experimental investigation/}));await waitFor(()=>expect(release).toBeTypeOf('function'));
+ const app=mount();fireEvent.click(await screen.findByRole('button',{name:'AI investigation'}));fireEvent.click(await screen.findByRole('button',{name:/Open experimental investigation/}));fireEvent.click(screen.getByRole('button',{name:'New investigation request'}));await waitFor(()=>expect(release).toBeTypeOf('function'));
  fireEvent.click(screen.getByRole('button',{name:'test route B'}));await screen.findByRole('heading',{name:'Other job'});expect(oldSignal?.aborted).toBe(true);
  // Browser-observable storage event models another same-origin tab completing Login.
  localStorage.setItem('c2hunter-token','principal-B');
@@ -88,10 +88,10 @@ it('cached real App A-B-A retires expanded detail and allows fresh history',asyn
  vi.spyOn(jobApi,'capabilities').mockResolvedValue(parseJobWire('capabilities',producer.fixtures.capabilities));
  const history=vi.spyOn(jobApi,'history').mockImplementation(async job=>({items:job==='job'?[original]:[],next_cursor:null}));
  const post=vi.spyOn(jobApi,'create');const app=mount();
- fireEvent.click(await screen.findByRole('button',{name:'AI 조사'}));fireEvent.click(await screen.findByRole('button',{name:/Open experimental investigation/}));fireEvent.click(await screen.findByRole('button',{name:/View saved run/}));
+ fireEvent.click(await screen.findByRole('button',{name:'AI investigation'}));fireEvent.click(await screen.findByRole('button',{name:/Open experimental investigation/}));fireEvent.click(screen.getByRole('button',{name:'New investigation request'}));fireEvent.click(await screen.findByRole('button',{name:/View saved run/}));
  fireEvent.click(screen.getByRole('button',{name:`Peer details ${original.selection.peer_ids[0]}`}));expect(screen.getByRole('region',{name:'Peer assessment detail'})).toBeInTheDocument();
  fireEvent.click(screen.getByRole('button',{name:'test route B'}));await screen.findByRole('heading',{name:'Other job'});
- fireEvent.click(screen.getByRole('button',{name:'test route A'}));fireEvent.click(await screen.findByRole('button',{name:'AI 조사'}));fireEvent.click(await screen.findByRole('button',{name:/Open experimental investigation/}));fireEvent.click(await screen.findByRole('button',{name:/View saved run/}));
+ fireEvent.click(screen.getByRole('button',{name:'test route A'}));fireEvent.click(await screen.findByRole('button',{name:'AI investigation'}));fireEvent.click(await screen.findByRole('button',{name:/Open experimental investigation/}));fireEvent.click(screen.getByRole('button',{name:'New investigation request'}));fireEvent.click(await screen.findByRole('button',{name:/View saved run/}));
  expect(screen.queryByRole('region',{name:'Peer assessment detail'})).toBeNull();expect(history).toHaveBeenCalledTimes(2);expect(post).not.toHaveBeenCalled();app.close();
 });
 

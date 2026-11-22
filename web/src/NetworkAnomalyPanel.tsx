@@ -47,15 +47,17 @@ export default function NetworkAnomalyPanel({ report, children, job, inheritLang
   const [selection, setSelection] = useState<EvidenceSelection>();
   const live = useRef(source.generation);
   const mounted = useRef(true);
+  const citationInvoker = useRef<HTMLElement | null>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   if (source.report !== report || source.jobId !== job?.id) {
     const next = { report, jobId: job?.id, generation: {} };
     live.current = next.generation;
+    citationInvoker.current = null;
     setSource(next); setOwner(undefined); setSelection(undefined);
   }
   const current = () => mounted.current && live.current === source.generation;
   const content = <><ReportContent report={report}/>{job && <NetworkSourceCapability source={job}/>} {children}</>;
-  return <NetworkEvidenceContext.Provider value={{ job, projection: projectNetworkReport(report), generation: source.generation, current, selection, navigate: (index, detail) => { if (current()) { setOwner('evidence'); setSelection({ ...detail, index }); } } }}><ReportDetailContext.Provider value={{ owner, claim: setOwner }}>{inheritLanguage ? <div lang={language} className="network-report-language"><ReportLanguageSelector/>{content}</div> : <ReportLanguageScope>{content}</ReportLanguageScope>}</ReportDetailContext.Provider></NetworkEvidenceContext.Provider>;
+  return <NetworkEvidenceContext.Provider value={{ job, projection: projectNetworkReport(report), generation: source.generation, current, selection, returnFromCitation: () => { if (!current()) return; const invoker = citationInvoker.current; citationInvoker.current = null; const target = invoker?.isConnected && invoker !== document.body ? invoker : document.getElementById('overall-network-heading'); if (target) { target.setAttribute('tabindex', '-1'); target.focus(); } }, navigate: (index, detail) => { if (current()) { citationInvoker.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setOwner('evidence'); setSelection({ ...detail, index }); } } }}><ReportDetailContext.Provider value={{ owner, claim: setOwner }}>{inheritLanguage ? <div lang={language} className="network-report-language"><ReportLanguageSelector/>{content}</div> : <ReportLanguageScope>{content}</ReportLanguageScope>}</ReportDetailContext.Provider></NetworkEvidenceContext.Provider>;
 }
 function ReportContent({ report }: { report?: NetworkAnomalyReport }) {
   const language = useReportLanguage();

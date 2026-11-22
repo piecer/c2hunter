@@ -5,7 +5,7 @@ import DDoSCandidateInspection from './DDoSCandidateInspection';
 import { DDoSDetailContext } from './ddosDetailContext';
 import './ddosProgressive.css';
 import { ddosSourceSnapshot } from './ddosSourceSnapshot';
-import ReportLanguageScope from './ReportLanguage';
+import ReportLanguageScope, { ReportLanguageSelector } from './ReportLanguage';
 import { axisNames, axisReasons } from './ddosEvidence';
 import { useReportLanguage } from './reportLanguageContext';
 import {
@@ -50,6 +50,12 @@ function Content({ report, detailOwner, setDetailOwner, ownerPrefix, current, jo
   const language = useReportLanguage();
   const t = (en: string, ko: string) => language === 'ko' ? ko : en;
   const [page, setPage] = useState(0);
+  const [observedOwner, setObservedOwner] = useState(detailOwner);
+  if (observedOwner !== detailOwner) {
+    setObservedOwner(detailOwner);
+    const index = report.findings.findIndex(item => detailOwner === `${ownerPrefix}:finding:${item.id}`);
+    if (index >= 0) setPage(Math.floor(index / 8));
+  }
   const [coverageExpanded, setCoverageExpanded] = useState(false);
   const [nextExpanded, setNextExpanded] = useState(false);
   if (!isDDoSAttackReport(report)) return <section className="panel ddos-report" role="alert">{t('Unsupported DDoS report. Review coverage and update the client.', '지원되지 않는 DDoS 보고서입니다. 분석 범위를 확인하고 클라이언트를 업데이트하세요.')}</section>;
@@ -154,13 +160,19 @@ function Content({ report, detailOwner, setDetailOwner, ownerPrefix, current, jo
 
 type Props = {
   report: DDoSAttackReport;
+  inheritLanguage?: boolean;
+  savedResult?: ReactNode;
   detailOwner?: string;
   setDetailOwner?: (owner: string | undefined) => void;
   children?: ReactNode;
   job?: ExportJob;
 };
 
-function OwnedPanel({ report, detailOwner, setDetailOwner, children, job, sourceKey, sourceSnapshot }: Props & { sourceKey: string; sourceSnapshot: string }) {
+function DDoSLanguage({ inherit, children }: { inherit?: boolean; children: ReactNode }) {
+  return inherit ? <><ReportLanguageSelector/>{children}</> : <ReportLanguageScope>{children}</ReportLanguageScope>;
+}
+
+function OwnedPanel({ report, detailOwner, setDetailOwner, children, job, sourceKey, sourceSnapshot, inheritLanguage }: Props & { sourceKey: string; sourceSnapshot: string }) {
   const [localOwner, setLocalOwner] = useState<string>();
   const [statusTarget, setStatusTarget] = useState<HTMLElement | null>(null);
   const active = useRef(true);
@@ -172,7 +184,10 @@ function OwnedPanel({ report, detailOwner, setDetailOwner, children, job, source
   const signature = `${report.version}:${report.primary_finding_id ?? 'none'}:${String(report.summary?.finding_count ?? 'unknown')}`;
   const owner = setDetailOwner ? detailOwner : localOwner;
   const select = (next: string | undefined) => { if (current()) (setDetailOwner ?? setLocalOwner)(next); };
-  return <ReportLanguageScope><DDoSDetailContext.Provider value={{ owner, select, current, prefix: sourceKey, statusTarget, setStatusTarget }}>
+  const findingPrefix = `ddos:${job?.id ?? ''}:${job?.dataset_id ?? ''}:${reportIdentity(report)}:${signature}`;
+  const hasFinding = (id: string) => current() && Boolean(job) && report.findings.filter(item => item.id === id).length === 1;
+  const navigateFinding = (id: string) => { if (hasFinding(id)) select(`${findingPrefix}:finding:${id}`); };
+  return <DDoSLanguage inherit={inheritLanguage}><DDoSDetailContext.Provider value={{ owner, select, current, prefix: sourceKey, statusTarget, setStatusTarget, jobId: job?.id, datasetId: job?.dataset_id, hasFinding, navigateFinding }}>
     <Content
       key={`${reportIdentity(report)}:${job?.id ?? ''}:${job?.dataset_id ?? ''}`}
       report={report}
@@ -183,7 +198,7 @@ function OwnedPanel({ report, detailOwner, setDetailOwner, children, job, source
       ownerPrefix={`ddos:${job?.id ?? ''}:${job?.dataset_id ?? ''}:${reportIdentity(report)}:${signature}`}
     />
     {children}
-  </DDoSDetailContext.Provider></ReportLanguageScope>;
+  </DDoSDetailContext.Provider></DDoSLanguage>;
 }
 
 export default function DDoSAttackPanel(props: Props) {
@@ -192,7 +207,7 @@ export default function DDoSAttackPanel(props: Props) {
   // Hash a source change once, not once per disclosure or captured action.
   const sourceSnapshot = ddosSourceSnapshot(props.report, props.job);
   const digest = useMemo(() => sha256(sourceSnapshot ?? 'invalid'), [sourceSnapshot]);
-  if (sourceSnapshot === null) return <ReportLanguageScope><InvalidReport/></ReportLanguageScope>;
+  if (sourceSnapshot === null) return <DDoSLanguage inherit={props.inheritLanguage}><InvalidReport/>{props.savedResult}</DDoSLanguage>;
   const sourceKey = `${reportIdentity(props.report)}:${digest}`;
   return <OwnedPanel key={sourceKey} {...props} sourceKey={sourceKey} sourceSnapshot={sourceSnapshot}/>;
 }

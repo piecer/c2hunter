@@ -36,6 +36,23 @@ async function full() {
   fireEvent.click(await screen.findByRole('button', { name: 'Open AI interpretation' }));
   fireEvent.click(await screen.findByRole('button', { name: 'View full AI text' }));
 }
+it('returns explicitly to the same saved run, section, claim page and citation invoker', async () => {
+  const { calls } = await setup();
+  fireEvent.click(screen.getByRole('button', { name: 'Prioritized next checks' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Next AI claims' }));
+  const article = screen.getByRole('article', { name: 'Full AI interpretation' });
+  const links = within(article).getAllByRole('button', { name: fixture.many.issues[19].id });
+  const before = [...calls];
+  links[1].focus(); fireEvent.click(links[1]);
+  expect(screen.getByRole('region', { name: 'Representative flow evidence' })).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: 'Return to cited AI claim' }));
+  const restored = screen.getByRole('article', { name: 'Full AI interpretation' });
+  expect(within(restored).getByRole('heading', { name: 'Prioritized next checks' })).toBeVisible();
+  expect(within(restored).getByRole('navigation', { name: 'AI claim pages' })).toHaveTextContent('2 / 4');
+  expect(within(restored).getAllByRole('button', { name: fixture.many.issues[19].id })[1]).toHaveFocus();
+  expect(screen.queryByRole('region', { name: 'Representative flow evidence' })).not.toBeInTheDocument();
+  expect(calls).toEqual(before);
+});
 it('retires captured navigation callbacks even when the original report object returns', () => {
   localStorage.setItem('c2hunter-report-language', 'en');
   let captured: EvidenceContext | undefined;
@@ -59,8 +76,9 @@ it.each([0, 10, 20])('navigates section citation %s by keyboard to exact raw ord
   const { calls } = await setup();
   const id = fixture.many.issues[19].id;
   const before = [...calls];
+  if (section !== 0) fireEvent.click(screen.getByRole('button', { name: section === 10 ? 'Prioritized next checks' : 'Possible correlations' }));
   const links = within(screen.getByRole('article', { name: 'Full AI interpretation' })).getAllByRole('button', { name: id });
-  links[section].focus();
+  links[0].focus();
   await userEvent.keyboard(section === 10 ? ' ' : '{Enter}');
   expect(screen.getByText('Page 3 of 3')).toBeVisible();
   const evidence = screen.getByRole('region', { name: 'Representative flow evidence' });
@@ -72,7 +90,12 @@ it.each([0, 10, 20])('navigates section citation %s by keyboard to exact raw ord
 it('keeps legacy source-less saved hypotheses visible but navigation non-actionable', async () => {
   const run = structuredClone(fixture.run); delete run.analysis_job_id;
   await setup(undefined, run);
-  expect(screen.getAllByText('Capture duplication is possible.')).toHaveLength(10);
+  const retained: HTMLElement[] = [];
+  for (let page = 0; page < 4; page += 1) {
+    retained.push(...screen.getAllByText('Capture duplication is possible.'));
+    if (page < 3) fireEvent.click(screen.getByRole('button', { name: 'Next AI claims' }));
+  }
+  expect(retained).toHaveLength(10);
   expect(screen.getAllByRole('button', { name: fixture.many.issues[19].id })[0]).toBeDisabled();
   expect(screen.getAllByText(/Cannot navigate: provenance does not match the current report/).length).toBeGreaterThan(0);
 });

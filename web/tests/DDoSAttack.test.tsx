@@ -155,7 +155,7 @@ it('shows one DDoS verdict type and investigation first, with reviewed responses
   expect(within(screen.getByRole('region', { name: 'DDoS 발견 근거' })).getByText(/SYN 프록시 또는 SYN 쿠키/)).toBeVisible();
   expect(screen.queryByText('AI C2 분석')).not.toBeInTheDocument();
 
-  fireEvent.change(screen.getByRole('combobox', { name: '보고서 언어 / Report language' }), { target: { value: 'en' } });
+  fireEvent.change(screen.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ }), { target: { value: 'en' } });
   expect(screen.getByRole('heading', { name: 'Suspicious DDoS-shaped traffic observed' })).toBeVisible();
   const englishGlance = screen.getByRole('region', { name: 'DDoS at a glance' });
   expect(within(englishGlance).getByText('TCP SYN flood')).toBeVisible();
@@ -401,7 +401,7 @@ it('retains all frozen v2 report interpretations and refuses v3 reason mutations
 it('shows separate supporting counter and unknown reasons and bounded source support', () => {
   const current = JSON.parse(produceScenarios()) as Record<string, DDoSAttackReport>;
   render(<DDoSAttackPanel report={current.coordinated_packets}/>);
-  fireEvent.change(screen.getByRole('combobox', { name: /Report language/ }), { target: { value: 'en' } });
+  fireEvent.change(screen.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ }), { target: { value: 'en' } });
   fireEvent.click(screen.getByRole('button', { name: /Show detailed evidence/ }));
   expect(screen.getByText(/Eligible sources: 3; coordinated sources: 3/)).toBeVisible();
   expect(screen.getAllByText(/Supporting evidence:/).length).toBeGreaterThan(0);

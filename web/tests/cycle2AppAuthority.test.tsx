@@ -5,7 +5,7 @@ import { beforeEach,expect,it,vi } from 'vitest';
 import App from '../src/App';
 import { api } from '../src/api';
 import { producer } from './jobInvestigationFixtures';
-beforeEach(()=>{sessionStorage.clear();localStorage.setItem('c2hunter-token','principal-A');vi.stubGlobal('matchMedia',()=>({matches:false}));});
+beforeEach(()=>{sessionStorage.clear();localStorage.setItem('c2hunter-token','principal-A');localStorage.setItem('c2hunter-report-language','en');vi.stubGlobal('matchMedia',()=>({matches:false}));});
 function setupGet(){vi.spyOn(api,'get').mockImplementation(async(path:string)=>path==='/analysis-jobs/job'?{id:'job',name:'Saved job',status:'COMPLETED',analysis:{module:'c2'}}:path==='/analysis-jobs/B'?{id:'B',name:'Other job',status:'COMPLETED',analysis:{module:'c2'}}:path==='/ai-capabilities'?{available:false}:{items:[]});}
 function Nav(){const nav=useNavigate();return <><button onClick={()=>nav('/analyses/job')}>test route A</button><button onClick={()=>nav('/analyses/B')}>test route B</button></>;}
 function mount(path='/analyses/job'){const client=new QueryClient({defaultOptions:{queries:{retry:false,staleTime:Infinity}}});const view=render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[path]}><Nav/><App/></MemoryRouter></QueryClientProvider>);return {view,client,close(){view.unmount();client.clear();}};}
@@ -15,7 +15,7 @@ it('cross-tab authentication transition retires pending UI and cached source imm
   if(init?.method==='POST'){oldSignal=init.signal as AbortSignal;return new Promise<Response>(r=>{release=r;});}
   return Promise.resolve(new Response(path.endsWith('/capabilities')?producer.fixtures.capabilities:'{"items":[],"next_cursor":null}'));
  });vi.stubGlobal('fetch',fetcher);
- const app=mount();fireEvent.click(await screen.findByRole('button',{name:'AI 조사'}));fireEvent.click(await screen.findByRole('button',{name:/Open experimental investigation/}));
+ const app=mount();fireEvent.click(await screen.findByRole('button',{name:'AI investigation'}));fireEvent.click(await screen.findByRole('button',{name:/Open experimental investigation/}));fireEvent.click(screen.getByRole('button',{name:'New investigation request'}));
  await waitFor(()=>expect(screen.getByRole('button',{name:/Start experimental investigation/})).toBeEnabled());
  fireEvent.change(screen.getByRole('textbox',{name:/Question/}),{target:{value:'A private pending question'}});
  fireEvent.click(screen.getByRole('button',{name:/Start experimental investigation/}));await waitFor(()=>expect(release).toBeTypeOf('function'));

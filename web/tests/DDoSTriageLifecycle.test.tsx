@@ -50,7 +50,7 @@ it('polls a pending DDoS owner into its completed report and stops polling at te
   const get = vi.spyOn(api, 'get').mockResolvedValue({ ...baseJob, status: 'PARSING' });
   const { unmount, client } = openJob();
   await screen.findByRole('heading', { name: 'Preparing DDoS analysis' });
-  const before = get.mock.calls.length;
+  const before = get.mock.calls.filter(([path]) => path === '/analysis-jobs/triage').length;
   get.mockImplementation(async path => path === '/analysis-jobs/triage' ? { ...baseJob, status: 'COMPLETED', ddos_attack: report } : { items: [] });
   await waitFor(() => expect(screen.getByRole('region', { name: 'DDoS at a glance' })).toBeVisible(), { timeout: 4500 });
   expect(get.mock.calls.filter(([path]) => path === '/analysis-jobs/triage').length).toBeGreaterThan(before);
