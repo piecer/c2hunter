@@ -76,6 +76,7 @@ test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', 
   await page.getByRole('button', { name: 'Close candidate detail' }).click();
   await page.getByRole('button', { name: '메뉴 / Menu' }).click();
   await page.getByRole('link', { name: 'Allowlist' }).click();
+  await page.getByRole('button', { name: 'Create entry' }).click();
   await page.getByLabel('Value').fill('203.0.113.10');
   await page.getByLabel('Description').fill('Reviewed trusted infrastructure');
   await page.getByLabel('Expires at').fill('2099-08-13T09:30');
@@ -86,6 +87,7 @@ test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', 
   expect(postedAllowlist.expires_at).toBe(expectedExpiration);
   await expect(page.getByText('203.0.113.10')).toBeVisible();
   await page.getByRole('button', { name: 'Delete 203.0.113.10' }).click();
+  await page.getByRole('dialog', { name: 'Confirm policy deletion' }).getByRole('button', { name: 'Confirm delete' }).click();
   await expect(page.getByText('No allowlist entries')).toBeVisible();
 });
 
@@ -133,6 +135,7 @@ test('administrator configures automation and triages candidates from the queue'
   await page.getByRole('button', { name: 'Development login' }).click();
 
   await page.getByRole('link', { name: 'Integration settings' }).click();
+  await page.getByRole('button', { name: 'Edit integration settings' }).click();
   await page.getByRole('form', { name: '외부 TI 및 MISP 설정' }).waitFor();
   await expect(page.getByText('API key는 배포 환경에서만 관리합니다.')).toBeVisible();
   await page.getByLabel('AbuseIPDB 양성 기준').fill('80');

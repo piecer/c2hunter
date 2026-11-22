@@ -142,6 +142,7 @@ describe('External sensor configuration and credentials', () => {
     });
     const user = userEvent.setup();
     await screen.findByRole('heading', { name: 'Desired configuration' });
+    await user.click(screen.getByRole('button', { name: 'Edit desired configuration' }));
     await user.selectOptions(screen.getByLabelText('Desired direction 1'), 'OUTBOUND');
 
     await user.click(screen.getByRole('button', { name: 'Save configuration' }));
