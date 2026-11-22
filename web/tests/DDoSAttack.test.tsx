@@ -361,7 +361,7 @@ it('renders the real DDoS report with its dedicated AI output and without C2 can
   fireEvent.click(screen.getByRole('button', { name: '작업 상세 / Job details' }));
   expect(screen.queryByRole('region', { name: 'DDoS 발견 근거' })).not.toBeInTheDocument();
   expect(screen.queryByText('AI C2 분석')).not.toBeInTheDocument();
-  expect(requests).not.toContain('/api/v1/analysis-jobs/ddos-job/candidates?page_size=200');
+  expect(requests.some(path => path.startsWith('/api/v1/analysis-jobs/ddos-job/candidates?'))).toBe(false);
   expect(requests).toContain('/api/v1/analysis-jobs/ddos-job/ai-runs');
 });
 

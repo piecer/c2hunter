@@ -18,8 +18,8 @@ type Preview = {
   admissible: boolean; reasons: string[];
 };
 
-export default function HistoricalReferenceInput({ jobId, value, onChange, disabled, requestError }: {
-  jobId: string; value: BaselineReference | null; onChange: (value: BaselineReference | null) => void; disabled: boolean; requestError?: Error | null;
+export default function HistoricalReferenceInput({ jobId, value, onChange, disabled, requestError, visible = true }: {
+  jobId: string; value: BaselineReference | null; onChange: (value: BaselineReference | null) => void; disabled: boolean; requestError?: Error | null; visible?: boolean;
 }) {
   const language = useReportLanguage();
   const t = (en: string, ko: string) => language === 'ko' ? ko : en;
@@ -52,6 +52,7 @@ export default function HistoricalReferenceInput({ jobId, value, onChange, disab
   });
   const denied = [scopes.error, preview.error, requestError].some(historicalAccessDenied);
   const stale = [preview.error, requestError].some(historicalConflict);
+  if (!visible) return null;
   return <section className="c2-discovery" aria-label={t('Historical reference options', '과거 참조 설정')}>
     <p className="warning">{t('Authenticated ANALYST access is required. No target quality review is asserted: comparison is UNREVIEWED and may be unusable. Preview counts are not approval or proof of normal traffic. This does not approve or modify a baseline.', '인증된 ANALYST 권한이 필요합니다. 대상 품질 검토를 주장하지 않습니다. 비교는 UNREVIEWED이며 사용할 수 없을 수 있습니다. 미리보기 건수는 승인이나 정상 트래픽의 증명이 아니며 기준선을 승인·변경하지 않습니다.')}</p>
     <label>{t('Historical scope', '과거 참조 범위')}<select value={scopeId} disabled={disabled || denied || scopes.isFetching} onChange={event => { owner.current += 1; setScopeId(event.target.value); onChange(null); preview.reset(); }}>

@@ -19,8 +19,8 @@ test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', 
   await page.getByLabel('Analysis name').fill('E2E investigation');
   await page.getByLabel('Sensor A').check();
   await page.getByRole('button', { name: 'Start analysis' }).click();
-  await expect(page.getByText('ANALYZING')).toBeVisible();
-  await page.getByRole('button', { name: 'Cancel analysis' }).click();
+  await expect(page.getByText('ANALYZING', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '분석 취소', exact: true }).click();
   await expect(page.getByText('Cancellation requested')).toBeVisible();
 
   await page.getByRole('link', { name: 'Candidates' }).click();
@@ -170,6 +170,7 @@ test('analyst can manage history and upload an offline PCAP', async ({ page }) =
   });
   await page.getByRole('button', { name: 'Upload and analyze' }).click();
   await expect(page.getByRole('heading', { name: 'Uploaded E2E capture' })).toBeVisible();
+  await page.getByRole('button', { name: '작업 정보', exact: true }).click();
   await expect(page.getByText('PCAP upload')).toBeVisible();
 });
 
@@ -210,6 +211,7 @@ test('analyst can run bounded AI analysis and inspect the candidate assessment',
   await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
   await page.goto('/analyses/job-1');
 
+  await page.getByRole('button', { name: 'AI 조사', exact: true }).click();
   const aiPanel = page.getByRole('region', { name: 'AI C2 분석' });
   await aiPanel.getByRole('button', { name: 'Run AI analysis' }).click();
   await expect(aiPanel.getByText('COMPLETED', { exact: true })).toBeVisible();
@@ -221,7 +223,7 @@ test('analyst can run bounded AI analysis and inspect the candidate assessment',
   await expect(aiPanel.getByText(/Not published/)).toBeVisible();
   await expect(aiPanel.getByText(/AI-generated, analyst review required/).first()).toBeVisible();
 
-  await page.getByRole('link', { name: '203.0.113.10' }).click();
+  await aiPanel.getByRole('link', { name: '203.0.113.10' }).click();
   const candidateAI = page.getByRole('region', { name: 'AI C2 판정' });
   await expect(candidateAI.getByText('LIKELY_C2')).toBeVisible();
   await expect(candidateAI.getByText('Stable periodic callback')).toBeVisible();
@@ -235,6 +237,7 @@ test('analysis configuration is structured and responsive', async ({ page }) => 
   await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
   await page.goto('/analyses/job-1');
 
+  await page.getByRole('button', { name: '작업 정보', exact: true }).click();
   const configuration = page.getByRole('region', { name: '분석 구성' });
   await expect(configuration).toBeVisible();
   await expect(page.getByRole('region', { name: '탐지 설정 요약' }).getByText('최소 후보 점수')).toBeVisible();
@@ -263,6 +266,7 @@ test('analyst can combine multiple flow filters and filter-out patterns', async 
   await page.getByRole('link', { name: 'Analysis history' }).click();
   await page.getByRole('link', { name: 'E2E investigation' }).click();
 
+  await page.getByRole('button', { name: '작업 정보', exact: true }).click();
   await expect(page.getByText('No filter-out patterns configured')).toBeVisible();
   await expect(page.getByText('Filters applied')).toBeVisible();
   await page.getByRole('button', { name: 'Add filter', exact: true }).click();

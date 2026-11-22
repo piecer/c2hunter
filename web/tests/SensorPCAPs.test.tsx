@@ -60,7 +60,7 @@ it('shows and downloads only PCAP archives linked to the current analysis', asyn
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
     if (path === '/api/v1/analysis-jobs/job-a') return json({ id: 'job-a', name: 'Analysis A', status: 'COMPLETED', packet_count: 100, flow_count: 10, candidate_count: 0 });
-    if (path === '/api/v1/analysis-jobs/job-a/candidates?page_size=200') return json({ items: [] });
+    if (path === '/api/v1/analysis-jobs/job-a/candidates?page=1&page_size=25&minimum_score=0&sort=-score') return json({ items: [], page: 1, page_size: 25, total: 0 });
     if (path.startsWith('/api/v1/analysis-jobs/job-a/flows?')) return json({ items: [], page: 1, page_size: 50, total: 0 });
     if (path === '/api/v1/detector-weight-presets') return json({ items: [] });
     if (path === '/api/v1/sensor-pcaps?analysis_job_id=job-a&page_size=200') return json({
@@ -84,6 +84,7 @@ it('shows and downloads only PCAP archives linked to the current analysis', asyn
     </QueryClientProvider>,
   );
 
+  await userEvent.click(await screen.findByRole('button', { name: '작업 정보' }));
   expect(await screen.findByRole('heading', { name: '분석 PCAP' })).toBeInTheDocument();
   expect(await screen.findByText('job-a--eth0-000001.pcap')).toBeInTheDocument();
   expect(screen.queryByText('job-b--eth1-000001.pcap')).not.toBeInTheDocument();

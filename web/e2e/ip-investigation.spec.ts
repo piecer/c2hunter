@@ -33,19 +33,35 @@ for (const width of [1280, 390]) {
       } else if (path.includes('/evidence/')) body = fixture('evidence_protocol');
       else if (path.endsWith('/steps')) body = { items: [fixture('step_tool')], next_cursor: null };
       else if (path === '/api/v1/analysis-jobs/job') body = { id: 'job', name: 'Long source label '.repeat(12), status: 'COMPLETED', analysis: { module: 'c2' } };
-      else if (path.endsWith('/candidates')) body = { items: Array.from({ length: 7 }, (_, index) => ({ id: `candidate-${index}`, candidate_ip: index === 6 ? longIP : `198.51.100.${index + 1}`, score: 42, severity: 'MEDIUM' })) };
+      else if (path.endsWith('/candidates')) {
+        const candidates = Array.from({ length: 7 }, (_, index) => ({ id: `candidate-${index}`, candidate_ip: index === 6 ? longIP : `198.51.100.${index + 1}`, score: 42, severity: 'MEDIUM' }));
+        const pageNumber = Number(url.searchParams.get('page') ?? '1');
+        const pageSize = Number(url.searchParams.get('page_size'));
+        if (url.searchParams.has('page')) {
+          // Bounded results paging is distinct from the lazy AI membership read.
+          expect(pageSize).toBe(25);
+        } else {
+          expect(pageSize).toBe(200);
+        }
+        body = { items: candidates.slice((pageNumber - 1) * pageSize, pageNumber * pageSize), page: pageNumber, page_size: pageSize, total: candidates.length };
+      }
       else if (path.endsWith('/flows')) body = { items: [{ flow_id: 'flow', job_id: 'job', timestamp: '2026-01-01T00:00:00Z', source_ip: '10.0.0.12', destination_ip: longIP, protocol: 'UDP', direction: 'OUTBOUND' }], total: 1, page: 1, page_size: 50 };
       else if (path === '/api/v1/ai-capabilities') body = { available: false };
       else body = { items: [] };
       await route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
     });
     await page.goto('/analyses/job');
-    const panel = page.getByRole('region', { name: 'IP 조사 / IP investigation', exact: true });
+    // The retained run owner and editable form are sibling regions in this entry.
+    const investigation = page.locator('#ip-investigation-entry');
+    const panel = investigation.getByRole('region', { name: 'IP 조사 / IP investigation', exact: true });
+    const selectedRun = investigation.getByRole('region', { name: '선택 조사 / Selected investigation', exact: true });
     await page.getByRole('button', { name: `Investigate candidate ${longIP}`, exact: true }).click();
     await expect(panel.getByLabel('대상 IP / Target IP')).toHaveValue(longIP);
     await expect(panel.getByLabel('대상 IP / Target IP')).toBeFocused();
+    await page.getByRole('button', { name: '작업 정보', exact: true }).click();
     await page.getByRole('button', { name: 'Investigate source 10.0.0.12', exact: true }).click();
     await expect(panel.getByLabel('대상 IP / Target IP')).toHaveValue('10.0.0.12');
+    await page.getByRole('button', { name: '작업 정보', exact: true }).click();
     await page.getByRole('button', { name: `Investigate destination ${longIP}`, exact: true }).click();
     await expect(panel.getByLabel('대상 IP / Target IP')).toHaveValue(longIP);
     await panel.getByText('범위 제한 / Scope filters', { exact: true }).click();
@@ -55,14 +71,14 @@ for (const width of [1280, 390]) {
     await panel.getByRole('button', { name: '범위 미리보기 / Preview scope', exact: true }).click();
     await panel.getByRole('button', { name: '조사 시작 / Start investigation', exact: true }).click();
     // No refresh, route change, selector action or priming GET before terminal.
-    await expect(panel.getByText('관측된 통신은 추가 검토가 필요합니다.', { exact: true })).toBeVisible({ timeout: 10000 });
+    await expect(selectedRun.getByText('관측된 통신은 추가 검토가 필요합니다.', { exact: true })).toBeVisible({ timeout: 10000 });
     expect(admissions).toHaveLength(1);
     expect(JSON.parse(admissions[0]).allow_remote).toBe(false);
-    await expect(panel.locator('img')).toHaveCount(0);
+    await expect(investigation.locator('img')).toHaveCount(0);
     const evidence = fixture('evidence_protocol') as { evidence_id: string };
-    await panel.getByRole('button', { name: `근거 보기 / Evidence ${evidence.evidence_id}`, exact: true }).click();
-    await expect(panel.getByText('updates.example.test', { exact: true })).toBeVisible();
-    const geometry = await panel.evaluate(element => ({
+    await selectedRun.getByRole('button', { name: `근거 보기 / Evidence ${evidence.evidence_id}`, exact: true }).click();
+    await expect(selectedRun.getByText('updates.example.test', { exact: true })).toBeVisible();
+    const geometry = await investigation.evaluate(element => ({
       panelClient: element.clientWidth, panelScroll: element.scrollWidth,
       viewport: innerWidth, document: document.documentElement.scrollWidth,
       nodes: element.querySelectorAll('*').length,
@@ -71,11 +87,13 @@ for (const width of [1280, 390]) {
         return box.width > 0 && (box.right > innerWidth + 1 || box.left < -1);
       }).map(control => control.textContent),
     }));
+    await testInfo.attach('investigation-geometry', { body: JSON.stringify(geometry), contentType: 'application/json' });
     await testInfo.attach('document-layout', { body: await page.screenshot({ fullPage: true }), contentType: 'image/png' });
     await testInfo.attach('layout-diagnostics', { body: JSON.stringify(await page.locator('.shell,.content,.content>*,.table-wrap,table').evaluateAll(elements => elements.map(element => ({
       tag: element.tagName, class: element.className, box: element.getBoundingClientRect().toJSON(), client: element.clientWidth, scroll: element.scrollWidth,
       minWidth: getComputedStyle(element).minWidth, overflowX: getComputedStyle(element).overflowX, grid: getComputedStyle(element).gridTemplateColumns,
     })))), contentType: 'application/json' });
+    await page.getByRole('button', { name: '결과·근거', exact: true }).click();
     const candidates = page.getByRole('table', { name: 'Analysis candidates', exact: true });
     await expect(candidates.getByRole('link', { name: longIP, exact: true })).toHaveText(longIP);
     const tableGeometry = await candidates.evaluate(table => {
@@ -87,14 +105,27 @@ for (const width of [1280, 390]) {
       const lastEdge = table.getBoundingClientRect().right - wrapper.getBoundingClientRect().right;
       const scrolled = wrapper.scrollLeft;
       wrapper.scrollLeft = 0;
+      const bounds = wrapper.getBoundingClientRect();
+      const allCellsFit = [...table.querySelectorAll('th,td')].every(cell => {
+        const box = cell.getBoundingClientRect();
+        return box.width > 0 && box.height > 0 && box.left >= bounds.left - 1 && box.right <= bounds.right + 1 && cell.scrollWidth <= cell.clientWidth + 1;
+      });
       return { contentWidth: content.getBoundingClientRect().width, available: innerWidth - content.getBoundingClientRect().left - scrollX,
-        wrapperClient: wrapper.clientWidth, wrapperScroll: wrapper.scrollWidth, overflowX: getComputedStyle(wrapper).overflowX, firstEdge, lastEdge, scrolled };
+        wrapperClient: wrapper.clientWidth, wrapperScroll: wrapper.scrollWidth, overflowX: getComputedStyle(wrapper).overflowX, firstEdge, lastEdge, scrolled, allCellsFit };
     });
     await testInfo.attach('candidate-table-geometry', { body: JSON.stringify(tableGeometry), contentType: 'application/json' });
     expect(tableGeometry.contentWidth).toBeLessThanOrEqual(tableGeometry.available + 1);
-    expect(tableGeometry.wrapperScroll).toBeGreaterThan(tableGeometry.wrapperClient);
     expect(tableGeometry.overflowX).toBe('auto');
-    expect(tableGeometry.scrolled).toBeGreaterThan(0);
+    if (width === 390) {
+      // This narrow fixture still needs local scrolling, with both edges reachable.
+      expect(tableGeometry.wrapperScroll).toBeGreaterThan(tableGeometry.wrapperClient);
+      expect(tableGeometry.scrolled).toBeGreaterThan(0);
+    } else {
+      // Compact result columns now fit on desktop: do not require artificial overflow.
+      expect(tableGeometry.wrapperScroll).toBe(tableGeometry.wrapperClient);
+      expect(tableGeometry.scrolled).toBe(0);
+      expect(tableGeometry.allCellsFit).toBe(true);
+    }
     expect(Math.abs(tableGeometry.firstEdge)).toBeLessThanOrEqual(1);
     // A negative right-edge delta is already inside the wrapper (including borders).
     expect(tableGeometry.lastEdge).toBeLessThanOrEqual(1);
@@ -103,7 +134,7 @@ for (const width of [1280, 390]) {
     expect(geometry.overflowingControls).toEqual([]);
     expect(geometry.nodes).toBeLessThan(900);
     expect(errors).toEqual([]);
-    await testInfo.attach('investigation-geometry', { body: JSON.stringify(geometry), contentType: 'application/json' });
-    await testInfo.attach('investigation-layout', { body: await panel.screenshot(), contentType: 'image/png' });
+    await page.getByRole('button', { name: 'AI 조사', exact: true }).click();
+    await testInfo.attach('investigation-layout', { body: await investigation.screenshot(), contentType: 'image/png' });
   });
 }

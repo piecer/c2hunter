@@ -28,7 +28,7 @@ const responses: Record<string, unknown> = {
   '/api/v1/analysis-jobs': { items: [{ id: 'job-1', name: 'Investigation', description: 'Initial note', status: 'COMPLETED', source_type: 'PCAP_UPLOAD', source: { filename: 'capture.pcap', size_bytes: 2048 }, created_at: '2026-07-20T10:10:00Z', start_time: '2026-07-20T10:00:00Z', end_time: '2026-07-20T10:05:00Z', packet_count: 100, flow_count: 50, candidate_count: 2 }] },
   '/api/v1/sensors': { items: [{ sensor_id: 'sensor-a', name: 'Sensor A', status: 'ONLINE', last_heartbeat: '2026-07-20T10:00:00Z', interfaces: [{ name: 'eth0', direction: 'INBOUND' }], version: '0.1.0', cpu_percent: 10, memory_percent: 20, disk_percent: 30, received_packets: 1000, dropped_packets: 2 }, { sensor_id: 'sensor-b', name: 'Sensor B', status: 'ONLINE', interfaces: [{ name: 'eth1', direction: 'OUTBOUND' }] }] },
   '/api/v1/analysis-jobs/job-1': { id: 'job-1', dataset_id: 'dataset-1', name: 'Investigation', status: 'ANALYZING', sensor_ids: ['sensor-a'], internal_networks: ['10.0.0.0/8'], capture: { max_packets: 2000, directions: ['OUTBOUND'] }, analysis: { profile: 'ddos_botnet', minimum_candidate_score: 60 }, transitions: [{ to_status: 'CREATED', occurred_at: '2026-07-20T10:00:00Z', reason: 'analysis requested' }], packet_count: 100, flow_count: 50, candidate_count: 1 },
-  '/api/v1/analysis-jobs/job-1/candidates?page_size=200': { items: [{ id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', hosts: ['10.0.0.5'], sensors: ['sensor-a'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', contribution: 15, description: 'Periodic traffic' }] }] },
+  '/api/v1/analysis-jobs/job-1/candidates?page=1&page_size=25&minimum_score=0&sort=-score': { page: 1, page_size: 25, total: 1, items: [{ id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', hosts: ['10.0.0.5'], sensors: ['sensor-a'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', contribution: 15, description: 'Periodic traffic' }] }] },
   '/api/v1/candidates': { items: [{ id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', occurrence_count: 3, duplicate_count: 2, workflow_status: 'NEEDS_REVIEW', action_status: 'NOT_REQUIRED', hosts: ['10.0.0.5'], sensors: ['sensor-a'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', contribution: 15, description: 'Periodic traffic' }], ti_assessment: { status: 'COMPLETED', signal: 'POSITIVE', configured_providers: 3, successful_providers: 3, positive_providers: 3, virustotal_malicious: 8, virustotal_suspicious: 2, abuse_confidence_score: 91, misp_event_count: 1, fetched_at: '2026-07-20T10:09:00Z' } }], workflow_counts: { needs_review: 1, in_review: 2, action_required: 3, action_in_progress: 4, action_completed: 5, false_positive: 6, done: 11 } },
   '/api/v1/candidates/candidate-1': { id: 'candidate-1', job_id: 'job-1', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', hosts: ['10.0.0.5'], sensors: ['sensor-a'], protocols: ['TCP'], ports: [443], domains: ['c2.example'], first_seen: '2026-07-20T10:00:00Z', last_seen: '2026-07-20T10:05:00Z', flow_count: 5, packet_count: 20, byte_count: 2048, traffic_buckets: [{ start: '2026-07-20T10:00:00Z', flows: 5, packets: 20, bytes: 2048 }], evidence: [{ type: 'PERIODIC_BEACON', detector: 'periodic_beacon', version: '1.0.0', raw_score: 15, contribution: 15, confidence: 0.9, description: 'Periodic traffic', hosts: ['10.0.0.5'], sensors: ['sensor-a'], metrics: { sample_count: 7, period_seconds: 30 } }], adjustments: [{ kind: 'SINGLE_HOST', points: -20, explanation: 'Single internal host observed' }] },
   '/api/v1/analysis-jobs/job-1/flows?candidate_ip=203.0.113.9&page=1&page_size=50': { items: [{ flow_id: '0123456789abcdef01234567', job_id: 'job-1', sensor_id: 'sensor-a', timestamp: '2026-07-20T10:00:00Z', source_ip: '10.0.0.5', destination_ip: '203.0.113.9', source_port: 51000, destination_port: 443, internal_ip: '10.0.0.5', external_ip: '203.0.113.9', service_port: 443, protocol: 'TCP', direction: 'OUTBOUND', packet_count: 2, total_bytes: 128, payload_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_prefix_hash: '8a62e967fcd6dfa5d75308c37808b4668a7faf1cdb06e09ac0a7161827603887', payload_length: 6, payload_entropy: 2.585, payload_printable_ratio: 1, payload_simhash: 'e627bf19152d67b3', payload_feature_version: '1', has_payload: true, current_label: null }], page: 1, page_size: 50, total: 1 },
@@ -103,6 +103,7 @@ describe('C2Hunter UI', () => {
       return Response.json(responses[path] ?? { items: [] });
     }, client);
     try {
+      await userEvent.click(await screen.findByRole('button', { name: 'AI 조사' }));
       const panel = await screen.findByRole('region', { name: 'AI C2 분석' });
       await waitFor(() => expect(client.getQueryData(['ai-run', 'shadow-1'])).toMatchObject({ status: 'RUNNING' }));
       expect(within(panel).getByRole('progressbar', { name: 'AI analysis progress' })).toHaveAttribute('value', '30');
@@ -143,6 +144,7 @@ describe('C2Hunter UI', () => {
       return Response.json(responses[path] ?? { items: [] });
     }, client);
     try {
+      await userEvent.click(await screen.findByRole('button', { name: 'AI 조사' }));
       const panel = await screen.findByRole('region', { name: 'AI C2 분석' });
       await waitFor(() => expect(client.getQueryData(['ai-run', 'shadow-1'])).toMatchObject({ status: 'RUNNING' }));
       await act(async () => { await client.invalidateQueries({ queryKey: ['ai-run', 'shadow-1'] }); });
@@ -197,6 +199,7 @@ describe('C2Hunter UI', () => {
         return Response.json(responses[path] ?? { items: [] });
       }, client);
       try {
+        await userEvent.click(await screen.findByRole('button', { name: 'AI 조사' }));
         const panel = await screen.findByRole('region', { name: 'AI C2 분석' });
         await waitFor(() => expect(assessmentReads).toBe(1));
         await waitFor(() => expect(client.getQueryData(['ai-run', 'shadow-1'])).toMatchObject({ status: 'RUNNING' }));
@@ -245,6 +248,7 @@ describe('C2Hunter UI', () => {
       return Response.json(responses[path] ?? {});
     });
     const user = userEvent.setup();
+    await userEvent.click(await screen.findByRole('button', { name: 'AI 조사' }));
     const panel = await screen.findByRole('region', { name: 'AI C2 분석' });
     const checkbox = within(panel).getByRole('checkbox', { name: /행동 기반 탐색/ });
     expect(checkbox).not.toBeChecked();
@@ -272,6 +276,7 @@ describe('C2Hunter UI', () => {
       return Response.json(responses[path] ?? {});
     });
     const user = userEvent.setup();
+    await userEvent.click(await screen.findByRole('button', { name: 'AI 조사' }));
     const panel = await screen.findByRole('region', { name: 'AI C2 분석' });
     const consent = await within(panel).findByRole('checkbox', { name: /원격 모델.*동의/ });
     expect(consent).not.toBeChecked();
@@ -296,6 +301,7 @@ describe('C2Hunter UI', () => {
       return Response.json(responses[path] ?? { items: [] });
     });
     const user = userEvent.setup();
+    await userEvent.click(await screen.findByRole('button', { name: 'AI 조사' }));
     const coverage = await screen.findByRole('region', { name: '탐색 범위' });
     expect(await within(coverage).findByText('후보 풀 31 · 선택 2 · 미선택 29')).toBeInTheDocument();
     expect(within(coverage).getByText(/미선택은 안전하다는 뜻이 아닙니다/)).toBeInTheDocument();
@@ -330,6 +336,7 @@ describe('C2Hunter UI', () => {
       return Response.json(responses[path] ?? { items: [] });
     });
     const user = userEvent.setup();
+    await userEvent.click(await screen.findByRole('button', { name: 'AI 조사' }));
     const panel = await screen.findByRole('region', { name: 'AI C2 분석' });
     expect(await within(panel).findByText('198.51.100.44')).toBeInTheDocument();
     expect(within(panel).queryByRole('link', { name: '198.51.100.44' })).not.toBeInTheDocument();
@@ -378,6 +385,7 @@ describe('C2Hunter UI', () => {
     }));
     render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/analyses/job-1']}><App/></MemoryRouter></QueryClientProvider>);
     const user = userEvent.setup();
+    await userEvent.click(await screen.findByRole('button', { name: 'AI 조사' }));
     await user.click(await screen.findByRole('checkbox', { name: /행동 기반 탐색/ }));
     await user.click(await screen.findByRole('checkbox', { name: /원격 모델.*동의/ }));
     await user.selectOptions(screen.getByLabelText('Candidate limit'), '1');
@@ -385,8 +393,10 @@ describe('C2Hunter UI', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '다음 선택 목록' })).toBeEnabled());
     await user.click(screen.getByRole('button', { name: '다음 선택 목록' }));
     await waitFor(() => expect(requested.some(path => path.includes('shadow-job-1/selection?offset=7'))).toBe(true));
+    await userEvent.click(await screen.findByRole('button', { name: '작업 정보' }));
     await user.click(screen.getByRole('link', { name: 'job-2' }));
     await screen.findByRole('heading', { name: 'job-2' });
+    await userEvent.click(await screen.findByRole('button', { name: 'AI 조사' }));
     expect(screen.getByRole('checkbox', { name: /행동 기반 탐색/ })).not.toBeChecked();
     expect(screen.getByRole('checkbox', { name: /원격 모델.*동의/ })).not.toBeChecked();
     expect(screen.getByLabelText('Candidate limit')).toHaveValue('5');
@@ -406,6 +416,7 @@ describe('C2Hunter UI', () => {
       if (path.endsWith('/shadow-1/assessments')) return failed === 'assessments' ? Response.json({ detail: 'read failed' }, { status: 503 }) : Response.json({ items: [] });
       return Response.json(responses[path] ?? { items: [] });
     });
+    await userEvent.click(await screen.findByRole('button', { name: 'AI 조사' }));
     const panel = await screen.findByRole('region', { name: 'AI C2 분석' });
     expect(await within(panel).findByRole('alert')).toHaveTextContent(failed === 'run' ? '실행 상세를 읽지 못했습니다' : 'AI 판정을 읽지 못했습니다');
   });
@@ -638,10 +649,11 @@ describe('C2Hunter UI', () => {
 
   it('shows detector settings, state history, and candidates on analysis detail', async () => {
     renderAt('/analyses/job-1');
+    expect(await screen.findByRole('table', { name: 'Analysis candidates' })).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole('button', { name: '작업 정보' }));
     expect(await screen.findByRole('heading', { name: '탐지 설정' })).toBeInTheDocument();
     expect(screen.getByText('최소 후보 점수')).toBeInTheDocument();
     expect(screen.getByText('ddos_botnet')).toBeInTheDocument();
-    expect(await screen.findByRole('table', { name: 'Analysis candidates' })).toBeInTheDocument();
     expect(await screen.findByRole('table', { name: 'Analysis flows' })).toBeInTheDocument();
     expect(screen.getByText('analysis requested')).toBeInTheDocument();
   });
@@ -657,6 +669,7 @@ describe('C2Hunter UI', () => {
       return new Response(JSON.stringify({ items: [] }), { status: 200 });
     });
 
+    await userEvent.click(await screen.findByRole('button', { name: '작업 정보' }));
     const lifecycle = await screen.findByRole('region', { name: 'PCAP 분석 처리 단계' });
     expect(within(lifecycle).getByText('업로드')).toBeInTheDocument();
     expect(within(lifecycle).getByText('분석 준비').closest('li')).toHaveAttribute('data-state', 'current');
@@ -668,6 +681,7 @@ describe('C2Hunter UI', () => {
   it('shows AI run status and evidence-linked candidate assessment', async () => {
     renderAt('/analyses/job-1');
 
+    await userEvent.click(await screen.findByRole('button', { name: 'AI 조사' }));
     const region = await screen.findByRole('region', { name: 'AI C2 분석' });
     expect(await within(region).findByText('COMPLETED')).toBeInTheDocument();
     expect(await within(region).findByText('AI SUSPICIOUS')).toBeInTheDocument();
@@ -729,8 +743,8 @@ describe('C2Hunter UI', () => {
     };
     const handler = async (input: RequestInfo | URL) => {
       const path = String(input);
-      if (path === '/api/v1/analysis-jobs/job-1/candidates?page_size=200') {
-        return new Response(JSON.stringify({ items: [statusCandidate] }), { status: 200 });
+      if (path === '/api/v1/analysis-jobs/job-1/candidates?page=1&page_size=25&minimum_score=0&sort=-score') {
+        return new Response(JSON.stringify({ items: [statusCandidate], page: 1, page_size: 25, total: 1 }), { status: 200 });
       }
       if (path.startsWith('/api/v1/candidates?')) {
         return new Response(JSON.stringify({ items: [statusCandidate], page: 1, total_pages: 1 }), { status: 200 });
@@ -769,6 +783,7 @@ describe('C2Hunter UI', () => {
       return new Response(JSON.stringify(path === '/api/v1/analysis-jobs/job-1' ? detailed : responses[path] ?? { items: [] }), { status: 200 });
     });
 
+    await userEvent.click(await screen.findByRole('button', { name: '작업 정보' }));
     const detection = await screen.findByRole('region', { name: '탐지 설정 요약' });
     expect(within(detection).getByText('최소 후보 점수')).toBeInTheDocument();
     expect(within(detection).getByText('60점 이상')).toBeInTheDocument();
@@ -804,6 +819,7 @@ describe('C2Hunter UI', () => {
     render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/job-1']}><App /></MemoryRouter></QueryClientProvider>);
     const user = userEvent.setup();
 
+    await userEvent.click(await screen.findByRole('button', { name: '작업 정보' }));
     expect(await screen.findByRole('heading', { name: '가중치 조정 후 재분석' })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '대형 서비스 노이즈 줄이기' }));
     await user.click(screen.getByRole('button', { name: '탐지 가중치로 재분석' }));
@@ -839,11 +855,13 @@ describe('C2Hunter UI', () => {
     render(<QueryClientProvider client={client}><MemoryRouter initialEntries={['/analyses/job-1']}><App /></MemoryRouter></QueryClientProvider>);
     const user = userEvent.setup();
 
+    await userEvent.click(await screen.findByRole('button', { name: '작업 정보' }));
     const firstWeight = await screen.findByLabelText(/공통 목적지/);
     await user.clear(firstWeight);
     await user.type(firstWeight, '0.25');
     await user.click(screen.getByRole('link', { name: 'job-2' }));
 
+    await userEvent.click(await screen.findByRole('button', { name: '작업 정보' }));
     expect(await screen.findByLabelText(/공통 목적지/)).toHaveValue(1.75);
   });
 
@@ -859,6 +877,7 @@ describe('C2Hunter UI', () => {
     vi.stubGlobal('fetch', fetchMock);
     const user = userEvent.setup();
 
+    await userEvent.click(await screen.findByRole('button', { name: '작업 정보' }));
     expect(await screen.findByRole('table', { name: 'Analysis flows' })).toBeInTheDocument();
     expect(screen.getByText('No filter-out patterns configured')).toBeInTheDocument();
     expect(screen.getByText('Filters applied')).toBeInTheDocument();
@@ -905,6 +924,7 @@ describe('C2Hunter UI', () => {
     renderAt('/analyses/job-1', fetchMock);
     const user = userEvent.setup();
 
+    await userEvent.click(await screen.findByRole('button', { name: '작업 정보' }));
     await screen.findByRole('table', { name: 'Analysis flows' });
     await user.click(screen.getByRole('button', { name: 'Add filter out' }));
     await user.type(screen.getByLabelText('Filter out 1 endpoint IP or CIDR'), '198.51.100.0/24');
@@ -918,7 +938,8 @@ describe('C2Hunter UI', () => {
       include_filters: [{ has_payload: true }],
       exclude_filters: [{ candidate_ip: '198.51.100.0/24' }],
     });
-    expect(await screen.findByRole('status')).toHaveTextContent('Partial filtered capture downloaded (8 of 12 matched packets; output byte limit reached)');
+    const exportPanel = screen.getByRole('heading', { name: 'All analysis flows' }).closest('section')!;
+    expect(await within(exportPanel).findByRole('status')).toHaveTextContent('Partial filtered capture downloaded (8 of 12 matched packets; output byte limit reached)');
     expect(fetchMock.mock.calls.filter(([url]: [RequestInfo | URL, RequestInit?]) => String(url).endsWith('/cancel'))).toHaveLength(0);
     await user.click(screen.getByRole('button', { name: 'Reset' }));
     expect(screen.queryByText(/Partial filtered capture downloaded/)).not.toBeInTheDocument();
@@ -939,9 +960,11 @@ describe('C2Hunter UI', () => {
       return new Response(JSON.stringify(responses[path] ?? { items: [] }), { status: responses[path] ? 200 : 404 });
     });
     const rendered = renderAt('/analyses/job-1', fetchMock);
+    await userEvent.click(await screen.findByRole('button', { name: '작업 정보' }));
     await screen.findByRole('table', { name: 'Analysis flows' });
     await userEvent.click(screen.getByRole('button', { name: 'Download filtered capture' }));
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Filtered capture queued'));
+    const exportPanel = screen.getByRole('heading', { name: 'All analysis flows' }).closest('section')!;
+    await waitFor(() => expect(within(exportPanel).getByRole('status')).toHaveTextContent('Filtered capture queued'));
 
     rendered.unmount();
 
@@ -976,6 +999,7 @@ describe('C2Hunter UI', () => {
     });
     renderAt('/analyses/job-1', fetchMock);
 
+    await userEvent.click(await screen.findByRole('button', { name: '작업 정보' }));
     await screen.findByRole('table', { name: 'Analysis flows' });
     await userEvent.click(screen.getByRole('button', { name: 'Download filtered capture' }));
 
@@ -991,6 +1015,7 @@ describe('C2Hunter UI', () => {
   it('limits include and exclude filter groups to the API contract', async () => {
     renderAt('/analyses/job-1');
     const user = userEvent.setup();
+    await userEvent.click(await screen.findByRole('button', { name: '작업 정보' }));
     await screen.findByRole('table', { name: 'Analysis flows' });
     const addInclude = screen.getByRole('button', { name: 'Add filter' });
     const addExclude = screen.getByRole('button', { name: 'Add filter out' });
@@ -1578,7 +1603,7 @@ describe('C2Hunter UI', () => {
     renderAt('/analyses/job-1');
     vi.stubGlobal('fetch', fetchMock);
     await screen.findByRole('heading', { name: 'Investigation' });
-    await userEvent.click(screen.getByRole('button', { name: 'Cancel analysis' }));
+    await userEvent.click(screen.getByRole('button', { name: '분석 취소' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/analysis-jobs/job-1/cancel', expect.objectContaining({ method: 'POST' })));
     const call = fetchMock.mock.calls.find(([url]) => url === '/api/v1/analysis-jobs/job-1/cancel');
     expect(JSON.parse(String(call?.[1]?.body))).toEqual({ reason: 'operator requested from web console' });
@@ -1662,7 +1687,7 @@ describe('C2Hunter UI', () => {
       const path = String(input);
       if (path === '/api/v1/pcap-analysis-jobs/initiate' && init?.method === 'POST') return new Response(JSON.stringify({ id: 'staged-job', name: 'Staged case', status: 'CREATED', processing: { phase: 'UPLOAD_PENDING' } }), { status: 201 });
       if (path === '/api/v1/analysis-jobs/staged-job') return new Response(JSON.stringify({ id: 'staged-job', name: 'Staged case', status: 'INGESTING', processing: { phase: 'UPLOAD_STORED' }, analysis: { module: 'c2' } }), { status: 200 });
-      if (path === '/api/v1/analysis-jobs/staged-job/candidates?page_size=200') return new Response(JSON.stringify({ items: [] }), { status: 200 });
+      if (path === '/api/v1/analysis-jobs/staged-job/candidates?page=1&page_size=25&minimum_score=0&sort=-score') return new Response(JSON.stringify({ items: [], page: 1, page_size: 25, total: 0 }), { status: 200 });
       return new Response(JSON.stringify({ error: { message: 'missing fixture' } }), { status: 404 });
     });
     class StagedUploadRequest {
@@ -1708,8 +1733,8 @@ describe('C2Hunter UI', () => {
       if (path === '/api/v1/analysis-jobs/retry-job') {
         return new Response(JSON.stringify({ id: 'retry-job', name: 'Retry case', status: 'INGESTING', processing: { phase: 'UPLOAD_STORED' } }), { status: 200 });
       }
-      if (path === '/api/v1/analysis-jobs/retry-job/candidates?page_size=200') {
-        return new Response(JSON.stringify({ items: [] }), { status: 200 });
+      if (path === '/api/v1/analysis-jobs/retry-job/candidates?page=1&page_size=25&minimum_score=0&sort=-score') {
+        return new Response(JSON.stringify({ items: [], page: 1, page_size: 25, total: 0 }), { status: 200 });
       }
       return new Response(JSON.stringify({ error: { message: 'missing fixture' } }), { status: 404 });
     });

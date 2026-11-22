@@ -15,7 +15,7 @@ import DDoSNormalReference from './DDoSNormalReference';
 import { ddosReferenceParameters } from './ddosReferenceRequest';
 import PcapAttackGuidance, { PcapGuidanceAIScope } from './PcapAttackGuidance';
 import DDoSAIInterpretation from './DDoSAIInterpretation';
-import ReportLanguageScope from './ReportLanguage';
+import ReportLanguageScope, { ReportLanguageSelector } from './ReportLanguage';
 import C2DiscoverySelection, { type SelectionSummary } from './C2DiscoverySelection';
 import C2AssessmentDetails, { type AIAssessment } from './C2AssessmentDetails';
 import HistoricalReferenceInput, { type BaselineReference } from './HistoricalReferenceInput';
@@ -627,7 +627,7 @@ function NewAnalysis() {
   return <><header><p className="eyebrow">INVESTIGATION</p><h1>New analysis</h1></header><form className="panel form" onSubmit={submit} onChange={event => { if (mutation.isPending && (event.target as HTMLInputElement).name) submission.invalidate(); }}><label>Analysis name<input name="name" required /></label><label>Analysis module<select name="analysis_module" value={analysisModule} onChange={event => setAnalysisModule(event.target.value)}><option value="c2">C2 detection</option><option value="ddos_attack">DDoS attack analysis</option><option value="network_anomaly">Network anomaly</option></select></label>{analysisModule === 'network_anomaly' && <><NetworkSourceCapability selection={mode}/><NetworkObservationHelp/></>}{isDDoS && <><DDoSAnalysisHelp/><DDoSThresholdFields/><DDoSNormalReference disabled={mutation.isPending}/></>}<fieldset><legend>Sensors</legend><AsyncState query={sensors}>{data => <>{items(data).map(sensor => <label className="check" key={sensor.sensor_id}><input type="checkbox" name="sensor_ids" value={sensor.sensor_id} aria-label={sensor.name}/>{sensor.name}</label>)}</>}</AsyncState></fieldset><div className="grid"><label>Data source<select name="mode" value={mode} onChange={event => setMode(event.target.value as 'LIVE' | 'HISTORICAL')}><option value="LIVE">Live capture</option><option value="HISTORICAL">Historical</option></select></label><label>Duration (seconds)<input name="duration" type="number" min="1" defaultValue="300" /></label><label>Internal networks<input name="internal_networks" defaultValue="10.0.0.0/8" required /></label><label>Maximum packets<input name="max_packets" type="number" min="1" defaultValue="2000000" /></label><label>BPF filter<input name="bpf" defaultValue="ip" /></label></div><fieldset hidden={!isC2} disabled={!isC2} style={!isC2 ? { display: 'none' } : undefined}><legend>C2 candidate thresholds</legend><div className="grid"><label>Minimum score<input name="score" type="number" min="0" max="100" defaultValue="50" /></label><label>Minimum internal hosts<input name="hosts" type="number" min="2" defaultValue="3" /></label></div></fieldset><fieldset><legend>Directions</legend>{['INBOUND','OUTBOUND'].map(value => <label className="check" key={value}><input type="checkbox" name="directions" value={value} defaultChecked/>{value}</label>)}</fieldset><fieldset hidden={!isC2} disabled={!isC2} style={!isC2 ? { display: 'none' } : undefined}><DetectorWeightFields weights={detectorWeights} setWeights={setDetectorWeights} enabled={isC2}/><fieldset><legend>모집단 이상 탐지</legend><label className="check"><input type="checkbox" name="ml_anomaly_enabled"/>후보군 대비 이상 통신 탐지 사용</label><label className="check"><input type="checkbox" name="ml_anomaly_allow_standalone"/>이상 탐지만으로 후보 생성 허용</label><p className="muted">기본값은 사용 안 함입니다. 단독 후보 생성은 실험 기능이며, 허용하지 않으면 다른 탐지 근거가 있는 후보의 점수만 보강합니다.</p></fieldset></fieldset><label className="check"><input type="checkbox" name="store_pcap" defaultChecked/>Store PCAP</label>{mutation.error && <p role="alert">{mutation.error.message}</p>}<button disabled={mutation.isPending}>{mutation.isPending ? 'Starting…' : 'Start analysis'}</button></form></>;
 }
 
-function JobReanalysis({ job }: { job: Job }) {
+function JobReanalysis({ job, visible = true }: { job: Job; visible?: boolean }) {
   const navigate = useNavigate();
   const recorded = job.analysis?.detector_weights;
   const initialWeights = detectorDefinitions.reduce<DetectorWeights>((result, [name]) => {
@@ -640,6 +640,7 @@ function JobReanalysis({ job }: { job: Job }) {
     mutationFn: () => api.post<Job>(`/analysis-jobs/${job.id}/reanalyze`, { idempotency_key: idempotencyKey(), detector_weights: weights }),
     onSuccess: created => navigate(`/analyses/${created.id}`),
   });
+  if (!visible) return <section aria-label="Reanalysis status">{reanalyze.isPending && <p role="status">재분석 생성 중…</p>}{reanalyze.error && <p role="alert">{reanalyze.error.message}</p>}</section>;
   return <section className="panel compact"><h2>가중치 조정 후 재분석</h2><p className="muted">데이터셋 {job.dataset_id}을 다시 업로드하거나 파싱하지 않고 탐지 가중치별 후보 점수를 비교합니다.</p><DetectorWeightFields weights={weights} setWeights={setWeights} applyDefault={false}/>{reanalyze.error && <p role="alert" className="error-text">{reanalyze.error.message}</p>}<button disabled={reanalyze.isPending} onClick={() => reanalyze.mutate()}>{reanalyze.isPending ? '재분석 생성 중…' : '탐지 가중치로 재분석'}</button></section>;
 }
 
@@ -664,7 +665,7 @@ function DDoSJobReanalysis({ job }: { job: Job }) {
   return <form className="panel compact form" onSubmit={submit} onChange={event => { if (reanalyze.isPending && (event.target as HTMLInputElement).name) submission.invalidate(); }}><h2>DDoS threshold 재분석</h2><p className="muted">원본 dataset {job.dataset_id}을 다시 수집하거나 파싱하지 않고 DDoS threshold snapshot만 변경합니다.</p><DDoSThresholdFields analysis={job.analysis}/><DDoSNormalReference inherit datasetId={job.dataset_id} disabled={reanalyze.isPending}/>{reanalyze.error && <p role="alert" className="error-text">{reanalyze.error.message}</p>}<button disabled={reanalyze.isPending}>{reanalyze.isPending ? '재분석 생성 중…' : 'DDoS threshold로 재분석'}</button></form>;
 }
 
-function AIArtifactPanel({ assessmentId }: { assessmentId: string }) {
+function AIArtifactPanel({ assessmentId, visible = true }: { assessmentId: string; visible?: boolean }) {
   const queryClient = useQueryClient();
   const language = useReportLanguage();
   const artifacts = useQuery<List<AIArtifact>, Error>({
@@ -676,6 +677,10 @@ function AIArtifactPanel({ assessmentId }: { assessmentId: string }) {
     mutationFn: ({ id, action }: { id: string; action: 'approve' | 'reject' }) => api.post(`/ai-artifacts/${id}/${action}`, { note: 'Reviewed from C2Hunter web console' }),
     onSuccess: async () => queryClient.invalidateQueries({ queryKey: ['ai-artifacts', assessmentId] }),
   });
+  if (!visible) return <section aria-label={`Artifact review status ${assessmentId}`}>
+    {review.isPending && <p role="status">{review.variables.id} · {review.variables.action} · 검토 저장 중…</p>}
+    {review.error && <p role="alert" className="error-text">{review.variables?.id} · 초안 검토 실패: {review.error.message}</p>}
+  </section>;
   if (artifacts.isLoading) return <p role="status">AI 생성 초안을 불러오는 중…</p>;
   if (artifacts.isError) return <p role="alert" className="error-text">AI 생성 초안을 불러오지 못했습니다: {historicalAccessDenied(artifacts.error) ? historicalErrorText(artifacts.error, language) : artifacts.error.message}</p>;
   if (!items(artifacts.data).length) return <p className="muted">생성된 Splunk/MISP 초안이 없습니다.</p>;
@@ -696,7 +701,7 @@ function AIArtifactPanel({ assessmentId }: { assessmentId: string }) {
   </section>;
 }
 
-function AIFeedbackPanel({ assessmentId }: { assessmentId: string }) {
+function AIFeedbackPanel({ assessmentId, visible = true }: { assessmentId: string; visible?: boolean }) {
   const queryClient = useQueryClient();
   const language = useReportLanguage();
   const [verdict, setVerdict] = useState<AIFeedback['verdict']>('NEED_MORE_DATA');
@@ -713,13 +718,17 @@ function AIFeedbackPanel({ assessmentId }: { assessmentId: string }) {
       await queryClient.invalidateQueries({ queryKey: ['ai-feedback', assessmentId] });
     },
   });
+  if (!visible) return <section aria-label={`Feedback status ${assessmentId}`}>
+    {submit.isPending && <p role="status">{assessmentId} · Saving feedback…</p>}
+    {submit.error && <p role="alert" className="error-text">{assessmentId} · 피드백 저장 실패: {historicalAccessDenied(submit.error) ? historicalErrorText(submit.error, language) : submit.error.message}</p>}
+  </section>;
   return <section className="feedback-panel" aria-label="Analyst confirmed feedback">
     <h4>Analyst feedback</h4>
     <p className="muted">Confirmed analyst feedback is append-only and does not replace the AI verdict above.</p>
     {feedback.isLoading && <p role="status">분석가 피드백을 불러오는 중…</p>}
     {feedback.isError && <p role="alert" className="error-text">피드백 조회 실패: {historicalAccessDenied(feedback.error) ? historicalErrorText(feedback.error, language) : feedback.error.message}</p>}
     {!feedback.isError && items(feedback.data).map(item => <article className="feedback-entry" key={item.id}><span className={`badge feedback-${item.verdict.toLowerCase()}`}>{item.verdict}</span><p>{item.note}</p><small>{item.created_by} · {fmt(item.created_at)}</small></article>)}
-    <form onSubmit={event => { event.preventDefault(); if (note.trim() && !historicalAccessDenied(feedback.error) && !historicalAccessDenied(submit.error)) submit.mutate(); }}>
+    <form onSubmit={event => { event.preventDefault(); if (!submit.isPending && note.trim() && !historicalAccessDenied(feedback.error) && !historicalAccessDenied(submit.error)) submit.mutate(); }}>
       <label>Confirmed assessment<select value={verdict} onChange={event => setVerdict(event.target.value as AIFeedback['verdict'])}><option value="CONFIRM_C2">Confirm C2</option><option value="CONFIRM_BENIGN">Confirm benign</option><option value="NEED_MORE_DATA">Need more data</option><option value="REJECT_EXPLANATION">Reject AI explanation</option></select></label>
       <label>Analyst note<textarea required minLength={1} maxLength={5000} value={note} onChange={event => setNote(event.target.value)} /></label>
       <button disabled={submit.isPending || !note.trim() || historicalAccessDenied(feedback.error) || historicalAccessDenied(submit.error)}>{submit.isPending ? 'Saving feedback…' : 'Save confirmed feedback'}</button>
@@ -728,7 +737,7 @@ function AIFeedbackPanel({ assessmentId }: { assessmentId: string }) {
   </section>;
 }
 
-function AIAnalysisPanel({ job, knownCandidateIds }: { job: Job; knownCandidateIds: string[] }) {
+function AIAnalysisPanel({ job, knownCandidateIds, visible = true }: { job: Job; knownCandidateIds: string[]; visible?: boolean }) {
   const queryClient = useQueryClient();
   const language = useReportLanguage();
   const t = (en: string, ko: string) => language === 'ko' ? ko : en;
@@ -786,7 +795,14 @@ function AIAnalysisPanel({ job, knownCandidateIds }: { job: Job; knownCandidateI
   });
   const completed = job.status === 'COMPLETED' || job.status === 'PARTIALLY_COMPLETED';
   const canStart = completed && config?.available === true && !capabilities.isError && (!config.remote || allowRemote) && (!historical || !shadow || baselineReference !== null);
-  return <section className="panel" aria-labelledby="ai-c2-analysis-heading">
+  return <section className={visible ? 'panel' : undefined} aria-labelledby={visible ? 'ai-c2-analysis-heading' : undefined} aria-label={visible ? undefined : 'AI C2 실행 상태'}>
+    {!visible && <>
+    {start.isPending && <p role="status">AI 분석 수락 확인 중</p>}
+    {start.error && <p role="alert">AI Run 생성 실패: {start.error.message}</p>}
+    {latest && <p role="status">AI C2 {latest.status} · AI 조사에서 범위와 실행 상세를 확인하세요.</p>}
+    {run.isError && <p role="alert">실행 상세를 읽지 못했습니다. 범위를 확인할 수 없습니다.</p>}
+    </>}
+    {visible && <>
     <div className="header-actions">
       <div><p className="eyebrow">BOUNDED EVIDENCE</p><h2 id="ai-c2-analysis-heading">AI C2 분석</h2></div>
       <div className="ai-run-controls"><label>Candidate limit<select value={candidateLimit} onChange={event => setCandidateLimit(Number(event.target.value))}>{[1, 2, 3, 4, 5].map(value => <option key={value} value={value}>{value}</option>)}</select></label><button type="button" disabled={!canStart || start.isPending} onClick={() => start.mutate()}>{start.isPending ? 'AI 분석 실행 중…' : 'Run AI analysis'}</button></div>
@@ -794,7 +810,9 @@ function AIAnalysisPanel({ job, knownCandidateIds }: { job: Job; knownCandidateI
     <label className="check"><input type="checkbox" checked={shadow} disabled={start.isPending} onChange={event => { setShadow(event.target.checked); setHistorical(false); setPinnedBaseline(null); }}/>{t('Opt in to behavioral discovery (shadow)', '행동 기반 탐색 사용 (shadow, 선택 사항)')}</label>
     <p className="muted">{t('Shadow review only: does not change source scores or automatically block traffic. The 1–5 candidate budget still applies.', 'Shadow 검토 전용: 원본 점수를 변경하지 않으며 자동 차단하지 않습니다. 후보 1–5개 제한은 유지됩니다.')}</p>
     {shadow && <label className="check"><input type="checkbox" checked={historical} disabled={start.isPending} onChange={event => { setHistorical(event.target.checked); setPinnedBaseline(null); }}/>{t('Use historical reference (optional)', '과거 참조 사용 (선택 사항)')}</label>}
-    {shadow && historical && <HistoricalReferenceInput key={`${job.id}:${saved?.id ?? 'none'}`} jobId={job.id} value={baselineReference} onChange={value => { setPinnedBaseline(value ? { runId: saved?.id, reference: value } : null); start.reset(); }} disabled={start.isPending} requestError={start.error}/>}
+    </>}
+    {shadow && historical && <HistoricalReferenceInput key={`${job.id}:${saved?.id ?? 'none'}`} jobId={job.id} value={baselineReference} onChange={value => { setPinnedBaseline(value ? { runId: saved?.id, reference: value } : null); start.reset(); }} disabled={start.isPending} requestError={start.error} visible={visible}/>}
+    {visible && <>
     {config && <p>{t('Provider / model / destination', '제공자 / 모델 / 전송 대상')}: {config.provider ?? '—'} · {config.model_name ?? '—'} · {config.destination ?? '—'}</p>}
     {config?.remote && <label className="check"><input type="checkbox" checked={allowRemote} disabled={!config.destination || start.isPending} onChange={event => setConsentedDestination(event.target.checked ? config.destination ?? null : null)}/>{t('I consent to sending bounded evidence to this remote model destination.', '이 원격 모델 대상에 제한된 증거를 전송하는 데 동의합니다.')}</label>}
     {capabilities.isLoading && <p role="status">{t('Checking AI availability…', 'AI 사용 가능 여부 확인 중…')}</p>}
@@ -810,13 +828,17 @@ function AIAnalysisPanel({ job, knownCandidateIds }: { job: Job; knownCandidateI
     {run.isError && <p role="alert" className="error-text">{t('Run details could not be read; coverage is unconfirmed', '실행 상세를 읽지 못했습니다. 범위를 확인할 수 없습니다')}: {run.error.message}</p>}
     {assessments.isError && <p role="alert" className="error-text">{t('AI assessments could not be read', 'AI 판정을 읽지 못했습니다')}: {historicalAccessDenied(assessments.error) ? historicalErrorText(assessments.error, language) : assessments.error.message}</p>}
     {assessments.isLoading && latest && <p role="status">AI 후보 판정을 불러오는 중…</p>}
+    </>}
+    {/* Keep mutation owners at stable positions; only their presentation unmounts. */}
     {!assessments.isError && items(assessments.data).map(item => {
       const result = item.assessment;
-      return <article className="ai-assessment" key={item.id}>
+      return <article className={visible ? 'ai-assessment' : undefined} key={item.id}>
+        {visible && <>
         <div className="header-actions"><h3>{(!item.discovery_origin && latest?.discovery_mode !== 'shadow') || knownCandidateIds.includes(item.candidate_id) ? <Link to={`/candidates/${item.candidate_id}`}>{item.external_ip}</Link> : item.external_ip}</h3><div><span className={`badge verdict-${result.candidate.verdict.toLowerCase()}`}>AI {result.candidate.verdict}</span> <strong>{t('Model confidence', '신뢰도')} {Math.round(result.candidate.confidence * 100)}%</strong> <span>Review priority {item.review_priority ?? 0}</span></div></div>
         <C2AssessmentDetails key={`${latest?.id}:${item.id}`} item={item}/>
-        <AIArtifactPanel assessmentId={item.id}/>
-        <AIFeedbackPanel assessmentId={item.id}/>
+        </>}
+        <AIArtifactPanel assessmentId={item.id} visible={visible}/>
+        <AIFeedbackPanel assessmentId={item.id} visible={visible}/>
       </article>;
     })}
   </section>;
@@ -856,8 +878,21 @@ function DDoSReportPending({ job }: { job: Job }) {
 
 function JobDetail() {
   const { id } = useParams();
+  return <ReportLanguageScope key={id} showControl={false}><JobDetailOwner id={id!}/></ReportLanguageScope>;
+}
+
+function JobDetailOwner({ id }: { id: string }) {
+  const language = useReportLanguage();
+  const t = (en: string, ko: string) => language === 'ko' ? ko : en;
+  const focusCandidates = useRef(false);
+  const [aiOpened, setAiOpened] = useState(false);
+  const [workOpened, setWorkOpened] = useState(false);
+  const [candidatePage, setCandidatePage] = useState(1);
+  const [view, setView] = useState<'results' | 'ai' | 'work'>('results');
   const [investigation, setInvestigation] = useState<(InvestigationSelection & { jobId: string })>();
   const investigate = (ip: string, side: InvestigationSelection['side'] = 'either') => {
+    setAiOpened(true);
+    setView('ai');
     setInvestigation(previous => ({ jobId: id!, ip, side, sequence: (previous?.sequence ?? 0) + 1 }));
     document.getElementById('ip-investigation-entry')?.scrollIntoView?.({ block: 'start' });
   };
@@ -868,15 +903,19 @@ function JobDetail() {
     queryFn: () => api.get(`/analysis-jobs/${id}`),
     refetchInterval: query => terminalStatuses.has(query.state.data?.status ?? '') ? false : 3000,
   });
-  const candidates = useQuery<List<Candidate>, Error>({
-    queryKey: ['job-candidates', id],
-    queryFn: () => api.get(`/analysis-jobs/${id}/candidates?page_size=200`),
+  const candidates = useQuery<Page<Candidate>, Error>({
+    queryKey: ['job-candidates', id, candidatePage],
+    queryFn: () => api.get(`/analysis-jobs/${id}/candidates?page=${candidatePage}&page_size=25&minimum_score=0&sort=-score`),
     enabled: q.data !== undefined && (q.data.analysis?.module ?? 'c2') === 'c2',
     refetchInterval: () => terminalStatuses.has(q.data?.status ?? '') ? false : 3000,
   });
+  const knownCandidates = useQuery<List<Candidate>, Error>({
+    queryKey: ['job-ai-known-candidates', id],
+    queryFn: () => api.get(`/analysis-jobs/${id}/candidates?page_size=200`),
+    enabled: aiOpened && q.data !== undefined && (q.data.analysis?.module ?? 'c2') === 'c2',
+  });
   const cancel = useMutation({ mutationFn: () => api.post(`/analysis-jobs/${id}/cancel`, { reason: 'operator requested from web console' }), onSuccess: () => { setNotice('Cancellation requested'); q.refetch(); } });
   return <>
-    {id && (!q.data || (q.data.analysis?.module ?? 'c2') === 'c2') && <JobInvestigationEntry key={`job-investigation-entry-${id}`} jobId={id} sourceAvailable={!q.isError && Boolean(q.data)}/> }
     <AsyncState query={q}>{j => {
     const terminal = terminalStatuses.has(j.status);
     const source = j.source;
@@ -884,24 +923,57 @@ function JobDetail() {
     const showGuidance = (module === 'ddos_attack' && j.source_type === 'PCAP_UPLOAD') || Object.hasOwn(j, 'pcap_attack_guidance');
     const investigationEntry = <AIInvestigationEntry key={`investigation-entry-${j.id}`} jobId={j.id} selection={investigation?.jobId === j.id ? investigation : undefined}/>;
     return <>
-      <header className="header-actions"><div><p className="eyebrow">ANALYSIS DETAIL</p><h1>{j.name}</h1><span className={`badge ${j.status.toLowerCase()}`}>{j.status}</span><p className="record-id">Job {j.id}{j.dataset_id ? ` · Dataset ${j.dataset_id}` : ''}</p></div><Link to="/analyses">Back to analysis history</Link></header>
-      {(j.source_type === 'PCAP_UPLOAD' || j.processing) && <PcapAnalysisLifecycle job={j}/>}
-      {module !== 'network_anomaly' && investigationEntry}
-      {j.description && <section className="panel"><h2>Analyst note</h2><p>{j.description}</p></section>}
-      {(module === 'c2' || !terminal || ('error_code' in j && j.error_code === 'LIVE_CAPTURE_RESTART_INCOMPLETE') || strings(j.warnings).length > 0 || cancel.error || notice) && <section className="panel">
-        {(module === 'c2' || (!terminal && typeof j.progress_percent === 'number')) && <label>Progress <progress value={terminal ? 100 : j.progress_percent ?? 0} max="100">{terminal ? 100 : j.progress_percent}%</progress></label>}
-        {module === 'c2' && <><section className="metrics compact"><article><strong>{(j.packet_count ?? 0).toLocaleString()}</strong><span>Packets</span></article><article><strong>{(j.flow_count ?? 0).toLocaleString()}</strong><span>Flows</span></article>{j.analysis?.module === 'network_anomaly' ? <article><strong>{j.network_anomaly?.version === 'network-pattern-report-v1' ? (typeof j.network_anomaly.summary?.flow_count === 'number' ? j.network_anomaly.summary.flow_count.toLocaleString() : '—') : j.network_anomaly?.flows?.length.toLocaleString() ?? '—'}</strong><span>Observed bidirectional flows</span></article> : String(module) === 'ddos_attack' ? <article><strong>{Number(j.ddos_attack?.summary.finding_count ?? 0).toLocaleString()}</strong><span>DDoS findings</span></article> : <article><strong>{(j.candidate_count ?? 0).toLocaleString()}</strong><span>Candidates</span></article>}<article><strong>{strings(j.sensor_ids).length}</strong><span>Sensors</span></article></section></>}
+      <header className={`header-actions ${module === 'c2' ? 'c2-result-header' : ''}`}><div><p className="eyebrow">{module === 'c2' ? t('C2 ANALYSIS', 'C2 분석') : 'ANALYSIS DETAIL'}</p><h1>{j.name}</h1><span className={`badge ${j.status.toLowerCase()}`}>{j.status}</span>{module !== 'c2' && <p className="record-id">Job {j.id}{j.dataset_id ? ` · Dataset ${j.dataset_id}` : ''}</p>}</div><div className="c2-header-actions"><Link to="/analyses">{module === 'c2' ? t('Back to analysis history', '분석 이력으로') : 'Back to analysis history'}</Link>{module === 'c2' && <ReportLanguageSelector/>}</div></header>
+      {module !== 'c2' && (j.source_type === 'PCAP_UPLOAD' || j.processing) && <PcapAnalysisLifecycle job={j}/>}
+      {module !== 'network_anomaly' && module !== 'c2' && investigationEntry}
+      {j.description && module !== 'c2' && <section className="panel"><h2>Analyst note</h2><p>{j.description}</p></section>}
+      {(module !== 'c2' && (!terminal || ('error_code' in j && j.error_code === 'LIVE_CAPTURE_RESTART_INCOMPLETE') || strings(j.warnings).length > 0 || cancel.error || notice)) && <section className="panel">
+        {(!terminal && typeof j.progress_percent === 'number') && <label>Progress <progress value={terminal ? 100 : j.progress_percent ?? 0} max="100">{terminal ? 100 : j.progress_percent}%</progress></label>}
         {'error_code' in j && j.error_code === 'LIVE_CAPTURE_RESTART_INCOMPLETE' && <div role="alert" aria-label="Incomplete LIVE capture" className="warning"><p lang="ko">컨트롤러 재시작으로 데이터셋 저장 전에 LIVE 캡처가 중단되었습니다. 수락된 메모리 내 flow batch가 유실되었을 수 있습니다. 새 캡처를 시작하세요. 표시된 0건은 트래픽이 없었다는 뜻이 아닙니다.</p><p lang="en">Controller restart interrupted LIVE capture before its dataset was saved; accepted in-memory flow batches may have been lost. Start a new capture. Displayed zero counts do not mean no traffic was observed.</p></div>}
         {strings(j.warnings).map(warning => <p className="warning" key={warning}>{warning}</p>)}
         {!terminal && <button className="danger" disabled={cancel.isPending} onClick={() => cancel.mutate()}>{cancel.isPending ? 'Cancelling…' : 'Cancel analysis'}</button>}
         {cancel.error && <p role="alert" className="error-text">{cancel.error.message}</p>}{notice && <p role="status">{notice}</p>}
       </section>}
-      {module === 'network_anomaly' ? <NetworkAnomalyPanel key={j.id} report={j.network_anomaly} job={j}><NetworkAIInterpretation key={j.id} jobId={j.id} completed={j.status === 'COMPLETED' && Boolean(j.network_anomaly)}/></NetworkAnomalyPanel> : module === 'ddos_attack' && j.ddos_attack ? <DDoSAttackPanel key={`${j.id}:${j.ddos_attack.primary_finding_id ?? 'none'}:${String(j.ddos_attack.summary?.finding_count ?? 'unknown')}`} report={j.ddos_attack} job={{ id: j.id, dataset_id: j.dataset_id, source_type: j.source_type, source: j.source, internal_networks: j.internal_networks }} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}>{showGuidance && <PcapAttackGuidance job={j} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}/>}<PcapGuidanceAIScope/><DDoSAIInterpretation jobId={j.id} completed={j.status === 'COMPLETED'}/></DDoSAttackPanel> : module === 'ddos_attack' ? <DDoSReportPending job={j}/> : module === 'c2' ? <ReportLanguageScope key={`c2-ai-${j.id}`}><AIAnalysisPanel job={j} knownCandidateIds={items(candidates.data).map(candidate => candidate.id)}/></ReportLanguageScope> : <p role="alert">Unsupported analysis module.</p>}
+      {module === 'network_anomaly' ? <NetworkAnomalyPanel key={j.id} report={j.network_anomaly} job={j}><NetworkAIInterpretation key={j.id} jobId={j.id} completed={j.status === 'COMPLETED' && Boolean(j.network_anomaly)}/></NetworkAnomalyPanel> : module === 'ddos_attack' && j.ddos_attack ? <DDoSAttackPanel key={`${j.id}:${j.ddos_attack.primary_finding_id ?? 'none'}:${String(j.ddos_attack.summary?.finding_count ?? 'unknown')}`} report={j.ddos_attack} job={{ id: j.id, dataset_id: j.dataset_id, source_type: j.source_type, source: j.source, internal_networks: j.internal_networks }} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}>{showGuidance && <PcapAttackGuidance job={j} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}/>}<PcapGuidanceAIScope/><DDoSAIInterpretation jobId={j.id} completed={j.status === 'COMPLETED'}/></DDoSAttackPanel> : module === 'ddos_attack' ? <DDoSReportPending job={j}/> : module === 'c2' ? null : <p role="alert">Unsupported analysis module.</p>}
+      {module === 'c2' && <section aria-label={t('C2 result summary', 'C2 결과 요약')} className="panel c2-result-summary" lang={language}>
+        <h2>{j.status === 'FAILED' ? t('Analysis failed · No final conclusion', '분석 실패 · 최종 결론 없음') : j.status === 'CANCELLED' ? t('Analysis cancelled · No final conclusion', '분석 취소 · 최종 결론 없음') : j.status === 'PARTIALLY_COMPLETED' ? t('Partially completed · Limited coverage', '부분 완료 · 관측 범위 제한') : !terminal ? t('Analysis in progress · Awaiting a final conclusion', '분석 진행 중 · 최종 결론 대기') : candidates.isError ? t('Candidate read failed · Coverage unconfirmed', '후보 조회 실패 · 범위 확인 불가') : candidates.data?.total === 0 ? t('0 retained candidates · Not a safety verdict', '보존된 탐지 후보 0건 · 안전 판정 아님') : candidates.data?.total !== undefined ? t(`${candidates.data.total} detected candidates · Review required`, `탐지 후보 ${candidates.data.total}건 · 검토 필요`) : t('Candidate count unconfirmed', '탐지 후보 수 확인 중')}</h2>
+        <p>{t('Retained candidates only, not a safety verdict for all traffic. AI execution and analyst workflow are separate.', '보존된 후보 범위이며 전체 트래픽의 안전 판정이 아닙니다. AI 실행 여부와 분석가 처리 상태는 별개입니다.')}</p>
+        {(j.status === 'FAILED' || j.status === 'CANCELLED') && <p role="alert">{j.transitions?.filter(item => item.to_status === j.status).at(-1)?.reason ?? t('No terminal reason recorded', '종료 사유 기록 없음')}</p>}
+        {'error_code' in j && j.error_code === 'LIVE_CAPTURE_RESTART_INCOMPLETE' && <div role="alert" aria-label="Incomplete LIVE capture" className="warning"><p lang="ko">컨트롤러 재시작으로 데이터셋 저장 전에 LIVE 캡처가 중단되었습니다. 수락된 메모리 내 flow batch가 유실되었을 수 있습니다. 새 캡처를 시작하세요. 표시된 0건은 트래픽이 없었다는 뜻이 아닙니다.</p><p lang="en">Controller restart interrupted LIVE capture before its dataset was saved; accepted in-memory flow batches may have been lost. Start a new capture. Displayed zero counts do not mean no traffic was observed.</p></div>}
+        {strings(j.warnings).map(warning => <p className="warning" key={warning}>{warning}</p>)}
+        <div className="c2-next-check"><p>{t('Next check: inspect candidate evidence and analyst workflow.', '다음 확인: 후보의 탐지 근거와 처리 상태를 확인하세요.')}</p><button type="button" className="secondary" onClick={() => { focusCandidates.current = true; setView('results'); document.getElementById('job-candidate-heading')?.focus(); }}>{t('Review candidates', '후보 검토로 이동')}</button></div>
+        <ul className="c2-key-facts" aria-label={t('Key facts', '핵심 사실')}>
+          {[[t('Packets', '패킷'), j.packet_count], [t('Flows', 'Flow'), j.flow_count], [t('Retained candidates', '보존 후보'), candidates.isError ? undefined : candidates.data?.total], [t('Sensors', '센서'), Array.isArray(j.sensor_ids) ? j.sensor_ids.length : undefined]].map(([label, value]) => <li key={String(label)}><span>{label}</span><strong>{typeof value === 'number' ? value.toLocaleString() : t('Unknown', '확인 불가')}</strong></li>)}
+        </ul>
+        {(j.start_time || j.end_time || j.updated_at) && <p className="muted">{t('Observed', '관측')}: {fmt(j.start_time)} – {fmt(j.end_time)} · {t('Updated', '갱신')}: {fmt(j.updated_at)}</p>}
+        {!terminal && <div className="c2-active-status"><p role="status">{t('Current phase', '현재 단계')}: {j.processing?.phase ?? j.status}</p>{typeof j.progress_percent === 'number' && <label>{t('Progress', '진행률')} <progress value={j.progress_percent} max="100">{j.progress_percent}%</progress></label>}<button className="danger" disabled={cancel.isPending} onClick={() => cancel.mutate()}>{cancel.isPending ? t('Cancelling…', '취소 중…') : t('Cancel analysis', '분석 취소')}</button></div>}
+        {cancel.error && <p role="alert" className="error-text">{cancel.error.message}</p>}{notice && <p role="status">{notice}</p>}
+        {candidates.data?.workflow_counts && <section aria-label={t('Candidate workflow', 'Candidate 처리 현황')} className="c2-workflow-summary"><p>{t('Workflow scope: minimum score 0 · Excluded candidates omitted · Before severity/verdict/workflow/TI filters (not this page).', '처리 현황 범위: 최소 점수 0 · 제외 후보 미포함 · 심각도/판정/처리 상태/TI 필터 적용 전 집계 (현재 페이지 아님).')}</p><ul>{([
+          [t('Needs review', '미분석'), candidates.data.workflow_counts.needs_review], [t('In review', '분석 중'), candidates.data.workflow_counts.in_review], [t('Action required', '조치 필요'), candidates.data.workflow_counts.action_required], [t('Action in progress', '조치 중'), candidates.data.workflow_counts.action_in_progress], [t('Action completed', '조치 완료'), candidates.data.workflow_counts.action_completed], [t('False positive', '오탐 처리 완료'), candidates.data.workflow_counts.false_positive],
+        ] as const).map(([label, value]) => <li key={label}>{label} <strong>{value ?? t('Unknown', '확인 불가')}</strong></li>)}</ul></section>}
+      </section>}
+      {module === 'c2' && <nav aria-label={t('Analysis purpose', '분석 목적')} className="row-actions c2-purpose-nav">
+        <button type="button" aria-pressed={view === 'results'} onClick={() => setView('results')}>{t('Results & evidence', '결과·근거')}</button>
+        <button type="button" aria-pressed={view === 'ai'} onClick={() => { setAiOpened(true); setView('ai'); }}>{t('AI investigation', 'AI 조사')}</button>
+        <button type="button" aria-pressed={view === 'work'} onClick={() => { setWorkOpened(true); setView('work'); }}>{t('Work information', '작업 정보')}</button>
+      </nav>}
+      {module === 'c2' && view === 'results' && <section className="panel compact c2-candidate-list" lang={language}>
+        <h2 id="job-candidate-heading" tabIndex={-1} ref={node => { if (node && focusCandidates.current) { node.focus(); focusCandidates.current = false; } }}>{t('Detected candidates', '탐지 후보')}</h2>
+        <p className="muted">{t('Open a candidate for all retained evidence, hosts, sensors, network details and observation times.', '후보를 열면 보존된 전체 근거, 호스트·센서, 네트워크 정보와 관측 시각을 확인할 수 있습니다.')}</p>
+        <AsyncState query={candidates} empty={data => items(data).length === 0}>{data => <div className="table-wrap"><table aria-label="Analysis candidates"><thead><tr><th>{t('Candidate', '후보')}</th><th>{t('Score / severity', '점수 / 심각도')}</th><th>{t('Analyst workflow', '처리 상태')}</th><th>{t('External TI', '외부 TI')}</th></tr></thead><tbody>{items(data).map(candidate => <tr key={candidate.id}>
+          <td><Link to={`/candidates/${candidate.id}`}>{candidate.candidate_ip}</Link><button type="button" className="secondary investigate-ip-button" aria-label={`Investigate candidate ${candidate.candidate_ip}`} onClick={() => investigate(candidate.candidate_ip)}>{t('Investigate IP', 'IP 조사')}</button>{candidate.candidate_kind === 'COMMUNICATION_STATUS' && <small>{t('Communication status candidate', '통신 상태 후보')}</small>}</td>
+          <td><strong>{candidate.score}</strong><small className={candidate.severity.toLowerCase()}>{candidate.severity}</small></td><td><CandidateWorkflowBadge candidate={candidate}/></td><td><CandidateThreatIntel assessment={candidate.ti_assessment}/></td>
+        </tr>)}</tbody></table></div>}</AsyncState>{candidates.data?.total !== undefined && <CandidatePagination data={candidates.data} page={candidatePage} onPage={setCandidatePage} language={language}/>}</section>}
+      {module === 'c2' && aiOpened && <section aria-label="AI 조사">
+        <AIAnalysisPanel visible={view === 'ai'} job={j} knownCandidateIds={knownCandidates.isError ? [] : items(knownCandidates.data).map(candidate => candidate.id)}/>
+        <AIInvestigationEntry key={`investigation-entry-${j.id}`} jobId={j.id} selection={investigation?.jobId === j.id ? investigation : undefined} visible={view === 'ai'}/>
+      </section>}
       {/* Keep the network verdict and next action ahead of optional IP investigation. */}
       {module === 'network_anomaly' && investigationEntry}
       {showGuidance && !(module === 'ddos_attack' && j.ddos_attack) && <ReportLanguageScope key={`pcap-guide-${j.id}`}><PcapAttackGuidance job={j} detailOwner={detailsOwner} setDetailOwner={setDetailsOwner}/></ReportLanguageScope>}
       {module !== 'c2' && <button type="button" className="secondary" aria-expanded={detailsOwner === j.id} onClick={() => setDetailsOwner(detailsOwner === j.id ? undefined : j.id)}>작업 상세 / Job details</button>}
-      {(module === 'c2' || detailsOwner === j.id) && <>
+      {((module === 'c2' && view === 'work') || detailsOwner === j.id) && <>
+      {module === 'c2' && <><p className="record-id">Job {j.id}{j.dataset_id ? ` · Dataset ${j.dataset_id}` : ''}</p>{(j.source_type === 'PCAP_UPLOAD' || j.processing) && <PcapAnalysisLifecycle job={j}/>} {j.description && <section className="panel"><h2>Analyst note</h2><p>{j.description}</p></section>}</>}
       {module !== 'c2' && <><section className="metrics compact"><article><strong>{(j.packet_count ?? 0).toLocaleString()}</strong><span>Packets</span></article><article><strong>{(j.flow_count ?? 0).toLocaleString()}</strong><span>Flows</span></article>{j.analysis?.module === 'network_anomaly' ? <article><strong>{j.network_anomaly?.version === 'network-pattern-report-v1' ? (typeof j.network_anomaly.summary?.flow_count === 'number' ? j.network_anomaly.summary.flow_count.toLocaleString() : '—') : j.network_anomaly?.flows?.length.toLocaleString() ?? '—'}</strong><span>Observed bidirectional flows</span></article> : String(module) === 'ddos_attack' ? <article><strong>{Number(j.ddos_attack?.summary.finding_count ?? 0).toLocaleString()}</strong><span>DDoS findings</span></article> : <article><strong>{(j.candidate_count ?? 0).toLocaleString()}</strong><span>Candidates</span></article>}<article><strong>{strings(j.sensor_ids).length}</strong><span>Sensors</span></article></section></>}
       <section className="grid compact">
         <article className="panel"><h2>Source and parsing</h2><dl><dt>Type</dt><dd>{j.source_type === 'PCAP_UPLOAD' ? 'PCAP upload' : j.mode ?? 'Sensor capture'}</dd><dt>File</dt><dd>{source?.filename ?? 'Sensor dataset'}</dd><dt>Format</dt><dd>{source?.capture_format ?? 'Not reported'}</dd><dt>Size</dt><dd>{formatBytes(source?.size_bytes)}</dd><dt>Captured packets</dt><dd>{formatValue(source?.captured_packet_count)}</dd><dt>Parsed packets</dt><dd>{formatValue(source?.parsed_packet_count)}</dd><dt>Skipped packets</dt><dd>{formatValue(source?.skipped_packet_count)}</dd><dt>Link types</dt><dd>{formatValue(source?.link_types)}</dd><dt>SHA-256</dt><dd className="hash-value">{source?.sha256 ?? 'Not applicable'}</dd></dl></article>
@@ -910,12 +982,13 @@ function JobDetail() {
       <AnalysisConfiguration analysis={j.analysis} capture={j.capture} detectorDefinitions={detectorDefinitions} internalNetworks={strings(j.internal_networks)} sensorIds={strings(j.sensor_ids)}/>
       <AnalysisPCAPs jobId={j.id}/>
       </>}
-      {j.status === 'COMPLETED' && j.dataset_id && (module === 'c2' ? <JobReanalysis key={j.id} job={j}/> : module === 'ddos_attack' ? <DDoSJobReanalysis key={j.id} job={j}/> : null)}
-      {module === 'c2' && <section className="panel compact"><h2>탐지 후보</h2><AsyncState query={candidates} empty={data => items(data).length === 0}>{data => <div className="table-wrap"><table aria-label="Analysis candidates"><thead><tr><th>후보</th><th>점수</th><th>External TI</th><th>판정</th><th>호스트 / 센서</th><th>네트워크 정보</th><th>탐지 근거</th><th>관측 시각</th></tr></thead><tbody>{items(data).map(candidate => { const hosts = candidateHosts(candidate); const sensors = candidateSensors(candidate); const protocols = strings(candidate.protocols); const ports = numbers(candidate.ports); const evidence = candidateEvidence(candidate); return <tr key={candidate.id}><td><Link to={`/candidates/${candidate.id}`}>{candidate.candidate_ip}</Link><button type="button" className="secondary investigate-ip-button" aria-label={`Investigate candidate ${candidate.candidate_ip}`} onClick={() => investigate(candidate.candidate_ip)}>IP 조사 / Investigate IP</button><CandidateTypeBadge candidate={candidate}/><small className={candidate.severity.toLowerCase()}>{candidate.severity}</small></td><td><strong>{candidate.score}</strong></td><td><CandidateThreatIntel assessment={candidate.ti_assessment} /></td><td><CandidateWorkflowBadge candidate={candidate} /></td><td>{hosts.length || candidate.distinct_internal_hosts || 0}개 호스트<small>{sensors.length}개 센서</small></td><td>{protocols.length ? protocols.join(', ') : '알 수 없는 프로토콜'}<small>{ports.length ? `포트 ${ports.join(', ')}` : '서비스 포트 없음'}</small></td><td>{candidate.evidence_count ?? evidence.length}건<small>{evidence.map(item => evidenceLabel(item.type)).join(', ') || '상세 근거 없음'}</small></td><td>{fmt(candidate.first_seen)}<small>~ {fmt(candidate.last_seen)}</small></td></tr>; })}</tbody></table></div>}</AsyncState></section>}
-      {module === 'c2' && <JobFlowReviewPanel key={`flow-review-${j.id}`} jobId={j.id} onInvestigate={investigate} />}
-      {(module === 'c2' || detailsOwner === j.id) && <><section className="panel compact"><h2>State transitions</h2>{j.transitions?.length ? <ol className="timeline">{j.transitions.map((transition, index) => <li key={`${transition.to_status}-${transition.occurred_at}-${index}`}><strong>{transition.to_status}</strong><span>{fmt(transition.occurred_at)}</span><p>{transition.reason ?? 'No transition reason recorded'}{transition.from_status ? ` · from ${transition.from_status}` : ''}</p></li>)}</ol> : <p className="muted">No state transition history was recorded.</p>}</section></>}
+      {j.status === 'COMPLETED' && j.dataset_id && (module !== 'c2' || workOpened) && (module === 'c2' ? <JobReanalysis key={j.id} job={j} visible={view === 'work'}/> : module === 'ddos_attack' ? <DDoSJobReanalysis key={j.id} job={j}/> : null)}
+      {module === 'c2' && workOpened && <JobFlowReviewPanel key={`flow-review-${j.id}`} jobId={j.id} onInvestigate={investigate} visible={view === 'work'}/>}
+      {((module === 'c2' && view === 'work') || detailsOwner === j.id) && <><section className="panel compact"><h2>State transitions</h2>{j.transitions?.length ? <ol className="timeline">{j.transitions.map((transition, index) => <li key={`${transition.to_status}-${transition.occurred_at}-${index}`}><strong>{transition.to_status}</strong><span>{fmt(transition.occurred_at)}</span><p>{transition.reason ?? 'No transition reason recorded'}{transition.from_status ? ` · from ${transition.from_status}` : ''}</p></li>)}</ol> : <p className="muted">No state transition history was recorded.</p>}</section></>}
     </>;
-  }}</AsyncState></>;
+  }}</AsyncState>
+    {(!q.data || (q.data.analysis?.module ?? 'c2') === 'c2') && <JobInvestigationEntry key={`job-investigation-entry-${id}`} jobId={id} sourceAvailable={!q.isError && Boolean(q.data)} visible={view === 'ai' || q.isError}/>}
+  </>;
 }
 
 const workflowPresentation = {
@@ -928,9 +1001,11 @@ const workflowPresentation = {
 } as const;
 
 function CandidateWorkflowBadge({ candidate }: { candidate: Candidate }) {
+  const language = useReportLanguage();
+  const english = { NEEDS_REVIEW: 'Needs review', IN_REVIEW: 'In review', ACTION_REQUIRED: 'Action required', ACTION_IN_PROGRESS: 'Action in progress', ACTION_COMPLETED: 'Action completed', FALSE_POSITIVE: 'False positive' };
   const fallback = candidate.current_verdict?.verdict === 'CONFIRMED_C2' ? 'ACTION_REQUIRED' : candidate.current_verdict?.verdict === 'FALSE_POSITIVE' ? 'FALSE_POSITIVE' : candidate.current_verdict?.verdict === 'UNDER_REVIEW' ? 'IN_REVIEW' : 'NEEDS_REVIEW';
   const presentation = workflowPresentation[candidate.workflow_status ?? fallback];
-  return <span className={`workflow-badge ${presentation.className}`} title={presentation.description}>{presentation.label}</span>;
+  return <span className={`workflow-badge ${presentation.className}`} title={language === 'ko' ? presentation.description : english[candidate.workflow_status ?? fallback]}>{language === 'ko' ? presentation.label : english[candidate.workflow_status ?? fallback]}</span>;
 }
 
 function CandidateTypeBadge({ candidate }: { candidate: Candidate }) {
@@ -938,20 +1013,22 @@ function CandidateTypeBadge({ candidate }: { candidate: Candidate }) {
 }
 
 function CandidateThreatIntel({ assessment }: { assessment?: ThreatIntelAssessment }) {
-  if (!assessment || assessment.signal === 'UNKNOWN') return <div className="candidate-ti unknown"><strong>미조회</strong><small>외부 TI 정보 없음</small></div>;
+  const language = useReportLanguage();
+  const t = (en: string, ko: string) => language === 'ko' ? ko : en;
+  if (!assessment || assessment.signal === 'UNKNOWN') return <div className="candidate-ti unknown"><strong>{t('Not checked', '미조회')}</strong><small>{t('No external TI information', '외부 TI 정보 없음')}</small></div>;
   const signals = <div className="ti-signal-row">
     {assessment.misp_event_count > 0 && <span>MISP {assessment.misp_event_count}</span>}
     {(assessment.virustotal_malicious > 0 || assessment.virustotal_suspicious > 0) && <span>VT {assessment.virustotal_malicious}/{assessment.virustotal_suspicious}</span>}
     {assessment.abuse_confidence_score > 0 && <span>Abuse {assessment.abuse_confidence_score}%</span>}
   </div>;
   if (assessment.signal === 'INCOMPLETE') {
-    const status = assessment.status === 'PENDING' ? '조회 중' : assessment.status === 'FAILED' ? '조회 실패' : '부분 완료';
-    return <div className="candidate-ti incomplete"><strong>정보 부족</strong><small>{status}</small>{signals}<small>{assessment.successful_providers}/{assessment.configured_providers} 조회 · {assessment.positive_providers}개 양성</small></div>;
+    const status = assessment.status === 'PENDING' ? t('Pending', '조회 중') : assessment.status === 'FAILED' ? t('Failed', '조회 실패') : t('Partial', '부분 완료');
+    return <div className="candidate-ti incomplete"><strong>{t('Incomplete information', '정보 부족')}</strong><small>{status}</small>{signals}<small>{t(`${assessment.successful_providers}/${assessment.configured_providers} checked · ${assessment.positive_providers} positive`, `${assessment.successful_providers}/${assessment.configured_providers} 조회 · ${assessment.positive_providers}개 양성`)}</small></div>;
   }
-  if (assessment.signal === 'NO_SIGNAL') return <div className="candidate-ti no-signal"><strong>외부 신호 없음</strong><small>{assessment.successful_providers}/{assessment.configured_providers} 조회 완료 · 안전 판정 아님</small></div>;
+  if (assessment.signal === 'NO_SIGNAL') return <div className="candidate-ti no-signal"><strong>{t('No external signal', '외부 신호 없음')}</strong><small>{assessment.successful_providers}/{assessment.configured_providers} {t('checked · Not a safety verdict', '조회 완료 · 안전 판정 아님')}</small></div>;
   return <div className="candidate-ti positive">
     {signals}
-    <small>{assessment.successful_providers}/{assessment.configured_providers} 조회 · {assessment.positive_providers}개 양성</small>
+    <small>{t(`${assessment.successful_providers}/${assessment.configured_providers} checked · ${assessment.positive_providers} positive`, `${assessment.successful_providers}/${assessment.configured_providers} 조회 · ${assessment.positive_providers}개 양성`)}</small>
   </div>;
 }
 
@@ -1017,12 +1094,12 @@ function Candidates() {
   return <><header><p className="eyebrow">DETECTION RESULTS</p><h1>Candidates</h1><p className="muted">내부 탐지 점수와 외부 TI 근거를 분리해 비교하고 우선 조사 대상을 선택합니다.</p></header>{q.data?.workflow_counts && <CandidateWorkflowSummary counts={q.data.workflow_counts} onSelect={selectWorkflow} />}<form className="candidate-filters" onSubmit={applyFilters}><label>Severity<select value={draft.severity} onChange={event => setDraft({ ...draft, severity: event.target.value })}><option value="">Any</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option></select></label><label>처리 상태<select value={draft.workflowStatus} onChange={event => setDraft({ ...draft, workflowStatus: event.target.value })}><option value="">전체 상태</option><option value="NEEDS_REVIEW">미분석</option><option value="IN_REVIEW">분석 중</option><option value="ACTION_REQUIRED">조치 필요</option><option value="ACTION_IN_PROGRESS">조치 중</option><option value="ACTION_COMPLETED">조치 완료</option><option value="FALSE_POSITIVE">오탐 처리 완료</option></select></label><label>Minimum score<input type="number" min="0" max="100" value={draft.minimumScore} onChange={event => setDraft({ ...draft, minimumScore: event.target.value })} /></label><label>External TI<select value={draft.tiFilter} onChange={event => setDraft({ ...draft, tiFilter: event.target.value })}><option value="">전체</option><option value="POSITIVE">양성 신호만</option><option value="MISP_MATCH">MISP 일치만</option><option value="INCOMPLETE">정보 부족만</option></select></label><label>Sort candidates<select value={draft.sort} onChange={event => setDraft({ ...draft, sort: event.target.value })}><option value="-ti_priority">외부 TI 근거 강한 순</option><option value="-score">Score: high to low</option><option value="score">Score: low to high</option><option value="candidate_ip">IP address</option><option value="-last_seen">Most recently seen</option><option value="first_seen">First seen</option></select></label><label className="check"><input type="checkbox" checked={draft.includeSuppressed} onChange={event => setDraft({ ...draft, includeSuppressed: event.target.checked })} />Include suppressed candidates</label><button>Apply filters</button><button type="button" className="secondary" onClick={resetFilters}>Reset</button></form>{selected.size > 0 && <form className="panel compact bulk-toolbar" aria-label="Candidate 일괄 처리" onSubmit={event => { event.preventDefault(); bulk.mutate(); }}><strong>{selected.size}개 선택</strong><label>빠른 판정<select value={bulkCommand} onChange={event => setBulkCommand(event.target.value as CandidateVerdict['verdict'])}><option value="UNDER_REVIEW">검토 시작</option><option value="CONFIRMED_C2">확정 C2</option><option value="FALSE_POSITIVE">오탐</option></select></label><label>공통 메모<input required maxLength={5000} value={bulkNote} onChange={event => setBulkNote(event.target.value)} /></label><button disabled={!bulkNote.trim() || bulk.isPending}>{bulk.isPending ? '처리 중…' : '선택 처리'}</button><button type="button" className="secondary" onClick={clearSelection}>선택 해제</button>{bulk.error && <p role="alert" className="error-text">{bulk.error.message}</p>}</form>}{bulkNotice && <p role="status">{bulkNotice}</p>}<AsyncState query={q} empty={data => items(data).length === 0}>{data => <><div className="table-wrap"><table aria-label="C2 candidates"><thead><tr><th><input type="checkbox" aria-label="현재 페이지 전체 선택" checked={items(data).length > 0 && items(data).every(candidate => selected.has(candidate.id))} onChange={event => setSelected(event.target.checked ? new Set(items(data).map(candidate => candidate.id)) : new Set())} /></th><th>Candidate</th><th>Score</th><th>External TI</th><th>처리 상태</th><th>Hosts</th><th>Sensors</th><th>Protocol / port</th><th>Observed</th><th>Primary evidence</th></tr></thead><tbody>{items(data).map(candidate => { const hosts = candidateHosts(candidate); const sensors = candidateSensors(candidate); const protocols = strings(candidate.protocols); const ports = numbers(candidate.ports); const evidence = candidateEvidence(candidate); return <tr key={candidate.id}><td><input type="checkbox" aria-label={`${candidate.candidate_ip} 선택`} checked={selected.has(candidate.id)} onChange={event => setSelected(current => { const next = new Set(current); if (event.target.checked) next.add(candidate.id); else next.delete(candidate.id); return next; })} /></td><td><Link to={`/candidates/${candidate.id}`}>{candidate.candidate_ip}</Link><CandidateTypeBadge candidate={candidate}/><small className={candidate.severity.toLowerCase()}>{candidate.severity}</small>{(candidate.occurrence_count ?? 1) > 1 && <small>{candidate.occurrence_count}회 탐지 · 중복 {candidate.duplicate_count ?? (candidate.occurrence_count ?? 1) - 1}건 통합</small>}</td><td><strong>{candidate.score}</strong></td><td><CandidateThreatIntel assessment={candidate.ti_assessment} /></td><td><CandidateWorkflowBadge candidate={candidate} /></td><td>{hosts.length || candidate.distinct_internal_hosts || 0}</td><td>{sensors.length}</td><td>{protocols.length ? protocols.join(', ') : 'Unknown'}<small>{ports.length ? `Ports ${ports.join(', ')}` : 'No ports reported'}</small></td><td>{fmt(candidate.first_seen)}<small>to {fmt(candidate.last_seen)}</small></td><td title={evidence[0]?.type}>{evidenceLabel(evidence[0]?.type)}<small>{evidence.length}건의 탐지 신호</small></td></tr>; })}</tbody></table></div><CandidatePagination data={data} page={page} onPage={next => { clearSelection(); setPage(next); }} /></>}</AsyncState></>;
 }
 
-function CandidatePagination({ data, page, onPage }: { data: Page<Candidate>; page: number; onPage: (page: number) => void }) {
+function CandidatePagination({ data, page, onPage, language = 'en' }: { language?: 'en' | 'ko'; data: Page<Candidate>; page: number; onPage: (page: number) => void }) {
   const pageSize = data.page_size ?? 50;
   const total = data.total ?? items(data).length;
   const current = data.page ?? page;
   const first = total === 0 ? 0 : (current - 1) * pageSize + 1;
-  return <div className="pagination"><span>Candidates {first}–{Math.min(current * pageSize, total)} of {total}</span><div className="row-actions"><button type="button" className="secondary" disabled={current <= 1} onClick={() => onPage(Math.max(1, current - 1))}>Previous candidates</button><button type="button" className="secondary" disabled={current * pageSize >= total} onClick={() => onPage(current + 1)}>Next candidates</button></div></div>;
+  return <div className="pagination"><span>{language === 'ko' ? '후보' : 'Candidates'} {first}–{Math.min(current * pageSize, total)} {language === 'ko' ? '/ 전체' : 'of'} {total}</span><div className="row-actions"><button type="button" className="secondary" disabled={current <= 1} onClick={() => onPage(Math.max(1, current - 1))}>{language === 'ko' ? '이전 후보' : 'Previous candidates'}</button><button type="button" className="secondary" disabled={current * pageSize >= total} onClick={() => onPage(current + 1)}>{language === 'ko' ? '다음 후보' : 'Next candidates'}</button></div></div>;
 }
 
 function CandidateEnrichmentPanel({ candidate, onUpdated }: { candidate: Candidate; onUpdated: () => Promise<unknown> }) {
@@ -1240,7 +1317,7 @@ function FlowFilterGroup({ kind, index, filter, onChange, onRemove }: { kind: 'F
   return <fieldset className={`flow-filter-group ${kind === 'Filter out' ? 'exclude' : 'include'}`}><legend className="sr-only">{prefix}</legend><div className="flow-filter-card-heading"><div className="flow-filter-card-title"><span>{kind === 'Filter out' ? 'EXCLUDE' : 'INCLUDE'}</span><strong>{String(index + 1).padStart(2, '0')}</strong></div><div className="flow-filter-tokens" aria-label={`${prefix} summary`}>{tokens.length ? tokens.map(token => <span key={token}>{token}</span>) : <span className="empty">No conditions yet</span>}</div><button type="button" className="flow-filter-remove" aria-label={`Remove ${prefix}`} title={`Remove ${prefix}`} onClick={onRemove}>×</button></div><div className="flow-filter-primary"><label><span>Endpoint IP / CIDR</span><input aria-label={`${prefix} endpoint IP or CIDR`} value={filter.candidateIp} onChange={event => onChange({ ...filter, candidateIp: event.target.value })} placeholder="203.0.113.10 or /24" /></label><label><span>Protocol</span><input aria-label={`${prefix} protocol`} value={filter.protocol} onChange={event => onChange({ ...filter, protocol: event.target.value })} placeholder="TCP, UDP…" /></label><label><span>Service port</span><input aria-label={`${prefix} external service port`} value={filter.port} onChange={event => onChange({ ...filter, port: event.target.value })} type="number" min="0" max="65535" placeholder="Any" /></label><label className="flow-filter-toggle"><input aria-label={`${prefix} payload only`} type="checkbox" checked={filter.payloadOnly} onChange={event => onChange({ ...filter, payloadOnly: event.target.checked })} /><span>Has payload</span></label></div><details className="flow-filter-advanced"><summary><span>Advanced conditions</span><small>Direction · Source port · Destination port</small></summary><div><label><span>Direction</span><select aria-label={`${prefix} direction`} value={filter.direction} onChange={event => onChange({ ...filter, direction: event.target.value })}><option value="">Any direction</option>{directions.map(direction => <option key={direction}>{direction}</option>)}</select></label><label><span>Source port</span><input aria-label={`${prefix} source port`} value={filter.sourcePort} onChange={event => onChange({ ...filter, sourcePort: event.target.value })} type="number" min="0" max="65535" placeholder="Any" /></label><label><span>Destination port</span><input aria-label={`${prefix} destination port`} value={filter.destinationPort} onChange={event => onChange({ ...filter, destinationPort: event.target.value })} type="number" min="0" max="65535" placeholder="Any" /></label></div></details></fieldset>;
 }
 
-function JobFlowReviewPanel({ jobId, onInvestigate }: { jobId: string; onInvestigate: (ip: string, side: InvestigationSelection['side']) => void }) {
+function JobFlowReviewPanel({ jobId, onInvestigate, visible = true }: { jobId: string; visible?: boolean; onInvestigate: (ip: string, side: InvestigationSelection['side']) => void }) {
   const [draft, setDraft] = useState<FlowFilterSet>(defaultFlowFilters);
   const [filters, setFilters] = useState<FlowFilterSet>(defaultFlowFilters);
   const [page, setPage] = useState(1);
@@ -1317,7 +1394,7 @@ function JobFlowReviewPanel({ jobId, onInvestigate }: { jobId: string; onInvesti
       if (generation === exportGeneration.current) setExporting(false);
     }
   };
-  return <section className="panel compact"><h2>All analysis flows</h2><p className="muted">Build a focused review queue, then remove known noise. Conditions inside each group are combined.</p><form className="flow-filter-builder" onSubmit={applyFilters}><section className="flow-filter-section include"><div className="flow-filter-heading"><div><span className="flow-filter-eyebrow">MATCH ANY GROUP</span><h3>Include flows</h3><p className="muted">Narrow the review queue to relevant traffic. Up to 20 groups.</p></div><button type="button" className="flow-filter-add" aria-label="Add filter" disabled={draft.include.length >= 20} onClick={() => setDraft(current => ({ ...current, include: [...current.include, newFlowFilter()] }))}><span>+</span> Add group</button></div>{draft.include.map((filter, index) => <FlowFilterGroup key={`include-${index}`} kind="Filter" index={index} filter={filter} onChange={updated => setDraft(current => ({ ...current, include: current.include.map((item, itemIndex) => itemIndex === index ? updated : item) }))} onRemove={() => setDraft(current => ({ ...current, include: current.include.filter((_, itemIndex) => itemIndex !== index) }))} />)}{draft.include.length === 0 && <div className="flow-filter-empty"><strong>No include filters</strong><span>All flows will be considered before exclusions.</span></div>}</section><section className="flow-filter-section exclude"><div className="flow-filter-heading"><div><span className="flow-filter-eyebrow">REMOVE ANY MATCH</span><h3>Filter out patterns</h3><p className="muted">Hide known noise, infrastructure, or reviewed traffic. Up to 20 patterns.</p></div><button type="button" className="flow-filter-add exclude" aria-label="Add filter out" disabled={draft.exclude.length >= 20} onClick={() => setDraft(current => ({ ...current, exclude: [...current.exclude, newFlowFilter()] }))}><span>+</span> Add pattern</button></div>{draft.exclude.map((filter, index) => <FlowFilterGroup key={`exclude-${index}`} kind="Filter out" index={index} filter={filter} onChange={updated => setDraft(current => ({ ...current, exclude: current.exclude.map((item, itemIndex) => itemIndex === index ? updated : item) }))} onRemove={() => setDraft(current => ({ ...current, exclude: current.exclude.filter((_, itemIndex) => itemIndex !== index) }))} />)}{draft.exclude.length === 0 && <div className="flow-filter-empty exclude"><strong>No filter-out patterns configured</strong><span>Add trusted IPs, CIDRs, or protocol patterns to remove noise.</span></div>}</section><div className="flow-filter-toolbar"><div><span className={`flow-filter-state ${filtersDirty ? 'dirty' : ''}`}>{filtersDirty ? 'Unapplied changes' : 'Filters applied'}</span><small>{draft.include.length} include · {draft.exclude.length} exclude groups</small></div><div className="actions"><button type="button" className="secondary" onClick={resetFilters}>Reset</button><button disabled={!filtersDirty}>Apply filters</button></div></div></form><div className="flow-export-actions"><div><strong>Filtered packet capture</strong><p className="muted">Exports decoded packets using the last applied filters. Payload-only applies per packet.</p></div><button type="button" disabled={exporting} onClick={downloadFilteredCapture}>{exporting ? 'Preparing capture…' : 'Download filtered capture'}</button></div>{exportNotice && <p role="status" className="success">{exportNotice}</p>}{exportError && <p role="alert" className="error">{exportError}</p>}<AsyncState query={query} empty={data => items(data).length === 0}>{data => <><div className="table-wrap"><table aria-label="Analysis flows"><thead><tr><th>Observed</th><th>Direction</th><th>Endpoints</th><th>Protocol</th><th>Volume</th><th>Payload features</th><th>Current label</th><th>Review</th></tr></thead><tbody>{items(data).map(flow => <FlowReviewRow key={flow.flow_id} flow={flow} onInvestigate={onInvestigate} />)}</tbody></table></div><FlowPagination data={data} page={page} onPage={setPage}/></>}</AsyncState></section>;
+  return <section className={visible ? "panel compact" : undefined} aria-label={visible ? undefined : "Flow operation status"}>{visible && <><h2>All analysis flows</h2><p className="muted">Build a focused review queue, then remove known noise. Conditions inside each group are combined.</p><form className="flow-filter-builder" onSubmit={applyFilters}><section className="flow-filter-section include"><div className="flow-filter-heading"><div><span className="flow-filter-eyebrow">MATCH ANY GROUP</span><h3>Include flows</h3><p className="muted">Narrow the review queue to relevant traffic. Up to 20 groups.</p></div><button type="button" className="flow-filter-add" aria-label="Add filter" disabled={draft.include.length >= 20} onClick={() => setDraft(current => ({ ...current, include: [...current.include, newFlowFilter()] }))}><span>+</span> Add group</button></div>{draft.include.map((filter, index) => <FlowFilterGroup key={`include-${index}`} kind="Filter" index={index} filter={filter} onChange={updated => setDraft(current => ({ ...current, include: current.include.map((item, itemIndex) => itemIndex === index ? updated : item) }))} onRemove={() => setDraft(current => ({ ...current, include: current.include.filter((_, itemIndex) => itemIndex !== index) }))} />)}{draft.include.length === 0 && <div className="flow-filter-empty"><strong>No include filters</strong><span>All flows will be considered before exclusions.</span></div>}</section><section className="flow-filter-section exclude"><div className="flow-filter-heading"><div><span className="flow-filter-eyebrow">REMOVE ANY MATCH</span><h3>Filter out patterns</h3><p className="muted">Hide known noise, infrastructure, or reviewed traffic. Up to 20 patterns.</p></div><button type="button" className="flow-filter-add exclude" aria-label="Add filter out" disabled={draft.exclude.length >= 20} onClick={() => setDraft(current => ({ ...current, exclude: [...current.exclude, newFlowFilter()] }))}><span>+</span> Add pattern</button></div>{draft.exclude.map((filter, index) => <FlowFilterGroup key={`exclude-${index}`} kind="Filter out" index={index} filter={filter} onChange={updated => setDraft(current => ({ ...current, exclude: current.exclude.map((item, itemIndex) => itemIndex === index ? updated : item) }))} onRemove={() => setDraft(current => ({ ...current, exclude: current.exclude.filter((_, itemIndex) => itemIndex !== index) }))} />)}{draft.exclude.length === 0 && <div className="flow-filter-empty exclude"><strong>No filter-out patterns configured</strong><span>Add trusted IPs, CIDRs, or protocol patterns to remove noise.</span></div>}</section><div className="flow-filter-toolbar"><div><span className={`flow-filter-state ${filtersDirty ? 'dirty' : ''}`}>{filtersDirty ? 'Unapplied changes' : 'Filters applied'}</span><small>{draft.include.length} include · {draft.exclude.length} exclude groups</small></div><div className="actions"><button type="button" className="secondary" onClick={resetFilters}>Reset</button><button disabled={!filtersDirty}>Apply filters</button></div></div></form><div className="flow-export-actions"><div><strong>Filtered packet capture</strong><p className="muted">Exports decoded packets using the last applied filters. Payload-only applies per packet.</p></div><button type="button" disabled={exporting} onClick={downloadFilteredCapture}>{exporting ? 'Preparing capture…' : 'Download filtered capture'}</button></div></>}{exporting && !visible && !exportNotice && <p role="status">Preparing capture…</p>}{exportNotice && <p role="status" className="success">{exportNotice}</p>}{exportError && <p role="alert" className="error">{exportError}</p>}<AsyncState query={query} empty={data => items(data).length === 0}>{data => <><div className="table-wrap"><table aria-label={visible ? "Analysis flows" : "Flow operation status"}>{visible && <thead><tr><th>Observed</th><th>Direction</th><th>Endpoints</th><th>Protocol</th><th>Volume</th><th>Payload features</th><th>Current label</th><th>Review</th></tr></thead>}<tbody>{items(data).map(flow => <FlowReviewRow key={flow.flow_id} flow={flow} onInvestigate={onInvestigate} visible={visible} />)}</tbody></table></div>{visible && <FlowPagination data={data} page={page} onPage={setPage}/>}</>}</AsyncState></section>;
 }
 
 function FlowPagination({ data, page, onPage }: { data: Page<FlowRecordReview>; page: number; onPage: (page: number) => void }) {
@@ -1338,7 +1415,7 @@ function FlowReviewPanel({ candidate }: { candidate: Candidate }) {
   return <section className="panel compact"><h2>Flow review</h2><p className="muted">Inspect a retained payload only when needed, then record an analyst verdict. C2 labels can create a reusable, non-reversible payload signature for future analyses.</p><AsyncState query={query} empty={data => items(data).length === 0}>{data => <><div className="table-wrap"><table aria-label="Candidate flows"><thead><tr><th>Observed</th><th>Direction</th><th>Endpoints</th><th>Protocol</th><th>Volume</th><th>Payload features</th><th>Current label</th><th>Review</th></tr></thead><tbody>{items(data).map(flow => <FlowReviewRow key={flow.flow_id} flow={flow} candidateIp={candidate.candidate_ip} />)}</tbody></table></div><FlowPagination data={data} page={page} onPage={setPage} /></>}</AsyncState></section>;
 }
 
-function FlowReviewRow({ flow, candidateIp, onInvestigate }: { flow: FlowRecordReview; candidateIp?: string; onInvestigate?: (ip: string, side: InvestigationSelection['side']) => void }) {
+function FlowReviewRow({ flow, candidateIp, onInvestigate, visible = true }: { visible?: boolean; flow: FlowRecordReview; candidateIp?: string; onInvestigate?: (ip: string, side: InvestigationSelection['side']) => void }) {
   const client = useQueryClient();
   const navigate = useNavigate();
   const [verdict, setVerdict] = useState<'C2' | 'BENIGN'>();
@@ -1391,6 +1468,10 @@ function FlowReviewRow({ flow, candidateIp, onInvestigate }: { flow: FlowRecordR
     event.preventDefault();
     label.mutate();
   };
+  if (!visible) return label.isPending || guidedReanalysis.isPending || label.error || guidedReanalysis.error || notice ? <tr><td colSpan={8}>
+    {(label.isPending || guidedReanalysis.isPending) && <p role="status">{flow.flow_id} · {label.isPending ? 'Saving…' : 'Creating reanalysis…'}</p>}
+    {label.error && <p role="alert">{label.error.message}</p>}{guidedReanalysis.error && <p role="alert">{guidedReanalysis.error.message}</p>}{notice && <p role="status">{notice}</p>}
+  </td></tr> : null;
   return <Fragment>
     <tr>
       <td>{fmt(flow.timestamp)}<small>{flow.sensor_id ?? 'Unknown sensor'}</small></td>
