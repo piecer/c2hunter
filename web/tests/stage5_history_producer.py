@@ -70,6 +70,9 @@ def generate():
         detail_path = "/api/v1/analysis-jobs/" + quote(child["id"], safe="")
         listing = client.get(list_path)
         detail = client.get(detail_path)
+        ai_runs = client.get(detail_path + "/ai-runs")
+        assert ai_runs.status_code == 200, ai_runs.text
+        assert ai_runs.json() == {"items": [], "total": 0, "page": 1, "page_size": 50}
         assert listing.status_code == detail.status_code == 200
         rows = listing.json()["items"]
         assert len(rows) == listing.json()["total"] == 1
@@ -94,6 +97,7 @@ def generate():
             origins[str(path.relative_to(ROOT))] = hashlib.sha256(path.read_bytes()).hexdigest()
         return {"list_path": list_path, "detail_path": detail_path,
                 "list_wire": listing.text, "detail_wire": detail.text,
+                "ai_runs_wire": ai_runs.text,
                 "persisted_report": report, "producer_origins": origins,
                 "denied_operations": DENIED}
     finally:

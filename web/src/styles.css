@@ -54,7 +54,23 @@
 /* Narrow navigation disclosure; desktop keeps its original flex layout. */
 .navigation-toggle{display:none}.shell-navigation{display:contents}
 @media(max-width:800px){
-  .shell>aside{display:grid;grid-template-columns:1fr auto;align-items:center;gap:.5rem;padding:.75rem 1.2rem}
+  .shell>aside{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,8rem),1fr));align-items:center;gap:.5rem;padding:.75rem 1.2rem}
+  .shell>aside>.brand{min-width:0;overflow-wrap:anywhere}
+  .content h1,.content h2{overflow-wrap:anywhere}
+  .content .actions,.content .pagination{flex-wrap:wrap}
+  .history-filters{grid-template-columns:minmax(0,1fr)}
+  .history-filters label,.candidate-filters label,.form,.form label{min-width:0;overflow-wrap:anywhere}
+  .history-filters input,.history-filters select,.candidate-filters input,.candidate-filters select{min-width:0;max-width:100%;width:100%}
+  .content>.grid>.panel{min-width:0}
+  .content>.grid>.panel>dl{grid-template-columns:repeat(2,minmax(0,1fr));overflow-wrap:anywhere}
+  .content>.grid>.panel>dl>dd{margin-inline-start:0}
+  .form{grid-template-columns:minmax(0,1fr)}
+  .form form,.form fieldset{min-width:0}
+  .form fieldset{margin-inline:0}
+  .form input:not([type="checkbox"]):not([type="radio"]),.form select,.form textarea{min-width:0;width:100%;max-width:100%}
+  .form button,.actions>button{min-width:0;max-width:100%;overflow-wrap:anywhere}
+  .form .source-row{grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr))}
+  .form .grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr))}
   .navigation-toggle{display:block}.shell-navigation{display:none;grid-column:1/-1}.shell-navigation.is-open{display:block}
   .shell-navigation .quiet{width:100%}
   .content:has(.network-report)>.header-actions{margin-bottom:.75rem}

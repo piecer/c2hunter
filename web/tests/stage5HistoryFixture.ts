@@ -9,7 +9,7 @@ export const historyProducer = JSON.parse(execFileSync(
   ['-I', '-B', resolve(directory, 'stage5_history_producer.py')],
   { encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL' },
 )) as {
-  list_path: string; detail_path: string; list_wire: string; detail_wire: string;
+  list_path: string; detail_path: string; list_wire: string; detail_wire: string; ai_runs_wire: string;
   persisted_report: { summary: { truncated: boolean; counts_are_lower_bounds: boolean; coverage_complete: boolean }; warnings: string[] };
   producer_origins: Record<string, string>; denied_operations: string[];
 };
