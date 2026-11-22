@@ -54,7 +54,7 @@ it('explicit attack entry retires a pending C2 upload without accepting its late
 it('explains the separate normal-reference purpose before selecting a dataset', () => {
   openUpload();
   fireEvent.click(screen.getByRole('button', { name: 'Offline attack triage' }));
-  fireEvent.click(screen.getByText('Advanced DDoS thresholds and optional normal reference'));
+  fireEvent.click(screen.getByText('Advanced options / 고급 설정'));
   expect(screen.getByText(/same-capture low-traffic buckets/)).toBeVisible();
   expect(screen.getByText(/candidate predicate evaluation.*does not upgrade flood likelihood/)).toBeVisible();
   expect(screen.getByText('False positives remain unmeasured, not zero.')).toBeVisible();
@@ -69,9 +69,9 @@ it('explicit offline attack entry keeps legacy C2 default and submits mounted ad
   expect(screen.getByLabelText('Analysis module')).toHaveValue('ddos_attack');
   expect(screen.getByText(/not a general intrusion detector/)).toBeVisible();
   expect(screen.getByText(/public IPv4.*\/32.*IPv6/)).toBeVisible();
-  const advanced = screen.getByText('Advanced DDoS thresholds and optional normal reference').closest('details')!;
+  const advanced = screen.getByText('Advanced options / 고급 설정').closest('details')!;
   expect(advanced).not.toHaveAttribute('open');
-  expect(advanced.querySelectorAll('input[type="number"]')).toHaveLength(15);
+  expect(advanced.querySelectorAll('input[type="number"]:not(:disabled)')).toHaveLength(15);
   expect(screen.getByLabelText('Minimum packets')).toHaveValue(1000);
   expect(screen.getByLabelText('Normal reference action')).toHaveValue('clear');
   fireEvent.change(screen.getByLabelText('Analysis name'), { target: { value: 'Attack triage' } });

@@ -28,7 +28,7 @@ async function form(page: Page, route = '/analyses/upload', module = 'ddos_attac
   await page.goto(route);
   await page.getByLabel('Analysis name').fill('Owned independent request');
   await page.getByLabel('Analysis module').selectOption(module);
-  if (module === 'ddos_attack') await page.getByText('Advanced DDoS thresholds and optional normal reference', { exact: true }).click();
+  await page.getByText('Advanced options / 고급 설정', { exact: true }).click();
   await page.getByLabel('Capture file').setInputFiles(join(root, 'unmeasured.pcap'));
   return page.getByLabel('Analysis name').locator('xpath=ancestor::form');
 }

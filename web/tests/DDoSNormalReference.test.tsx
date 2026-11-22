@@ -112,7 +112,7 @@ it.each(['/analyses/new', '/analyses/upload'])('a late DDoS admission cannot pub
   await waitFor(() => expect(calls.some(path => path === '/api/v1/analysis-jobs' || path === '/api/v1/pcap-analysis-jobs/initiate')).toBe(true));
   fireEvent.change(screen.getByLabelText('Analysis module'), { target: { value: 'c2' } });
   finish(Response.json({ id: 'late-created' }));
-  await waitFor(() => expect(form.querySelector(':scope > button:last-child')).not.toBeDisabled());
+  await waitFor(() => expect(form.querySelector(':scope > button:not([type="button"])')).not.toBeDisabled());
   expect(screen.getByLabelText('Analysis module')).toHaveValue('c2');
   expect(calls).not.toContain('/api/v1/analysis-jobs/late-created');
   expect(calls).not.toContain('/api/v1/pcap-analysis-jobs/late-created/capture');

@@ -52,6 +52,7 @@ it.each(['/analyses/new', '/analyses/upload'])('isolates network controls and re
   const fetcher = vi.fn(async () => new Response(JSON.stringify({ items: [] })));
   vi.stubGlobal('fetch', fetcher);
   render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[route]}><App/></MemoryRouter></QueryClientProvider>);
+  fireEvent.click(screen.getByText('Advanced options / 고급 설정'));
   const module = screen.getByLabelText('Analysis module');
   expect(module).toHaveValue('c2');
   const score = screen.getByLabelText('Minimum score');
@@ -93,6 +94,7 @@ it('uploads network evidence without C2 query settings even when C2 inputs are i
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/upload']}><App/></MemoryRouter></QueryClientProvider>);
   fireEvent.change(screen.getByLabelText('Analysis name'), { target: { value: 'Network capture' } });
   await userEvent.upload(screen.getByLabelText('Capture file'), new File(['pcap'], 'test.pcap'));
+  fireEvent.click(screen.getByText('Advanced options / 고급 설정'));
   fireEvent.change(screen.getByLabelText('Minimum score'), { target: { value: '999' } });
   fireEvent.change(screen.getAllByRole('spinbutton', { name: /가중치/ })[0], { target: { value: '1.5' } });
   fireEvent.change(screen.getByLabelText('Analysis module'), { target: { value: 'network_anomaly' } });

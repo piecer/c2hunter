@@ -322,6 +322,7 @@ it('submits the dedicated DDoS module and thresholds from the live analysis form
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/new']}><App/></MemoryRouter></QueryClientProvider>);
   fireEvent.change(screen.getByLabelText('Analysis name'), { target: { value: 'DDoS investigation' } });
   fireEvent.change(screen.getByLabelText('Analysis module'), { target: { value: 'ddos_attack' } });
+  fireEvent.click(screen.getByText('Advanced options / 고급 설정'));
   expect(screen.getByRole('heading', { name: 'DDoS attack traffic analysis' })).toBeVisible();
   await userEvent.click(await screen.findByLabelText('Sensor'));
   fireEvent.change(screen.getByLabelText('Minimum observed sources'), { target: { value: '30' } });

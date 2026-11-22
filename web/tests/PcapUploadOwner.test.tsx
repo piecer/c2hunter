@@ -12,6 +12,7 @@ async function uploadForm(module = 'ddos_attack', defaultPreset = false) {
   const view = render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={['/analyses/upload']}><App/></MemoryRouter></QueryClientProvider>);
   fireEvent.change(screen.getByLabelText('Analysis name'), { target: { value: 'Owned upload' } });
   fireEvent.change(screen.getByLabelText('Analysis module'), { target: { value: module } });
+  fireEvent.click(screen.getByText('Advanced options / 고급 설정'));
   const file = new File(['pcap'], 'owned.pcap');
   fireEvent.change(screen.getByLabelText('Capture file'), { target: { files: [file] } });
   return { ...view, file, form: screen.getByLabelText('Analysis name').closest('form')! };
