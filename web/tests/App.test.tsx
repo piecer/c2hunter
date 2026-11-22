@@ -707,6 +707,7 @@ describe('C2Hunter UI', () => {
   it('shows the latest validated AI assessment on candidate detail', async () => {
     renderAt('/candidates/candidate-1');
 
+    await userEvent.click(await screen.findByRole('button', { name: 'AI assessment' }));
     const region = await screen.findByRole('region', { name: 'AI C2 판정' });
     expect(await within(region).findByText('SUSPICIOUS')).toBeInTheDocument();
     expect(within(region).getByText('신뢰도 75%')).toBeInTheDocument();
@@ -730,6 +731,7 @@ describe('C2Hunter UI', () => {
 
     expect(await screen.findByRole('heading', { name: '203.0.113.40' })).toBeInTheDocument();
     expect(screen.getByText('통신 상태 후보')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '근거 1 · TCP 통신 재시도 패턴' }));
     expect(screen.getByText('TCP 통신 재시도 패턴')).toBeInTheDocument();
     expect(screen.getByText('세션 성립 미관찰')).toBeInTheDocument();
   });
@@ -1141,13 +1143,16 @@ describe('C2Hunter UI', () => {
     vi.stubGlobal('fetch', fetchMock);
     const user = userEvent.setup();
     await screen.findByRole('heading', { name: '203.0.113.9' });
+    await userEvent.click(screen.getByRole('button', { name: '점수 조정 및 작업' }));
     await user.click(screen.getByRole('button', { name: 'Export candidate PCAP' }));
     await user.click(screen.getByRole('button', { name: 'Reanalyze' }));
 
+    await user.click(screen.getByRole('button', { name: '근거 1 · 주기적 비콘' }));
     expect(screen.getByRole('heading', { name: '탐지 근거' })).toBeInTheDocument();
     expect(screen.getByText('주기적 비콘')).toBeInTheDocument();
     expect(screen.getByText('주기 통신 탐지기 · v1.0.0')).toBeInTheDocument();
     expect(screen.getByText('표본 수')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Traffic buckets' }));
     expect(screen.getByRole('table', { name: 'Candidate traffic buckets' })).toBeInTheDocument();
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/analysis-jobs/job-1/reanalyze', expect.objectContaining({ method: 'POST' })));
@@ -1189,6 +1194,7 @@ describe('C2Hunter UI', () => {
     });
     renderAt('/candidates/candidate-1', fetchMock);
 
+    await userEvent.click(await screen.findByRole('button', { name: '점수 조정 및 작업' }));
     await userEvent.click(await screen.findByRole('button', { name: 'Export candidate PCAP' }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
@@ -1218,6 +1224,7 @@ describe('C2Hunter UI', () => {
     });
     renderAt('/candidates/candidate-1', fetchMock);
 
+    await userEvent.click(await screen.findByRole('button', { name: '점수 조정 및 작업' }));
     await userEvent.click(await screen.findByRole('button', { name: 'Export candidate PCAP' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
@@ -1275,8 +1282,9 @@ describe('C2Hunter UI', () => {
     renderAt('/candidates/candidate-1', fetchMock);
     const user = userEvent.setup();
 
+    await userEvent.click(await screen.findByRole('button', { name: '판정 및 외부 검증' }));
     expect(await screen.findByRole('heading', { name: '판정 및 외부 검증' })).toBeInTheDocument();
-    expect(screen.getByText('자동 조회 완료')).toBeInTheDocument();
+    expect(within(screen.getByRole('region', { name: '판정 및 외부 검증' })).getByText('자동 조회 완료')).toBeInTheDocument();
     expect(screen.getByText('MISP 이벤트 1개')).toBeInTheDocument();
     expect(screen.getByText(/외부 평판은 판단 근거이며 자동 확정하지 않습니다/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'MISP로 전송' })).toBeDisabled();
@@ -1286,14 +1294,14 @@ describe('C2Hunter UI', () => {
     await user.click(screen.getByRole('button', { name: '판정 저장' }));
     await waitFor(() => expect(screen.getByText('확정 C2')).toBeInTheDocument());
     expect(screen.getByRole('heading', { name: '후속 대응 조치' })).toBeInTheDocument();
-    expect(screen.getByText('조치 필요', { selector: '.workflow-badge' })).toBeInTheDocument();
+    expect(within(screen.getByRole('region', { name: '후속 대응 조치' })).getByText('조치 필요', { selector: '.workflow-badge' })).toBeInTheDocument();
 
     await user.type(screen.getByLabelText('조치 내용'), 'Host isolation initiated');
     await user.click(screen.getByRole('button', { name: '조치 시작' }));
-    await waitFor(() => expect(screen.getByText('조치 중', { selector: '.workflow-badge' })).toBeInTheDocument());
+    await waitFor(() => expect(within(screen.getByRole('region', { name: '후속 대응 조치' })).getByText('조치 중', { selector: '.workflow-badge' })).toBeInTheDocument());
     await user.type(screen.getByLabelText('조치 내용'), 'Host isolated and IOC blocked');
     await user.click(screen.getByRole('button', { name: '조치 완료' }));
-    await waitFor(() => expect(screen.getByText('조치 완료', { selector: '.workflow-badge' })).toBeInTheDocument());
+    await waitFor(() => expect(within(screen.getByRole('region', { name: '후속 대응 조치' })).getByText('조치 완료', { selector: '.workflow-badge' })).toBeInTheDocument());
 
     await user.click(screen.getByRole('button', { name: '외부 TI 다시 조회' }));
     expect(await screen.findByText('악성 8')).toBeInTheDocument();
@@ -1351,6 +1359,7 @@ describe('C2Hunter UI', () => {
     vi.stubGlobal('fetch', fetchMock);
     const user = userEvent.setup();
     await screen.findByRole('heading', { name: '203.0.113.9' });
+    await userEvent.click(screen.getByRole('button', { name: '점수 조정 및 작업' }));
 
     await user.click(screen.getByRole('button', { name: 'Delete candidate' }));
     expect(screen.getByRole('dialog', { name: 'Delete candidate permanently' })).toBeInTheDocument();
@@ -1385,18 +1394,21 @@ describe('C2Hunter UI', () => {
 
     try {
       renderAt('/candidates/candidate-1');
+      await userEvent.click(await screen.findByRole('button', { name: '근거 1 · 주기적 비콘' }));
       await screen.findByRole('heading', { name: '탐지 근거' });
       expect(screen.getByTitle('sample_count')).toBeVisible();
       const disclosureLabel = screen.getByText('상세 지표 2개 더 보기');
       const disclosure = disclosureLabel.closest('details');
       expect(disclosure).not.toHaveAttribute('open');
-      expect(screen.getByText('Timing Window')).not.toBeVisible();
+      expect(screen.queryByText('Timing Window')).not.toBeInTheDocument();
+      expect(disclosure?.children).toHaveLength(1);
 
       await userEvent.click(disclosureLabel);
       expect(disclosure).toHaveAttribute('open');
       expect(screen.getByText('Timing Window')).toBeVisible();
       expect(screen.getByText('Minimum Seconds')).toBeInTheDocument();
       expect(screen.getByText('25초')).toBeInTheDocument();
+      await userEvent.selectOptions(screen.getByLabelText('상세 지표 선택'), 'phases');
       expect(screen.getByText('Warmup')).toBeInTheDocument();
       expect(document.body).not.toHaveTextContent('{"minimum_seconds":25');
     } finally {
@@ -1413,6 +1425,7 @@ describe('C2Hunter UI', () => {
 
     try {
       renderAt('/candidates/candidate-1');
+      await userEvent.click(await screen.findByRole('button', { name: '점수 조정 및 작업' }));
       expect(await screen.findByText('점수 조정 · Imported adjustment')).toBeInTheDocument();
     } finally {
       responses['/api/v1/candidates/candidate-1'] = original;
@@ -1453,6 +1466,8 @@ describe('C2Hunter UI', () => {
     vi.stubGlobal('fetch', fetchMock);
     const user = userEvent.setup();
 
+    await userEvent.click(await screen.findByRole('button', { name: 'Flow review' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Inspect flow 0123456789abcdef01234567' }));
     expect(await screen.findByRole('table', { name: 'Candidate flows' })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Preview payload 0123456789abcdef01234567' }));
     expect(await screen.findByText('beacon')).toBeInTheDocument();

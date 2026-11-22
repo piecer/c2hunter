@@ -1,7 +1,11 @@
-import { Fragment, FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, FormEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom';
-import { api } from './api';
+import { api, ApiError } from './api';
+import CandidateQueuePreview from './CandidateQueuePreview';
+import CandidateQueueTI from './CandidateQueueTI';
+import { useCandidateQueueReturn, useCandidateQueueSelection } from './useCandidateQueueSelection';
+import { listEnum, listPage, useListReturn, useResultSelection } from './useResultSelection';
 import { captureAuthentication, setAuthentication } from './authentication';
 import { AIInvestigationEntry, type InvestigationSelection } from './AIInvestigationPanel';
 import { JobInvestigationEntry } from './JobInvestigationPanel';
@@ -24,6 +28,9 @@ import { historicalAccessDenied, historicalErrorText } from './historicalReferen
 import { useReportLanguage } from './reportLanguageContext';
 import AnalysisConfiguration, { StructuredValue } from './AnalysisConfiguration';
 import { runPcapExportLifecycle, type PcapExportLifecycleResult } from './pcapExportLifecycle';
+import ResultDetailPanel, { CandidateDeleteConfirmation } from './ResultDetailPanel';
+import { useCandidateDetailSelection } from './useCandidateDetailSelection';
+import './candidateNavigation.css';
 import './styles.css';
 
 type WorkflowCounts = { needs_review: number; in_review: number; action_required: number; action_in_progress: number; action_completed: number; false_positive: number; done: number };
@@ -202,18 +209,30 @@ function EvidenceMetric({ name, value }: { name: string; value: unknown }) {
   return <span title={name}><b>{metricLabel(name)}</b><span className="metric-output"><MetricValue name={name} value={value}/></span></span>;
 }
 
+function EvidenceMetricDetail({ name, value }: { name: string; value: unknown }) {
+  const [page, setPage] = useState(0);
+  const values = Array.isArray(value) ? value : [value];
+  return <div className="metric-detail"><h3>{metricLabel(name)}</h3><code>{name}</code>
+    {values.slice(page * 20, (page + 1) * 20).map((item, index) => <div key={index}>{typeof item === 'object' && item !== null && (Array.isArray(item) || Object.keys(item).length > 20 || Object.values(item).some(child => child !== null && typeof child === 'object')) ? <pre>{JSON.stringify(item, null, 2)}</pre> : <StructuredValue value={item} field={name}/>}</div>)}
+    {Array.isArray(value) && <div className="pagination"><span>Values {values.length ? page * 20 + 1 : 0}–{Math.min((page + 1) * 20, values.length)} of {values.length}</span><button type="button" disabled={page === 0} onClick={() => setPage(page - 1)}>Previous metric values</button><button type="button" disabled={(page + 1) * 20 >= values.length} onClick={() => setPage(page + 1)}>Next metric values</button></div>}
+  </div>;
+}
+
 function EvidenceMetrics({ metrics }: { metrics: Record<string, unknown> }) {
+  const [open, setOpen] = useState(false);
+  const [selectedMetric, setSelectedMetric] = useState('');
   const entries = Object.entries(metrics);
   const summary = entries.filter(([, value]) => isCompactEvidenceMetric(value)).slice(0, 4);
   const summaryKeys = new Set(summary.map(([name]) => name));
   const details = entries.filter(([name]) => !summaryKeys.has(name));
   return <div className="evidence-metrics">
     {summary.map(([name, value]) => <EvidenceMetric key={name} name={name} value={value}/>) }
-    {details.length > 0 && <details className="evidence-metric-details">
+    {details.length > 0 && <details className="evidence-metric-details" onToggle={event => setOpen(event.currentTarget.open)}>
       <summary>상세 지표 {details.length}개 더 보기</summary>
-      <div className="evidence-metrics evidence-metrics-expanded">
-        {details.map(([name, value]) => <EvidenceMetric key={name} name={name} value={value}/>) }
-      </div>
+      {open && <div className="evidence-metrics-expanded">
+        <label>상세 지표 선택<select value={details.some(([name]) => name === selectedMetric) ? selectedMetric : details[0][0]} onChange={event => setSelectedMetric(event.target.value)}>{details.map(([name]) => <option key={name} value={name}>{metricLabel(name)} · {name}</option>)}</select></label>
+        {details.filter(([name], index) => details.some(([key]) => key === selectedMetric) ? name === selectedMetric : index === 0).map(([name, value]) => <EvidenceMetricDetail key={name} name={name} value={value}/>)}
+      </div>}
     </details>}
   </div>;
 }
@@ -409,34 +428,57 @@ function AnalysisResult({ job }: { job: Job }) {
   return <><strong>{job.candidate_count ?? 0}</strong> candidates<small>{job.packet_count ?? 0} packets · {job.flow_count ?? 0} flows</small></>;
 }
 
+const historyStatuses = ['CREATED', 'WAITING_FOR_SENSOR', 'CAPTURING', 'UPLOADING', 'INGESTING', 'ANALYZING', 'COMPLETED', 'PARTIALLY_COMPLETED', 'FAILED', 'CANCELLED'];
+const historySorts = ['-created_at', 'created_at', '-updated_at', 'updated_at', 'name', '-name', 'status', '-status', 'source_type', '-source_type'];
+type HistoryListState = { page: number; search: string; status: string; source: string; sort: string };
+function readHistoryList(params: URLSearchParams): HistoryListState {
+  return { page: listPage(params), search: params.get('search') ?? '', status: listEnum(params, 'status', ['', ...historyStatuses]), source: listEnum(params, 'source_type', ['', 'SENSOR_CAPTURE', 'PCAP_UPLOAD']), sort: listEnum(params, 'sort', historySorts, '-created_at') };
+}
+function writeHistoryList(value: HistoryListState): URLSearchParams {
+  const params = new URLSearchParams();
+  if (value.page !== 1) params.set('page', String(value.page));
+  if (value.search) params.set('search', value.search);
+  if (value.status) params.set('status', value.status);
+  if (value.source) params.set('source_type', value.source);
+  if (value.sort !== '-created_at') params.set('sort', value.sort);
+  return params;
+}
+
 function AnalysisHistory() {
   const client = useQueryClient();
-  const [search, setSearch] = useState('');
-  const [status, setStatus] = useState('');
-  const [source, setSource] = useState('');
+  const navigation = useResultSelection(readHistoryList, writeHistoryList);
+  const applied = navigation.value;
+  const valid = navigation.unique && Number.isSafeInteger(applied.page) && applied.page > 0
+    && ![applied.status, applied.source, applied.sort].includes('!invalid') && applied.search.length <= 200;
+  const [draftState, setDraftState] = useState({ signature: navigation.signature, value: applied });
+  if (draftState.signature !== navigation.signature) setDraftState({ signature: navigation.signature, value: applied });
+  const draft = draftState.signature === navigation.signature ? draftState.value : applied;
+  const setDraft = (value: HistoryListState) => setDraftState({ signature: navigation.signature, value });
   const [editing, setEditing] = useState<{ job: Job; name: string; description: string }>();
   const [deleting, setDeleting] = useState<Job>();
-  const parameters = new URLSearchParams({ page_size: '200', sort: '-created_at' });
-  if (search.trim()) parameters.set('search', search.trim());
-  if (status) parameters.set('status', status);
-  if (source) parameters.set('source_type', source);
-  const query = useQuery<List<Job>, Error>({
-    queryKey: ['analysis-history', search, status, source],
+  const parameters = new URLSearchParams({ page: String(applied.page), page_size: '50', sort: applied.sort });
+  if (applied.search) parameters.set('search', applied.search);
+  if (applied.status) parameters.set('status', applied.status);
+  if (applied.source) parameters.set('source_type', applied.source);
+  const query = useQuery<Page<Job>, Error>({
+    queryKey: ['analysis-history', navigation.signature],
+    enabled: valid,
     queryFn: () => api.get(`/analysis-jobs?${parameters.toString()}`),
   });
+  const listReturn = useListReturn(valid && !query.isPending, 'history-list-heading', query.data);
   const update = useMutation<Job, Error, { id: string; name: string; description: string }>({
-    mutationFn: value => api.patch(`/analysis-jobs/${value.id}`, { name: value.name, description: value.description }),
+    mutationFn: value => api.patch(`/analysis-jobs/${encodeURIComponent(value.id)}`, { name: value.name, description: value.description }),
     onSuccess: () => { setEditing(undefined); client.invalidateQueries({ queryKey: ['analysis-history'] }); },
   });
   const remove = useMutation<void, Error, string>({
-    mutationFn: id => api.delete<void>(`/analysis-jobs/${id}`),
+    mutationFn: id => api.delete<void>(`/analysis-jobs/${encodeURIComponent(id)}`),
     onSuccess: () => { setDeleting(undefined); client.invalidateQueries({ queryKey: ['analysis-history'] }); },
   });
   const submitEdit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (editing) update.mutate({ id: editing.job.id, name: editing.name, description: editing.description });
   };
-  return <><header className="header-actions"><div><p className="eyebrow">INVESTIGATION ARCHIVE</p><h1>Analysis history</h1><p className="muted">Review, rename, annotate, or remove completed investigations. Captured evidence and detector settings remain immutable.</p></div><div className="actions"><Link className="button-link secondary-link" to="/analyses/upload">Upload PCAP</Link><Link className="button-link" to="/analyses/new">New analysis</Link></div></header><section className="panel history-filters"><label>Search<input value={search} onChange={event => setSearch(event.target.value)} placeholder="Name or analyst note" /></label><label>Status<select value={status} onChange={event => setStatus(event.target.value)}><option value="">All statuses</option>{['CREATED','WAITING_FOR_SENSOR','CAPTURING','UPLOADING','INGESTING','ANALYZING','COMPLETED','PARTIALLY_COMPLETED','FAILED','CANCELLED'].map(value => <option key={value}>{value}</option>)}</select></label><label>Source<select value={source} onChange={event => setSource(event.target.value)}><option value="">All sources</option><option value="SENSOR_CAPTURE">Sensor capture</option><option value="PCAP_UPLOAD">PCAP upload</option></select></label></section><AsyncState query={query} empty={data => items(data).length === 0}>{data => <div className="table-wrap"><table aria-label="Analysis history"><thead><tr><th>Analysis</th><th>Source</th><th>Status</th><th>Observed range</th><th>Created</th><th>Results</th><th>Manage</th></tr></thead><tbody>{items(data).map(job => <tr key={job.id}><td><Link to={`/analyses/${job.id}`}>{job.name}</Link><small>{job.description || job.id}</small></td><td>{job.source_type === 'PCAP_UPLOAD' ? <><strong>PCAP upload</strong><small>{job.source?.filename} · {formatBytes(job.source?.size_bytes)}</small></> : <><strong>{job.mode === 'HISTORICAL' ? 'Historical sensors' : 'Live sensors'}</strong><small>{job.sensor_ids?.length ?? 0} sensor(s)</small></>}</td><td><span className={`badge ${job.status.toLowerCase()}`}>{job.status}</span></td><td>{fmt(job.start_time)}<small>to {fmt(job.end_time)}</small></td><td>{fmt(job.created_at)}</td><td><AnalysisResult job={job}/></td><td><div className="row-actions"><button type="button" className="secondary" aria-label={`Edit ${job.name}`} onClick={() => setEditing({ job, name: job.name, description: job.description ?? '' })}>Edit</button><button type="button" className="danger" aria-label={`Delete ${job.name}`} disabled={!terminalStatuses.has(job.status)} title={terminalStatuses.has(job.status) ? 'Delete analysis' : 'Only terminal analyses can be deleted'} onClick={() => setDeleting(job)}>Delete</button></div></td></tr>)}</tbody></table></div>}</AsyncState>{editing && <div className="dialog-backdrop"><form className="panel dialog form" role="dialog" aria-modal="true" aria-labelledby="edit-analysis-title" onSubmit={submitEdit}><h2 id="edit-analysis-title">Edit analysis metadata</h2><p className="muted">Results, source packets, time range, and detector settings cannot be changed. Create a reanalysis to change detection parameters.</p><label>Analysis name<input value={editing.name} maxLength={200} onChange={event => setEditing({ ...editing, name: event.target.value })} required /></label><label>Analyst note<textarea value={editing.description} maxLength={5000} rows={5} onChange={event => setEditing({ ...editing, description: event.target.value })} /></label>{update.error && <p role="alert" className="error-text">{update.error.message}</p>}<div className="actions"><button disabled={update.isPending}>{update.isPending ? 'Saving…' : 'Save changes'}</button><button type="button" className="secondary" onClick={() => setEditing(undefined)}>Cancel</button></div></form></div>}{deleting && <div className="dialog-backdrop"><section className="panel dialog" role="dialog" aria-modal="true" aria-labelledby="delete-analysis-title"><h2 id="delete-analysis-title">Delete analysis</h2><p>Delete <strong>{deleting.name}</strong>, its candidates, and generated PCAP exports? This action cannot be undone.</p>{remove.error && <p role="alert" className="error-text">{remove.error.message}</p>}<div className="actions"><button type="button" className="danger" disabled={remove.isPending} onClick={() => remove.mutate(deleting.id)}>{remove.isPending ? 'Deleting…' : 'Delete permanently'}</button><button type="button" className="secondary" onClick={() => setDeleting(undefined)}>Cancel</button></div></section></div>}</>;
+  return <><header className="header-actions"><div><p className="eyebrow">INVESTIGATION ARCHIVE</p><h1 {...listReturn.headingProps}>Analysis history</h1><p className="muted">Review, rename, annotate, or remove completed investigations. Captured evidence and detector settings remain immutable.</p></div><div className="actions"><Link className="button-link secondary-link" to="/analyses/upload">Upload PCAP</Link><Link className="button-link" to="/analyses/new">New analysis</Link></div></header><form className="panel history-filters" onSubmit={event => { event.preventDefault(); navigation.apply({ ...draft, search: draft.search.trim(), page: 1 }); }}><label>Search<input maxLength={200} value={draft.search} onChange={event => setDraft({ ...draft, search: event.target.value })} placeholder="Name or analyst note" /></label><label>Status<select value={draft.status} onChange={event => setDraft({ ...draft, status: event.target.value })}><option value="">All statuses</option>{historyStatuses.map(value => <option key={value}>{value}</option>)}</select></label><label>Source<select value={draft.source} onChange={event => setDraft({ ...draft, source: event.target.value })}><option value="">All sources</option><option value="SENSOR_CAPTURE">Sensor capture</option><option value="PCAP_UPLOAD">PCAP upload</option></select></label><label>Sort analyses<select value={draft.sort} onChange={event => setDraft({ ...draft, sort: event.target.value })}>{historySorts.map(value => <option key={value}>{value}</option>)}</select></label><button>Apply history filters</button></form>{!valid ? <p role="alert">Invalid list filters. Correct the filters and apply again.</p> : <AsyncState query={query} empty={data => items(data).length === 0}>{data => <div className="table-wrap"><table aria-label="Analysis history"><thead><tr><th>Analysis</th><th>Source</th><th>Status</th><th>Observed range</th><th>Created</th><th>Results</th><th>Manage</th></tr></thead><tbody>{items(data).map(job => <tr key={job.id}><td><Link {...listReturn.linkProps(job.id)} to={`/analyses/${encodeURIComponent(job.id)}`}>{job.name}</Link><small>{job.description || job.id}</small></td><td>{job.source_type === 'PCAP_UPLOAD' ? <><strong>PCAP upload</strong><small>{job.source?.filename} · {formatBytes(job.source?.size_bytes)}</small></> : <><strong>{job.mode === 'HISTORICAL' ? 'Historical sensors' : 'Live sensors'}</strong><small>{job.sensor_ids?.length ?? 0} sensor(s)</small></>}</td><td><span className={`badge ${job.status.toLowerCase()}`}>{job.status}</span></td><td>{fmt(job.start_time)}<small>to {fmt(job.end_time)}</small></td><td>{fmt(job.created_at)}</td><td><AnalysisResult job={job}/></td><td><div className="row-actions"><button type="button" className="secondary" aria-label={`Edit ${job.name}`} onClick={() => setEditing({ job, name: job.name, description: job.description ?? '' })}>Edit</button><button type="button" className="danger" aria-label={`Delete ${job.name}`} disabled={!terminalStatuses.has(job.status)} title={terminalStatuses.has(job.status) ? 'Delete analysis' : 'Only terminal analyses can be deleted'} onClick={() => setDeleting(job)}>Delete</button></div></td></tr>)}</tbody></table></div>}</AsyncState>}{valid && query.data && !Array.isArray(query.data) && query.data.total !== undefined && query.data.page !== undefined && query.data.page_size !== undefined && <div className="pagination"><span>Analyses {query.data.items.length ? (query.data.page - 1) * query.data.page_size + 1 : 0}–{query.data.items.length ? Math.min(query.data.page * query.data.page_size, query.data.total) : 0} of {query.data.total}</span><div className="row-actions"><button type="button" className="secondary" disabled={query.data.page <= 1} onClick={() => navigation.apply({ ...applied, page: Math.max(1, query.data!.page! - 1) })}>Previous analyses</button><button type="button" className="secondary" disabled={query.data.page * query.data.page_size >= query.data.total} onClick={() => navigation.apply({ ...applied, page: query.data!.page! + 1 })}>Next analyses</button></div></div>}{editing && <div className="dialog-backdrop"><form className="panel dialog form" role="dialog" aria-modal="true" aria-labelledby="edit-analysis-title" onSubmit={submitEdit}><h2 id="edit-analysis-title">Edit analysis metadata</h2><p className="muted">Results, source packets, time range, and detector settings cannot be changed. Create a reanalysis to change detection parameters.</p><label>Analysis name<input value={editing.name} maxLength={200} onChange={event => setEditing({ ...editing, name: event.target.value })} required /></label><label>Analyst note<textarea value={editing.description} maxLength={5000} rows={5} onChange={event => setEditing({ ...editing, description: event.target.value })} /></label>{update.error && <p role="alert" className="error-text">{update.error.message}</p>}<div className="actions"><button disabled={update.isPending}>{update.isPending ? 'Saving…' : 'Save changes'}</button><button type="button" className="secondary" onClick={() => setEditing(undefined)}>Cancel</button></div></form></div>}{deleting && <div className="dialog-backdrop"><section className="panel dialog" role="dialog" aria-modal="true" aria-labelledby="delete-analysis-title"><h2 id="delete-analysis-title">Delete analysis</h2><p>Delete <strong>{deleting.name}</strong>, its candidates, and generated PCAP exports? This action cannot be undone.</p>{remove.error && <p role="alert" className="error-text">{remove.error.message}</p>}<div className="actions"><button type="button" className="danger" disabled={remove.isPending} onClick={() => remove.mutate(deleting.id)}>{remove.isPending ? 'Deleting…' : 'Delete permanently'}</button><button type="button" className="secondary" onClick={() => setDeleting(undefined)}>Cancel</button></div></section></div>}</>;
 }
 
 function NetworkObservationHelp() {
@@ -637,8 +679,8 @@ function JobReanalysis({ job, visible = true }: { job: Job; visible?: boolean })
   }, {});
   const [weights, setWeights] = useState<DetectorWeights>(initialWeights);
   const reanalyze = useMutation({
-    mutationFn: () => api.post<Job>(`/analysis-jobs/${job.id}/reanalyze`, { idempotency_key: idempotencyKey(), detector_weights: weights }),
-    onSuccess: created => navigate(`/analyses/${created.id}`),
+    mutationFn: () => api.post<Job>(`/analysis-jobs/${encodeURIComponent(job.id)}/reanalyze`, { idempotency_key: idempotencyKey(), detector_weights: weights }),
+    onSuccess: created => navigate(`/analyses/${encodeURIComponent(created.id)}`),
   });
   if (!visible) return <section aria-label="Reanalysis status">{reanalyze.isPending && <p role="status">재분석 생성 중…</p>}{reanalyze.error && <p role="alert">{reanalyze.error.message}</p>}</section>;
   return <section className="panel compact"><h2>가중치 조정 후 재분석</h2><p className="muted">데이터셋 {job.dataset_id}을 다시 업로드하거나 파싱하지 않고 탐지 가중치별 후보 점수를 비교합니다.</p><DetectorWeightFields weights={weights} setWeights={setWeights} applyDefault={false}/>{reanalyze.error && <p role="alert" className="error-text">{reanalyze.error.message}</p>}<button disabled={reanalyze.isPending} onClick={() => reanalyze.mutate()}>{reanalyze.isPending ? '재분석 생성 중…' : '탐지 가중치로 재분석'}</button></section>;
@@ -648,8 +690,8 @@ function DDoSJobReanalysis({ job }: { job: Job }) {
   const navigate = useNavigate();
   const submission = useDDoSSubmission(job.id);
   const reanalyze = useMutation({
-    mutationFn: (body: Record<string, unknown>) => api.post<Job>(`/analysis-jobs/${job.id}/reanalyze`, body),
-    onSuccess: (created, body) => { if (submission.current(body)) navigate(`/analyses/${created.id}`); },
+    mutationFn: (body: Record<string, unknown>) => api.post<Job>(`/analysis-jobs/${encodeURIComponent(job.id)}/reanalyze`, body),
+    onSuccess: (created, body) => { if (submission.current(body)) navigate(`/analyses/${encodeURIComponent(created.id)}`); },
     onSettled: () => submission.settled(),
   });
   const submit = (event: FormEvent<HTMLFormElement>) => {
@@ -754,7 +796,7 @@ function AIAnalysisPanel({ job, knownCandidateIds, visible = true }: { job: Job;
   const [candidateLimit, setCandidateLimit] = useState(5);
   const runs = useQuery<List<AIRun>, Error>({
     queryKey: ['ai-runs', job.id],
-    queryFn: () => api.get(`/analysis-jobs/${job.id}/ai-runs`),
+    queryFn: () => api.get(`/analysis-jobs/${encodeURIComponent(job.id)}/ai-runs`),
     refetchInterval: query => items(query.state.data).some(run => !terminalStatuses.has(run.status)) ? 2000 : false,
   });
   const saved = items(runs.data).find(item => item.id === savedRunId) ?? items(runs.data)[0];
@@ -777,7 +819,7 @@ function AIAnalysisPanel({ job, knownCandidateIds, visible = true }: { job: Job;
     refetchInterval: query => !historicalAccessDenied(query.state.error) && latest && !terminalRun ? 2000 : false,
   });
   const start = useMutation({
-    mutationFn: () => api.post<AIRun>(`/analysis-jobs/${job.id}/ai-runs`, {
+    mutationFn: () => api.post<AIRun>(`/analysis-jobs/${encodeURIComponent(job.id)}/ai-runs`, {
       idempotency_key: `web-${job.id}-${Date.now()}`,
       candidate_limit: candidateLimit,
       ...(shadow ? { discovery_mode: 'shadow' } : {}),
@@ -887,7 +929,9 @@ function JobDetailOwner({ id }: { id: string }) {
   const focusCandidates = useRef(false);
   const [aiOpened, setAiOpened] = useState(false);
   const [workOpened, setWorkOpened] = useState(false);
-  const [candidatePage, setCandidatePage] = useState(1);
+  const preview = useCandidateQueueSelection('job-candidate-heading');
+  const candidatePage = preview.page ?? 1;
+  const setCandidatePage = preview.setPage;
   const [view, setView] = useState<'results' | 'ai' | 'work'>('results');
   const [investigation, setInvestigation] = useState<(InvestigationSelection & { jobId: string })>();
   const investigate = (ip: string, side: InvestigationSelection['side'] = 'either') => {
@@ -900,21 +944,22 @@ function JobDetailOwner({ id }: { id: string }) {
   const [notice, setNotice] = useState('');
   const q = useQuery<Job, Error>({
     queryKey: ['job', id],
-    queryFn: () => api.get(`/analysis-jobs/${id}`),
+    queryFn: () => api.get(`/analysis-jobs/${encodeURIComponent(id)}`),
     refetchInterval: query => terminalStatuses.has(query.state.data?.status ?? '') ? false : 3000,
   });
   const candidates = useQuery<Page<Candidate>, Error>({
     queryKey: ['job-candidates', id, candidatePage],
-    queryFn: () => api.get(`/analysis-jobs/${id}/candidates?page=${candidatePage}&page_size=25&minimum_score=0&sort=-score`),
-    enabled: q.data !== undefined && (q.data.analysis?.module ?? 'c2') === 'c2',
+    queryFn: () => api.get(`/analysis-jobs/${encodeURIComponent(id)}/candidates?page=${candidatePage}&page_size=25&minimum_score=0&sort=-score`),
+    enabled: preview.page !== undefined && q.data !== undefined && (q.data.analysis?.module ?? 'c2') === 'c2',
     refetchInterval: () => terminalStatuses.has(q.data?.status ?? '') ? false : 3000,
   });
+  useCandidateQueueReturn(preview, !q.isPending && !candidates.isPending, candidates.data);
   const knownCandidates = useQuery<List<Candidate>, Error>({
     queryKey: ['job-ai-known-candidates', id],
-    queryFn: () => api.get(`/analysis-jobs/${id}/candidates?page_size=200`),
+    queryFn: () => api.get(`/analysis-jobs/${encodeURIComponent(id)}/candidates?page_size=200`),
     enabled: aiOpened && q.data !== undefined && (q.data.analysis?.module ?? 'c2') === 'c2',
   });
-  const cancel = useMutation({ mutationFn: () => api.post(`/analysis-jobs/${id}/cancel`, { reason: 'operator requested from web console' }), onSuccess: () => { setNotice('Cancellation requested'); q.refetch(); } });
+  const cancel = useMutation({ mutationFn: () => api.post(`/analysis-jobs/${encodeURIComponent(id)}/cancel`, { reason: 'operator requested from web console' }), onSuccess: () => { setNotice('Cancellation requested'); q.refetch(); } });
   return <>
     <AsyncState query={q}>{j => {
     const terminal = terminalStatuses.has(j.status);
@@ -960,10 +1005,10 @@ function JobDetailOwner({ id }: { id: string }) {
       {module === 'c2' && view === 'results' && <section className="panel compact c2-candidate-list" lang={language}>
         <h2 id="job-candidate-heading" tabIndex={-1} ref={node => { if (node && focusCandidates.current) { node.focus(); focusCandidates.current = false; } }}>{t('Detected candidates', '탐지 후보')}</h2>
         <p className="muted">{t('Open a candidate for all retained evidence, hosts, sensors, network details and observation times.', '후보를 열면 보존된 전체 근거, 호스트·센서, 네트워크 정보와 관측 시각을 확인할 수 있습니다.')}</p>
-        <AsyncState query={candidates} empty={data => items(data).length === 0}>{data => <div className="table-wrap"><table aria-label="Analysis candidates"><thead><tr><th>{t('Candidate', '후보')}</th><th>{t('Score / severity', '점수 / 심각도')}</th><th>{t('Analyst workflow', '처리 상태')}</th><th>{t('External TI', '외부 TI')}</th></tr></thead><tbody>{items(data).map(candidate => <tr key={candidate.id}>
-          <td><Link to={`/candidates/${candidate.id}`}>{candidate.candidate_ip}</Link><button type="button" className="secondary investigate-ip-button" aria-label={`Investigate candidate ${candidate.candidate_ip}`} onClick={() => investigate(candidate.candidate_ip)}>{t('Investigate IP', 'IP 조사')}</button>{candidate.candidate_kind === 'COMMUNICATION_STATUS' && <small>{t('Communication status candidate', '통신 상태 후보')}</small>}</td>
+        <div className={`candidate-queue${preview.selected ? ' is-selected' : ''}`}><div>{preview.page === undefined ? <p role="alert">{t('Invalid candidate page', '잘못된 후보 페이지')}</p> : <AsyncState query={candidates} empty={data => items(data).length === 0}>{data => <div className="table-wrap"><table aria-label="Analysis candidates"><thead><tr><th>{t('Candidate', '후보')}</th><th>{t('Score / severity', '점수 / 심각도')}</th><th>{t('Analyst workflow', '처리 상태')}</th><th>{t('External TI', '외부 TI')}</th></tr></thead><tbody>{items(data).map(candidate => <tr key={candidate.id}>
+          <td><Link to={`/candidates/${encodeURIComponent(candidate.id)}`}>{candidate.candidate_ip}</Link><button type="button" className="secondary" aria-label={t(`Preview candidate ${candidate.candidate_ip}`, `후보 미리보기 ${candidate.candidate_ip}`)} {...preview.buttonProps(candidate.id)}>{t('Preview', '미리보기')}</button><button type="button" className="secondary investigate-ip-button" aria-label={`Investigate candidate ${candidate.candidate_ip}`} onClick={() => investigate(candidate.candidate_ip)}>{t('Investigate IP', 'IP 조사')}</button>{candidate.candidate_kind === 'COMMUNICATION_STATUS' && <small>{t('Communication status candidate', '통신 상태 후보')}</small>}</td>
           <td><strong>{candidate.score}</strong><small className={candidate.severity.toLowerCase()}>{candidate.severity}</small></td><td><CandidateWorkflowBadge candidate={candidate}/></td><td><CandidateThreatIntel assessment={candidate.ti_assessment}/></td>
-        </tr>)}</tbody></table></div>}</AsyncState>{candidates.data?.total !== undefined && <CandidatePagination data={candidates.data} page={candidatePage} onPage={setCandidatePage} language={language}/>}</section>}
+        </tr>)}</tbody></table></div>}</AsyncState>}{candidates.data?.total !== undefined && <CandidatePagination data={candidates.data} page={candidatePage} onPage={setCandidatePage} language={language}/>}</div>{preview.opened && <ResultDetailPanel headingLabel={t('Selected candidate detail', '선택한 후보 상세')} closeLabel={t('Close candidate detail', '후보 상세 닫기')} focusOnSelection={!preview.restoring} selection={preview.selected} onClose={preview.close} returnFocus={preview.returnFocus}>{preview.selected && <CandidateQueuePreview key={preview.selected} id={preview.selected} jobId={id} language={language} onOpenFull={preview.depart}/>}</ResultDetailPanel>}</div></section>}
       {module === 'c2' && aiOpened && <section aria-label="AI 조사">
         <AIAnalysisPanel visible={view === 'ai'} job={j} knownCandidateIds={knownCandidates.isError ? [] : items(knownCandidates.data).map(candidate => candidate.id)}/>
         <AIInvestigationEntry key={`investigation-entry-${j.id}`} jobId={j.id} selection={investigation?.jobId === j.id ? investigation : undefined} visible={view === 'ai'}/>
@@ -977,7 +1022,7 @@ function JobDetailOwner({ id }: { id: string }) {
       {module !== 'c2' && <><section className="metrics compact"><article><strong>{(j.packet_count ?? 0).toLocaleString()}</strong><span>Packets</span></article><article><strong>{(j.flow_count ?? 0).toLocaleString()}</strong><span>Flows</span></article>{j.analysis?.module === 'network_anomaly' ? <article><strong>{j.network_anomaly?.version === 'network-pattern-report-v1' ? (typeof j.network_anomaly.summary?.flow_count === 'number' ? j.network_anomaly.summary.flow_count.toLocaleString() : '—') : j.network_anomaly?.flows?.length.toLocaleString() ?? '—'}</strong><span>Observed bidirectional flows</span></article> : String(module) === 'ddos_attack' ? <article><strong>{Number(j.ddos_attack?.summary.finding_count ?? 0).toLocaleString()}</strong><span>DDoS findings</span></article> : <article><strong>{(j.candidate_count ?? 0).toLocaleString()}</strong><span>Candidates</span></article>}<article><strong>{strings(j.sensor_ids).length}</strong><span>Sensors</span></article></section></>}
       <section className="grid compact">
         <article className="panel"><h2>Source and parsing</h2><dl><dt>Type</dt><dd>{j.source_type === 'PCAP_UPLOAD' ? 'PCAP upload' : j.mode ?? 'Sensor capture'}</dd><dt>File</dt><dd>{source?.filename ?? 'Sensor dataset'}</dd><dt>Format</dt><dd>{source?.capture_format ?? 'Not reported'}</dd><dt>Size</dt><dd>{formatBytes(source?.size_bytes)}</dd><dt>Captured packets</dt><dd>{formatValue(source?.captured_packet_count)}</dd><dt>Parsed packets</dt><dd>{formatValue(source?.parsed_packet_count)}</dd><dt>Skipped packets</dt><dd>{formatValue(source?.skipped_packet_count)}</dd><dt>Link types</dt><dd>{formatValue(source?.link_types)}</dd><dt>SHA-256</dt><dd className="hash-value">{source?.sha256 ?? 'Not applicable'}</dd></dl></article>
-        <article className="panel"><h2>Observation timeline</h2><dl><dt>Observed from</dt><dd>{fmt(j.start_time)}</dd><dt>Observed to</dt><dd>{fmt(j.end_time)}</dd><dt>Created</dt><dd>{fmt(j.created_at)}</dd><dt>Updated</dt><dd>{fmt(j.updated_at)}</dd><dt>Completed</dt><dd>{fmt(j.completed_at)}</dd><dt>Parent analysis</dt><dd>{j.parent_job_id ? <Link to={`/analyses/${j.parent_job_id}`}>{j.parent_job_id}</Link> : 'None'}</dd></dl></article>
+        <article className="panel"><h2>Observation timeline</h2><dl><dt>Observed from</dt><dd>{fmt(j.start_time)}</dd><dt>Observed to</dt><dd>{fmt(j.end_time)}</dd><dt>Created</dt><dd>{fmt(j.created_at)}</dd><dt>Updated</dt><dd>{fmt(j.updated_at)}</dd><dt>Completed</dt><dd>{fmt(j.completed_at)}</dd><dt>Parent analysis</dt><dd>{j.parent_job_id ? <Link to={`/analyses/${encodeURIComponent(j.parent_job_id)}`}>{j.parent_job_id}</Link> : 'None'}</dd></dl></article>
       </section>
       <AnalysisConfiguration analysis={j.analysis} capture={j.capture} detectorDefinitions={detectorDefinitions} internalNetworks={strings(j.internal_networks)} sensorIds={strings(j.sensor_ids)}/>
       <AnalysisPCAPs jobId={j.id}/>
@@ -1052,16 +1097,58 @@ function CandidateWorkflowSummary({ counts, onSelect }: { counts: WorkflowCounts
 type CandidateFilters = { severity: string; workflowStatus: string; minimumScore: string; tiFilter: string; includeSuppressed: boolean; sort: string };
 const defaultCandidateFilters: CandidateFilters = { severity: '', workflowStatus: '', minimumScore: '0', tiFilter: '', includeSuppressed: false, sort: '-last_seen' };
 
+
+type CandidateListState = CandidateFilters & { page: number };
+function readCandidateList(params: URLSearchParams): CandidateListState {
+  const minimumScore = params.get('minimum_score') ?? '0';
+  return {
+    page: listPage(params),
+    severity: listEnum(params, 'severity', ['', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW']),
+    workflowStatus: listEnum(params, 'workflow_status', ['', 'NEEDS_REVIEW', 'IN_REVIEW', 'ACTION_REQUIRED', 'ACTION_IN_PROGRESS', 'ACTION_COMPLETED', 'FALSE_POSITIVE']),
+    minimumScore,
+    tiFilter: listEnum(params, 'ti_filter', ['', 'POSITIVE', 'MISP_MATCH', 'INCOMPLETE']),
+    includeSuppressed: params.get('include_suppressed') === 'true',
+    sort: listEnum(params, 'sort', ['-ti_priority', '-score', 'score', 'candidate_ip', '-last_seen', 'first_seen'], '-last_seen'),
+  };
+}
+function writeCandidateList(value: CandidateListState): URLSearchParams {
+  const params = new URLSearchParams();
+  if (value.page !== 1) params.set('page', String(value.page));
+  if (value.severity) params.set('severity', value.severity);
+  if (value.workflowStatus) params.set('workflow_status', value.workflowStatus);
+  if (value.minimumScore !== '0') params.set('minimum_score', value.minimumScore);
+  if (value.tiFilter) params.set('ti_filter', value.tiFilter);
+  if (value.includeSuppressed) params.set('include_suppressed', 'true');
+  if (value.sort !== '-last_seen') params.set('sort', value.sort);
+  return params;
+}
+
 function Candidates() {
-  const [page, setPage] = useState(1);
-  const [filters, setFilters] = useState(defaultCandidateFilters);
-  const [draft, setDraft] = useState(defaultCandidateFilters);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const preview = useCandidateQueueSelection('candidate-list-heading');
+  const navigation = useResultSelection(readCandidateList, writeCandidateList);
+  const { page, ...filters } = navigation.value;
+  const [draftState, setDraftState] = useState({ signature: navigation.signature, filters });
+  if (draftState.signature !== navigation.signature) setDraftState({ signature: navigation.signature, filters });
+  const draft = draftState.signature === navigation.signature ? draftState.filters : filters;
+  const setDraft = (next: CandidateFilters) => setDraftState({ signature: navigation.signature, filters: next });
+  const setPage = (next: number) => navigation.apply({ ...filters, page: next });
+  const setFilters = (next: CandidateFilters) => navigation.apply({ ...next, page: 1 }, !valid);
+  const valid = navigation.unique && Number.isSafeInteger(page) && page > 0
+    && !Object.values(filters).includes('!invalid')
+    && /^\d+$/.test(filters.minimumScore)
+    && Number(filters.minimumScore) >= 0 && Number(filters.minimumScore) <= 100
+    && ['', 'true', 'false'].includes(navigation.params.get('include_suppressed') ?? '');
+  const [selection, setSelection] = useState({ signature: navigation.signature, ids: new Set<string>() });
+  if (selection.signature !== navigation.signature) setSelection({ signature: navigation.signature, ids: new Set() });
+  const selected = selection.signature === navigation.signature ? selection.ids : new Set<string>();
+  const setSelected = (next: Set<string> | ((current: Set<string>) => Set<string>)) => setSelection(current => ({ signature: navigation.signature, ids: typeof next === 'function' ? next(current.signature === navigation.signature ? current.ids : new Set()) : next }));
+  const client = useQueryClient();
   const [bulkCommand, setBulkCommand] = useState<CandidateVerdict['verdict']>('UNDER_REVIEW');
   const [bulkNote, setBulkNote] = useState('');
   const [bulkNotice, setBulkNotice] = useState('');
   const q = useQuery<Page<Candidate>, Error>({
     queryKey: ['candidates', page, filters],
+    enabled: valid,
     queryFn: () => {
       const parameters = new URLSearchParams({ page: String(page), page_size: '50', minimum_score: filters.minimumScore || '0', sort: filters.sort });
       if (filters.severity) parameters.set('severity', filters.severity);
@@ -1071,27 +1158,27 @@ function Candidates() {
       return api.get(`/candidates?${parameters}`);
     },
   });
+  const listReturn = useListReturn(valid && !q.isPending, 'candidate-list-heading', q.data);
+  useCandidateQueueReturn(preview, valid && !q.isPending, q.data);
   const bulk = useMutation({
-    mutationFn: () => api.post<{ succeeded: number; failed: number }>('/candidate-bulk-operations', {
-      candidate_ids: [...selected], command: bulkCommand, confidence: 'HIGH', note: bulkNote,
+    mutationFn: (request: { selection: typeof selection; command: CandidateVerdict['verdict']; note: string }) => api.post<{ succeeded: number; failed: number }>('/candidate-bulk-operations', {
+      candidate_ids: [...request.selection.ids], command: request.command, confidence: 'HIGH', note: request.note,
     }),
-    onSuccess: async result => {
+    onSuccess: async (result, request) => {
       setBulkNotice(`${result.succeeded}건 처리 완료${result.failed ? ` · ${result.failed}건 실패` : ''}`);
-      setSelected(new Set());
-      await q.refetch();
+      setSelection(current => current === request.selection ? { ...current, ids: new Set() } : current);
+      await client.invalidateQueries({ queryKey: ['candidates'] });
     },
   });
   const clearSelection = () => setSelected(new Set());
-  const applyFilters = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); clearSelection(); setPage(1); setFilters({ ...draft, minimumScore: draft.minimumScore || '0' }); };
-  const resetFilters = () => { clearSelection(); setDraft(defaultCandidateFilters); setFilters(defaultCandidateFilters); setPage(1); };
+  const applyFilters = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setFilters({ ...draft, minimumScore: draft.minimumScore || '0' }); };
+  const resetFilters = () => { setDraft(defaultCandidateFilters); setFilters(defaultCandidateFilters); };
   const selectWorkflow = (workflowStatus: string) => {
     const selected = { ...filters, workflowStatus };
     setDraft(selected);
     setFilters(selected);
-    clearSelection();
-    setPage(1);
   };
-  return <><header><p className="eyebrow">DETECTION RESULTS</p><h1>Candidates</h1><p className="muted">내부 탐지 점수와 외부 TI 근거를 분리해 비교하고 우선 조사 대상을 선택합니다.</p></header>{q.data?.workflow_counts && <CandidateWorkflowSummary counts={q.data.workflow_counts} onSelect={selectWorkflow} />}<form className="candidate-filters" onSubmit={applyFilters}><label>Severity<select value={draft.severity} onChange={event => setDraft({ ...draft, severity: event.target.value })}><option value="">Any</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option></select></label><label>처리 상태<select value={draft.workflowStatus} onChange={event => setDraft({ ...draft, workflowStatus: event.target.value })}><option value="">전체 상태</option><option value="NEEDS_REVIEW">미분석</option><option value="IN_REVIEW">분석 중</option><option value="ACTION_REQUIRED">조치 필요</option><option value="ACTION_IN_PROGRESS">조치 중</option><option value="ACTION_COMPLETED">조치 완료</option><option value="FALSE_POSITIVE">오탐 처리 완료</option></select></label><label>Minimum score<input type="number" min="0" max="100" value={draft.minimumScore} onChange={event => setDraft({ ...draft, minimumScore: event.target.value })} /></label><label>External TI<select value={draft.tiFilter} onChange={event => setDraft({ ...draft, tiFilter: event.target.value })}><option value="">전체</option><option value="POSITIVE">양성 신호만</option><option value="MISP_MATCH">MISP 일치만</option><option value="INCOMPLETE">정보 부족만</option></select></label><label>Sort candidates<select value={draft.sort} onChange={event => setDraft({ ...draft, sort: event.target.value })}><option value="-ti_priority">외부 TI 근거 강한 순</option><option value="-score">Score: high to low</option><option value="score">Score: low to high</option><option value="candidate_ip">IP address</option><option value="-last_seen">Most recently seen</option><option value="first_seen">First seen</option></select></label><label className="check"><input type="checkbox" checked={draft.includeSuppressed} onChange={event => setDraft({ ...draft, includeSuppressed: event.target.checked })} />Include suppressed candidates</label><button>Apply filters</button><button type="button" className="secondary" onClick={resetFilters}>Reset</button></form>{selected.size > 0 && <form className="panel compact bulk-toolbar" aria-label="Candidate 일괄 처리" onSubmit={event => { event.preventDefault(); bulk.mutate(); }}><strong>{selected.size}개 선택</strong><label>빠른 판정<select value={bulkCommand} onChange={event => setBulkCommand(event.target.value as CandidateVerdict['verdict'])}><option value="UNDER_REVIEW">검토 시작</option><option value="CONFIRMED_C2">확정 C2</option><option value="FALSE_POSITIVE">오탐</option></select></label><label>공통 메모<input required maxLength={5000} value={bulkNote} onChange={event => setBulkNote(event.target.value)} /></label><button disabled={!bulkNote.trim() || bulk.isPending}>{bulk.isPending ? '처리 중…' : '선택 처리'}</button><button type="button" className="secondary" onClick={clearSelection}>선택 해제</button>{bulk.error && <p role="alert" className="error-text">{bulk.error.message}</p>}</form>}{bulkNotice && <p role="status">{bulkNotice}</p>}<AsyncState query={q} empty={data => items(data).length === 0}>{data => <><div className="table-wrap"><table aria-label="C2 candidates"><thead><tr><th><input type="checkbox" aria-label="현재 페이지 전체 선택" checked={items(data).length > 0 && items(data).every(candidate => selected.has(candidate.id))} onChange={event => setSelected(event.target.checked ? new Set(items(data).map(candidate => candidate.id)) : new Set())} /></th><th>Candidate</th><th>Score</th><th>External TI</th><th>처리 상태</th><th>Hosts</th><th>Sensors</th><th>Protocol / port</th><th>Observed</th><th>Primary evidence</th></tr></thead><tbody>{items(data).map(candidate => { const hosts = candidateHosts(candidate); const sensors = candidateSensors(candidate); const protocols = strings(candidate.protocols); const ports = numbers(candidate.ports); const evidence = candidateEvidence(candidate); return <tr key={candidate.id}><td><input type="checkbox" aria-label={`${candidate.candidate_ip} 선택`} checked={selected.has(candidate.id)} onChange={event => setSelected(current => { const next = new Set(current); if (event.target.checked) next.add(candidate.id); else next.delete(candidate.id); return next; })} /></td><td><Link to={`/candidates/${candidate.id}`}>{candidate.candidate_ip}</Link><CandidateTypeBadge candidate={candidate}/><small className={candidate.severity.toLowerCase()}>{candidate.severity}</small>{(candidate.occurrence_count ?? 1) > 1 && <small>{candidate.occurrence_count}회 탐지 · 중복 {candidate.duplicate_count ?? (candidate.occurrence_count ?? 1) - 1}건 통합</small>}</td><td><strong>{candidate.score}</strong></td><td><CandidateThreatIntel assessment={candidate.ti_assessment} /></td><td><CandidateWorkflowBadge candidate={candidate} /></td><td>{hosts.length || candidate.distinct_internal_hosts || 0}</td><td>{sensors.length}</td><td>{protocols.length ? protocols.join(', ') : 'Unknown'}<small>{ports.length ? `Ports ${ports.join(', ')}` : 'No ports reported'}</small></td><td>{fmt(candidate.first_seen)}<small>to {fmt(candidate.last_seen)}</small></td><td title={evidence[0]?.type}>{evidenceLabel(evidence[0]?.type)}<small>{evidence.length}건의 탐지 신호</small></td></tr>; })}</tbody></table></div><CandidatePagination data={data} page={page} onPage={next => { clearSelection(); setPage(next); }} /></>}</AsyncState></>;
+  return <><header><p className="eyebrow">DETECTION RESULTS</p><h1 {...listReturn.headingProps}>Candidates</h1><p className="muted">내부 탐지 점수와 외부 TI 근거를 분리해 비교하고 우선 조사 대상을 선택합니다.</p></header>{q.data?.workflow_counts && <CandidateWorkflowSummary counts={q.data.workflow_counts} onSelect={selectWorkflow} />}<form className="candidate-filters" onSubmit={applyFilters}><label>Severity<select value={draft.severity} onChange={event => setDraft({ ...draft, severity: event.target.value })}><option value="">Any</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option></select></label><label>처리 상태<select value={draft.workflowStatus} onChange={event => setDraft({ ...draft, workflowStatus: event.target.value })}><option value="">전체 상태</option><option value="NEEDS_REVIEW">미분석</option><option value="IN_REVIEW">분석 중</option><option value="ACTION_REQUIRED">조치 필요</option><option value="ACTION_IN_PROGRESS">조치 중</option><option value="ACTION_COMPLETED">조치 완료</option><option value="FALSE_POSITIVE">오탐 처리 완료</option></select></label><label>Minimum score<input type="number" min="0" max="100" value={draft.minimumScore} onChange={event => setDraft({ ...draft, minimumScore: event.target.value })} /></label><label>External TI<select value={draft.tiFilter} onChange={event => setDraft({ ...draft, tiFilter: event.target.value })}><option value="">전체</option><option value="POSITIVE">양성 신호만</option><option value="MISP_MATCH">MISP 일치만</option><option value="INCOMPLETE">정보 부족만</option></select></label><label>Sort candidates<select value={draft.sort} onChange={event => setDraft({ ...draft, sort: event.target.value })}><option value="-ti_priority">외부 TI 근거 강한 순</option><option value="-score">Score: high to low</option><option value="score">Score: low to high</option><option value="candidate_ip">IP address</option><option value="-last_seen">Most recently seen</option><option value="first_seen">First seen</option></select></label><label className="check"><input type="checkbox" checked={draft.includeSuppressed} onChange={event => setDraft({ ...draft, includeSuppressed: event.target.checked })} />Include suppressed candidates</label><button>Apply filters</button><button type="button" className="secondary" onClick={resetFilters}>Reset</button></form>{(selected.size > 0 || bulk.isPending || bulk.error) && <form className="panel compact bulk-toolbar" aria-label="Candidate 일괄 처리" onSubmit={event => { event.preventDefault(); if (valid && selected.size && !bulk.isPending) bulk.mutate({ selection, command: bulkCommand, note: bulkNote }); }}><strong>{selected.size}개 선택</strong><label>빠른 판정<select value={bulkCommand} onChange={event => setBulkCommand(event.target.value as CandidateVerdict['verdict'])}><option value="UNDER_REVIEW">검토 시작</option><option value="CONFIRMED_C2">확정 C2</option><option value="FALSE_POSITIVE">오탐</option></select></label><label>공통 메모<input required maxLength={5000} value={bulkNote} onChange={event => setBulkNote(event.target.value)} /></label><button disabled={!valid || !selected.size || !bulkNote.trim() || bulk.isPending}>{bulk.isPending ? '처리 중…' : '선택 처리'}</button><button type="button" className="secondary" onClick={clearSelection}>선택 해제</button>{bulk.error && <p role="alert" className="error-text">{bulk.error.message}</p>}</form>}{bulkNotice && <p role="status">{bulkNotice}</p>}<div className={`candidate-queue${preview.selected ? ' is-selected' : ''}`}><div>{!valid ? <p role="alert">Invalid list filters. Correct the filters or reset the list.</p> : <AsyncState query={q} empty={data => items(data).length === 0}>{data => <><div className="table-wrap"><table aria-label="C2 candidates"><thead><tr><th><input type="checkbox" aria-label="현재 페이지 전체 선택" checked={items(data).length > 0 && items(data).every(candidate => selected.has(candidate.id))} onChange={event => setSelected(event.target.checked ? new Set(items(data).map(candidate => candidate.id)) : new Set())} /></th><th>Candidate</th><th>Score</th><th>External TI</th><th>처리 상태</th><th>Protocol / port · Hosts / sensors</th><th>Primary evidence</th></tr></thead><tbody>{items(data).map(candidate => { const hosts = candidateHosts(candidate); const sensors = candidateSensors(candidate); const protocols = strings(candidate.protocols); const ports = numbers(candidate.ports); const evidence = candidateEvidence(candidate); return <tr key={candidate.id}><td><input type="checkbox" aria-label={`${candidate.candidate_ip} 선택`} checked={selected.has(candidate.id)} onChange={event => setSelected(current => { const next = new Set(current); if (event.target.checked) next.add(candidate.id); else next.delete(candidate.id); return next; })} /></td><td><Link {...listReturn.linkProps(candidate.id)} to={`/candidates/${encodeURIComponent(candidate.id)}`}>{candidate.candidate_ip}</Link><button type="button" className="secondary" aria-label={`Preview candidate ${candidate.candidate_ip}`} {...preview.buttonProps(candidate.id)}>Preview</button><CandidateTypeBadge candidate={candidate}/><small className={candidate.severity.toLowerCase()}>{candidate.severity}</small>{(candidate.occurrence_count ?? 1) > 1 && <small>{candidate.occurrence_count}회 탐지 · 중복 {candidate.duplicate_count ?? (candidate.occurrence_count ?? 1) - 1}건 통합</small>}</td><td className="queue-score">{candidate.score}</td><td className="queue-ti"><CandidateQueueTI assessment={candidate.ti_assessment} /></td><td><CandidateWorkflowBadge candidate={candidate} /></td><td>{protocols.length ? protocols.join(', ') : 'Unknown'}<small>{ports.length ? `Ports ${ports.join(', ')}` : 'No ports reported'} · Hosts {hosts.length || candidate.distinct_internal_hosts || 0} · Sensors {sensors.length} · {evidence.length}건의 탐지 신호 · Observed {fmt(candidate.first_seen)} to {fmt(candidate.last_seen)}</small></td><td title={evidence[0]?.type}>{evidenceLabel(evidence[0]?.type)}</td></tr>; })}</tbody></table></div></>}</AsyncState>}{valid && q.data && (q.data.total === undefined || q.data.page === undefined || q.data.page_size === undefined ? <p className="muted">Candidate total not reported</p> : <div className="pagination"><span>Candidates {q.data.items.length ? (q.data.page - 1) * q.data.page_size + 1 : 0}–{q.data.items.length ? Math.min(q.data.page * q.data.page_size, q.data.total) : 0} of {q.data.total}</span><div className="row-actions"><button type="button" className="secondary" disabled={q.data.page <= 1} onClick={() => setPage(Math.max(1, q.data!.page! - 1))}>Previous candidates</button><button type="button" className="secondary" disabled={q.data.page * q.data.page_size >= q.data.total} onClick={() => setPage(q.data!.page! + 1)}>Next candidates</button></div></div>)}</div>{preview.opened && <ResultDetailPanel focusOnSelection={!preview.restoring} selection={preview.selected} onClose={preview.close} returnFocus={preview.returnFocus}>{preview.selected && <CandidateQueuePreview key={preview.selected} id={preview.selected} onOpenFull={preview.depart}/>}</ResultDetailPanel>}</div></>;
 }
 
 function CandidatePagination({ data, page, onPage, language = 'en' }: { language?: 'en' | 'ko'; data: Page<Candidate>; page: number; onPage: (page: number) => void }) {
@@ -1102,7 +1189,7 @@ function CandidatePagination({ data, page, onPage, language = 'en' }: { language
   return <div className="pagination"><span>{language === 'ko' ? '후보' : 'Candidates'} {first}–{Math.min(current * pageSize, total)} {language === 'ko' ? '/ 전체' : 'of'} {total}</span><div className="row-actions"><button type="button" className="secondary" disabled={current <= 1} onClick={() => onPage(Math.max(1, current - 1))}>{language === 'ko' ? '이전 후보' : 'Previous candidates'}</button><button type="button" className="secondary" disabled={current * pageSize >= total} onClick={() => onPage(current + 1)}>{language === 'ko' ? '다음 후보' : 'Next candidates'}</button></div></div>;
 }
 
-function CandidateEnrichmentPanel({ candidate, onUpdated }: { candidate: Candidate; onUpdated: () => Promise<unknown> }) {
+function CandidateEnrichmentPanel({ candidate, onUpdated, visible = true }: { candidate: Candidate; onUpdated: () => Promise<unknown>; visible?: boolean }) {
   const [verdict, setVerdict] = useState<CandidateVerdict['verdict']>('UNDER_REVIEW');
   const [confidence, setConfidence] = useState<CandidateVerdict['confidence']>('MEDIUM');
   const [note, setNote] = useState('');
@@ -1110,7 +1197,7 @@ function CandidateEnrichmentPanel({ candidate, onUpdated }: { candidate: Candida
   const [eventId, setEventId] = useState('');
   const [notice, setNotice] = useState('');
   const verdictMutation = useMutation({
-    mutationFn: () => api.post(`/candidates/${candidate.id}/verdicts`, { verdict, confidence, note: note.trim() }),
+    mutationFn: () => api.post(`/candidates/${encodeURIComponent(candidate.id)}/verdicts`, { verdict, confidence, note: note.trim() }),
     onSuccess: async () => {
       setNotice('Candidate verdict recorded');
       setNote('');
@@ -1118,7 +1205,7 @@ function CandidateEnrichmentPanel({ candidate, onUpdated }: { candidate: Candida
     },
   });
   const actionMutation = useMutation({
-    mutationFn: (status: 'IN_PROGRESS' | 'COMPLETED') => api.post(`/candidates/${candidate.id}/actions`, { status, note: actionNote.trim() }),
+    mutationFn: (status: 'IN_PROGRESS' | 'COMPLETED') => api.post(`/candidates/${encodeURIComponent(candidate.id)}/actions`, { status, note: actionNote.trim() }),
     onSuccess: async () => {
       setNotice('후속 대응 조치 상태가 저장되었습니다');
       setActionNote('');
@@ -1126,7 +1213,7 @@ function CandidateEnrichmentPanel({ candidate, onUpdated }: { candidate: Candida
     },
   });
   const threatIntelMutation = useMutation({
-    mutationFn: () => api.post(`/candidates/${candidate.id}/threat-intelligence/lookups`, {}),
+    mutationFn: () => api.post(`/candidates/${encodeURIComponent(candidate.id)}/threat-intelligence/lookups`, {}),
     onSuccess: async () => {
       setNotice('Threat intelligence lookup completed');
       await onUpdated();
@@ -1134,7 +1221,7 @@ function CandidateEnrichmentPanel({ candidate, onUpdated }: { candidate: Candida
   });
   const mispMutation = useMutation({
     mutationFn: () => api.post(
-      `/candidates/${candidate.id}/misp-exports`,
+      `/candidates/${encodeURIComponent(candidate.id)}/misp-exports`,
       eventId.trim() ? { event_id: eventId.trim() } : {},
     ),
     onSuccess: async () => {
@@ -1149,6 +1236,11 @@ function CandidateEnrichmentPanel({ candidate, onUpdated }: { candidate: Candida
   const errors = [verdictMutation.error, actionMutation.error, threatIntelMutation.error, mispMutation.error].filter(Boolean) as Error[];
   const currentVerdict = typeof candidate.current_verdict?.verdict === 'string' ? candidate.current_verdict.verdict : '';
   const currentVerdictLabel = currentVerdict === 'CONFIRMED_C2' ? '확정 C2' : currentVerdict === 'FALSE_POSITIVE' ? '오탐' : '검토 중';
+  if (!visible) return <div aria-label="Candidate validation status">
+    {[verdictMutation, actionMutation, threatIntelMutation, mispMutation].some(mutation => mutation.isPending) && <p role="status">Candidate validation operation pending…</p>}
+    {errors.length > 0 && <p role="alert" className="error-text">{errors.map(error => error.message).join(', ')}</p>}
+    {notice && <p role="status">{notice}</p>}
+  </div>;
   return <section className="panel compact candidate-enrichment" aria-labelledby="candidate-validation-title">
     <div className="section-heading"><div><p className="eyebrow">ANALYST WORKFLOW</p><h2 id="candidate-validation-title">판정 및 외부 검증</h2></div>{currentVerdict && <span className={`badge verdict-${currentVerdict.toLowerCase()}`}>{currentVerdictLabel}</span>}</div>
     <div className="grid compact">
@@ -1163,7 +1255,7 @@ function CandidateEnrichmentPanel({ candidate, onUpdated }: { candidate: Candida
         <div className="section-heading"><div><h3>외부 위협 인텔리전스</h3>{threatIntel && <span className={`workflow-badge ti-${(threatIntel.status ?? 'COMPLETED').toLowerCase()}`}>{threatIntelStatusLabel(threatIntel)}</span>}</div><button className="secondary" disabled={threatIntelMutation.isPending} onClick={() => threatIntelMutation.mutate()}>{threatIntelMutation.isPending ? '조회 중…' : '외부 TI 다시 조회'}</button></div>
         <p className="analyst-guardrail">외부 평판은 판단 근거이며 자동 확정하지 않습니다. 네트워크 행위 근거와 함께 분석가가 Confirm 여부를 결정하세요.</p>
         {!threatIntel && <p className="muted">구성된 VirusTotal, AbuseIPDB, MISP를 후보 생성 직후 자동 조회합니다.</p>}
-        {threatIntel && <><p className="muted">{threatIntel.status === 'PENDING' ? `조회 요청 ${fmt(threatIntel.fetched_at)}` : `최근 조회 ${fmt(threatIntel.fetched_at)}`}</p><div className="ti-grid">{Object.entries(threatIntel.providers).map(([provider, result]) => <article key={provider} className="ti-card"><strong>{provider === 'virustotal' ? 'VirusTotal' : provider === 'abuseipdb' ? 'AbuseIPDB' : provider === 'misp' ? 'MISP' : provider}</strong>{result.status === 'PENDING' ? <p className="muted">조회 대기 중</p> : result.status === 'NOT_CONFIGURED' ? <p className="muted">Provider 설정 없음</p> : result.status !== 'OK' ? <p className="error-text">{result.error ?? 'Provider lookup failed'}{result.retry_after && ` · Retry-After ${result.retry_after}s`}</p> : provider === 'virustotal' ? <dl><dt>악성</dt><dd>악성 {result.malicious ?? 0}</dd><dt>의심</dt><dd>{result.suspicious ?? 0}</dd><dt>평판</dt><dd>{result.reputation ?? 0}</dd></dl> : provider === 'abuseipdb' ? <dl><dt>Abuse 신뢰도</dt><dd>Abuse 신뢰도 {result.abuse_confidence_score ?? 0}%</dd><dt>신고 수</dt><dd>{result.total_reports ?? 0}</dd><dt>국가</dt><dd>{result.country_code ?? 'Unknown'}</dd></dl> : <dl><dt>일치 Attribute</dt><dd>최대 100건 중 {result.attribute_count ?? 0}개</dd><dt>이벤트</dt><dd>MISP 이벤트 {result.event_count ?? 0}개</dd><dt>Event ID</dt><dd>{result.matches?.map(match => match.event_id).filter(Boolean).join(', ') || '없음'}</dd></dl>}</article>)}</div></>}
+        {threatIntel && <><p className="muted">{threatIntel.status === 'PENDING' ? `조회 요청 ${fmt(threatIntel.fetched_at)}` : `최근 조회 ${fmt(threatIntel.fetched_at)}`}</p><div className="ti-grid">{Object.entries(threatIntel.providers).map(([provider, result]) => <article key={provider} className="ti-card"><strong>{provider === 'virustotal' ? 'VirusTotal' : provider === 'abuseipdb' ? 'AbuseIPDB' : provider === 'misp' ? 'MISP' : provider}</strong>{result.status === 'PENDING' ? <p className="muted">조회 대기 중</p> : result.status === 'NOT_CONFIGURED' ? <p className="muted">Provider 설정 없음</p> : result.status !== 'OK' ? <p className="error-text">{result.error ?? 'Provider lookup failed'}{result.retry_after && ` · Retry-After ${result.retry_after}s`}</p> : provider === 'virustotal' ? <dl><dt>악성</dt><dd>악성 {result.malicious ?? '기록 없음'}</dd><dt>의심</dt><dd>{result.suspicious ?? '기록 없음'}</dd><dt>평판</dt><dd>{result.reputation ?? '기록 없음'}</dd></dl> : provider === 'abuseipdb' ? <dl><dt>Abuse 신뢰도</dt><dd>Abuse 신뢰도 {result.abuse_confidence_score ?? '기록 없음'}%</dd><dt>신고 수</dt><dd>{result.total_reports ?? '기록 없음'}</dd><dt>국가</dt><dd>{result.country_code ?? 'Unknown'}</dd></dl> : <dl><dt>일치 Attribute</dt><dd>최대 100건 중 {result.attribute_count ?? '기록 없음'}개</dd><dt>이벤트</dt><dd>MISP 이벤트 {result.event_count ?? '기록 없음'}개</dd><dt>Event ID</dt><dd>{result.matches?.map(match => match.event_id).filter(Boolean).join(', ') || '없음'}</dd></dl>}</article>)}</div></>}
       </div>
     </div>
     {currentVerdict === 'CONFIRMED_C2' && <section className="subpanel candidate-action-panel" aria-labelledby="candidate-action-title">
@@ -1188,24 +1280,26 @@ function CandidateEnrichmentPanel({ candidate, onUpdated }: { candidate: Candida
   </section>;
 }
 
-function CandidateAIAnalysis({ candidate }: { candidate: Candidate }) {
+function CandidateAIAnalysis({ candidate, visible = true }: { candidate: Candidate; visible?: boolean }) {
   const runs = useQuery<List<AIRun>, Error>({
     queryKey: ['ai-runs', candidate.job_id],
-    queryFn: () => api.get(`/analysis-jobs/${candidate.job_id}/ai-runs`),
-    enabled: Boolean(candidate.job_id),
+    queryFn: () => api.get(`/analysis-jobs/${encodeURIComponent(candidate.job_id ?? '')}/ai-runs`),
+    enabled: visible && Boolean(candidate.job_id),
   });
   const latestRun = items(runs.data)[0];
   const assessments = useQuery<List<AIAssessment>, Error>({
     queryKey: ['ai-assessments', latestRun?.id],
-    queryFn: () => api.get(`/ai-runs/${latestRun?.id}/assessments`),
-    enabled: Boolean(latestRun?.id),
+    queryFn: () => api.get(`/ai-runs/${encodeURIComponent(latestRun?.id ?? '')}/assessments`),
+    enabled: visible && Boolean(latestRun?.id),
   });
   const assessment = items(assessments.data).find(item => item.candidate_id === candidate.id);
-  if (!candidate.job_id || (!latestRun && !runs.isLoading)) return null;
+  const error = runs.error ?? assessments.error;
+  if (!visible) return error ? <p role="alert">AI 판정을 조회할 수 없습니다. {error.message}</p> : null;
   return <section className="panel compact" aria-labelledby="candidate-ai-analysis-heading">
     <div className="section-heading"><div><p className="eyebrow">LATEST VALIDATED RUN</p><h2 id="candidate-ai-analysis-heading">AI C2 판정</h2></div>{latestRun && <span className={`badge ${latestRun.status === 'COMPLETED' ? 'low' : 'medium'}`}>{latestRun.status}</span>}</div>
     {(runs.isLoading || assessments.isLoading) && <p className="muted">AI 판정을 불러오는 중…</p>}
-    {(runs.error || assessments.error) && <p className="muted">AI 판정을 조회할 수 없습니다.</p>}
+    {error && <p role="alert">AI 판정을 조회할 수 없습니다. {error.message}</p>}
+    {!latestRun && !runs.isLoading && !error && <p className="muted">저장된 AI 판정이 없습니다. AI 미평가는 정상 판정이 아닙니다.</p>}
     {assessment && <article className="ai-assessment-card"><div className="header-actions"><strong>{assessment.assessment.candidate.verdict}</strong><span>신뢰도 {Math.round(assessment.assessment.candidate.confidence * 100)}%</span></div><p>{assessment.assessment.candidate.summary_ko}</p>{assessment.assessment.supporting_factors.map(factor => <div className="ai-factor" key={`${assessment.id}-${factor.title}`}><strong>{factor.title}</strong><p>{factor.explanation}</p><div className="config-tags">{factor.evidence_ids.map(evidenceId => <code className="config-tag" key={evidenceId}>{evidenceId}</code>)}</div></div>)}</article>}
     {!assessment && !assessments.isLoading && latestRun?.status === 'COMPLETED' && <p className="muted">최신 Run에 이 후보의 AI 판정이 없습니다.</p>}
   </section>;
@@ -1213,6 +1307,28 @@ function CandidateAIAnalysis({ candidate }: { candidate: Candidate }) {
 
 function CandidateDetail() {
   const { id } = useParams();
+  return <CandidateDetailOwner key={id} id={id} />;
+}
+
+function CandidateDetailOwner({ id }: { id?: string }) {
+  const client = useQueryClient();
+  const [identifierOpen, setIdentifierOpen] = useState(false);
+
+  const returnFocus = useRef<HTMLElement | null>(null);
+  const candidateAuthority = useRef({ current: true });
+  useEffect(() => () => { candidateAuthority.current.current = false; }, []);
+  const candidateAvailable = () => {
+    const state = client.getQueryState<Candidate, Error>(['candidate', id]);
+    return Boolean(state?.data && state.data.id === id && state.data.evidence === q.data?.evidence && state.data.job_id === q.data?.job_id && state.data.candidate_ip === q.data?.candidate_ip && !(state.error instanceof ApiError && [403, 404, 410].includes(state.error.status)));
+  };
+  const selectDetail = (value: string, trigger = document.activeElement as HTMLElement, resume = false) => {
+    if (!candidateAvailable()) return;
+    if (!candidateAuthority.current.current) candidateAuthority.current = { current: true };
+    returnFocus.current = trigger;
+
+    if (resume) detailNavigation.resume();
+    else setSelection(value);
+  };
   const navigate = useNavigate();
   const [notice, setNotice] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -1220,9 +1336,16 @@ function CandidateDetail() {
   useEffect(() => () => { exportGeneration.current += 1; }, []);
   const q = useQuery<Candidate, Error>({
     queryKey: ['candidate', id],
-    queryFn: () => api.get(`/candidates/${id}`),
+    queryFn: () => api.get(`/candidates/${encodeURIComponent(id ?? '')}`),
     refetchInterval: query => query.state.data?.threat_intelligence?.status === 'PENDING' ? 1000 : false,
   });
+  const unavailable = q.error instanceof ApiError && [403, 404, 410].includes(q.error.status);
+  const detailNavigation = useCandidateDetailSelection(q.data, unavailable, returnFocus);
+  const { selection: requestedSelection, select: setSelection, evidenceInvalid, bucketPage, changeBucketPage: setBucketPage } = detailNavigation;
+  if (unavailable || detailNavigation.retiredSelection) candidateAuthority.current.current = false;
+  const authority = candidateAuthority.current;
+  const selection = unavailable ? undefined : requestedSelection;
+
   const exportPcap = useMutation({
     mutationFn: async () => {
       const generation = ++exportGeneration.current;
@@ -1244,19 +1367,28 @@ function CandidateDetail() {
     },
     onSuccess: created => setNotice(pcapDownloadNotice(created, 'candidate PCAP')),
   });
-  const reanalyze = useMutation({ mutationFn: () => api.post(`/analysis-jobs/${q.data?.job_id}/reanalyze`, { idempotency_key: idempotencyKey() }), onSuccess: () => setNotice('Reanalysis created') });
+  const reanalyze = useMutation({ mutationFn: () => api.post(`/analysis-jobs/${encodeURIComponent(q.data?.job_id ?? '')}/reanalyze`, { idempotency_key: idempotencyKey() }), onSuccess: () => setNotice('Reanalysis created') });
   const addToAllowlist = useMutation({ 
     mutationFn: (body: unknown) => api.post('/allowlist', body), 
     onSuccess: () => setNotice('Added to allowlist') 
   });
-  const deleteCandidate = useMutation({ 
-    mutationFn: () => api.delete(`/candidates/${id}`), 
-    onSuccess: () => {
+  const deleteCandidate = useMutation({
+    mutationFn: (token: { current: boolean }) => {
+      if (!candidateAvailable()) token.current = false;
+      if (!token.current) throw new Error('Candidate unavailable. Select the candidate again.');
+      return api.delete(`/candidates/${encodeURIComponent(id ?? '')}`);
+    },
+    onSuccess: (_result, token) => {
       setConfirmDelete(false);
-      navigate('/candidates');
+      if (token.current && candidateAvailable()) navigate('/candidates');
+      else setNotice('Candidate deletion completed for the retired selection.');
     }
   });
-  return <AsyncState query={q}>{candidate => {
+  useEffect(() => {
+    if (!unavailable && !detailNavigation.retiredSelection) return;
+    if (!deleteCandidate.isPending) setConfirmDelete(false);
+  }, [unavailable, detailNavigation.retiredSelection, deleteCandidate.isPending]);
+  const renderCandidate = (candidate: Candidate) => {
     const hosts = candidateHosts(candidate);
     const sensors = candidateSensors(candidate);
     const protocols = strings(candidate.protocols);
@@ -1266,27 +1398,55 @@ function CandidateDetail() {
     const adjustments = Array.isArray(candidate.adjustments) ? candidate.adjustments : [];
     const buckets = Array.isArray(candidate.traffic_buckets) ? candidate.traffic_buckets : [];
     const traffic = numbers(candidate.traffic_series).length ? numbers(candidate.traffic_series) : buckets.map(bucket => bucket.packets);
-    return <>
-      <header className="header-actions"><div><p className="eyebrow">CANDIDATE DETAIL</p><h1>{candidate.candidate_ip}</h1><span className={`badge ${candidate.severity.toLowerCase()}`}>{candidate.score} · {candidate.severity}</span>{candidate.candidate_kind === 'COMMUNICATION_STATUS' && <span className="badge">통신 상태 후보</span>}<p className="record-id">Candidate {candidate.id}</p></div>{candidate.job_id && <Link to={`/analyses/${candidate.job_id}`}>View source analysis</Link>}</header>
-      <section className="metrics compact"><article><strong>{hosts.length || candidate.distinct_internal_hosts || 0}</strong><span>내부 호스트</span></article><article><strong>{sensors.length}</strong><span>센서</span></article><article><strong>{(candidate.flow_count ?? 0).toLocaleString()}</strong><span>흐름</span></article><article><strong>{(candidate.packet_count ?? 0).toLocaleString()}</strong><span>패킷</span></article><article><strong>{formatBytes(candidate.byte_count)}</strong><span>통신량</span></article><article><strong>{evidence.length}</strong><span>탐지 신호</span></article></section>
-      <div className="grid compact"><section className="panel"><h2>Traffic over time</h2>{traffic.length ? <MiniChart values={traffic} label="Traffic over time" /> : <p className="muted">No traffic series was retained for this candidate.</p>}{buckets.length > 0 && <div className="table-wrap"><table aria-label="Candidate traffic buckets"><thead><tr><th>Bucket start</th><th>Flows</th><th>Packets</th><th>Bytes</th></tr></thead><tbody>{buckets.map(bucket => <tr key={bucket.start}><td>{fmt(bucket.start)}</td><td>{bucket.flows}</td><td>{bucket.packets}</td><td>{formatBytes(bucket.bytes)}</td></tr>)}</tbody></table></div>}</section><section className="panel"><h2>Network context</h2><dl><dt>Protocols</dt><dd>{formatValue(protocols)}</dd><dt>Service ports</dt><dd>{formatValue(ports)}</dd><dt>Domains</dt><dd>{formatValue(domains)}</dd><dt>First observed</dt><dd>{fmt(candidate.first_seen)}</dd><dt>Last observed</dt><dd>{fmt(candidate.last_seen)}</dd><dt>Internal hosts</dt><dd>{formatValue(hosts)}</dd><dt>Sensors</dt><dd>{formatValue(sensors)}</dd><dt>Related attack targets</dt><dd>{formatValue(candidate.related_attack_targets)}</dd></dl></section></div>
-      <CandidateAIAnalysis candidate={candidate} />
-      <CandidateEnrichmentPanel candidate={candidate} onUpdated={async () => { await q.refetch(); }} />
-      <FlowReviewPanel candidate={candidate} />
-      <section className="panel compact detection-evidence"><h2>탐지 근거</h2>{evidence.length ? evidence.map((item, index) => <article className="evidence detailed" key={`${item.detector ?? item.type}-${index}`}><div className="evidence-heading"><strong title={item.type}>{evidenceLabel(item.type)}</strong><small title={item.detector}>{detectorLabel(item.detector)}{item.version ? ` · v${item.version}` : ''}</small></div><span className="evidence-score">+{formatValue(item.contribution ?? item.score ?? item.raw_score ?? 0)}</span><p>{item.description ?? '기록된 탐지 근거 설명이 없습니다.'}</p><dl><dt>원시 점수</dt><dd>{formatValue(item.raw_score)}</dd><dt>신뢰도</dt><dd>{item.confidence === undefined ? '기록 없음' : `${Math.round(item.confidence * 100)}%`}</dd><dt>관측 시각</dt><dd>{fmt(item.first_seen)} – {fmt(item.last_seen)}</dd><dt>호스트</dt><dd>{formatValue(item.hosts)}</dd><dt>센서</dt><dd>{formatValue(item.sensors)}</dd></dl>{item.metrics && Object.keys(item.metrics).length > 0 && <EvidenceMetrics metrics={item.metrics}/>} {strings(item.warnings).map(warning => <p className="warning" key={warning}>{warning}</p>)}</article>) : <p className="muted">기록된 탐지 근거가 없습니다.</p>}</section>
-      <section className="panel compact"><h2>점수 조정</h2>{adjustments.length ? <ul className="adjustments">{adjustments.map((adjustment, index) => <li key={`${adjustment.kind}-${index}`}><strong className={adjustment.points < 0 ? 'critical' : 'low'}>{adjustment.points > 0 ? '+' : ''}{adjustment.points}</strong><span title={String(adjustment.kind)}>{adjustmentLabel(adjustment.kind)} · {adjustment.explanation}</span></li>)}</ul> : <p className="muted">적용된 점수 조정이 없습니다.</p>}<div className="actions">
+    const freshnessAlert = q.error && <p role="alert" className="warning">{unavailable ? 'Candidate unavailable; retained summary is historical.' : 'Candidate refresh failed; retained result may be stale.'} {q.error.message} <button type="button" onClick={() => q.refetch()}>Retry candidate</button></p>;
+    return <div className="candidate-result">
+      {!selection && freshnessAlert}
+      <header className="header-actions"><div><p className="eyebrow">CANDIDATE DETAIL</p><h1>{candidate.candidate_ip}</h1><span className={`badge ${candidate.severity.toLowerCase()}`}>{candidate.score} · {candidate.severity}</span>{candidate.candidate_kind === 'COMMUNICATION_STATUS' && <span className="badge">통신 상태 후보</span>}<details className="candidate-identifier" open={identifierOpen} onToggle={event => setIdentifierOpen(event.currentTarget.open)}><summary>Candidate identifier</summary>{identifierOpen && <p className="record-id">Candidate {candidate.id}</p>}</details></div>{candidate.job_id && <Link to={`/analyses/${encodeURIComponent(candidate.job_id ?? '')}`}>View source analysis</Link>}</header>
+      <section className="panel compact" aria-label="Candidate result summary">
+        <CandidateWorkflowBadge candidate={candidate}/>{(candidate.ti_assessment || !candidate.threat_intelligence) && <CandidateThreatIntel assessment={candidate.ti_assessment}/>}
+        {candidate.threat_intelligence && <p>{threatIntelStatusLabel(candidate.threat_intelligence)}</p>}
+        <div className="metrics compact">
+          <article><strong>{candidate.flow_count ?? '기록 없음'}</strong><span>흐름</span></article>
+          <article><strong>{candidate.packet_count ?? '기록 없음'}</strong><span>패킷</span></article>
+          <article><strong>{formatBytes(candidate.byte_count)}</strong><span>통신량</span></article>
+          <article><strong>{evidence.length}</strong><span>보존 탐지 신호</span></article>
+        </div>
+        <ul>{evidence.slice(0, 3).map((item, index) => <li key={index}>{item.description ?? evidenceLabel(item.type)}</li>)}</ul>
+        {evidence.flatMap((item, index) => strings(item.warnings).map((warning, warningIndex) => <p className="warning" key={`${index}-${warningIndex}`}>{warning}</p>))}
+        <p>다음 확인: 탐지 근거를 선택하여 관측 사실과 한계를 검토하세요.</p>
+      </section>
+      <nav className="candidate-navigation" aria-label="Candidate detail selection" tabIndex={-1}>
+        {detailNavigation.deferredSelection && <button type="button" onClick={event => selectDetail(detailNavigation.deferredSelection!, event.currentTarget, true)}>Open requested detail</button>}
+        {evidence.slice(0, 3).map((item, index) => <button key={index} type="button" disabled={unavailable} aria-expanded={!evidenceInvalid && selection === `evidence-${index}`} aria-controls="candidate-selected-detail" onClick={() => selectDetail(`evidence-${index}`)}>근거 {index + 1} · {evidenceLabel(item.type)}</button>)}
+        {evidence.length > 3 && <label className="candidate-evidence-selector">전체 근거 {evidence.length}개<select aria-label="Evidence selection" disabled={unavailable} value={!evidenceInvalid && selection?.startsWith('evidence-') ? selection.slice(9) : ''} onChange={event => { if (event.target.value !== '') selectDetail(`evidence-${event.target.value}`, event.currentTarget); }}><option value="">근거 선택 / Select evidence</option>{evidence.map((item, index) => <option key={index} value={index}>근거 {index + 1} · {evidenceLabel(item.type)}</option>)}</select></label>}
+        {['Traffic buckets', 'Network context', 'AI assessment', '판정 및 외부 검증', 'Flow review', '점수 조정 및 작업', 'Raw candidate'].map(label => <button type="button" key={label} disabled={unavailable} aria-expanded={selection === label} aria-controls="candidate-selected-detail" onClick={() => selectDetail(label)}>{label}</button>)}
+      </nav>
+      <section className="panel compact"><h2>Traffic over time</h2>{traffic.length ? <MiniChart values={traffic} label="Traffic over time"/> : <p className="muted">No traffic series was retained for this candidate.</p>}</section>
+      <ResultDetailPanel suspended={confirmDelete} selection={selection} onClose={() => setSelection(undefined)} returnFocus={returnFocus}>
+      {selection && freshnessAlert}
+      {selection === 'Traffic buckets' && <section className="panel">{buckets.length > 0 && <div className="table-wrap"><table aria-label="Candidate traffic buckets"><thead><tr><th>Bucket start</th><th>Flows</th><th>Packets</th><th>Bytes</th></tr></thead><tbody>{buckets.slice(bucketPage * 50, (bucketPage + 1) * 50).map(bucket => <tr key={bucket.start}><td>{fmt(bucket.start)}</td><td>{bucket.flows}</td><td>{bucket.packets}</td><td>{formatBytes(bucket.bytes)}</td></tr>)}</tbody></table></div>}<div className="pagination"><span>Buckets {buckets.length ? bucketPage * 50 + 1 : 0}–{Math.min((bucketPage + 1) * 50, buckets.length)} of {buckets.length}</span><button type="button" disabled={bucketPage === 0} onClick={() => setBucketPage(bucketPage - 1)}>Previous traffic buckets</button><button type="button" disabled={(bucketPage + 1) * 50 >= buckets.length} onClick={() => setBucketPage(bucketPage + 1)}>Next traffic buckets</button></div></section>}
+      {selection === 'Network context' && <section className="panel"><h2>Network context</h2><dl><dt>Protocols</dt><dd>{formatValue(protocols)}</dd><dt>Service ports</dt><dd>{formatValue(ports)}</dd><dt>Domains</dt><dd>{formatValue(domains)}</dd><dt>First observed</dt><dd>{fmt(candidate.first_seen)}</dd><dt>Last observed</dt><dd>{fmt(candidate.last_seen)}</dd><dt>Internal hosts</dt><dd>{formatValue(hosts)}</dd><dt>Sensors</dt><dd>{formatValue(sensors)}</dd><dt>Related attack targets</dt><dd>{formatValue(candidate.related_attack_targets)}</dd></dl></section>}
+      {selection === 'Raw candidate' && <section className="panel"><h2>Retained candidate record</h2><pre aria-label="Retained candidate JSON">{JSON.stringify(candidate, null, 2)}</pre></section>}
+      <CandidateAIAnalysis candidate={candidate} visible={selection === 'AI assessment'}/>
+      <CandidateEnrichmentPanel candidate={candidate} visible={selection === '판정 및 외부 검증'} onUpdated={async () => { await q.refetch(); }} />
+      <FlowReviewPanel candidate={candidate} available={!unavailable} visible={selection === 'Flow review'} navigation={detailNavigation}/>
+      {evidenceInvalid && <p role="status">Selected evidence is no longer available. Select the retained evidence again.</p>}
+      {!evidenceInvalid && selection?.startsWith('evidence-') && <section className="panel compact detection-evidence"><h2>탐지 근거</h2>{evidence.length ? evidence.map((item, index) => selection === `evidence-${index}` && <article className="evidence detailed" key={`${item.detector ?? item.type}-${index}`}><div className="evidence-heading"><strong title={item.type}>{evidenceLabel(item.type)}</strong><small title={item.detector}>{detectorLabel(item.detector)}{item.version ? ` · v${item.version}` : ''}</small></div><span className="evidence-score">+{formatValue(item.contribution ?? item.score ?? item.raw_score)}</span><p>{item.description ?? '기록된 탐지 근거 설명이 없습니다.'}</p><dl><dt>원시 점수</dt><dd>{formatValue(item.raw_score)}</dd><dt>신뢰도</dt><dd>{typeof item.confidence !== 'number' ? '기록 없음' : `${Math.round(item.confidence * 100)}%`}</dd><dt>관측 시각</dt><dd>{fmt(item.first_seen)} – {fmt(item.last_seen)}</dd><dt>호스트</dt><dd>{formatValue(item.hosts)}</dd><dt>센서</dt><dd>{formatValue(item.sensors)}</dd></dl>{item.metrics && Object.keys(item.metrics).length > 0 && <EvidenceMetrics metrics={item.metrics}/>} {strings(item.warnings).map(warning => <p className="warning" key={warning}>{warning}</p>)}</article>) : <p className="muted">기록된 탐지 근거가 없습니다.</p>}</section>}
+      <section className={selection === '점수 조정 및 작업' ? "panel compact" : undefined}>{selection === '점수 조정 및 작업' && <><h2>점수 조정</h2>{adjustments.length ? <ul className="adjustments">{adjustments.map((adjustment, index) => <li key={`${adjustment.kind}-${index}`}><strong className={adjustment.points < 0 ? 'critical' : 'low'}>{adjustment.points > 0 ? '+' : ''}{adjustment.points}</strong><span title={String(adjustment.kind)}>{adjustmentLabel(adjustment.kind)} · {adjustment.explanation}</span></li>)}</ul> : <p className="muted">적용된 점수 조정이 없습니다.</p>}<div className="actions">
         <button disabled={!candidate.job_id || exportPcap.isPending} onClick={() => exportPcap.mutate()}>{exportPcap.isPending ? 'Requesting export…' : 'Export candidate PCAP'}</button>
         <button className="secondary" disabled={!candidate.job_id || reanalyze.isPending} onClick={() => reanalyze.mutate()}>{reanalyze.isPending ? 'Creating reanalysis…' : 'Reanalyze'}</button>
         <button className="secondary" disabled={addToAllowlist.isPending} onClick={() => addToAllowlist.mutate({value: candidate.candidate_ip, type: 'IP', description: `Added from candidate ${candidate.id}`})}>
           {addToAllowlist.isPending ? 'Adding to allowlist…' : 'Add to Allowlist'}
         </button>
-        <button className="danger" disabled={deleteCandidate.isPending} onClick={() => setConfirmDelete(true)}>
+        <button className="danger" disabled={deleteCandidate.isPending} onClick={() => { if (authority.current) setConfirmDelete(true); }}>
           Delete candidate
         </button>
-      </div>{(exportPcap.error || reanalyze.error || addToAllowlist.error || deleteCandidate.error) && <p role="alert" className="error-text">{[exportPcap.error?.message, reanalyze.error?.message, addToAllowlist.error?.message, deleteCandidate.error?.message].filter(Boolean).join(', ')}</p>}{notice && <p role="status">{notice}</p>}</section>
-      {confirmDelete && <div className="dialog-backdrop"><section role="dialog" aria-modal="true" aria-labelledby="delete-candidate-title" className="panel dialog"><h2 id="delete-candidate-title">Delete candidate permanently</h2><p>This removes {candidate.candidate_ip} from the analysis results. This action cannot be undone.</p>{deleteCandidate.error && <p role="alert" className="error-text">{deleteCandidate.error.message}</p>}<div className="actions"><button className="danger" disabled={deleteCandidate.isPending} onClick={() => deleteCandidate.mutate()}>{deleteCandidate.isPending ? 'Deleting…' : 'Delete permanently'}</button><button type="button" className="secondary" disabled={deleteCandidate.isPending} onClick={() => { deleteCandidate.reset(); setConfirmDelete(false); }}>Cancel</button></div></section></div>}
-    </>;
-  }}</AsyncState>;
+      </div></>}{[exportPcap, reanalyze, addToAllowlist, deleteCandidate].some(mutation => mutation.isPending) && <p role="status">Candidate operation pending…</p>}{(exportPcap.error || reanalyze.error || addToAllowlist.error || deleteCandidate.error) && <p role="alert" className="error-text">{[exportPcap.error?.message, reanalyze.error?.message, addToAllowlist.error?.message, deleteCandidate.error?.message].filter(Boolean).join(', ')}</p>}{notice && <p role="status">{notice}</p>}</section>
+      </ResultDetailPanel>
+      {confirmDelete && <CandidateDeleteConfirmation pending={deleteCandidate.isPending} onCancel={() => { deleteCandidate.reset(); setConfirmDelete(false); }}><h2 id="delete-candidate-title">Delete candidate permanently</h2><p>This removes {candidate.candidate_ip} from the analysis results. This action cannot be undone.</p>{deleteCandidate.error && <p role="alert" className="error-text">{deleteCandidate.error.message}</p>}<div className="actions"><button className="danger" disabled={deleteCandidate.isPending} onClick={() => deleteCandidate.mutate(authority)}>{deleteCandidate.isPending ? 'Deleting…' : 'Delete permanently'}</button><button data-cancel type="button" className="secondary" disabled={deleteCandidate.isPending} onClick={() => { deleteCandidate.reset(); setConfirmDelete(false); }}>Cancel</button></div></CandidateDeleteConfirmation>}
+    </div>;
+  };
+  return q.data ? renderCandidate(q.data) : <div className="candidate-result"><details className="candidate-identifier" open={identifierOpen} onToggle={event => setIdentifierOpen(event.currentTarget.open)}><summary>Candidate identifier</summary>{identifierOpen && <p className="record-id">Candidate {id}</p>}</details><AsyncState query={q}>{renderCandidate}</AsyncState></div>;
 }
 
 type FlowFilterDraft = { candidateIp: string; direction: string; protocol: string; port: string; sourcePort: string; destinationPort: string; payloadOnly: boolean };
@@ -1404,41 +1564,163 @@ function FlowPagination({ data, page, onPage }: { data: Page<FlowRecordReview>; 
   return <div className="pagination"><span>Flows {(current - 1) * pageSize + 1}–{Math.min(current * pageSize, total)} of {total}</span><div className="row-actions"><button type="button" className="secondary" disabled={page <= 1} onClick={() => onPage(Math.max(1, page - 1))}>Previous flows</button><button type="button" className="secondary" disabled={page * pageSize >= total} onClick={() => onPage(page + 1)}>Next flows</button></div></div>;
 }
 
-function FlowReviewPanel({ candidate }: { candidate: Candidate }) {
-  const [page, setPage] = useState(1);
-  const query = useQuery<Page<FlowRecordReview>, Error>({
-    queryKey: ['candidate-flows', candidate.job_id, candidate.candidate_ip, page],
-    queryFn: () => api.get(`/analysis-jobs/${candidate.job_id}/flows?candidate_ip=${encodeURIComponent(candidate.candidate_ip)}&page=${page}&page_size=50`),
-    enabled: Boolean(candidate.job_id),
-  });
-  if (!candidate.job_id) return <section className="panel compact"><h2>Flow review</h2><p className="muted">The source analysis is unavailable, so its flows cannot be reviewed.</p></section>;
-  return <section className="panel compact"><h2>Flow review</h2><p className="muted">Inspect a retained payload only when needed, then record an analyst verdict. C2 labels can create a reusable, non-reversible payload signature for future analyses.</p><AsyncState query={query} empty={data => items(data).length === 0}>{data => <><div className="table-wrap"><table aria-label="Candidate flows"><thead><tr><th>Observed</th><th>Direction</th><th>Endpoints</th><th>Protocol</th><th>Volume</th><th>Payload features</th><th>Current label</th><th>Review</th></tr></thead><tbody>{items(data).map(flow => <FlowReviewRow key={flow.flow_id} flow={flow} candidateIp={candidate.candidate_ip} />)}</tbody></table></div><FlowPagination data={data} page={page} onPage={setPage} /></>}</AsyncState></section>;
+function useFlowOwnerLifetime() {
+  const lifetime = useRef(false);
+  useLayoutEffect(() => {
+    // StrictMode replays setup; real remounts get a different lifetime ref.
+    lifetime.current = true;
+    // Revoke before destination layout callbacks, not just passive cleanup.
+    return () => { lifetime.current = false; };
+  }, []);
+  return lifetime;
 }
 
-function FlowReviewRow({ flow, candidateIp, onInvestigate, visible = true }: { visible?: boolean; flow: FlowRecordReview; candidateIp?: string; onInvestigate?: (ip: string, side: InvestigationSelection['side']) => void }) {
+type FlowAuthority = { current: boolean; sourceCurrent?: () => boolean };
+function flowAuthorityCurrent(authority?: FlowAuthority) {
+  if (!authority) return true;
+  if (authority.current && authority.sourceCurrent && !authority.sourceCurrent()) authority.current = false;
+  return authority.current;
+}
+type RetainedFlowOwner = { key: string; flow: FlowRecordReview; scope: string; page: number; authority: FlowAuthority; retention: { pinned: boolean; pending: boolean } };
+
+function FlowReviewPanel({ candidate, navigation, visible = true, available = true }: { candidate: Candidate; navigation: ReturnType<typeof useCandidateDetailSelection>; visible?: boolean; available?: boolean }) {
+  const client = useQueryClient();
+  const lifetime = useFlowOwnerLifetime();
+  const page = navigation.page;
+  const [selected, setSelected] = useState<string>();
+  const restoredIntent = useRef('');
+
+  // Retain operation owners independently of the current query page and presentation.
+  const [owners, setOwners] = useState<RetainedFlowOwner[]>([]);
+  const currentOwners = useRef(owners);
+  const updateOwners = useCallback((update: (current: RetainedFlowOwner[]) => RetainedFlowOwner[]) => {
+    const next = update(currentOwners.current);
+    currentOwners.current = next;
+    setOwners(next);
+  }, []);
+  const [capacityNotice, setCapacityNotice] = useState('');
+  const scope = JSON.stringify([candidate.id, candidate.job_id, candidate.candidate_ip]);
+  const retentionChanged = useCallback(() => {
+    updateOwners(current => {
+      const kept = current.filter(owner => owner.key === selected || owner.retention.pinned);
+      current.filter(owner => !kept.includes(owner)).forEach(owner => { owner.authority.current = false; });
+      return kept.length === current.length ? current : kept;
+    });
+  }, [selected, updateOwners]);
+  const releaseOwner = (owner: RetainedFlowOwner) => {
+    if (owner.retention.pending) return;
+    owner.authority.current = false;
+    updateOwners(current => current.filter(item => item !== owner));
+    if (selected === owner.key) { setSelected(undefined); navigation.changeFlow(); }
+    setCapacityNotice('');
+  };
+  const query = useQuery<Page<FlowRecordReview>, Error>({
+    queryKey: ['candidate-flows', candidate.job_id, candidate.candidate_ip, page],
+    queryFn: () => api.get(`/analysis-jobs/${encodeURIComponent(candidate.job_id ?? '')}/flows?candidate_ip=${encodeURIComponent(candidate.candidate_ip)}&page=${page}&page_size=50`),
+    enabled: visible && available && Boolean(candidate.job_id),
+  });
+  const sourceUnavailable = query.error instanceof ApiError && [403, 404, 410].includes(query.error.status);
+  if (navigation.flow && (sourceUnavailable || (query.isSuccess && (!items(query.data).some(flow => flow.flow_id === navigation.flow && flow.job_id === candidate.job_id) || (query.data?.page !== undefined && query.data.page !== page))))) navigation.retireFlowEntry(navigation.entryKey);
+
+  const historyRetired = navigation.flowEntryRetired(navigation.entryKey);
+  const newAuthority = (flow: FlowRecordReview): FlowAuthority => ({ current: true, sourceCurrent: () => {
+    const source = client.getQueryState<Candidate, Error>(['candidate', candidate.id]);
+    const flows = client.getQueryState<Page<FlowRecordReview>, Error>(['candidate-flows', candidate.job_id, candidate.candidate_ip, page]);
+    const retired = (error: Error | null | undefined) => error instanceof ApiError && [403, 404, 410].includes(error.status);
+    return Boolean(lifetime.current && source?.data && source.data.job_id && source.data.evidence === candidate.evidence && JSON.stringify([source.data.id, source.data.job_id, source.data.candidate_ip]) === scope &&
+      !retired(source.error) && flows?.data && (flows.data.page === undefined || flows.data.page === page) && !retired(flows.error) && items(flows.data).some(item => item.flow_id === flow.flow_id && item.job_id === flow.job_id));
+  } });
+  // Revocation is separate from operation lifetime. Never reauthorize a captured callback.
+  for (const owner of owners) {
+    if (!available || !candidate.job_id || owner.scope !== scope || sourceUnavailable || !flowAuthorityCurrent(owner.authority) ||
+        (owner.page === page && query.isSuccess && !items(query.data).some(flow => flow.flow_id === owner.flow.flow_id && flow.job_id === owner.flow.job_id))) {
+      owner.authority.current = false;
+
+    }
+  }
+  const inspect = (flow: FlowRecordReview, explicit = true) => {
+    const nextAuthority = newAuthority(flow);
+    if (!available || sourceUnavailable || !candidate.job_id || flow.job_id !== candidate.job_id || (query.data?.page !== undefined && query.data.page !== page) || !flowAuthorityCurrent(nextAuthority)) return;
+    const key = JSON.stringify([scope, flow.flow_id]);
+    if (!explicit && historyRetired) return;
+    const liveOwners = currentOwners.current;
+    const retained = liveOwners.filter(owner => owner.key === key || owner.retention.pinned);
+    const existing = retained.find(owner => owner.key === key);
+    if (!existing && retained.length >= 8) {
+      setCapacityNotice('Limit: 8 retained flow reviews. Acknowledge a result or explicitly discard an idle draft to release space. Pending work cannot be released.');
+      return;
+    }
+    liveOwners.filter(owner => !retained.includes(owner)).forEach(owner => { owner.authority.current = false; });
+    updateOwners(() => existing ? retained.map(owner => owner === existing ? { ...owner, page, authority: flowAuthorityCurrent(owner.authority) ? owner.authority : nextAuthority } : owner)
+      : [...retained, { key, flow, scope, page, authority: nextAuthority, retention: { pinned: false, pending: false } }]);
+    setCapacityNotice('');
+    setSelected(key);
+    if (explicit) navigation.changeFlow(flow.flow_id, page, historyRetired);
+  };
+  useEffect(() => {
+    const intent = JSON.stringify([scope, page, navigation.flow, navigation.entryKey]);
+    if (!visible || !navigation.flow) { restoredIntent.current = ''; return; }
+    if (!query.data || restoredIntent.current === intent) return;
+    restoredIntent.current = intent;
+    const flow = items(query.data).find(item => item.flow_id === navigation.flow && item.job_id === candidate.job_id);
+    if (flow) inspect(flow, false);
+  });
+  const selectedKey = navigation.flow ? JSON.stringify([scope, navigation.flow]) : undefined;
+  const flowMissing = visible && navigation.flow && query.data && (!items(query.data).some(flow => flow.flow_id === navigation.flow && flow.job_id === candidate.job_id) || (query.data.page !== undefined && query.data.page !== page) || historyRetired);
+  return <section className={visible ? "panel compact" : undefined}>
+    {visible && <><h2>Flow review</h2><p className="muted">Inspect a retained payload only when needed, then record an analyst verdict. C2 labels can create a reusable, non-reversible payload signature for future analyses.</p>
+      {!candidate.job_id ? <p>The source analysis is unavailable, so its flows cannot be reviewed.</p> : <AsyncState query={query} empty={data => items(data).length === 0}>{data => <>
+        <div className="table-wrap"><table aria-label="Candidate flows"><thead><tr><th>Observed</th><th>Endpoints</th><th>Current label</th><th>Review</th></tr></thead><tbody>{items(data).map(flow => <tr key={flow.flow_id}>
+          <td>{fmt(flow.timestamp)}</td><td>{flow.source_ip} → {flow.destination_ip}<small>{flow.protocol} · {flow.direction}</small></td><td>{flow.current_label?.verdict ?? 'Unreviewed'}</td>
+          <td><button type="button" aria-expanded={selectedKey === JSON.stringify([scope, flow.flow_id])} onClick={() => inspect(flow)}>Inspect flow {flow.flow_id}</button></td>
+        </tr>)}</tbody></table></div><FlowPagination data={data} page={page} onPage={next => { setSelected(undefined); navigation.changeFlow(undefined, next); }}/>
+      </>}</AsyncState>}
+    </>}
+    {visible && <p aria-label="Flow review retention">{owners.length} of 8 retained flow reviews. All source flow pages remain available.</p>}
+    {capacityNotice && <p role="alert">{capacityNotice}</p>}
+    {flowMissing && <p role="status">Selected flow is not available on this source page. Select a retained flow explicitly.</p>}
+    <div className="table-wrap"><table aria-label="Selected candidate flow">{owners.map(owner => <tbody key={owner.key} aria-label={`Retained flow review ${owner.flow.flow_id}`}><FlowReviewRow flow={owner.flow} authority={owner.authority} retention={owner.retention} onRetentionChange={retentionChanged} onRelease={() => releaseOwner(owner)} candidateIp={candidate.candidate_ip} visible={visible && !historyRetired && selectedKey === owner.key && owner.page === page && owner.authority.current}/></tbody>)}</table></div>
+  </section>;
+}
+
+function FlowReviewRow({ flow, candidateIp, onInvestigate, visible = true, authority, retention, onRetentionChange, onRelease }: { retention?: RetainedFlowOwner['retention']; onRetentionChange?: () => void; onRelease?: () => void; authority?: FlowAuthority; visible?: boolean; flow: FlowRecordReview; candidateIp?: string; onInvestigate?: (ip: string, side: InvestigationSelection['side']) => void }) {
   const client = useQueryClient();
   const navigate = useNavigate();
+  const lifetime = useFlowOwnerLifetime();
+  // Also fence job-flow rows, which have no candidate source authority token.
+  const authorityCurrent = (token?: FlowAuthority) => lifetime.current && flowAuthorityCurrent(token);
   const [verdict, setVerdict] = useState<'C2' | 'BENIGN'>();
   const [confidence, setConfidence] = useState<'CONFIRMED' | 'HIGH' | 'MEDIUM'>('HIGH');
   const [note, setNote] = useState('');
   const [createSignature, setCreateSignature] = useState(true);
   const [signatureName, setSignatureName] = useState('');
   const [notice, setNotice] = useState('');
-  const preview = useMutation<PayloadPreview, Error>({
-    mutationFn: () => api.get(`/analysis-jobs/${flow.job_id}/flows/${flow.flow_id}/payload-preview`),
+  const requireAuthority = (token?: FlowAuthority) => { if (!authorityCurrent(token)) throw new Error('Flow source changed or unavailable. Select the flow again.'); };
+  const admitted = useRef(new Set<string>());
+  const admit = (kind: string, token: FlowAuthority | undefined, operation: () => void) => {
+    if (!authorityCurrent(token) || admitted.current.has(kind)) return;
+    admitted.current.add(kind);
+    if (retention) { retention.pending = true; retention.pinned = true; }
+    operation();
+  };
+  const preview = useMutation<PayloadPreview, Error, FlowAuthority | undefined>({
+    mutationFn: token => { requireAuthority(token); return api.get(`/analysis-jobs/${encodeURIComponent(flow.job_id)}/flows/${encodeURIComponent(flow.flow_id)}/payload-preview`); },
+    onSettled: () => { admitted.current.delete('preview'); },
   });
-  const guidance = useMutation<DetectionGuidance, Error>({
-    mutationFn: () => api.get(`/analysis-jobs/${flow.job_id}/flows/${flow.flow_id}/detection-guidance`),
+  const guidance = useMutation<DetectionGuidance, Error, FlowAuthority | undefined>({
+    mutationFn: token => { requireAuthority(token); return api.get(`/analysis-jobs/${encodeURIComponent(flow.job_id)}/flows/${encodeURIComponent(flow.flow_id)}/detection-guidance`); },
+    onSettled: () => { admitted.current.delete('guidance'); },
   });
-  const guidedReanalysis = useMutation<Job, Error>({
-    mutationFn: () => api.post(`/analysis-jobs/${flow.job_id}/reanalyze`, {
+  const guidedReanalysis = useMutation<Job, Error, FlowAuthority | undefined>({
+    mutationFn: token => { requireAuthority(token); return api.post(`/analysis-jobs/${encodeURIComponent(flow.job_id)}/reanalyze`, {
       idempotency_key: idempotencyKey(),
       ...guidance.data?.recommended_reanalysis,
-    }),
-    onSuccess: created => navigate(`/analyses/${created.id}`),
+    }); },
+    onSuccess: (created, token) => { if (authorityCurrent(token)) navigate(`/analyses/${encodeURIComponent(created.id)}`); else setNotice('Source flow reanalysis created; source selection retired.'); },
+    onSettled: () => { admitted.current.delete('reanalysis'); },
   });
-  const label = useMutation<{ label: FlowLabel; signature?: PayloadSignature | null }, Error>({
-    mutationFn: () => api.post(`/analysis-jobs/${flow.job_id}/flow-labels`, {
+  const label = useMutation<{ label: FlowLabel; signature?: PayloadSignature | null }, Error, FlowAuthority | undefined>({
+    mutationFn: token => { requireAuthority(token); return api.post(`/analysis-jobs/${encodeURIComponent(flow.job_id)}/flow-labels`, {
       flow_id: flow.flow_id,
       verdict,
       confidence,
@@ -1446,18 +1728,26 @@ function FlowReviewRow({ flow, candidateIp, onInvestigate, visible = true }: { v
       create_signature: verdict === 'C2' && createSignature,
       signature_name: verdict === 'C2' && createSignature ? signatureName : undefined,
       signature_description: verdict === 'C2' && createSignature ? note : '',
-    }),
-    onSuccess: result => {
+    }); },
+    onSuccess: (result, token) => {
       setNotice(result.signature ? `C2 label and signature "${result.signature.name}" saved.` : `${result.label.verdict} label saved.`);
-      if (result.label.verdict === 'C2') guidance.mutate();
+      if (result.label.verdict === 'C2') admit('guidance', token, () => guidance.mutate(token));
       setVerdict(undefined);
       setNote('');
-      client.invalidateQueries({ queryKey: ['candidate-flows'] });
+      client.invalidateQueries({ queryKey: ['candidate-flows', flow.job_id] });
       client.invalidateQueries({ queryKey: ['job-flows', flow.job_id] });
       client.invalidateQueries({ queryKey: ['payload-signatures'] });
     },
+    onSettled: () => { admitted.current.delete('label'); },
   });
+  const pending = admitted.current.size > 0 || preview.isPending || guidance.isPending || label.isPending || guidedReanalysis.isPending;
+  const dirty = Boolean(verdict || note);
+  const pinned = pending || dirty || Boolean(preview.data || preview.error || guidance.data || guidance.error || label.error || guidedReanalysis.error || notice);
+  if (retention) { retention.pinned = pinned; retention.pending = pending; }
+  useEffect(() => { onRetentionChange?.(); }, [pinned, pending, onRetentionChange]);
+  const releaseControl = onRelease && <button type="button" disabled={pending} onClick={() => { if (!pending) onRelease(); }}>{dirty ? 'Discard draft and release' : 'Acknowledge and release'} {flow.flow_id}</button>;
   const startReview = (nextVerdict: 'C2' | 'BENIGN') => {
+    if (label.isPending || !authorityCurrent(authority)) return;
     label.reset();
     setNotice('');
     setVerdict(nextVerdict);
@@ -1466,13 +1756,20 @@ function FlowReviewRow({ flow, candidateIp, onInvestigate, visible = true }: { v
   };
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    label.mutate();
+    if (label.isPending || !authorityCurrent(authority)) return;
+    admit('label', authority, () => label.mutate(authority));
   };
-  if (!visible) return label.isPending || guidedReanalysis.isPending || label.error || guidedReanalysis.error || notice ? <tr><td colSpan={8}>
+  if (!visible) return pinned ? <tr><td colSpan={8}>
+    <small>{flow.job_id} · {flow.flow_id}{authority && !authority.current ? ' · Source selection retired; no new actions.' : ''}</small>
+    {dirty && <p>Draft retained for {flow.flow_id}.</p>}
+    {(preview.isPending || guidance.isPending) && <p role="status">{flow.flow_id} · Reading…</p>}
+    {preview.error && <p role="alert">{preview.error.message}</p>}{guidance.error && <p role="alert">{guidance.error.message}</p>}
+    {releaseControl}
     {(label.isPending || guidedReanalysis.isPending) && <p role="status">{flow.flow_id} · {label.isPending ? 'Saving…' : 'Creating reanalysis…'}</p>}
     {label.error && <p role="alert">{label.error.message}</p>}{guidedReanalysis.error && <p role="alert">{guidedReanalysis.error.message}</p>}{notice && <p role="status">{notice}</p>}
   </td></tr> : null;
   return <Fragment>
+    {releaseControl && <tr><td colSpan={8}>{releaseControl}</td></tr>}
     <tr>
       <td>{fmt(flow.timestamp)}<small>{flow.sensor_id ?? 'Unknown sensor'}</small></td>
       <td><code>{flow.direction}</code></td>
@@ -1481,11 +1778,11 @@ function FlowReviewRow({ flow, candidateIp, onInvestigate, visible = true }: { v
       <td>{(flow.packet_count ?? 0).toLocaleString()} packets<small>{formatBytes(flow.total_bytes)}</small></td>
       <td>{flow.has_payload ? <><span>{formatBytes(flow.payload_length)}</span><small>entropy {formatValue(flow.payload_entropy)} · printable {flow.payload_printable_ratio === undefined ? 'unknown' : `${Math.round(flow.payload_printable_ratio * 100)}%`}</small><small className="hash-value">SHA-256 {flow.payload_hash?.slice(0, 16)}… · SimHash {flow.payload_simhash ?? 'unavailable'}</small></> : <span className="muted">No payload</span>}</td>
       <td>{flow.current_label ? <><span className={`badge ${flow.current_label.verdict === 'C2' ? 'critical' : 'low'}`}>{flow.current_label.verdict}</span><small>{flow.current_label.confidence} · {fmt(flow.current_label.created_at)}</small><small>{flow.current_label.note}</small></> : <span className="muted">Unreviewed</span>}</td>
-      <td><div className="row-actions"><button type="button" className="secondary" disabled={!flow.has_payload || preview.isPending} aria-label={`Preview payload ${flow.flow_id}`} onClick={() => preview.mutate()}>{preview.isPending ? 'Loading…' : 'Preview payload'}</button><button type="button" className="danger" aria-label={`Mark C2 ${flow.flow_id}`} onClick={() => startReview('C2')}>Mark C2</button><button type="button" className="secondary" aria-label={`Mark benign ${flow.flow_id}`} onClick={() => startReview('BENIGN')}>Mark benign</button>{flow.current_label?.verdict === 'C2' && <button type="button" className="secondary" disabled={guidance.isPending} aria-label={`탐지 조정 가이드 ${flow.flow_id}`} onClick={() => guidance.mutate()}>{guidance.isPending ? '가이드 계산 중…' : '탐지 조정 가이드'}</button>}</div></td>
+      <td><div className="row-actions"><button type="button" className="secondary" disabled={!flow.has_payload || preview.isPending} aria-label={`Preview payload ${flow.flow_id}`} onClick={() => admit('preview', authority, () => preview.mutate(authority))}>{preview.isPending ? 'Loading…' : 'Preview payload'}</button><button type="button" className="danger" disabled={label.isPending} aria-label={`Mark C2 ${flow.flow_id}`} onClick={() => startReview('C2')}>Mark C2</button><button type="button" className="secondary" disabled={label.isPending} aria-label={`Mark benign ${flow.flow_id}`} onClick={() => startReview('BENIGN')}>Mark benign</button>{flow.current_label?.verdict === 'C2' && <button type="button" className="secondary" disabled={guidance.isPending} aria-label={`탐지 조정 가이드 ${flow.flow_id}`} onClick={() => admit('guidance', authority, () => guidance.mutate(authority))}>{guidance.isPending ? '가이드 계산 중…' : '탐지 조정 가이드'}</button>}</div></td>
     </tr>
     {(preview.data || preview.error) && <tr className="expanded-row"><td colSpan={8}><section aria-label={`Payload preview ${flow.flow_id}`} className="payload-preview"><div className="header-actions"><div><strong>Explicit payload preview</strong><small>{preview.data ? `${preview.data.sample_bytes} of ${preview.data.payload_length ?? preview.data.sample_bytes} bytes${preview.data.truncated ? ' (truncated)' : ''}` : 'Preview unavailable'}</small></div><button type="button" className="secondary" onClick={() => preview.reset()}>Close preview</button></div>{preview.error ? <p role="alert" className="error-text">{preview.error.message}</p> : <><p><strong>ASCII</strong></p><pre>{preview.data?.payload_ascii}</pre><p><strong>Hex</strong></p><pre>{preview.data?.payload_hex}</pre></>}</section></td></tr>}
     {verdict && <tr className="expanded-row"><td colSpan={8}><form className="flow-review-form" onSubmit={submit}><h3>Record {verdict} verdict</h3><div className="grid"><label>Confidence<select value={confidence} onChange={event => setConfidence(event.target.value as typeof confidence)}><option>CONFIRMED</option><option>HIGH</option><option>MEDIUM</option></select></label><label>Analyst note<textarea value={note} onChange={event => setNote(event.target.value)} maxLength={5000} rows={3} required /></label></div>{verdict === 'C2' && <fieldset><legend>Future detection</legend><label className="check"><input type="checkbox" checked={createSignature} onChange={event => setCreateSignature(event.target.checked)} disabled={!flow.has_payload} />Create payload signature</label>{createSignature && <label>Signature name<input value={signatureName} onChange={event => setSignatureName(event.target.value)} maxLength={200} required /></label>}<p className="muted">Exact payload matches alert at high confidence. Structural matches remain monitor-only and keep protocol, direction, and service-port guards.</p></fieldset>}{label.error && <p role="alert" className="error-text">{label.error.message}</p>}<div className="actions"><button disabled={label.isPending}>{label.isPending ? 'Saving…' : `Save ${verdict} label`}</button><button type="button" className="secondary" onClick={() => setVerdict(undefined)}>Cancel</button></div></form></td></tr>}
-    {(guidance.data || guidance.error) && <tr className="expanded-row"><td colSpan={8}><DetectionGuidancePanel headingId={`detection-guidance-${flow.flow_id}`} guidance={guidance.data} error={guidance.error} reanalyzing={guidedReanalysis.isPending} reanalysisError={guidedReanalysis.error} onReanalyze={() => guidedReanalysis.mutate()} onClose={() => guidance.reset()} /></td></tr>}
+    {(guidance.data || guidance.error) && <tr className="expanded-row"><td colSpan={8}><DetectionGuidancePanel headingId={`detection-guidance-${flow.flow_id}`} guidance={guidance.data} error={guidance.error} reanalyzing={guidedReanalysis.isPending} reanalysisError={guidedReanalysis.error} onReanalyze={() => admit('reanalysis', authority, () => guidedReanalysis.mutate(authority))} onClose={() => guidance.reset()} /></td></tr>}
     {notice && <tr className="expanded-row"><td colSpan={8}><p role="status">{notice}</p></td></tr>}
   </Fragment>;
 }

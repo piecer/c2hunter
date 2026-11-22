@@ -14,7 +14,11 @@ import { patternLabel } from '../src/reportTranslations';
 
 const python = process.env.C2HUNTER_PYTHON ?? resolve('../.venv/bin/python');
 const generate = () => JSON.parse(execFileSync(python, ['tests/network_family_fixture.py'], { encoding: 'utf8', timeout: 60000, maxBuffer: 16 * 1024 * 1024 }));
+// Prepare two independent real publications under the same 60s child guard.
+// Fixture setup belongs to collection; the default test deadline bounds parity
+// assertions, not a second Python/controller/worker bootstrap. Do not reuse bytes.
 const bundle = generate();
+const second = generate();
 const legacy = JSON.parse(readFileSync('tests/fixtures/network-family-legacy.json', 'utf8'));
 const clients: QueryClient[] = [];
 afterEach(() => clients.splice(0).forEach(c => c.clear()));
@@ -30,7 +34,6 @@ it.each([1, 5, 6, 7, 100])('validates all six observed families at limit %s and 
 });
 
 it('preserves canonical report and AI bytes across real public jobs', () => {
-  const second = generate();
   for (const key of Object.keys(bundle.cases)) {
     for (const field of ['report', 'ai']) expect(JSON.stringify(second.cases[key][field])).toBe(JSON.stringify(bundle.cases[key][field]));
   }

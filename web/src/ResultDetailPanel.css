@@ -1,0 +1,31 @@
+/* Candidate-only containment: keep complete values, scroll tables locally. */
+.content:has(.candidate-result), .candidate-result, .candidate-result section,
+.candidate-result article, .candidate-result header > *, .candidate-result dl > *,
+.candidate-result label, .candidate-result .table-wrap { min-width: 0; max-width: 100%; }
+.candidate-result { overflow-wrap: anywhere; }
+.candidate-result .header-actions { flex-wrap: wrap; }
+.candidate-result .header-actions > div { flex: 1 1 18rem; }
+.candidate-result .record-id { white-space: normal; overflow-wrap: anywhere; }
+.candidate-result .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.candidate-result .row-actions, .candidate-result .pagination { flex-wrap: wrap; }
+.candidate-result input, .candidate-result select, .candidate-result textarea { min-width: 0; max-width: 100%; }
+.candidate-result pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.candidate-result .table-wrap { overflow-x: auto; }
+.candidate-result .chart { max-height: 140px; }
+.candidate-detail-surface { margin: 1rem 0; border: 1px solid var(--border); padding: 1rem; border-radius: 8px; }
+.candidate-detail-surface > .section-heading { flex-wrap: wrap; gap: .75rem; }
+.candidate-detail-surface h2:focus { outline: 2px solid var(--accent); outline-offset: 3px; }
+.candidate-result .metric-detail > div { margin: .4rem 0; }
+.candidate-detail-modal { position: fixed; z-index: 50; inset: .5rem; margin: 0; overflow: auto; overscroll-behavior: contain; background: var(--panel); box-shadow: 0 0 0 100vmax #000a; }
+@media (max-width: 640px) {
+  .candidate-result .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .candidate-result > header h1 { font-size: 1.3rem; }
+  .candidate-result > header .eyebrow { margin-top: 0; }
+  .candidate-result .panel { padding: .75rem; }
+  .candidate-result dl { grid-template-columns: minmax(0, 1fr); }
+  .candidate-result dd { margin-left: 0; }
+  .candidate-detail-modal { padding: .5rem; }
+}
+
+.candidate-delete-dialog { color: var(--text); background: var(--panel); width: min(34rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); overflow: auto; margin: auto; }
+.candidate-delete-dialog::backdrop { background: #000a; }
