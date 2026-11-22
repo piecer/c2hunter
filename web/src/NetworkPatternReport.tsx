@@ -1,10 +1,12 @@
-import { useNetworkEvidence } from './networkEvidenceContext';
+import './networkProgressiveDetail.css';
+import NetworkExampleDetail from './NetworkExampleDetail';
+import { useNetworkEvidence, type EvidenceSelection } from './networkEvidenceContext';
 import NetworkICMPDetails from './NetworkICMPDetails';
 import type { ICMPResult } from './networkICMPDetails';
-import { projectNetworkReport } from './networkReportValidation';
+import { projectNetworkReport, record } from './networkReportValidation';
 import { useReportDetail } from './reportDetailContext';
-import { useCallback, useRef, useState } from 'react';
-import NetworkMeasurements, { CauseHypothesis } from './NetworkMeasurements';
+import { useCallback, useId, useRef, useState, type RefObject } from 'react';
+import NetworkMeasurements, { CauseHypothesis, type MeasurementKind } from './NetworkMeasurements';
 import { useReportLanguage } from './reportLanguageContext';
 import { choose, diagnostics, rawText, translateProse, patternLabel, warningLabel, factLabel, evidenceText } from './reportTranslations';
 
@@ -50,7 +52,7 @@ export default function NetworkPatternReport({ report }: { report: PatternReport
       if (node.contains(document.activeElement)) groupsHeading.current?.focus();
     };
   }, []);
-  const [expanded, setExpanded] = useState<{ report: PatternReport; index: number }>();
+  const [expanded, setExpanded] = useState<{ report: PatternReport; index: number; request?: EvidenceSelection }>();
   const evidence = useNetworkEvidence();
   const [request, setRequest] = useState(evidence?.selection);
   if (evidence?.selection && request !== evidence.selection) {
@@ -58,14 +60,14 @@ export default function NetworkPatternReport({ report }: { report: PatternReport
     setPage(Math.floor(evidence.selection.index / 8));
     setGroupsOpen(true);
     setCoverageOpen(false);
-    setExpanded({ report, index: evidence.selection.index });
+    setExpanded({ report, index: evidence.selection.index, request: evidence.selection });
     focusEvidence.current = true;
   }
-  const [owner, setOwner] = useState(report);
+  const [owner, setOwner] = useState({ report, generation: evidence?.generation });
   // Identity, not counts/issue IDs: a replacement may have the same groups but
   // different evidence. Reset before committing children; never revive A on A→B→A.
-  if (owner !== report) {
-    setOwner(report);
+  if (owner.report !== report || owner.generation !== evidence?.generation) {
+    setOwner({ report, generation: evidence?.generation });
     setPage(0);
     setGroupsOpen(false);
     setCoverageOpen(false);
@@ -108,11 +110,6 @@ export default function NetworkPatternReport({ report }: { report: PatternReport
     <section aria-label={t('At a glance', '한눈에 보기')} className="network-glance" data-tone={recognized && verdict === 'anomaly_observed' ? 'observed' : safeClear && verdict === 'no_clear_anomaly' ? 'clear' : 'insufficient'}>
       <p className="eyebrow">{t('OVERALL NETWORK REPORT', '전체 네트워크 보고서')}</p><h2 id="overall-network-heading">{heading}</h2>
       <p data-testid="network-verdict">{heading === t('Anomaly observed', '이상 징후 관찰됨') ? t('Observable anomaly patterns need review; this does not establish a root cause or C2 activity.', '관찰된 이상 패턴을 확인해야 하며, 원인이나 C2 활동이 확정된 것은 아닙니다.') : safeClear && verdict === 'no_clear_anomaly' ? t('No supported anomaly pattern was observed in the evaluated evidence; this does not prove a healthy network.', '평가한 증거에서 지원되는 이상 패턴이 관찰되지 않았지만 네트워크가 정상임을 입증하지는 않습니다.') : t('Available evidence cannot support an overall conclusion; check coverage first.', '현재 증거로 종합 결론을 내릴 수 없으므로 분석 범위를 먼저 확인하세요.')}</p>
-      <div role="group" aria-label={t('Report totals', '보고서 전체 수치')} className="network-totals">
-        <div><strong>{number(summary.suspect_flow_count)}</strong><span>{t('suspect flows', '의심 흐름')}</span></div>
-        <div><strong>{number(summary.flow_count)}</strong><span>{t('flows scanned', '검사한 흐름')}</span></div>
-        <div><strong>{number(summary.issue_count)}</strong><span>{t('issue groups', '문제 그룹')}</span></div>
-      </div>
       {!complete && <p className="warning">{t('Incomplete or unknown coverage — absence of findings cannot establish a healthy network.', '분석 범위가 불완전하거나 알려지지 않았습니다. 발견 사항이 없더라도 네트워크가 정상이라고 단정할 수 없습니다.')} {warnings.length} {t('coverage warnings', '개 범위 경고')} · {number(summary.skipped_records)} {t('skipped', '개 건너뜀')} · {number(summary.incomplete_records)} {t('incomplete', '개 불완전')}</p>}
       {summary.counts_are_lower_bounds === true && <p className="warning">{t('Counts are lower bounds, not complete capture totals.', '수치는 하한값이며 전체 캡처의 총계가 아닙니다.')} {number(summary.tracking_limited_records)} {t('records exceeded tracking limits; additional anomalies may be missing.', '개 레코드가 추적 한도를 초과하여 추가 이상 징후가 누락되었을 수 있습니다.')}</p>}
       {summary.truncated === true && <p className="warning">{t('Report truncated: retained evidence is not the complete result.', '보고서 일부 생략: 보존된 증거는 전체 결과가 아닙니다.')} {number(summary.omitted_issue_count)} {t('groups omitted by producer', '개 그룹 분석기에서 생략')}</p>}
@@ -124,7 +121,7 @@ export default function NetworkPatternReport({ report }: { report: PatternReport
           <h3>{t('Priority next check', '우선 확인 사항')}</h3>
           <p>{positives.length ? choose(language, ...diagnostics[positives[0].issue!.pattern][2]) : safeClear && verdict === 'no_clear_anomaly' ? t('If symptoms persist, compare another observation period or capture point.', '증상이 지속되면 다른 관찰 기간이나 캡처 지점과 비교하세요.') : t('Check capture coverage and missing evidence before drawing conclusions.', '결론을 내리기 전에 캡처 범위와 누락된 증거를 확인하세요.')}</p>
         </section>
-        {positives.length > 0 && measurementsSupported && summary.suspected_cause != null && <div className="network-cause"><CauseHypothesis value={summary.suspected_cause} leading compact/></div>}
+
       </div>
       {positives.length > 0 && <><h3>{t('First observations to inspect', '먼저 확인할 관찰 결과')}</h3>
         <ol className="network-key-patterns">{positives.slice(0, 3).map(({ issue: validIssue, index: i }) => { const issue = validIssue!; return <li data-testid="top-observation" key={i}>
@@ -135,6 +132,12 @@ export default function NetworkPatternReport({ report }: { report: PatternReport
         </li>; })}</ol>
         <p className="network-order-note muted">{t('Up to 3 groups · producer order, not a risk ranking · group counts may overlap.', '최대 3개 그룹 · 분석기 순서이며 위험도 순위 아님 · 그룹별 수치는 중복될 수 있음')}</p>
       </>}
+      <div role="group" aria-label={t('Report totals', '보고서 전체 수치')} className="network-totals">
+        <div><strong>{number(summary.suspect_flow_count)}</strong><span>{t('suspect flows', '의심 흐름')}</span></div>
+        <div><strong>{number(summary.flow_count)}</strong><span>{t('flows scanned', '검사한 흐름')}</span></div>
+        <div><strong>{number(summary.issue_count)}</strong><span>{t('issue groups', '문제 그룹')}</span></div>
+      </div>
+      {positives.length > 0 && measurementsSupported && summary.suspected_cause != null && <div className="network-guidance"><div className="network-cause"><CauseHypothesis value={summary.suspected_cause} leading compact/></div></div>}
     </section>
     <button type="button" className="secondary" aria-expanded={coverageOpen} aria-controls={coverageOpen ? 'network-coverage' : undefined} onClick={() => { setCoverageOpen(!coverageOpen); detail?.claim('coverage'); setExpanded(undefined); }}>{t('Coverage details and limitations', '분석 범위 상세 및 한계')}</button>
     {coverageOpen && <section id="network-coverage" aria-label={t('Analysis coverage', '분석 범위')}>
@@ -187,11 +190,57 @@ export default function NetworkPatternReport({ report }: { report: PatternReport
         <h5>{t('Next checks', '다음 확인 사항')}</h5><Notes values={issue.next_checks}/>
 
           {!examples.length && <p>{t('No representative flow examples were included.', '대표 흐름 예시가 포함되지 않았습니다.')}</p>}
-          {issue.pattern === 'icmp_errors' && examples.length > 0 && <NetworkICMPDetails key={index} values={examples.map(e => e.icmpDetails)}/>}
-          <ul>{examples.slice(0, 3).map((example, i) => <li key={i}>{endpoint(example.endpoint_a)} ↔ {endpoint(example.endpoint_b)} · {number(example.event_count)} {t('events', '건')}{example.facts === undefined && <p>{t('Numeric facts not reported.', '수치 사실 미제공.')}</p>}<ul>{Object.entries(example.facts ?? {}).slice(0, 8).map(([key, value]) => <li key={key}>{factLabel(language, key)}: {typeof value === 'number' && Number.isFinite(value) ? String(value) : t('Unknown', '알 수 없음')}</li>)}{Object.keys(example.facts ?? {}).length > 8 && <li>{Object.keys(example.facts ?? {}).length - 8} {t('additional facts omitted from this view.', '개의 추가 사실이 이 화면에서 생략되었습니다.')}</li>}</ul>{measurementsSupported && <NetworkMeasurements value={example.measurements}/>}</li>)}</ul>
-          <p>{number(issue.omitted_examples)} {t('examples omitted by producer', '개 예시 분석기에서 생략')} · {Math.max(0, examples.length - 3)} {t('additional examples omitted from this view. Only retained evidence is available here; no additional data is fetched.', '개 추가 예시 이 화면에서 생략. 보존된 증거만 제공되며 추가 데이터를 가져오지 않습니다.')}</p>
+          <ExampleSelection key={index} fallbackFocus={groupsHeading} issue={issue} measurementsSupported={measurementsSupported} request={expanded?.request} ordinals={exampleOrdinals(report.issues?.[index]?.examples, examples)}/>
+          <p>{number(issue.omitted_examples)} {t('examples omitted by producer', '개 예시 분석기에서 생략')} · {examples.length} {t('retained examples available by selection. Only retained evidence is available here; no additional data is fetched.', '개 보존 예시를 선택하여 확인할 수 있습니다. 보존된 증거만 제공되며 추가 데이터를 가져오지 않습니다.')}</p>
         </section>}
       </article>;
     })}
   </section>;
+}
+
+// Match only the admission fields used by the existing projection. Walk forward
+// so equal retained examples keep distinct original positions after bad siblings.
+function exampleOrdinals(raw: unknown, examples: PatternIssue['examples']): number[] {
+  if (!Array.isArray(raw) || raw.length > 10) return [];
+  let cursor = 0;
+  return examples.map(example => {
+    while (cursor < raw.length) {
+      const index = cursor++, value = record(raw[index]);
+      const a = record(value?.endpoint_a), b = record(value?.endpoint_b);
+      if (a?.ip === example.endpoint_a.ip && a?.port === example.endpoint_a.port && b?.ip === example.endpoint_b.ip && b?.port === example.endpoint_b.port && value?.event_count === example.event_count) return index;
+    }
+    return -1; // Never substitute a filtered display ordinal as source authority.
+  });
+}
+
+function ExampleSelection({ issue, measurementsSupported, request, ordinals, fallbackFocus }: { fallbackFocus: RefObject<HTMLHeadingElement | null>; issue: PatternIssue; measurementsSupported: boolean; request?: EvidenceSelection; ordinals: number[] }) {
+  const language = useReportLanguage();
+  const t = (en: string, ko: string) => choose(language, en, ko);
+  const [selected, select] = useState<number | undefined>(request?.exampleIndex);
+  const [measurements, showMeasurements] = useState<MeasurementKind | 'icmp' | undefined>(request?.measurement);
+  const [seenRequest, setSeenRequest] = useState(request);
+  if (seenRequest !== request) {
+    setSeenRequest(request); select(request?.exampleIndex); showMeasurements(request?.measurement);
+  }
+  const selector = useRef<HTMLSelectElement>(null);
+  const selectorId = useId();
+  const example = selected === undefined ? undefined : issue.examples[ordinals.indexOf(selected)];
+  const endpoint = (value: Endpoint) => `${value.ip.includes(':') ? `[${value.ip}]` : value.ip}${value.port === null ? '' : `:${value.port}`}`;
+  return <div className="network-example-selection">
+    <NetworkExampleDetail open={Boolean(example)} onClose={() => { select(undefined); showMeasurements(undefined); }} returnFocus={request ? fallbackFocus : selector} fallbackFocus={fallbackFocus} headingLabel={t('Selected representative example', '선택한 대표 예시')} closeLabel={t('Close example detail', '예시 상세 닫기')}>
+    <label htmlFor={selectorId}>{t('Representative example', '대표 예시')}</label>
+      <select id={selectorId} ref={selector} value={selected ?? ''} onChange={event => { select(event.target.value === '' ? undefined : Number(event.target.value)); showMeasurements(undefined); }}>
+        <option value="">{t('Select an example', '예시 선택')}</option>
+        {issue.examples.map((value, i) => <option key={i} value={ordinals[i]}>{ordinals[i] + 1}. {endpoint(value.endpoint_a)} ↔ {endpoint(value.endpoint_b)}</option>)}
+      </select>
+    {example && <>
+      <p>{endpoint(example.endpoint_a)} ↔ {endpoint(example.endpoint_b)} · {example.event_count} {t('events', '건')}</p>
+      {example.facts === undefined && <p>{t('Numeric facts not reported.', '수치 사실 미제공.')}</p>}
+      <ul>{Object.entries(example.facts ?? {}).map(([key, value]) => <li key={key}>{factLabel(language, key)}: {String(value)}</li>)}</ul>
+      {issue.pattern === 'icmp_errors' && <NetworkICMPDetails key={selected} values={[example.icmpDetails]} expanded={measurements === 'icmp'} onToggle={() => showMeasurements(measurements === 'icmp' ? undefined : 'icmp')}/>}
+      {measurementsSupported && <div role="group" aria-label={t('Measurement detail kind', '측정 상세 종류')} className="actions">{(['rtt', 'spacing', 'ttl', 'full'] as const).map(kind => <button key={kind} type="button" className="secondary" aria-expanded={measurements === kind} onClick={() => showMeasurements(measurements === kind ? undefined : kind)}>{({ rtt: 'RTT', spacing: t('Packet spacing', '패킷 간격'), ttl: t('TTL / Hop Limit', 'TTL / 홉 제한'), full: t('Full measurements', '전체 측정값') })[kind]}</button>)}</div>}
+      {measurementsSupported && measurements && measurements !== 'icmp' && <NetworkMeasurements value={example.measurements} kind={measurements}/>}
+    </>}
+    </NetworkExampleDetail>
+  </div>;
 }

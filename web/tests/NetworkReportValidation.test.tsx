@@ -97,6 +97,7 @@ it('shows missing facts as not reported rather than zero', () => {
   const report = structuredClone(fixtures.syn_reset);
   delete report.issues[0].examples[0].facts;
   render(<NetworkAnomalyPanel report={report}/>); openFirst();
+  fireEvent.change(screen.getByLabelText('Representative example'), { target: { value: '0' } });
   expect(screen.getByText(/Numeric facts not reported/)).toBeVisible();
 });
 it.each(['verdict-object', 'verdict-array', 'protocol-object', 'protocol-array'])('rejects non-string %s without coercion or losing independent evidence', fault => {

@@ -68,6 +68,7 @@ it('shows bounded numeric producer facts without interpreting missing values as 
   render(<NetworkAnomalyPanel report={{ ...report, issues: [{ ...report.issues[0], examples: [{ ...report.issues[0].examples[0], facts }] }] }}/>);
   openGroups();
   fireEvent.click(screen.getByRole('button', { name: /Show representative evidence/ }));
+  fireEvent.change(screen.getByLabelText('Representative example'), { target: { value: '0' } });
   for (const [key, value] of Object.entries(facts)) expect(screen.getByText(`${key}: ${value}`)).toBeVisible();
 });
 

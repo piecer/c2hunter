@@ -1,4 +1,4 @@
-import { fireEvent, screen } from '@testing-library/react';
+import { fireEvent, screen, within } from '@testing-library/react';
 
 // Explicit operator disclosure steps, shared by evidence-level regressions.
 export function openGroups() {
@@ -12,6 +12,16 @@ export function openCoverage() {
 export function openEvidence(index = 0) {
   openGroups();
   const button = screen.getAllByRole('button', { name: /^(Show|Hide) representative evidence|^(보기|숨기기) 대표 증거/ })[index];
+  if (button.getAttribute('aria-expanded') !== 'true') fireEvent.click(button);
+}
+export function selectExample(index = 0) {
+  const selector = screen.getByLabelText(/^(Representative example|대표 예시)$/);
+  if ((selector as HTMLSelectElement).value !== String(index)) fireEvent.change(selector, { target: { value: String(index) } });
+}
+export function openMeasurements(index = 0) {
+  selectExample(index);
+  const selection = screen.getByLabelText(/^(Representative example|대표 예시)$/).closest('.network-example-selection') as HTMLElement;
+  const button = within(selection).getByRole('button', { name: /^(Full measurements|전체 측정값)$/ });
   if (button.getAttribute('aria-expanded') !== 'true') fireEvent.click(button);
 }
 export async function openAI(full = false) {

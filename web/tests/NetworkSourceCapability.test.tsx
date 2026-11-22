@@ -71,7 +71,7 @@ it.each([
   expect(capability).toHaveTextContent(expected!);
   expect(capability).toHaveTextContent('available bidirectional packet-level PCAP');
   expect(screen.getByRole('heading', { name: 'Anomaly observed' })).toBeVisible();
-  expect(screen.getByRole('button', { name: /Job details/ })).toHaveAttribute('aria-expanded', 'false');
+  expect(screen.getByRole('button', { name: 'Work information' })).toHaveAttribute('aria-expanded', 'false');
   fireEvent.change(screen.getByRole('combobox'), { target: { value: 'ko' } });
   expect(within(screen.getByRole('region', { name: /입력 지원 범위/ })).getByRole('heading')).toBeVisible();
 });

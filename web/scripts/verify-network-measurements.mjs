@@ -93,7 +93,7 @@ try {
           const documentDOM = await page.locator('*').count();
           assert(documentDOM < 500);
           const viewportRects = {};
-          for (const [key, locator] of Object.entries({ verdict: glance.getByTestId('network-verdict'), firstKeypoint: glance.getByTestId('top-observation').first(), nextCheck: glance.locator('p').filter({ has: page.getByText(language === 'en' ? 'Priority next check' : '우선 확인 사항', { exact: true }) }) })) {
+          for (const [key, locator] of Object.entries({ verdict: glance.getByTestId('network-verdict'), firstKeypoint: glance.getByTestId('top-observation').first(), nextCheck: glance.getByRole('region', { name: language === 'en' ? 'Next action' : '다음 행동', exact: true }) })) {
             if (!await locator.count()) continue;
             const rect = await locator.boundingBox();
             viewportRects[key] = rect;
@@ -117,6 +117,11 @@ try {
         assert.equal(await page.getByRole('region', { name: detailName }).count(), 0);
         const button = page.getByRole('button', { name: language === 'en' ? /Show representative evidence/ : /보기 대표 증거/ });
         await button.focus();
+        await page.keyboard.press('Enter');
+        const selector = page.getByLabel(language === 'en' ? 'Representative example' : '대표 예시', { exact: true });
+        await selector.selectOption('0');
+        const fullMeasurements = page.getByRole('button', { name: language === 'en' ? 'Full measurements' : '전체 측정값', exact: true });
+        await fullMeasurements.focus();
         await page.keyboard.press('Enter');
         const detail = page.getByRole('region', { name: detailName });
         await detail.waitFor();
@@ -192,9 +197,17 @@ try {
             const evidence = articles.nth(index).getByRole('button');
             await evidence.focus();
             await page.keyboard.press(index % 2 ? 'Space' : 'Enter');
-            assert.equal(await page.getByRole('region', { name: detailName, exact: true }).count(), 3);
-            threeExamplePeak = Math.max(threeExamplePeak, await page.locator('*').count());
-            assert(threeExamplePeak < 500);
+            assert.equal(await page.getByRole('region', { name: detailName, exact: true }).count(), 0);
+            for (let example = 0; example < activeReport.issues[current * 8 + index].examples.length; example++) {
+              await selector.selectOption(String(example));
+              await fullMeasurements.focus();
+              await page.keyboard.press(example % 2 ? 'Space' : 'Enter');
+              assert.equal(await page.getByRole('region', { name: detailName, exact: true }).count(), 1);
+              threeExamplePeak = Math.max(threeExamplePeak, await page.locator('*').count());
+              assert(threeExamplePeak < 500);
+            }
+            await page.getByRole('button', { name: language === 'en' ? 'Close example detail' : '예시 상세 닫기', exact: true }).click();
+            assert(await selector.evaluate(element => document.activeElement === element));
           }
           if (current < 2) await next.click();
         }

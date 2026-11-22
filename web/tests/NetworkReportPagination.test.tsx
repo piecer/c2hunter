@@ -32,13 +32,13 @@ it('resets page and detail for replacement reports even with identical counts an
   openGroups();
   fireEvent.click(screen.getByRole('button', { name: 'Next groups' }));
   fireEvent.click(screen.getAllByRole('button', { name: /Show representative evidence/ })[0]);
-  fireEvent.change(screen.getByRole('combobox'), { target: { value: 'ko' } });
+  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'ko' } });
   rerender(<NetworkAnomalyPanel report={replacement}/>);
   openGroups();
   expect(screen.getByRole('status')).toHaveTextContent('3페이지 중 1페이지');
   expect(screen.getByRole('button', { name: '이전 그룹' })).toBeDisabled();
   expect(screen.queryByRole('region', { name: '대표 흐름 증거' })).not.toBeInTheDocument();
-  expect(screen.getByRole('combobox')).toHaveValue('ko');
+  expect(screen.getByLabelText('보고서 언어 / Report language')).toHaveValue('ko');
   // A → B → A must not resurrect A's old page or detail owner.
   rerender(<NetworkAnomalyPanel report={original}/>);
   openGroups();
@@ -83,7 +83,7 @@ it('keeps producer-discarded groups separate from retained groups on other pages
   fireEvent.click(screen.getByRole('button', { name: 'Next groups' }));
   expect(screen.getByText(/shown on this page/)).toHaveTextContent('4 shown on this page');
   expect(screen.getByText(/shown on this page/)).toHaveTextContent('16 retained groups not shown on this page');
-  fireEvent.change(screen.getByRole('combobox'), { target: { value: 'ko' } });
+  fireEvent.change(screen.getByLabelText('보고서 언어 / Report language'), { target: { value: 'ko' } });
   expect(screen.getByRole('status')).toHaveTextContent('3페이지 중 3페이지');
   expect(screen.getByText(/개 현재 페이지에 표시/)).toHaveTextContent('16 개 보존된 그룹 현재 페이지에 표시되지 않음');
   expect(screen.getByRole('button', { name: '다음 그룹' })).toBeDisabled();
@@ -96,7 +96,7 @@ it('supports Tab, Enter and Space with focus on page status and only live aria-c
   render(<NetworkAnomalyPanel report={fixtures[9]}/>);
   openGroups();
   await user.tab();
-  expect(screen.getByRole('combobox')).toHaveFocus();
+  expect(screen.getByLabelText('보고서 언어 / Report language')).toHaveFocus();
   for (const shortcut of screen.getAllByRole('button', { name: /Inspect evidence/ })) {
     await user.tab();
     expect(shortcut).toHaveFocus();

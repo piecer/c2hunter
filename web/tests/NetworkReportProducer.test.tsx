@@ -42,6 +42,6 @@ it('uses summary flow count rather than the empty compatibility flows array in t
   expect(await screen.findByRole('heading', { name: 'Anomaly observed' })).toBeVisible();
   expect(screen.queryByText(/Pattern scan →/)).not.toBeInTheDocument();
   expect(screen.queryByText('Observed bidirectional flows')).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button', { name: '작업 상세 / Job details' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Work information' }));
   expect(screen.getByText('Observed bidirectional flows').closest('article')).toHaveTextContent('1Observed bidirectional flows');
 });

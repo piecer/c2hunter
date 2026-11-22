@@ -1,9 +1,9 @@
 import NetworkSourceCapability from './NetworkSourceCapability';
-import { NetworkEvidenceContext, type NetworkEvidenceJob } from './networkEvidenceContext';
+import { NetworkEvidenceContext, type NetworkEvidenceJob, type EvidenceSelection } from './networkEvidenceContext';
 import { projectNetworkReport } from './networkReportValidation';
 import { ReportDetailContext, type ReportDetail } from './reportDetailContext';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import ReportLanguageScope from './ReportLanguage';
+import ReportLanguageScope, { ReportLanguageSelector } from './ReportLanguage';
 import { useReportLanguage } from './reportLanguageContext';
 import { choose, factLabel, translateProse, warningLabel } from './reportTranslations';
 import NetworkPatternReport, { type PatternIssue } from './NetworkPatternReport';
@@ -40,10 +40,11 @@ function CompactEvidence({ value }: { value: unknown }) {
   };
   return <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', minWidth: 100, maxWidth: 280, maxHeight: 280, overflow: 'auto', fontSize: '0.75rem' }}>{typeof value === 'object' ? format(value) : String(value)}</pre>;
 }
-export default function NetworkAnomalyPanel({ report, children, job }: { report?: NetworkAnomalyReport; children?: ReactNode; job?: NetworkEvidenceJob & { source_type?: string; mode?: string } }) {
+export default function NetworkAnomalyPanel({ report, children, job, inheritLanguage = false }: { inheritLanguage?: boolean; report?: NetworkAnomalyReport; children?: ReactNode; job?: NetworkEvidenceJob & { source_type?: string; mode?: string } }) {
+  const language = useReportLanguage();
   const [owner, setOwner] = useState<ReportDetail>();
   const [source, setSource] = useState({ report, jobId: job?.id, generation: {} });
-  const [selection, setSelection] = useState<{ index: number }>();
+  const [selection, setSelection] = useState<EvidenceSelection>();
   const live = useRef(source.generation);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -53,7 +54,8 @@ export default function NetworkAnomalyPanel({ report, children, job }: { report?
     setSource(next); setOwner(undefined); setSelection(undefined);
   }
   const current = () => mounted.current && live.current === source.generation;
-  return <NetworkEvidenceContext.Provider value={{ job, projection: projectNetworkReport(report), generation: source.generation, current, selection, navigate: index => { if (current()) { setOwner('evidence'); setSelection({ index }); } } }}><ReportDetailContext.Provider value={{ owner, claim: setOwner }}><ReportLanguageScope><ReportContent report={report}/>{job && <NetworkSourceCapability source={job}/>} {children}</ReportLanguageScope></ReportDetailContext.Provider></NetworkEvidenceContext.Provider>;
+  const content = <><ReportContent report={report}/>{job && <NetworkSourceCapability source={job}/>} {children}</>;
+  return <NetworkEvidenceContext.Provider value={{ job, projection: projectNetworkReport(report), generation: source.generation, current, selection, navigate: (index, detail) => { if (current()) { setOwner('evidence'); setSelection({ ...detail, index }); } } }}><ReportDetailContext.Provider value={{ owner, claim: setOwner }}>{inheritLanguage ? <div lang={language} className="network-report-language"><ReportLanguageSelector/>{content}</div> : <ReportLanguageScope>{content}</ReportLanguageScope>}</ReportDetailContext.Provider></NetworkEvidenceContext.Provider>;
 }
 function ReportContent({ report }: { report?: NetworkAnomalyReport }) {
   const language = useReportLanguage();

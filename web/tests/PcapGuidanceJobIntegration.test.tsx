@@ -59,6 +59,7 @@ it('keeps the integrated maximum job bounded while reaching every guide target',
   const { unmount, client } = open(value);
   const reached = new Set<string>();
   const initial = document.querySelectorAll('*').length; let peak = initial;
+  fireEvent.click(screen.getByRole('button', { name: 'Open PCAP review windows' }));
   for (let page = 0; page < 4; page++) {
     for (const [offset, button] of screen.getAllByRole('button', { name: /Review window/ }).entries()) {
       fireEvent.click(button);
@@ -79,11 +80,13 @@ it('uses one detail owner for guide evidence and legacy findings without changin
   const value = job('positive'), before = JSON.stringify(value.ddos_attack);
   const { unmount, client } = open(value);
   await screen.findByRole('region', { name: 'PCAP review guidance' });
+  fireEvent.click(screen.getByRole('button', { name: 'Open PCAP review windows' }));
   fireEvent.click(screen.getByRole('button', { name: 'Review window 1' }));
   expect(screen.getByRole('region', { name: 'Candidate evidence' })).toBeVisible();
   fireEvent.click(screen.getByRole('button', { name: /Show detailed evidence/ }));
   expect(screen.getByRole('region', { name: 'DDoS finding evidence' })).toBeVisible();
   expect(screen.queryByRole('region', { name: 'Candidate evidence' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Open PCAP review windows' }));
   fireEvent.click(screen.getByRole('button', { name: 'Review window 1' }));
   expect(screen.queryByRole('region', { name: 'DDoS finding evidence' })).not.toBeInTheDocument();
   expect(JSON.stringify(value.ddos_attack)).toBe(before);
@@ -94,6 +97,7 @@ it('renders malformed-present rejection alongside the preserved legacy report an
   const value = job('mixed');
   const successor = job('quiet_relative_udp');
   const { unmount, client } = open(value);
+  fireEvent.click(await screen.findByRole('button', { name: 'Open PCAP review windows' }));
   await screen.findByRole('button', { name: 'Review window 1' });
   const post = vi.spyOn(api, 'post').mockResolvedValue(successor);
   client.setQueryData(['job', successor.id], successor);
@@ -104,6 +108,7 @@ it('renders malformed-present rejection alongside the preserved legacy report an
   expect(post.mock.calls[0][0]).toBe(`/analysis-jobs/${value.id}/reanalyze`);
   expect(post.mock.calls[0][1]).not.toHaveProperty('pcap_attack_guidance');
   expect(screen.queryByRole('region', { name: 'Candidate evidence' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Open PCAP review windows' }));
   fireEvent.click(screen.getByRole('button', { name: 'Review window 1' }));
   expect(screen.getByRole('region', { name: 'Candidate evidence' })).toHaveTextContent('600');
   act(() => { client.setQueryData(['job', successor.id], { ...successor, pcap_attack_guidance: value.pcap_attack_guidance }); });
