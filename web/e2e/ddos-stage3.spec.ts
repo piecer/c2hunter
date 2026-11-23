@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -83,8 +83,12 @@ for (const width of [1280, 390]) for (const language of ['ko', 'en']) {
 }
 
 for (const width of [1280, 390]) for (const language of ['ko', 'en']) {
-  // Independent producer reports must not share one cumulative test deadline.
-  for (const name of Object.keys(fixture.reports)) test(`real producer scenarios ${width} ${language} ${name} retain every finding with bounded single-owner DOM`, async ({ page }, info) => {
+  // Keep the full maximum report mounted, but budget independent page inspections
+  // separately. The whole-report selection-retention journey is exercised below.
+  for (const name of Object.keys(fixture.reports)) {
+    const report = fixture.reports[name];
+    const findingPages = name === 'maximum' ? Array.from({ length: Math.ceil(report.findings.length / 8) }, (_, i) => i) : [undefined];
+    for (const findingPage of findingPages) test(`real producer scenarios ${width} ${language} ${name}${findingPage === undefined ? '' : ` page ${findingPage + 1}`} retain every finding with bounded single-owner DOM`, async ({ page }, info) => {
     await page.setViewportSize({ width, height: 900 });
     await install(page, language);
     const observations = [];
@@ -95,13 +99,19 @@ for (const width of [1280, 390]) for (const language of ['ko', 'en']) {
       const glance = page.getByRole('region', { name: language === 'en' ? 'DDoS at a glance' : 'DDoS 한눈에 보기' });
       for (const phrase of language === 'en' ? ['packet drops', 'clock skew', 'parser skipped', 'lower bounds'] : ['패킷 drop', '시계 오차', '파서가', '하한']) await expect(glance).toContainText(phrase);
     }
-    const report = fixture.reports[name]; let reached = 0, peak = 0;
+    const first = (findingPage ?? 0) * 8;
+    const end = findingPage === undefined ? report.findings.length : Math.min(first + 8, report.findings.length);
+    const navigation = page.getByRole('navigation', { name: language === 'en' ? 'DDoS finding pages' : 'DDoS 발견 항목 페이지' });
+    for (let p = 0; p < (findingPage ?? 0); p++) await navigation.getByRole('button', { name: language === 'en' ? 'Next' : '다음', exact: true }).click();
+    if (findingPage !== undefined) await expect(navigation.getByRole('status')).toHaveText(`${findingPage + 1} / ${findingPages.length}`);
+    let reached = first, peak = 0;
     do {
       const toggles = page.getByRole('button', { name: /Show detailed evidence|Hide detailed evidence|상세 근거 보기|상세 근거 숨기기/ });
       for (let i = 0; i < await toggles.count(); i++) {
         await toggles.nth(i).click();
         await expect(page.getByRole('region', { name: language === 'en' ? 'DDoS finding evidence' : 'DDoS 발견 근거' })).toHaveCount(1);
         const candidates = page.getByRole('button', { name: /Inspect candidate|후보 검토/ });
+        if (findingPage !== undefined) await expect(candidates).toHaveText(report.findings[reached].signature_candidates.map((candidate: { id: string }) => `${language === 'en' ? 'Inspect candidate' : '후보 검토'} — ${candidate.id}`));
         for (let c = 0; c < await candidates.count(); c++) {
           await candidates.nth(c).click();
           await expect(page.getByRole('region', { name: language === 'en' ? 'Candidate inspection' : '후보 검토 상세' })).toHaveCount(1);
@@ -127,12 +137,168 @@ for (const width of [1280, 390]) for (const language of ['ko', 'en']) {
       const next = page.getByRole('navigation', { name: language === 'en' ? 'DDoS finding pages' : 'DDoS 발견 항목 페이지' }).getByRole('button', { name: language === 'en' ? 'Next' : '다음', exact: true });
       if (!(await next.count()) || await next.isDisabled()) break;
       await next.click();
-    } while (reached < report.findings.length);
-    expect(reached).toBe(report.findings.length); expect(peak).toBeLessThan(900);
-    observations.push({ name, reached, peak });
+    } while (reached < end);
+    expect(reached).toBe(end); expect(peak).toBeLessThan(900);
+    observations.push({ name, first, reached, peak });
     await info.attach('scenario-dom', { body: JSON.stringify(observations), contentType: 'application/json' });
-  });
+    });
+  }
 }
+
+// Native Enter activation avoids pointer scrolling/stability work in this long
+// journey. Independent page cases above still click every finding/candidate.
+async function activate(button: Locator, initiallyCollapsed = false) {
+  // Independent read-only preconditions share one settled UI state. Complete
+  // every check before sending input, including the candidate's initial state.
+  await Promise.all([
+    expect(button).toBeVisible(),
+    expect(button).toBeEnabled(),
+    ...(initiallyCollapsed ? [expect(button).toHaveAttribute('aria-expanded', 'false')] : []),
+  ]);
+  // These controls only change in-document state. Keep native focus/key events,
+  // but skip navigation synchronization; the caller asserts each UI transition.
+  await button.press('Enter', { noWaitAfter: true });
+}
+for (const width of [1280, 390]) for (const language of ['ko', 'en']) test(`maximum cumulative every-finding selection ${width} ${language} retains one report owner`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 900 });
+  const { errors, writes } = await install(page, language);
+  const navigations: string[] = [];
+  // Frame navigation events also include the router's same-document history
+  // initialization; count document navigation requests rather than history events.
+  page.on('request', request => { if (request.isNavigationRequest() && request.frame() === page.mainFrame()) navigations.push(request.url()); });
+  await page.goto('/analyses/maximum');
+  await expect(page.getByRole('region', { name: language === 'en' ? 'DDoS at a glance' : 'DDoS 한눈에 보기' })).toBeVisible();
+  await expect(page.getByText('Unsupported DDoS report. Review coverage and update the client.')).toHaveCount(0);
+  const findings = fixture.reports.maximum.findings;
+  expect(findings).toHaveLength(100);
+  const report = page.locator('section.ddos-report');
+  await expect(report).toHaveCount(1);
+  // Keep the original Content root handle, not a locator that could resolve a
+  // replacement. Its visibility plus the navigation census fence owner resets.
+  const owner = (await report.elementHandle())!;
+  const navigation = report.getByRole('navigation', { name: language === 'en' ? 'DDoS finding pages' : 'DDoS 발견 항목 페이지' });
+  const next = navigation.getByRole('button', { name: language === 'en' ? 'Next' : '다음', exact: true });
+  const previous = navigation.getByRole('button', { name: language === 'en' ? 'Previous' : '이전', exact: true });
+  const toggles = report.getByRole('button', { name: /Show detailed evidence|Hide detailed evidence|상세 근거 보기|상세 근거 숨기기/ });
+  const evidence = page.getByRole('region', { name: language === 'en' ? 'DDoS finding evidence' : 'DDoS 발견 근거' });
+  const detail = page.getByRole('region', { name: language === 'en' ? 'Candidate inspection' : '후보 검토 상세' });
+  const close = page.getByRole('button', { name: /Close detail|상세 닫기/ });
+  const candidateLabel = language === 'en' ? 'Inspect candidate' : '후보 검토';
+  const pageCount = Math.ceil(findings.length / 8);
+  const observations: (Awaited<ReturnType<typeof geometry>> & { index: number; finding: string; candidate: string; phase: string; populated: number; ownerRetained: boolean; navigations: number })[] = [];
+  const selected = new Set<string>();
+  const initial = await geometry(page);
+  let peak = initial.nodes;
+  const observe = async (index: number, candidate: string, phase: string) => {
+    // No input occurs between these global observations. Preserve the exact
+    // role predicates and original owner handle while overlapping read waits.
+    const [, , bounds, ownerVisible] = await Promise.all([
+      expect(evidence).toHaveCount(1), expect(detail).toHaveCount(1),
+      geometry(page), owner.isVisible(),
+    ]);
+    expect(bounds.document).toBeLessThanOrEqual(width); expect(bounds.body).toBeLessThanOrEqual(width);
+    expect(bounds.nodes).toBeLessThan(900);
+    expect(ownerVisible).toBe(true); expect(navigations).toHaveLength(1);
+    peak = Math.max(peak, bounds.nodes);
+    observations.push({ index, finding: findings[index].id, candidate, phase, populated: selected.size, ownerRetained: true, navigations: navigations.length, ...bounds });
+  };
+  try {
+    for (let p = 0; p < pageCount; p++) {
+      await Promise.all([
+        expect(navigation.getByRole('status')).toHaveText(`${p + 1} / ${pageCount}`),
+        expect(toggles).toHaveCount(Math.min(8, findings.length - p * 8)),
+      ]);
+      for (let i = 0; i < Math.min(8, findings.length - p * 8); i++) {
+        const index = p * 8 + i, finding = findings[index], toggle = toggles.nth(i);
+        await activate(toggle);
+        const candidates = evidence.getByRole('button', { name: /Inspect candidate|후보 검토/ });
+        await Promise.all([
+          expect(evidence).toHaveCount(1),
+          expect(candidates).toHaveText(finding.signature_candidates.map((candidate: { id: string }) => `${candidateLabel} — ${candidate.id}`)),
+        ]);
+        expect(finding.signature_candidates.length).toBeGreaterThan(0);
+        for (let c = 0; c < finding.signature_candidates.length; c++) {
+          const candidate = candidates.nth(c), id = finding.signature_candidates[c].id;
+          await activate(candidate, true); await expect(candidate).toHaveAttribute('aria-expanded', 'true');
+          selected.add(finding.id);
+          await observe(index, id, 'selected');
+          if (index === 0 && c === 0) {
+            const action = page.getByLabel(language === 'en' ? 'Normal reference action' : '정상 참조 작업');
+            if (width < 600) await activate(close);
+            await expect(action).toBeVisible(); await action.selectOption('select');
+            await expect(page.getByRole('radio')).toHaveCount(20);
+            if (width < 600) await activate(toggle);
+            await expect(candidate).toHaveAttribute('aria-expanded', 'true');
+            await observe(index, id, 'reference-picker-overlap');
+            if (width < 600) await activate(close);
+            await action.selectOption('clear');
+            if (width < 600) await activate(toggle);
+          }
+        }
+        await activate(width < 600 ? close : toggle);
+        await Promise.all([expect(evidence).toHaveCount(0), expect(detail).toHaveCount(0)]);
+      }
+      if (p + 1 < pageCount) await activate(next);
+      else await expect(next).toBeDisabled();
+    }
+    expect([...selected]).toEqual(findings.map((finding: { id: string }) => finding.id));
+    // At maximum cumulative occupancy, return to the earliest selection without
+    // selecting it again. A reset/remount cannot satisfy this retained state.
+    for (let p = pageCount - 1; p > 0; p--) await activate(previous);
+    await expect(previous).toBeDisabled(); await activate(toggles.first());
+    const retained = findings[0].signature_candidates.at(-1).id;
+    await expect(evidence.getByRole('button', { name: `${candidateLabel} — ${retained}`, exact: true })).toHaveAttribute('aria-expanded', 'true');
+    await observe(0, retained, 'retained-at-maximum');
+    await activate(width < 600 ? close : toggles.first());
+    await Promise.all([expect(evidence).toHaveCount(0), expect(detail).toHaveCount(0)]);
+    expect(peak).toBeLessThan(900); expect(errors).toEqual([]); expect(writes).toEqual([]);
+  } finally {
+    await info.attach('maximum-cumulative-trajectory', { body: JSON.stringify({ width, language, initial, navigations, selected: [...selected], observations, peak }), contentType: 'application/json' });
+    await owner.dispose();
+  }
+});
+
+for (const width of [1280, 390]) for (const language of ['ko', 'en']) test(`maximum selection retention across every finding page ${width} ${language}`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 900 });
+  const { errors, writes } = await install(page, language);
+  await page.goto('/analyses/maximum');
+  await expect(page.getByRole('region', { name: language === 'en' ? 'DDoS at a glance' : 'DDoS 한눈에 보기' })).toBeVisible();
+  const navigation = page.getByRole('navigation', { name: language === 'en' ? 'DDoS finding pages' : 'DDoS 발견 항목 페이지' });
+  const next = navigation.getByRole('button', { name: language === 'en' ? 'Next' : '다음', exact: true });
+  const previous = navigation.getByRole('button', { name: language === 'en' ? 'Previous' : '이전', exact: true });
+  const toggle = page.getByRole('button', { name: /Show detailed evidence|Hide detailed evidence|상세 근거 보기|상세 근거 숨기기/ }).first();
+  const detail = page.getByRole('region', { name: language === 'en' ? 'Candidate inspection' : '후보 검토 상세' });
+  const evidence = page.getByRole('region', { name: language === 'en' ? 'DDoS finding evidence' : 'DDoS 발견 근거' });
+  const pageCount = Math.ceil(fixture.reports.maximum.findings.length / 8);
+  const selections: string[] = [];
+  const observations = [];
+  for (const direction of ['forward', 'backward']) {
+    for (let visit = 0; visit < pageCount; visit++) {
+      const index = direction === 'forward' ? visit : pageCount - 1 - visit;
+      await expect(navigation.getByRole('status')).toHaveText(`${index + 1} / ${pageCount}`);
+      await toggle.click(); await expect(evidence).toHaveCount(1);
+      const candidate = page.getByRole('button', { name: /Inspect candidate|후보 검토/ }).first();
+      if (direction === 'forward') {
+        selections.push(await candidate.innerText());
+        await candidate.click();
+      } else {
+        await expect(candidate).toHaveText(selections[index]);
+      }
+      await expect(candidate).toHaveAttribute('aria-expanded', 'true');
+      await expect(detail).toHaveCount(1);
+      const bounds = await geometry(page);
+      expect(bounds.document).toBeLessThanOrEqual(width); expect(bounds.nodes).toBeLessThan(900);
+      observations.push({ direction, index, selection: selections[index], ...bounds });
+      if (width < 600) await page.getByRole('button', { name: /Close detail|상세 닫기/ }).click();
+      else await toggle.click();
+      await expect(evidence).toHaveCount(0); await expect(detail).toHaveCount(0);
+      if (visit + 1 < pageCount) await (direction === 'forward' ? next : previous).click();
+      else await expect(direction === 'forward' ? next : previous).toBeDisabled();
+    }
+  }
+  expect(selections).toHaveLength(pageCount); expect(errors).toEqual([]); expect(writes).toEqual([]);
+  await info.attach('maximum-selection-retention', { body: JSON.stringify(observations), contentType: 'application/json' });
+});
 
 for (const width of [1280, 390]) for (const language of ['ko', 'en']) test(`reference picker ${width} ${language} pages, explicit assertion, clear, inherit and current-route payloads`, async ({ page }, info) => {
   await page.setViewportSize({ width, height: 900 });
