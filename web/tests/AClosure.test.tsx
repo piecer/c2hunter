@@ -12,12 +12,21 @@ function setup() {
   const state = { candidate: { ...candidate } as typeof candidate & { job_id?: string }, candidateStatus: 200, flowStatus: 200, flows: [flow()], total: 1 };
   let release!: (response: Response) => void;
   const pending = new Promise<Response>(resolve => { release = resolve; });
+  // Share the release barrier and bytes, not a native Response stream whose
+  // clone finalizers can consume it before a later write on older Node versions.
+  const reply = pending.then(async response => ({
+    body: response.body === null ? null : await response.arrayBuffer(),
+    init: { status: response.status, statusText: response.statusText, headers: new Headers(response.headers) },
+  }));
   const requests: { path: string; method: string; body?: unknown }[] = [];
   localStorage.setItem('c2hunter-token', 'token');
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input); const method = init?.method ?? 'GET';
     requests.push({ path, method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
-    if (method === 'POST' || method === 'DELETE') return pending;
+    if (method === 'POST' || method === 'DELETE') {
+      const { body, init: responseInit } = await reply;
+      return new Response(body, responseInit);
+    }
     if (path === '/api/v1/candidates/closure') return Response.json(state.candidateStatus === 200 ? state.candidate : { error: { message: 'Candidate read failed' } }, { status: state.candidateStatus });
     if (path.includes('/flows?')) return Response.json(state.flowStatus === 200 ? { items: state.flows, page: Number(new URL(path, 'http://fixture').searchParams.get('page')), page_size: 1, total: state.total } : { error: { message: 'Flow read failed' } }, { status: state.flowStatus });
     if (path.endsWith('/detection-guidance')) return Response.json({ conditions: [], adjustments: [], recommendations: [{ kind: 'MINIMUM_SCORE' }], warnings: [], recommended_reanalysis: { minimum_score: 17 } });
@@ -29,6 +38,39 @@ function setup() {
   const refresh = async (key = 'candidate-flows') => { await act(async () => { await client.invalidateQueries({ queryKey: [key] }); }); };
   return { state, requests, client, release, refresh, user: userEvent.setup() };
 }
+
+it.each([200, 204, 503])('gives each deferred write an independent response body and headers: %s', async status => {
+  const { release } = setup();
+  await screen.findByRole('button', { name: 'Flow review' });
+  const firstRequest = fetch('/api/v1/fixture-write', { method: 'POST' });
+  const secondRequest = fetch('/api/v1/fixture-write', { method: 'DELETE' });
+  let settled = false;
+  void firstRequest.then(() => { settled = true; });
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  const body = status === 204 ? null : JSON.stringify({ label: { verdict: 'BENIGN' }, note: '한글' });
+  await act(async () => release(new Response(body, { status, headers: { 'content-type': 'application/json', 'x-fixture': 'original' } })));
+  const first = await firstRequest;
+  const second = await secondRequest;
+  expect(first === second).toBe(false);
+  expect(await first.text()).toBe(body ?? '');
+  first.headers.set('x-fixture', 'changed');
+  expect(second.bodyUsed).toBe(false);
+  expect(second.headers.get('x-fixture')).toBe('original');
+  expect(await second.text()).toBe(body ?? '');
+  const later = await fetch('/api/v1/fixture-write', { method: 'POST' });
+  expect(later === first).toBe(false);
+  expect(later === second).toBe(false);
+  expect(later.bodyUsed).toBe(false);
+  expect(later.headers.get('x-fixture')).toBe('original');
+  expect(await later.text()).toBe(body ?? '');
+  for (const response of [first, second, later]) {
+    expect(response.status).toBe(status);
+    expect(response.headers.get('content-type')).toBe('application/json');
+    if (status === 204) expect(response.body).toBeNull();
+  }
+});
+
 async function draft(user: ReturnType<typeof userEvent.setup>) {
   await user.click(await screen.findByRole('button', { name: 'Flow review' }));
   await user.click(await screen.findByRole('button', { name: 'Inspect flow flow-a' }));
