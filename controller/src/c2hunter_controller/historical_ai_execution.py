@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +23,7 @@ from .ai_analysis import (
 from .ai_artifacts import build_ai_artifacts
 from .ai_feedback import REVIEW_PRIORITY_VERSION, calculate_review_priority
 from .ai_gateway import AIAnalysisCancelled, assess_candidate
+from .auth_job_context import current_job_audit
 from .baseline_admission import BaselineAdmission
 from .c2_diagnostics import C2Diagnostics
 from .historical_ai_builder import build_historical_target_snapshot
@@ -37,6 +39,7 @@ def create_saved(
     actor: str,
     payload: dict[str, Any],
     admission: BaselineAdmission | None,
+    before_publish: Callable[[str], object] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     from pydantic import TypeAdapter
 
@@ -78,6 +81,11 @@ def create_saved(
         output_schema_version="1.0",
         request_fingerprint=fingerprint,
     )
+    authority = current_job_audit()
+    if before_publish is not None:
+        before_publish(request.run_id)
+    elif authority is not None:
+        authority.reserve("ai_run", request.run_id)
     return service.repository.admit_historical_ai_run(
         request, build_historical_target_snapshot, admission=admission
     )

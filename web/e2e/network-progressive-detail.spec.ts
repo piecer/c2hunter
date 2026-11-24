@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
@@ -20,7 +21,7 @@ async function setup(page: Page, width: number, language: string, fullJob = publ
   const requests: string[] = [], errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   const jobs = ['progressive-a', 'progressive-b'].map(id => ({ id, name: id, dataset_id: 'progressive-dataset', status: 'COMPLETED', source_type: 'PCAP_UPLOAD', mode: 'PCAP_UPLOAD', description: 'Source and processing metadata remain available. '.repeat(20), analysis: { module: 'network_anomaly' }, network_anomaly: maximum.many }));
-  await page.route('**/api/v1/**', async route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
     const path = new URL(route.request().url()).pathname.replace('/api/v1', '');
     requests.push(`${route.request().method()} ${path}`);
     let body: unknown = { items: [] };
@@ -32,7 +33,7 @@ async function setup(page: Page, width: number, language: string, fullJob = publ
     else if (path === `/ai-runs/${numeric.run.id}`) body = numeric.run;
     else body = jobs.find(job => path === `/analysis-jobs/${job.id}`) ?? body;
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
-  });
+  }));
   return { requests, errors };
 }
 test('Network language selector also updates job work information', async ({ page }) => {

@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -18,7 +19,7 @@ async function install(page: Page) {
   const errors: string[] = [], writes: { path: string; body: unknown }[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await installApiFixture(page);
-  await page.route('**/api/v1/**', async route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (request.method() !== 'GET') {
       writes.push({ path, body: request.postDataJSON() });
@@ -27,7 +28,7 @@ async function install(page: Page) {
     if (path === '/api/v1/analysis-jobs') return route.fulfill({ json: { items: jobs, page: 1, page_size: 50, total: jobs.length } });
     if (path === '/api/v1/detector-weight-presets') return route.fulfill({ json: { items: [] } });
     return route.fallback();
-  });
+  }));
   return { errors, writes };
 }
 async function measure(page: Page, width: number, limit: number) {

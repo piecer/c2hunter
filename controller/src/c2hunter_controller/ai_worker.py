@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, start_http_server
 
-from .ai_analysis import AIAnalysisService
+from .ai_analysis import AIAnalysisService, AIRepository, ModelGateway
 from .ai_gateway import create_model_gateway
 from .ai_queueing import RedisAIAnalysisWorkerQueue
 from .config import Settings
@@ -141,7 +141,11 @@ class AIAnalysisWorker:
         self._heartbeat_deadline = 0.0
         from .ai_investigation_worker import InvestigationSupervisor, configured_service
 
-        investigation_service, _ = configured_service(getattr(service, "repository", None), gateway)
+        investigation_service, _ = configured_service(
+            getattr(service, "repository", None),
+            gateway,
+            auth_store=getattr(service, "auth_store", None),
+        )
         self.investigation_runtime = (
             InvestigationSupervisor(investigation_service)
             if investigation_service is not None and investigation_service.gateway is not None
@@ -296,6 +300,16 @@ def _healthy(path: Path, max_age: int) -> bool:
         return False
 
 
+def configured_ai_service(
+    repository: AIRepository, gateway: ModelGateway, settings: Settings
+) -> AIAnalysisService:
+    from .auth_runtime import build_auth_store
+
+    service = AIAnalysisService(repository, gateway)
+    service.auth_store = build_auth_store(settings)
+    return service
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="c2hunter-ai-worker")
     parser.add_argument("command", nargs="?", default="run", choices=("run", "healthcheck"))
@@ -346,7 +360,7 @@ def main() -> int:
             f"AI model is not ready: provider={settings.ai_model_provider} "
             f"model={settings.ai_model_name}"
         )
-    service = AIAnalysisService(repository, gateway)
+    service = configured_ai_service(repository, gateway, settings)
     queue = RedisAIAnalysisWorkerQueue(
         settings.redis_url,
         visibility_timeout=settings.queue_visibility_timeout_seconds,

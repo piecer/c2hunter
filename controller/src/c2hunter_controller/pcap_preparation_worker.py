@@ -11,6 +11,8 @@ from c2hunter_analysis.ddos_signatures import load_reference
 from c2hunter_analysis.network_coverage import attach_network_coverage_context
 from c2hunter_analysis.pcap import PcapParseError, parse_pcap
 
+from .auth_job_runtime import repair_job_audit, repair_pending_page
+from .auth_store import AuthStore
 from .jobs import JobState, StateMachine
 from .schemas import AnalysisJobCreate
 
@@ -58,6 +60,8 @@ class PcapPreparationWorker:
         max_attempts: int = 3,
     ) -> None:
         self.repository = repository
+        self.auth_store: AuthStore | None = None
+        self._audit_cursor: str | None = None
         self.enqueue = enqueue
         self.lease_seconds = lease_seconds
         self.lease_renew_seconds = lease_renew_seconds or max(1.0, lease_seconds / 3)
@@ -65,12 +69,19 @@ class PcapPreparationWorker:
         self.max_packets = max_packets
         self.machine = StateMachine()
 
+    def audit_status(self, job_id: str) -> str | None:
+        row = self.repository.get_job_summary(job_id)
+        return str(row["status"]) if row is not None else None
+
     def run_once(self, *, now: datetime | None = None) -> bool:
         claimed_at = now or datetime.now(UTC)
         job = self.repository.claim_pcap_preparation(
             now=claimed_at,
             lease_seconds=self.lease_seconds,
             max_attempts=self.max_attempts,
+        )
+        self._audit_cursor = repair_pending_page(
+            self.auth_store, "analysis", self.audit_status, cursor=self._audit_cursor
         )
         if job is None:
             return False
@@ -308,3 +319,9 @@ class PcapPreparationWorker:
             else self.repository.fail_pcap_preparation
         )
         publish(job, attempt=attempt, lease_token=lease_token)
+        repair_job_audit(
+            self.auth_store,
+            "analysis",
+            str(job["id"]),
+            lambda: self.audit_status(str(job["id"])),
+        )

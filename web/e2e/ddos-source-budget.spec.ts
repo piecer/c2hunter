@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
@@ -7,11 +8,11 @@ for (const name of Object.keys(jobs)) test(`supported source budgets ${name} pre
   const job = jobs[name], writes: string[] = [], errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(() => { localStorage.setItem('c2hunter-token', 'owned-budget'); localStorage.setItem('c2hunter-report-language', 'en'); });
-  await page.route('**/api/v1/**', async route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
     const req = route.request(), path = new URL(req.url()).pathname.replace('/api/v1', '');
     if (req.method() !== 'GET') writes.push(path);
     await route.fulfill({ json: path === `/analysis-jobs/${job.id}` ? job : path === '/ai-capabilities' ? { available: false, ddos_interpretation: false, reason: 'Offline budget fixture' } : { items: [] } });
-  });
+  }));
   await page.goto(`/analyses/${job.id}`);
   await expect(page.getByRole('region', { name: 'DDoS at a glance' })).toBeVisible();
   await expect(page.getByText('Unsupported DDoS report. Review coverage and update the client.')).toHaveCount(0);

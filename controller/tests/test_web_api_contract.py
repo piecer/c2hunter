@@ -49,7 +49,11 @@ def test_development_login_is_disabled_by_default_and_explicit_when_enabled() ->
 def test_analyst_api_requires_a_server_validated_bearer_token() -> None:
     client = TestClient(
         create_app(
-            Settings(environment="production", api_auth_required=True),
+            Settings(
+                environment="production",
+                api_auth_required=True,
+                account_auth_enabled=False,
+            ),
             MemoryRepository(),
         )
     )
@@ -70,6 +74,7 @@ def test_development_login_token_is_accepted_by_protected_routes() -> None:
             Settings(
                 environment="development",
                 api_auth_required=True,
+                account_auth_enabled=False,
                 dev_login_enabled=True,
             ),
             MemoryRepository(),
@@ -95,6 +100,7 @@ def test_static_tokens_enforce_viewer_and_analyst_roles() -> None:
             Settings(
                 environment="production",
                 api_auth_required=True,
+                account_auth_enabled=False,
                 viewer_token_sha256=token_hash(viewer_token),
                 analyst_token_sha256=token_hash(analyst_token),
             ),
@@ -151,6 +157,7 @@ def test_scoped_legacy_artifact_download_is_not_cross_principal(
             Settings(
                 environment="production",
                 api_auth_required=True,
+                account_auth_enabled=False,
                 viewer_token_sha256=token_hash(viewer_token),
                 analyst_token_sha256=token_hash(analyst_token),
                 pcap_artifact_io=artifact_io,
@@ -178,6 +185,7 @@ def test_development_login_is_rate_limited() -> None:
             Settings(
                 environment="development",
                 api_auth_required=True,
+                account_auth_enabled=False,
                 dev_login_enabled=True,
                 rate_limit_window_seconds=60,
                 dev_login_rate_limit=1,
@@ -201,6 +209,7 @@ def test_analysis_job_creation_is_rate_limited_per_principal() -> None:
             Settings(
                 environment="production",
                 api_auth_required=True,
+                account_auth_enabled=False,
                 admin_token_sha256=token_hash(admin_token),
                 analysis_job_rate_limit=1,
             ),

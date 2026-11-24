@@ -4,18 +4,27 @@ import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { beforeEach,expect,it,vi } from 'vitest';
 import { writeFileSync } from 'node:fs';
 import App from '../src/App';
+import { setAuthentication } from '../src/authentication';
 import { api,ApiError } from '../src/api';
 import { jobApi } from '../src/jobInvestigationApi';
 import { producer } from './jobInvestigationFixtures';
 import { parseJobWire } from '../src/jobInvestigationContract';
 const record=(name:string,value:unknown)=>{if(process.env.C2HUNTER_JOB_CORPUS_OUTPUT)writeFileSync(process.env.C2HUNTER_JOB_CORPUS_OUTPUT+'.'+name,JSON.stringify(value,null,2));};
-beforeEach(()=>{sessionStorage.clear();localStorage.setItem('c2hunter-token','principal-A');localStorage.setItem('c2hunter-report-language','en');vi.stubGlobal('matchMedia',()=>({matches:false,addEventListener:vi.fn(),removeEventListener:vi.fn()}));});
+beforeEach(()=>{sessionStorage.clear();setAuthentication('principal-A');localStorage.setItem('c2hunter-report-language','en');vi.stubGlobal('matchMedia',()=>({matches:false,addEventListener:vi.fn(),removeEventListener:vi.fn()}));});
+// Explicit server opt-in is required for legacy development login. No production fallback.
+function legacyTransport(handler:(path:string,init?:RequestInit)=>Promise<Response>) {
+ return vi.fn(async(path:string,init?:RequestInit)=>{
+  if(path.endsWith('/auth/csrf'))return Response.json({csrf_token:null,account_login_enabled:false,setup_required:false,dev_login_enabled:true});
+  if(path.endsWith('/auth/me'))return Response.json({user:null,principal:{subject:'legacy-fixture',role:'ADMIN'},csrf_token:null,session_id:null,identity_scope:'legacy:legacy-fixture',audit_available:true,auth_kind:'bearer'});
+  return handler(path,init);
+ });
+}
 function setupGet(){vi.spyOn(api,'get').mockImplementation(async(path:string)=>path==='/analysis-jobs/job'?{id:'job',name:'Saved job',status:'COMPLETED',analysis:{module:'c2'}}:path==='/analysis-jobs/B'?{id:'B',name:'Other job',status:'COMPLETED',analysis:{module:'c2'}}:path==='/ai-capabilities'?{available:false}:{items:[]});}
 function Nav(){const nav=useNavigate();return <><button onClick={()=>nav('/analyses/job')}>test route A</button><button onClick={()=>nav('/analyses/B')}>test route B</button></>;}
 function mount(path='/analyses/job'){const client=new QueryClient({defaultOptions:{queries:{retry:false,staleTime:Infinity}}});const view=render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[path]}><Nav/><App/></MemoryRouter></QueryClientProvider>);return {view,client,close(){view.unmount();client.clear();}};}
 it('normal App sign-out/login must not transfer an unresolved principal-A POST to principal-B',async()=>{
  setupGet();const posts:{token:string|null;body:string}[]=[];
- vi.stubGlobal('fetch',vi.fn(async(path:string,init?:RequestInit)=>{
+ vi.stubGlobal('fetch',legacyTransport(async(path:string,init?:RequestInit)=>{
   if(init?.method==='POST'){posts.push({token:new Headers(init.headers).get('authorization'),body:String(init.body)});throw new Error('acknowledgment lost');}
   return new Response(path.endsWith('/capabilities')?producer.fixtures.capabilities:'{"items":[],"next_cursor":null}');
  }));
@@ -98,7 +107,7 @@ it('cached real App A-B-A retires expanded detail and allows fresh history',asyn
 it.each(['job','shared'] as const)('current malformed %s 401 executes actual App invalidation without clearing pending receipt',async client=>{
  setupGet();const pending='preserved-unresolved-receipt';sessionStorage.setItem('c2hunter-job-investigation-pending-v1',pending);
  const app=mount();await screen.findByRole('heading',{name:'Saved job'});
- vi.stubGlobal('fetch',vi.fn(async()=>new Response('not JSON',{status:401})));
+ vi.stubGlobal('fetch',legacyTransport(async()=>new Response('not JSON',{status:401})));
  await act(async()=>{try{const signal=new AbortController().signal;await (client==='job'?jobApi.history('job',null,signal):api.boundedRequest('/test',{signal}));}catch{/* malformed error remains refused */}});
  expect(localStorage.getItem('c2hunter-token')).toBeNull();expect(await screen.findByRole('button',{name:'Development login'})).toBeInTheDocument();
  expect(sessionStorage.getItem('c2hunter-job-investigation-pending-v1')).toBe(pending);app.close();

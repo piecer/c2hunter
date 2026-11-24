@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from threading import BoundedSemaphore
 from typing import Any
@@ -271,7 +272,14 @@ class InvestigationService:
             limitations=overview.limitations,
         )
 
-    def admit(self, owner_id: str, job_id: str, request: object) -> tuple[InvestigationRun, bool]:
+    def admit(
+        self,
+        owner_id: str,
+        job_id: str,
+        request: object,
+        *,
+        before_publish: Callable[[str], object] | None = None,
+    ) -> tuple[InvestigationRun, bool]:
         try:
             req = InvestigationRequest.model_validate(request)
         except (ValueError, TypeError):
@@ -309,6 +317,7 @@ class InvestigationService:
             request_json=raw,
             binding_json=_wire(ExecutionBinding(source=snapshot.binding, execution=execution)),
             snapshot_json=frozen,
+            before_publish=before_publish,
         )
         return self._run(run), created
 
@@ -408,9 +417,12 @@ class InvestigationService:
             return ExecutionOutcome(claim, "STALE_CLAIM", False)
         if type(deadline_monotonic) not in {int, float} or not math.isfinite(deadline_monotonic):
             return ExecutionOutcome(claim, "INVALID_DEADLINE", False)
-        return _Execution(
-            self, claim, min(deadline_monotonic, time.monotonic() + DEADLINE_SECONDS)
-        ).run()
+        try:
+            return _Execution(
+                self, claim, min(deadline_monotonic, time.monotonic() + DEADLINE_SECONDS)
+            ).run()
+        finally:
+            self.store.repair_audit(str(claim["id"]))
 
 
 class _Execution:

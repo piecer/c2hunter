@@ -384,10 +384,14 @@ def create_pcap_export_worker(
                 raise TransientExportError("PCAP export storage unavailable") from exc
             raise
 
+    from .auth_runtime import build_auth_store
+
+    queue = PcapExportQueue(
+        repository, metrics=metrics if isinstance(metrics, PcapExportMetrics) else None
+    )
+    queue.auth_store = build_auth_store(settings)
     return PcapExportWorker(
-        PcapExportQueue(
-            repository, metrics=metrics if isinstance(metrics, PcapExportMetrics) else None
-        ),
+        queue,
         execute,
         lease_seconds=settings.pcap_export_lease_seconds,
         renew_seconds=settings.pcap_export_lease_renew_seconds,

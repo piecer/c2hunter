@@ -23,17 +23,23 @@ from .ai_investigation_store import (
     initialize_investigation_store,
 )
 from .ai_job_investigation import JobInvestigationService
+from .auth_store import AuthStore
 from .repositories import MemoryRepository, SQLiteRepository
 
 
 def configured_service(
-    repository: Any, configured_gateway: object, *, bootstrap_local: bool = False
+    repository: Any,
+    configured_gateway: object,
+    *,
+    bootstrap_local: bool = False,
+    auth_store: AuthStore | None = None,
 ) -> tuple[InvestigationService | None, str | None]:
     """Explicit app startup owns local schema. PostgreSQL needs migrate first."""
     try:
         if bootstrap_local and isinstance(repository, MemoryRepository | SQLiteRepository):
             initialize_investigation_store(repository)
         store = InvestigationRunStore(repository)
+        store.auth_store = auth_store
     except InvestigationStoreError as exc:
         return None, (
             exc.code

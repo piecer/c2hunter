@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -20,7 +21,7 @@ for (const width of [1280, 390]) for (const language of ['en', 'ko']) for (const
     let sourceError = false, newer = false, unreadable = false;
     const posts: string[] = [], reads: string[] = [], errors: string[] = [];
     page.on('pageerror', e => errors.push(e.message));
-    await page.route('**/api/v1/**', async route => {
+    await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
       const request = route.request(), url = new URL(request.url()), path = url.pathname.replace('/api/v1', '');
       if (request.method() === 'POST') {
         posts.push(path);
@@ -37,7 +38,7 @@ for (const width of [1280, 390]) for (const language of ['en', 'ko']) for (const
       else if (path === aPath) await route.fulfill({ status: unreadable ? 503 : 200, json: unreadable ? {} : a });
       else if (path === bPath) await route.fulfill({ json: b });
       else await route.fulfill({ json: { items: [] } });
-    });
+    }));
     await page.goto(`/analyses/${job.id}`);
     const openName = module === 'network' ? t('Open AI interpretation', 'AI 해석 열기') : t('Open DDoS AI interpretation', 'DDoS AI 해석 열기');
     await page.getByRole('button', { name: openName, exact: true }).click();

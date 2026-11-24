@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test } from '@playwright/test';
 import { fixture } from '../tests/investigationFixtures';
 import type { InvestigationRun } from '../src/investigationTypes';
@@ -9,7 +10,7 @@ for (const width of [1280, 390]) {
     const writes: string[] = [];
     await page.setViewportSize({ width, height: 900 });
     await page.addInitScript(() => localStorage.setItem('c2hunter-token', 'fixture-only'));
-    await page.route('**/api/v1/**', async route => {
+    await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
       const request = route.request();
       const url = new URL(request.url());
       const path = url.pathname;
@@ -25,7 +26,7 @@ for (const width of [1280, 390]) {
       else if (path === '/api/v1/ai-capabilities') body = { available: false };
       else body = { items: [] };
       await route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
-    });
+    }));
     await page.goto(`/analyses/${run.job_id}`);
     await page.getByRole('button', { name: 'AI 조사', exact: true }).click();
     await page.getByRole('button', { name: 'IP 조사 열기', exact: true }).click();

@@ -1,3 +1,4 @@
+import re
 from ipaddress import ip_address, ip_network
 from typing import Literal
 from urllib.parse import urlsplit
@@ -138,6 +139,11 @@ class Settings(BaseSettings):
     dev_login_enabled: bool = False
     dev_token_ttl_seconds: int = Field(default=28_800, gt=0, le=86_400)
     api_auth_required: bool | None = None
+    account_auth_enabled: bool | None = None
+    auth_database_path: str = "data/security/auth.sqlite3"
+    auth_audit_retention_days: int = Field(default=180, ge=1, le=3650)
+    auth_public_origin: str | None = None
+    auth_insecure_loopback_http: bool = False
     viewer_token_sha256: str = Field(default="", pattern=r"^(?:|[0-9a-f]{64})$")
     analyst_token_sha256: str = Field(default="", pattern=r"^(?:|[0-9a-f]{64})$")
     admin_token_sha256: str = Field(default="", pattern=r"^(?:|[0-9a-f]{64})$")
@@ -290,6 +296,72 @@ class Settings(BaseSettings):
             raise ValueError(
                 "ai_model_base_url must be an absolute HTTP(S) URL without embedded credentials"
             )
+        return self
+
+    @field_validator("auth_audit_retention_days", mode="before")
+    @classmethod
+    def validate_audit_retention_days(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("Audit retention must be 1..3650 days")
+        return value
+
+    @model_validator(mode="after")
+    def validate_account_security(self) -> "Settings":
+        if self.account_auth_enabled is None:
+            self.account_auth_enabled = self.environment != "test"
+        if self.account_auth_enabled and (not self.api_auth_required or self.dev_login_enabled):
+            raise ValueError(
+                "account_auth_enabled requires api_auth_required and forbids dev_login_enabled"
+            )
+        if self.environment != "test" and not self.api_auth_required:
+            raise ValueError("Deployable modes require API authentication")
+        digests = [
+            value
+            for value in (
+                self.viewer_token_sha256,
+                self.analyst_token_sha256,
+                self.admin_token_sha256,
+            )
+            if value
+        ]
+        if len(digests) != len(set(digests)):
+            raise ValueError("Static token digests must be unique across roles")
+        if self.auth_public_origin == "":
+            self.auth_public_origin = None
+        if self.auth_public_origin is not None:
+            origin = self.auth_public_origin
+            parsed = urlsplit(origin)
+            host = parsed.hostname or ""
+            try:
+                loopback = ip_address(host).is_loopback
+                valid_host = True
+            except ValueError:
+                loopback = host == "localhost"
+                valid_host = len(host) <= 253 and all(
+                    re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                    for label in host.split(".")
+                )
+            authority = f"[{host}]" if ":" in host else host
+            port = parsed.port
+            if port is not None:
+                authority += f":{port}"
+            if (
+                not valid_host
+                or port == 0
+                or not origin.isascii()
+                or any(char.isspace() or ord(char) < 32 for char in origin)
+                or origin != f"{parsed.scheme}://{authority}"
+                or parsed.username is not None
+                or parsed.password is not None
+                or (
+                    parsed.scheme != "https"
+                    and not (
+                        parsed.scheme == "http" and loopback and self.auth_insecure_loopback_http
+                    )
+                )
+                or port == (443 if parsed.scheme == "https" else 80)
+            ):
+                raise ValueError("auth_public_origin must be a canonical secure origin")
         return self
 
     @model_validator(mode="after")

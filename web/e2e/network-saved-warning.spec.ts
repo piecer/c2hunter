@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
@@ -22,11 +23,11 @@ for (const width of [1280, 390]) for (const language of ['en', 'ko']) for (const
     const requests: string[] = [], errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
     const job = { ...witness[era], warnings: [...witness[era].warnings, unknown] };
-    await page.route('**/api/v1/**', async route => {
+    await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
       const path = new URL(route.request().url()).pathname.replace('/api/v1', '');
       requests.push(`${route.request().method()} ${path}`);
       await route.fulfill({ contentType: 'application/json', body: JSON.stringify(path === `/analysis-jobs/${job.id}` ? job : { items: [] }) });
-    });
+    }));
     await page.goto(`/analyses/${job.id}`);
     const glance = page.getByRole('region', { name: ko ? '한눈에 보기' : 'At a glance', exact: true });
     if (era === 'job') await expect(glance).toBeVisible();

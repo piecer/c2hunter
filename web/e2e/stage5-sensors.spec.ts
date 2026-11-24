@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test, type Page } from '@playwright/test';
 import { sensorProducer, sensorProducerPage } from '../tests/stage5SensorFixture';
 
@@ -6,7 +7,7 @@ async function install(page: Page, maximum = sensorProducer.maximum) {
   const errors: string[] = [], writes: { path: string; body: Record<string, unknown> }[] = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
-  await page.route('**/api/v1/**', route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(route => {
     const request = route.request(), parsed = new URL(request.url()), path = parsed.pathname;
     if (request.method() !== 'GET') {
       const body = request.postDataJSON(); writes.push({ path, body });
@@ -17,7 +18,7 @@ async function install(page: Page, maximum = sensorProducer.maximum) {
     if (path === `/api/v1/sensors/${maximum.sensor_id}`) return route.fulfill({ json: maximum });
     if (path === '/api/v1/analysis-jobs/synthetic-job') return route.fulfill({ json: { id: 'synthetic-job', name: 'Synthetic job', status: 'COMPLETED' } });
     return route.fulfill({ json: sensorProducerPage(parsed.pathname + parsed.search) ?? { items: [] } });
-  });
+  }));
   return { errors, writes };
 }
 async function measure(page: Page, width: number, limit = 2500) {

@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test } from '@playwright/test';
 
 for (const kind of ['candidates', 'analyses'] as const) {
@@ -12,7 +13,7 @@ for (const kind of ['candidates', 'analyses'] as const) {
         const root = kind === 'candidates' ? '/api/v1/candidates' : '/api/v1/analysis-jobs';
         const rows = Array.from({ length: 50 }, (_, index) => ({ id: `uncached-${index}`, name: `Uncached investigation ${index}`, candidate_ip: `203.0.113.${index + 1}`, status: 'COMPLETED', score: 80, severity: 'HIGH', candidate_count: 0 }));
         const row = rows[30];
-        await page.route('**/api/v1/**', async route => {
+        await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
           const path = new URL(route.request().url()).pathname;
           if (path === root) {
             const read = ++reads;
@@ -21,7 +22,7 @@ for (const kind of ['candidates', 'analyses'] as const) {
             return route.fulfill({ json: { items, page: 1, page_size: 50, total: items.length } });
           }
           return route.fulfill({ json: path === `${root}/${row.id}` ? row : { items: [], total: 0, page: 1, page_size: 25 } });
-        });
+        }));
         await page.goto(`/${kind}`);
         const invoker = page.getByRole('link', { name: kind === 'candidates' ? row.candidate_ip : row.name, exact: true });
         await invoker.scrollIntoViewIfNeeded();
@@ -74,7 +75,7 @@ for (const kind of ['candidates', 'analyses'] as const) {
     const delayed = new Promise<void>(resolve => { release = resolve; });
     const root = kind === 'candidates' ? '/api/v1/candidates' : '/api/v1/analysis-jobs';
     const row = { id: 'deleted-row', name: 'Deleted investigation', candidate_ip: '203.0.113.88', status: 'COMPLETED', score: 80, severity: 'HIGH', candidate_count: 0 };
-    await page.route('**/api/v1/**', async route => {
+    await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
       const path = new URL(route.request().url()).pathname;
       if (path === root) {
         reads++;
@@ -82,7 +83,7 @@ for (const kind of ['candidates', 'analyses'] as const) {
         return route.fulfill({ json: { items: reads === 1 ? [row] : [], page: 1, page_size: 50, total: reads === 1 ? 1 : 0 } });
       }
       return route.fulfill({ json: path === `${root}/${row.id}` ? row : { items: [], total: 0, page: 1, page_size: 25 } });
-    });
+    }));
     await page.goto(`/${kind}`);
     const invoker = page.getByRole('link', { name: kind === 'candidates' ? row.candidate_ip : row.name, exact: true });
     await invoker.click();
@@ -103,7 +104,7 @@ for (const kind of ['candidates', 'analyses'] as const) {
     const writes: string[] = [];
     const detailReads: string[] = [];
     const rows = Array.from({ length: 151 }, (_, index) => ({ id: `record-${index + 1}`, name: `Stored investigation ${index + 1}`, candidate_ip: `203.0.113.${index + 1}`, score: 80, severity: 'HIGH', status: 'COMPLETED', candidate_count: 0 }));
-    await page.route('**/api/v1/**', async route => {
+    await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
       const url = new URL(route.request().url());
       if (route.request().method() !== 'GET') writes.push(url.pathname);
       const root = kind === 'candidates' ? '/api/v1/candidates' : '/api/v1/analysis-jobs';
@@ -116,7 +117,7 @@ for (const kind of ['candidates', 'analyses'] as const) {
         body = rows.find(row => `${root}/${row.id}` === url.pathname);
       }
       await route.fulfill({ json: body });
-    });
+    }));
     const listURL = kind === 'candidates' ? '/candidates?page=2&severity=HIGH&sort=-score' : '/analyses?page=2&search=Stored&status=COMPLETED&sort=name';
     await page.goto(listURL);
     const name = (index: number) => kind === 'candidates' ? rows[index - 1].candidate_ip : rows[index - 1].name;

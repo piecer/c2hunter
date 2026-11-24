@@ -1,4 +1,4 @@
-import { captureAuthentication, invalidateAuthentication } from './authentication';
+import { authenticationHeaders, captureAuthentication, invalidateAuthentication } from './authentication';
 import { ApiError } from './api';
 import { assertJobIdentity, JobContractError, jobEqual, parseJobPage, parseJobWire } from './jobInvestigationContract';
 import type { JobRun, JobRequest, JobStep } from './jobInvestigationTypes';
@@ -7,9 +7,9 @@ const base=(job:string)=>`/analysis-jobs/${encodeURIComponent(job)}/ai-job-inves
 const path=(job:string,id:string)=>`${base(job)}/${encodeURIComponent(id)}`;
 /** Dedicated raw-byte boundary retains duplicate-member rejection for JOB only. */
 async function request(path:string,signal:AbortSignal,body?:string,method='GET'):Promise<string>{
-  const authority=captureAuthentication(),headers=new Headers({accept:'application/json'}),token=authority.token;
-  if(token)headers.set('authorization',`Bearer ${token}`);if(body!==undefined)headers.set('content-type','application/json');
-  const response=await fetch('/api/v1'+path,{method,signal,headers,body});
+  const authority=captureAuthentication(),headers=authenticationHeaders(authority,{accept:'application/json'});
+  if(body!==undefined)headers.set('content-type','application/json');
+  const response=await fetch('/api/v1'+path,{method,signal,headers,body,credentials:'same-origin',redirect:'error'});
   invalidateAuthentication(response.status,authority,signal);
   const advertised=response.headers.get('content-length');
   if(advertised!==null&&/^\d+$/.test(advertised)&&Number(advertised)>262144){await response.body?.cancel();throw new JobContractError();}

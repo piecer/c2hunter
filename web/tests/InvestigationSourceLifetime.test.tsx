@@ -3,13 +3,14 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom';
 import { expect, it, vi } from 'vitest';
 import App from '../src/App';
+import { setAuthentication } from '../src/authentication';
 import { api } from '../src/api';
 import { investigationApi } from '../src/investigationApi';
 import { fixture } from './investigationFixtures';
 import type { InvestigationRun, SourcePreview } from '../src/investigationTypes';
 
 function mount(missing: boolean) {
-  localStorage.setItem('c2hunter-token', 'test');
+  setAuthentication('test');
   localStorage.setItem('c2hunter-report-language', 'en');
   const get = vi.spyOn(api, 'get').mockImplementation(async path => {
     if (path === '/analysis-jobs/job') { if (missing) throw new Error('Source deleted'); return { id: 'job', name: 'Source job', status: 'COMPLETED', analysis: { module: 'c2' } }; }

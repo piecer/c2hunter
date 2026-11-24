@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test } from '@playwright/test';
 
 const candidate = { id: 'composition-a', job_id: 'job-a', candidate_ip: '203.0.113.9', score: 80, severity: 'HIGH', evidence: [{ type: 'PERIODIC_BEACON', description: 'Retained reason', warnings: ['Limited coverage'] }] };
@@ -9,14 +10,14 @@ for (const section of ['operations', 'evidence', 'flows']) test(`global preview 
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(() => localStorage.setItem('c2hunter-token', 'composition'));
-  await page.route('**/api/v1/**', async route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
     const path = new URL(route.request().url()).pathname;
     if (route.request().method() !== 'GET') writes.push(path);
     if (path === '/api/v1/candidates') return route.fulfill({ json: { items: [candidate], total: 1, page: 1, page_size: 50 } });
     if (path.includes('/flows')) return route.fulfill({ json: { items: [{ flow_id: 'flow-a', job_id: 'job-a', timestamp: '2026-11-15T00:00:00Z', source_ip: '10.0.0.1', destination_ip: candidate.candidate_ip, protocol: 'TCP', direction: 'OUTBOUND', has_payload: true }], total: 1, page: 1, page_size: 50 } });
     if (missing) return route.fulfill({ status: 404, json: { error: { code: 'CANDIDATE_NOT_FOUND', message: 'Missing source' } } });
     return route.fulfill({ json: candidate });
-  });
+  }));
   await page.goto(`/candidates/composition-a?detail=${section}${section === 'evidence' ? '&evidence=0' : section === 'flows' ? '&flow_page=1&flow=flow-a' : ''}`);
   if (section === 'evidence') await expect(page.locator('.evidence.detailed')).toContainText('Retained reason');
   else await expect(page.getByRole('button', { name: section === 'flows' ? 'Mark benign flow-a' : 'Delete candidate', exact: true })).toBeVisible();
@@ -56,14 +57,14 @@ for (const control of ['transient 503', 'wrong job membership', 'unrelated candi
   let missing = false;
   const writes: string[] = [];
   const b = { ...candidate, id: 'composition-b', candidate_ip: '203.0.113.10' };
-  await page.route('**/api/v1/**', async route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
     const path = new URL(route.request().url()).pathname;
     if (route.request().method() !== 'GET') writes.push(path);
     if (path === '/api/v1/analysis-jobs/job-a') return route.fulfill({ json: { id: 'job-a', name: 'Scoped fixture', status: 'COMPLETED', analysis: { module: 'c2' }, candidate_count: 1 } });
     if (path === '/api/v1/candidates' || path === '/api/v1/analysis-jobs/job-a/candidates') return route.fulfill({ json: { items: [candidate, b], total: 2, page: 1, page_size: 50 } });
     if (missing && (control === 'transient 503' || path.includes('/analysis-jobs/') || path.endsWith('/composition-b'))) return route.fulfill({ status: control === 'transient 503' ? 503 : 404, json: { error: { code: control === 'transient 503' ? 'UNAVAILABLE' : 'CANDIDATE_NOT_FOUND' } } });
     return route.fulfill({ json: candidate });
-  });
+  }));
   await page.goto('/candidates/composition-a?detail=operations');
   await expect(page.getByRole('button', { name: 'Delete candidate', exact: true })).toBeVisible();
   const started = await page.evaluate(() => performance.now());

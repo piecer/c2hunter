@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test } from '@playwright/test';
 import { installApiFixture } from './route-fixture';
 
@@ -19,7 +20,7 @@ for (const { width, language } of [1280, 390].flatMap(width => ['ko', 'en'].map(
     const reads: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
     await installApiFixture(page);
-    await page.route('**/api/v1/**', async route => {
+    await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
       const request = route.request();
       const url = new URL(request.url());
       const path = url.pathname.replace('/api/v1', '');
@@ -46,10 +47,10 @@ for (const { width, language } of [1280, 390].flatMap(width => ['ko', 'en'].map(
           workflow_counts: { needs_review: 51, in_review: 0, action_required: 0, action_in_progress: 0, action_completed: 0, false_positive: 0, done: 0 } };
       } else return route.fallback();
       await route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
-    });
+    }));
     await page.goto('/login');
-    await page.getByLabel('Username').fill('analyst');
-    await page.getByRole('button', { name: 'Development login' }).click();
+    await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+    await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
     await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
     await page.waitForLoadState('networkidle');
     reads.length = 0;

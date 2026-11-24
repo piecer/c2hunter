@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test } from '@playwright/test';
 import { installApiFixture } from './route-fixture';
 
@@ -24,16 +25,16 @@ for (const width of [1280, 390]) {
     const errors: string[] = []; const writes: string[] = []; const reads: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
     await installApiFixture(page);
-    await page.route('**/api/v1/**', async route => {
+    await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
       const path = new URL(route.request().url()).pathname.replace('/api/v1', '');
       if (route.request().method() === 'GET') reads.push(path);
       else if (path !== '/auth/dev-login') writes.push(path);
       if (path === `/candidates/${encodedId}`) return route.fulfill({ json: candidate });
       return route.fallback();
-    });
+    }));
     await page.goto('/login');
-    await page.getByLabel('Username').fill('analyst');
-    await page.getByRole('button', { name: 'Development login' }).click();
+    await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+    await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
     await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
     await page.waitForLoadState('networkidle'); reads.length = 0;
     await page.goto(`/candidates/${encodedId}`);

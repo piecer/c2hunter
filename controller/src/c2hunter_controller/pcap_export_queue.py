@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
+from .auth_job_context import current_job_audit
+from .auth_job_runtime import repair_job_audit, repair_pending_page
+from .auth_store import AuthStore
 from .pcap_export_metrics import PcapExportMetrics
 from .pcap_export_store import (
     ACTIVE_EXPORT_STATES,
@@ -22,6 +26,8 @@ class PcapExportQueue:
 
     def __init__(self, repository: Repository, *, metrics: PcapExportMetrics | None = None) -> None:
         self.repository = repository
+        self.auth_store: AuthStore | None = None
+        self._audit_cursor: str | None = None
         self.metrics = metrics
         self.reconcile_metrics()
 
@@ -30,8 +36,18 @@ class PcapExportQueue:
             self.metrics.reconcile_queue_depth(self.repository.count_pcap_export_jobs_by_status())
 
     def enqueue(
-        self, job: PcapExportJob, *, capacity: int, per_principal_limit: int
+        self,
+        job: PcapExportJob,
+        *,
+        capacity: int,
+        per_principal_limit: int,
+        before_publish: Callable[[str], object] | None = None,
     ) -> tuple[PcapExportJob, bool]:
+        authority = current_job_audit()
+        if before_publish is not None:
+            before_publish(str(job["id"]))
+        elif authority is not None:
+            authority.reserve("pcap_export", str(job["id"]))
         try:
             result, created = self.repository.enqueue_pcap_export_job(
                 job, capacity=capacity, per_principal_limit=per_principal_limit
@@ -48,6 +64,15 @@ class PcapExportQueue:
             self.metrics.enqueue("created" if created else "reused", result)
             self.reconcile_metrics()
         return result, created
+
+    def audit_status(self, export_id: str) -> str | None:
+        row = self.get(export_id)
+        return str(row["status"]) if row is not None else None
+
+    def repair_audit(self, export_id: str) -> str:
+        return repair_job_audit(
+            self.auth_store, "pcap_export", export_id, lambda: self.audit_status(export_id)
+        )
 
     def get(self, export_id: str) -> PcapExportJob | None:
         return self.repository.get_pcap_export_job(export_id)
@@ -110,6 +135,7 @@ class PcapExportQueue:
             lease_token=lease_token,
             artifact=artifact,
         )
+        self.repair_audit(export_id)
         if updated and self.metrics is not None:
             try:
                 current = self.get(export_id)
@@ -142,6 +168,7 @@ class PcapExportQueue:
             error=error,
             retry_base_seconds=retry_base_seconds,
         )
+        self.repair_audit(export_id)
         if updated and self.metrics is not None:
             try:
                 current = self.get(export_id)
@@ -159,6 +186,7 @@ class PcapExportQueue:
 
     def cancel(self, export_id: str, *, reason: str | None = None) -> PcapExportJob:
         job = self.repository.cancel_pcap_export_job(export_id, reason=reason)
+        self.repair_audit(export_id)
         if self.metrics is not None:
             self.metrics.transition(job)
             self.reconcile_metrics()
@@ -166,6 +194,9 @@ class PcapExportQueue:
 
     def recover_expired(self, *, now: datetime | None = None) -> int:
         recovered = self.repository.recover_pcap_export_jobs(now=now)
+        self._audit_cursor = repair_pending_page(
+            self.auth_store, "pcap_export", self.audit_status, cursor=self._audit_cursor
+        )
         if self.metrics is not None:
             self.metrics.lease_expired(recovered)
             self.reconcile_metrics()

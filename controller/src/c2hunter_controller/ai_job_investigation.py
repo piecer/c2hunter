@@ -143,7 +143,14 @@ class JobInvestigationService:
             return "JOB_DISPATCH_UNSUPPORTED"
         return "UNAVAILABLE" if self.gateway is None else None
 
-    def admit(self, owner_id: str, job_id: str, request: object) -> tuple[JobRun, bool]:
+    def admit(
+        self,
+        owner_id: str,
+        job_id: str,
+        request: object,
+        *,
+        before_publish: Callable[[str], object] | None = None,
+    ) -> tuple[JobRun, bool]:
         try:
             req = JobRequest.model_validate(request)
             raw = _wire(req)
@@ -198,6 +205,7 @@ class JobInvestigationService:
                     request_json=raw,
                     binding_json=_wire(binding),
                     snapshot_json=frozen,
+                    before_publish=before_publish,
                 )
             except InvestigationError:
                 # A concurrent same-intent winner is authoritative even if today's
@@ -353,7 +361,10 @@ class JobInvestigationService:
             return ExecutionOutcome(claim, "STALE_CLAIM", False)
         if type(deadline_monotonic) not in {int, float} or not math.isfinite(deadline_monotonic):
             return ExecutionOutcome(claim, "INVALID_DEADLINE", False)
-        return _Execution(self, claim, min(deadline_monotonic, time.monotonic() + 300)).run()
+        try:
+            return _Execution(self, claim, min(deadline_monotonic, time.monotonic() + 300)).run()
+        finally:
+            self.store.repair_audit(str(claim["id"]))
 
 
 class _Execution:

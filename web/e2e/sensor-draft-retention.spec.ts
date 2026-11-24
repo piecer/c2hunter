@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test, type Page } from '@playwright/test';
 import { sensorProducer } from '../tests/stage5SensorFixture';
 
@@ -9,7 +10,7 @@ async function install(page: Page, mode: 'unsaved' | 'unconfirmed' | 'failed') {
   let finishFailure: (() => Promise<void>) | undefined;
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
-  await page.route('**/api/v1/**', route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(route => {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (request.method() !== 'GET') {
       writes.push(request.postDataJSON());
@@ -22,7 +23,7 @@ async function install(page: Page, mode: 'unsaved' | 'unconfirmed' | 'failed') {
     }
     if (path === '/api/v1/sensors') return route.fulfill({ json: { items: sensors, page: 1, page_size: 50, total: sensors.length } });
     return route.fulfill({ json: sensors.find(sensor => path.endsWith(`/${sensor.sensor_id}`)) ?? { items: [] } });
-  });
+  }));
   return { errors, writes, reloads, fail: async () => { expect(finishFailure).toBeDefined(); await finishFailure!(); } };
 }
 async function go(page: Page, index: number) {

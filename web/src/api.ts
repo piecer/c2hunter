@@ -1,4 +1,4 @@
-import { captureAuthentication, invalidateAuthentication } from './authentication';
+import { authenticationHeaders, captureAuthentication, currentAuthentication, invalidateAuthentication } from './authentication';
 import { readBoundedJSON } from './investigationTransport';
 
 export class ApiError extends Error {
@@ -6,12 +6,11 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init: RequestInit = {}, onStatus?: (status: number) => void): Promise<T> {
-  const authority = captureAuthentication(), token = authority.token;
-  const headers = new Headers(init.headers);
+  const authority = captureAuthentication();
+  const headers = authenticationHeaders(authority, init.headers);
   headers.set('accept', 'application/json');
   if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
-  if (token) headers.set('authorization', `Bearer ${token}`);
-  const response = await fetch(`/api/v1${path}`, { ...init, headers: Object.fromEntries(headers.entries()) });
+  const response = await fetch(`/api/v1${path}`, { ...init, credentials: 'same-origin', redirect: 'error', headers: Object.fromEntries(headers.entries()) });
   invalidateAuthentication(response.status, authority, init.signal);
   onStatus?.(response.status);
   // Read a clone so repeated test adapters and cache layers that return the same
@@ -25,10 +24,9 @@ async function request<T>(path: string, init: RequestInit = {}, onStatus?: (stat
 }
 
 async function download(path: string, fallbackFilename: string): Promise<void> {
-  const authority = captureAuthentication(), token = authority.token;
-  const headers: Record<string, string> = { accept: 'application/vnd.tcpdump.pcap' };
-  if (token) headers.authorization = `Bearer ${token}`;
-  const response = await fetch(`/api/v1${path}`, { headers });
+  const authority = captureAuthentication();
+  const headers = authenticationHeaders(authority, { accept: 'application/vnd.tcpdump.pcap' });
+  const response = await fetch(`/api/v1${path}`, { headers: Object.fromEntries(headers.entries()), credentials: 'same-origin', redirect: 'error' });
   if (!response.ok) {
     invalidateAuthentication(response.status, authority);
     const body = await response.clone().json().catch(() => undefined);
@@ -38,7 +36,9 @@ async function download(path: string, fallbackFilename: string): Promise<void> {
   const disposition = response.headers.get('content-disposition') ?? '';
   const match = disposition.match(/filename="([A-Za-z0-9._-]+)"/);
   const filename = match?.[1] ?? fallbackFilename;
-  const objectUrl = URL.createObjectURL(await response.blob());
+  const blob = await response.blob();
+  if (!currentAuthentication(authority)) return;
+  const objectUrl = URL.createObjectURL(blob);
   try {
     const anchor = document.createElement('a');
     anchor.href = objectUrl;
@@ -64,8 +64,9 @@ function uploadWithProgress<T>(
     request.open('PUT', `/api/v1${path}`);
     request.setRequestHeader('accept', 'application/json');
     request.setRequestHeader('content-type', contentType);
-    const authority = captureAuthentication(), token = authority.token;
-    if (token) request.setRequestHeader('authorization', `Bearer ${token}`);
+    const authority = captureAuthentication();
+    request.withCredentials = true;
+    authenticationHeaders(authority).forEach((value, key) => request.setRequestHeader(key, value));
     request.upload.onprogress = event => {
       if (event.lengthComputable) onProgress({ loaded: event.loaded, total: event.total });
     };
@@ -92,12 +93,11 @@ function uploadWithProgress<T>(
 }
 
 async function boundedRequest(path: string, init: RequestInit = {}, onHeaders?: (headers: Headers) => void): Promise<unknown> {
-  const authority = captureAuthentication(), token = authority.token;
-  const headers = new Headers(init.headers);
+  const authority = captureAuthentication();
+  const headers = authenticationHeaders(authority, init.headers);
   headers.set('accept', 'application/json');
   if (init.body) headers.set('content-type', 'application/json');
-  if (token) headers.set('authorization', `Bearer ${token}`);
-  const response = await fetch(`/api/v1${path}`, { ...init, headers: Object.fromEntries(headers.entries()) });
+  const response = await fetch(`/api/v1${path}`, { ...init, credentials: 'same-origin', redirect: 'error', headers: Object.fromEntries(headers.entries()) });
   // Keep the existing authentication invalidation flow even on malformed errors.
   invalidateAuthentication(response.status, authority, init.signal);
   onHeaders?.(response.headers);

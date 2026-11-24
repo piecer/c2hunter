@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test, type Page } from '@playwright/test';
 import { installApiFixture } from './route-fixture';
 
@@ -32,13 +33,13 @@ for (const width of [1280, 390]) {
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
     await installApiFixture(page);
-    await page.route('**/api/v1/**', async route => {
+    await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
       const path = new URL(route.request().url()).pathname;
       requests.push(`${route.request().method()} ${path}`);
       if (path === '/api/v1/dashboard') return route.fulfill({ json: dashboard });
       if (path === '/api/v1/candidates/queue-0') return route.fulfill({ json: dashboard.priority_candidates[0] });
       return route.fallback();
-    });
+    }));
     await page.goto('/');
     const trust = page.getByRole('region', { name: '집계 범위 및 수집 제한' });
     await expect(trust).toContainText('오프라인 1 · 성능 저하 1 · 누락 패킷 1,234');

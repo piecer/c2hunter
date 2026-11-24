@@ -5,6 +5,7 @@ import json
 import math
 import uuid
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
@@ -31,6 +32,9 @@ from pydantic import (
 from .ai_discovery import MAX_SELECTION_CANDIDATES
 from .ai_feedback import REVIEW_PRIORITY_VERSION, calculate_review_priority
 from .ai_gateway import AIAnalysisCancelled, assess_candidate
+from .auth_job_context import current_job_audit
+from .auth_job_runtime import repair_job_audit
+from .auth_store import AuthStore
 from .c2_diagnostics import C2Diagnostics
 from .ddos_ai import DDoSOutputError
 from .historical_evidence import HistoricalReference
@@ -915,6 +919,7 @@ class FakeGateway:
 class AIAnalysisService:
     def __init__(self, repository: AIRepository, gateway: ModelGateway) -> None:
         self.repository = repository
+        self.auth_store: AuthStore | None = None
         self.gateway = gateway
 
     def create_run(
@@ -931,6 +936,7 @@ class AIAnalysisService:
         baseline_reference: dict[str, Any] | None = None,
         allow_remote: bool = False,
         baseline_admission: BaselineAdmission | None = None,
+        before_publish: Callable[[str], object] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         if baseline_mode != "off" or baseline_reference is not None:
             from .historical_ai_execution import create_saved
@@ -950,6 +956,7 @@ class AIAnalysisService:
                     "baseline_reference": baseline_reference,
                 },
                 admission=baseline_admission,
+                before_publish=before_publish,
             )
         job = self.repository.get_job(analysis_job_id)
         if job is None:
@@ -1075,6 +1082,11 @@ class AIAnalysisService:
                     "selection_inventory": selection_inventory,
                 }
             )
+        authority = current_job_audit()
+        if before_publish is not None:
+            before_publish(str(run["id"]))
+        elif authority is not None:
+            authority.reserve("ai_run", str(run["id"]))
         stored, created = self.repository.create_ai_run(run)
         if (
             stored.get("analysis_kind", "C2") != analysis_kind
@@ -1121,7 +1133,21 @@ class AIAnalysisService:
             updated["completed_at"] = occurred_at
         return self.repository.save_ai_run(updated)
 
+    def repair_audit(self, run_id: str) -> str:
+        def read_status() -> str | None:
+            row = self.repository.get_ai_run(run_id)
+            return str(row["status"]) if row is not None else None
+
+        return repair_job_audit(self.auth_store, "ai_run", run_id, read_status)
+
     def execute(self, run_id: str) -> dict[str, Any]:
+        try:
+            return self._execute(run_id)
+        finally:
+            # Outside model error mapping, including terminal redelivery and commit-then-error.
+            self.repair_audit(run_id)
+
+    def _execute(self, run_id: str) -> dict[str, Any]:
         run = self.repository.get_ai_run(run_id)
         if run is None:
             raise AIAnalysisError("AI run not found")
@@ -1326,6 +1352,12 @@ class AIAnalysisService:
         return self.execute(run["id"]), True
 
     def cancel(self, run_id: str, reason: str) -> dict[str, Any]:
+        try:
+            return self._cancel(run_id, reason)
+        finally:
+            self.repair_audit(run_id)
+
+    def _cancel(self, run_id: str, reason: str) -> dict[str, Any]:
         run = self.repository.get_ai_run(run_id)
         if run is None:
             raise AIAnalysisError("AI run not found")

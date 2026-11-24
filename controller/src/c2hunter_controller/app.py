@@ -65,6 +65,13 @@ from .ai_queueing import (
 )
 from .allowlist_api import allowlist_router
 from .api_errors import ApiError
+from .auth_http import AccountBoundary
+from .auth_http_routes import account_router, auth_error_handler
+from .auth_job_context import current_job_audit
+from .auth_job_runtime import wire_job_audit
+from .auth_models import AuthError
+from .auth_runtime import build_auth_store
+from .auth_store import AuthStore
 from .capture_limits import allocate_sensor_limit, limit_flow_records
 from .config import Settings
 from .detection_guidance import build_detection_guidance
@@ -999,8 +1006,10 @@ def create_app(
     pcap_export_dependencies: PcapExportDependencies | None = None,
     local_analysis_worker_health_path: Path | None = None,
     local_ai_worker_enabled: bool = False,
+    auth_store: AuthStore | None = None,
 ) -> FastAPI:
     config = settings or Settings()
+    effective_auth_store = auth_store if auth_store is not None else build_auth_store(config)
     pcap_export_slots = threading.BoundedSemaphore(config.pcap_export_max_concurrent)
     if config.ai_model_endpoint_is_remote:
         logger.warning(
@@ -1522,8 +1531,14 @@ def create_app(
                 else required_role(request.method, path)
             )
             if (config.api_auth_required or investigation_request) and minimum_role is not None:
-                principal = authenticator.authenticate(request.headers.get("authorization"))
-                require_role(principal, minimum_role)
+                if getattr(request.state, "account_boundary_verified", False):
+                    principal = getattr(request.state, "principal", None)
+                    if principal is None:
+                        return cast(Response, await call_next(request))
+                else:
+                    principal = authenticator.authenticate(request.headers.get("authorization"))
+                if not getattr(request.state, "account_boundary_verified", False):
+                    require_role(principal, minimum_role)
                 request.state.principal = principal
                 if request.method == "POST" and path in {
                     "/api/v1/analysis-jobs",
@@ -1552,7 +1567,7 @@ def create_app(
 
     @app.middleware("http")
     async def observability(request: Request, call_next: Any) -> Response:
-        request.state.request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+        request.state.request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
         if investigation_path(request.url.path):
             request.state.request_id = request.state.request_id[:200]
         metric_path = _metrics_path(request.url.path)
@@ -2328,6 +2343,43 @@ def create_app(
 
     machine = StateMachine()
 
+    def reserve_analysis(job: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        context = current_job_audit()
+        if context is not None:
+            context.reserve("analysis", str(job["id"]))
+        return repo.create_job(job)
+
+    def export_owner_visible(metadata: dict[str, Any], request: Request) -> bool:
+        owner = metadata.get("principal_scope")
+        subject = _request_actor(request)
+        if getattr(request.state, "auth_session", None) is not None:
+            return bool(owner == subject)
+        return owner in {None, subject}
+
+    def finish_export(export_id: str) -> None:
+        if effective_auth_store is None:
+            return
+        winner = pcap_export_queue.get(export_id)
+        if winner is not None:
+            effective_auth_store.finish_job("pcap_export", export_id, str(winner["status"]))
+
+    def finish_analysis(job_id: str) -> None:
+        if effective_auth_store is None:
+            return
+        winner = repo.get_job_summary(job_id)
+        if winner is not None:
+            effective_auth_store.finish_job("analysis", job_id, str(winner["status"]))
+
+    def terminal_analysis(job: dict[str, Any]) -> bool:
+        won = repo.transition_job_terminal(job)
+        finish_analysis(str(job["id"]))
+        return won
+
+    def complete_analysis(job: dict[str, Any], candidates: list[dict[str, Any]]) -> bool:
+        won = repo.complete_job_with_candidates(job, candidates)
+        finish_analysis(str(job["id"]))
+        return won
+
     def record_capture_completions(sensor_id: str, payload: Heartbeat, now: datetime) -> None:
         for completion in payload.completed_capture_jobs:
             current = repo.get_job_summary(completion.job_id)
@@ -2416,6 +2468,8 @@ def create_app(
         max_attempts=config.pcap_preparation_max_attempts,
         max_packets=config.pcap_upload_max_packets,
     )
+
+    pcap_preparation_worker.auth_store = effective_auth_store
 
     def process_pcap_preparations_once() -> bool:
         return pcap_preparation_worker.run_once()
@@ -2940,6 +2994,7 @@ def create_app(
             JobState.FAILED,
             JobState.CANCELLED,
         }:
+            finish_analysis(str(job["id"]))
             work_queue.ack_result(receipt)
             return
         if result.get("status") == "EVENT":
@@ -2967,7 +3022,7 @@ def create_app(
                 job["error_code"] = "INVALID_DDOS_RESULT"
                 job["error"] = "worker returned PCAP guidance for an incompatible module"
                 machine.transition(job, JobState.FAILED, "invalid PCAP guidance owner")
-                repo.transition_job_terminal(job)
+                terminal_analysis(job)
                 work_queue.ack_result(receipt)
                 return
             if module == "network_anomaly":
@@ -2987,7 +3042,7 @@ def create_app(
                     job["error_code"] = "INVALID_DDOS_RESULT"
                     job["error"] = "worker returned an invalid DDoS report"
                     machine.transition(job, JobState.FAILED, "invalid DDoS worker result")
-                    repo.transition_job_terminal(job)
+                    terminal_analysis(job)
                     work_queue.ack_result(receipt)
                     return
                 job["ddos_attack"] = report
@@ -3002,7 +3057,7 @@ def create_app(
                 job["error_code"] = "UNSUPPORTED_ANALYSIS_MODULE"
                 job["error"] = "worker result references an unsupported analysis module"
                 machine.transition(job, JobState.FAILED, "unsupported analysis module result")
-                repo.transition_job_terminal(job)
+                terminal_analysis(job)
                 work_queue.ack_result(receipt)
                 return
             job["candidate_count"] = len(candidates)
@@ -3033,11 +3088,11 @@ def create_app(
                 "updated_at": occurred_at,
             }
         if result.get("status") == "COMPLETED":
-            won = repo.complete_job_with_candidates(job, candidates)
+            won = complete_analysis(job, candidates)
             if won and module == "c2":
                 schedule_candidate_enrichment(str(job["id"]), candidates)
         else:
-            repo.transition_job_terminal(job)
+            terminal_analysis(job)
         work_queue.ack_result(receipt)
 
     def process_results_once() -> bool:
@@ -3131,6 +3186,7 @@ def create_app(
                 job["error_code"] = "LIVE_CAPTURE_RESTART_INCOMPLETE"
                 job["error"] = reason
                 repo.save_job_metadata(job)
+                finish_analysis(str(job["id"]))
 
         def process_local_due_work() -> bool:
             live_processed = process_due_live_jobs_once()
@@ -3218,6 +3274,7 @@ def create_app(
                 job["error_code"] = "INVALID_DDOS_RESULT"
                 machine.transition(job, JobState.FAILED, "invalid DDoS analysis result")
                 repo.save_job_metadata(job)
+                finish_analysis(str(job["id"]))
                 raise ApiError(
                     500,
                     "INVALID_DDOS_RESULT",
@@ -3235,7 +3292,7 @@ def create_app(
             int(record.get("packet_count", 1)) for record in job.get("flow_records", [])
         )
         machine.transition(job, JobState.COMPLETED, "analysis completed")
-        if repo.complete_job_with_candidates(job, candidates):
+        if complete_analysis(job, candidates):
             if module == "c2":
                 schedule_candidate_enrichment(str(job["id"]), candidates)
             return job
@@ -3394,7 +3451,7 @@ def create_app(
         bind_ddos_reference(requested_job, reference_snapshot)
         requested_job["payload_signatures"] = payload_signature_snapshot()
         requested_job["allowlist"] = allowlist_snapshot()
-        job, created = repo.create_job(requested_job)
+        job, created = reserve_analysis(requested_job)
         if not created:
             check_reference_replay(job, reference_snapshot)
             check_request_replay(job, binding, payload.ddos_normal_reference)
@@ -3459,7 +3516,7 @@ def create_app(
             "phase_started_at": now.isoformat(),
             "updated_at": now.isoformat(),
         }
-        saved, created = repo.create_job(job)
+        saved, created = reserve_analysis(job)
         if not created:
             check_reference_replay(saved, reference_snapshot)
             check_request_replay(saved, binding, payload.ddos_normal_reference)
@@ -3837,7 +3894,7 @@ def create_app(
         }
         attach_ddos_coverage_context(job)
         attach_network_coverage_context(job)
-        job, created = repo.create_job(job)
+        job, created = await run_in_threadpool(reserve_analysis, job)
         if not created:
             check_reference_replay(job, reference_snapshot)
             check_request_replay(job, binding, selection)
@@ -3866,7 +3923,7 @@ def create_app(
         )
         del uploaded_bytes
         if isinstance(work_queue, MemoryControllerQueue):
-            return _public_job(execute_analysis(job))
+            return _public_job(await run_in_threadpool(execute_analysis, job))
         for state, reason in (
             (JobState.WAITING_FOR_SENSOR, "uploaded capture accepted"),
             (JobState.CAPTURING, "uploaded immutable capture selected"),
@@ -4724,6 +4781,7 @@ def create_app(
         if job is None:
             raise ApiError(404, "JOB_NOT_FOUND", "분석 작업을 찾을 수 없습니다")
         if job["status"] == JobState.CANCELLED:
+            finish_analysis(job_id)
             return _public_job(job)
         if JobState(job["status"]) in {
             JobState.COMPLETED,
@@ -4741,7 +4799,7 @@ def create_app(
                 "phase_started_at": occurred_at,
                 "updated_at": occurred_at,
             }
-        if repo.transition_job_terminal(job):
+        if terminal_analysis(job):
             return _public_job(job)
         winner = repo.get_job_summary(job_id)
         if winner is not None and winner.get("status") == JobState.CANCELLED:
@@ -4891,7 +4949,7 @@ def create_app(
             reanalysis_job["network_coverage_context"] = network_coverage_context(source)
         attach_ddos_coverage_context(reanalysis_job)
         attach_network_coverage_context(reanalysis_job)
-        job, created = repo.create_job(reanalysis_job)
+        job, created = reserve_analysis(reanalysis_job)
         if not created:
             check_reference_replay(job, reference_snapshot)
             check_request_replay(
@@ -5444,6 +5502,7 @@ def create_app(
             current = existing
             for _ in range(3000):
                 if current.get("status") not in {"QUEUED", "RUNNING"}:
+                    finish_export(str(current["id"]))
                     response.status_code = 201
                     return public_job(current)
                 sleep(0.01)
@@ -5745,6 +5804,7 @@ def create_app(
                 for stage in (*PCAP_EXPORT_STAGES, "total"):
                     if stage in stage_seconds:
                         observe_pcap_export_stage(stage, stage_seconds[stage])
+                finish_export(str(stored["id"]))
         finally:
             if slot_owned:
                 pcap_export_slots.release()
@@ -5776,7 +5836,7 @@ def create_app(
             ) from exc
         if metadata is None:
             raise ApiError(404, "PCAP_EXPORT_NOT_FOUND", "PCAP export를 찾을 수 없습니다")
-        if metadata.get("principal_scope") not in {None, _request_actor(request)}:
+        if not export_owner_visible(metadata, request):
             raise ApiError(404, "PCAP_EXPORT_NOT_FOUND", "PCAP export를 찾을 수 없습니다")
         return public_job(adapt_sync_export(metadata))
 
@@ -5799,10 +5859,7 @@ def create_app(
                     "PCAP_EXPORT_STORAGE_ERROR",
                     "PCAP export storage is temporarily unavailable",
                 ) from exc
-            if legacy is None or legacy.get("principal_scope") not in {
-                None,
-                _request_actor(request),
-            }:
+            if legacy is None or not export_owner_visible(legacy, request):
                 raise ApiError(404, "PCAP_EXPORT_NOT_FOUND", "PCAP export를 찾을 수 없습니다")
             return JSONResponse(
                 status_code=409,
@@ -5824,6 +5881,7 @@ def create_app(
                 "PCAP_EXPORT_STORAGE_ERROR",
                 "PCAP export storage is temporarily unavailable",
             ) from exc
+        finish_export(export_id)
         if current["status"] in {"COMPLETED", "FAILED"}:
             return JSONResponse(
                 status_code=409,
@@ -5878,10 +5936,7 @@ def create_app(
                 "PCAP_EXPORT_STORAGE_ERROR",
                 "PCAP export storage is temporarily unavailable",
             ) from exc
-        if authorized_metadata is None or authorized_metadata.get("principal_scope") not in {
-            None,
-            _request_actor(request),
-        }:
+        if authorized_metadata is None or not export_owner_visible(authorized_metadata, request):
             raise ApiError(404, "PCAP_EXPORT_NOT_FOUND", "PCAP export를 찾을 수 없습니다")
         if config.pcap_artifact_io == "legacy":
             stored = repo.get_export(export_id)
@@ -6049,6 +6104,24 @@ def create_app(
             },
         )
 
+    app.state.auth_store = effective_auth_store
+    app.include_router(account_router(config, effective_auth_store))
+    app.add_exception_handler(AuthError, auth_error_handler)
+    app.add_middleware(
+        AccountBoundary, settings=config, store=effective_auth_store, authenticator=authenticator
+    )
+    wire_job_audit(
+        effective_auth_store,
+        ai_service=ai_service,
+        investigation_service=investigation_service,
+        job_investigation_service=job_investigation_service,
+        pcap_export_queue=pcap_export_queue,
+    )
+    from .auth_retention import bind_audit_retention
+
+    app.state.auth_retention = None
+    if config.account_auth_enabled and effective_auth_store is not None:
+        bind_audit_retention(app, effective_auth_store, config.auth_audit_retention_days)
     return app
 
 

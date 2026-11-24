@@ -7,7 +7,8 @@ import { useReportDetail } from './reportDetailContext';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from './api';
-import { captureAuthentication, currentAuthentication } from './authentication';
+import { captureAuthentication, currentAuthentication, hasRole } from './authentication';
+import RoleControl from './RoleControl';
 import { useInterpretationAdmission } from './interpretationAdmission';
 import InterpretationHistory from './InterpretationHistory';
 import { useInterpretationRuns } from './useInterpretationRuns';
@@ -58,7 +59,7 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
   const pendingFocus = useRef<string | undefined>(undefined);
   const t = (en: string, ko: string) => choose(language, en, ko);
   const client = useQueryClient();
-  const capabilities = useQuery<Capabilities, Error>({ queryKey: ['ai-capabilities'], queryFn: () => api.get('/ai-capabilities'), retry: false });
+  const capabilities = useQuery<Capabilities, Error>({ queryKey: ['ai-capabilities'], queryFn: () => api.get('/ai-capabilities'), enabled: hasRole('ANALYST'), retry: false });
   const config = capabilities.data;
   const [consentedDestination, setConsentedDestination] = useState<string | null>(null);
   const allowRemote = Boolean(config?.remote && config.destination && consentedDestination === config.destination);
@@ -148,7 +149,7 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
     {start.error && <p role="alert" className="error-text">{t('AI run could not be started', 'AI 실행을 시작하지 못했습니다')}: {start.error.message}</p>}
     {runs.isLoading && <p role="status">{t('Loading saved AI runs…', '저장된 AI 실행 조회 중…')}</p>}
     {(runs.isError || run.isError) && <p role="alert" className="error-text">{t('Saved AI run could not be read; status is unconfirmed', '저장된 AI 실행을 읽지 못했습니다. 상태를 확인할 수 없습니다')}: {boundedText(runs.error?.message ?? run.error?.message)}</p>}
-    {(statusUnknown || capabilities.isError || runs.isError || run.isError) && <button type="button" className="secondary" disabled={capabilities.isFetching || runs.isFetching || run.isFetching} onClick={() => { void capabilities.refetch(); void runs.refetch(); if (latest) void run.refetch(); }}>{t('Retry status lookup', '상태 조회 재시도')}</button>}
+    {(statusUnknown || capabilities.isError || runs.isError || run.isError) && <button type="button" className="secondary" disabled={capabilities.isFetching || runs.isFetching || run.isFetching} onClick={() => { if (hasRole('ANALYST')) void capabilities.refetch(); void runs.refetch(); if (latest) void run.refetch(); }}>{t('Retry status lookup', '상태 조회 재시도')}</button>}
     {!runs.isLoading && !runs.isError && !current && <p className="muted">{t('No saved AI interpretation runs.', '저장된 AI 해석 실행이 없습니다.')}</p>}
     {controlled && <><div className="ai-run-summary" role="status" aria-label={t('Latest AI run', '최신 AI 실행')}><span className={`badge ${active ? 'medium' : ''}`}>{t(({ QUEUED: 'Queued', PREPARING: 'Preparing', ANALYZING: 'Analyzing', VALIDATING: 'Validating', COMPLETED: 'Completed', FAILED: 'Failed', CANCELLED: 'Cancelled' } as Record<string, string>)[controlled.status] ?? boundedText(controlled.status), ({ QUEUED: '대기 중', PREPARING: '준비 중', ANALYZING: '해석 중', VALIDATING: '검증 중', COMPLETED: '완료', FAILED: '실패', CANCELLED: '취소됨' } as Record<string, string>)[controlled.status] ?? boundedText(controlled.status))}</span><span>{t('Requested language', '요청 언어')}: {controlled.language === 'ko' ? '한국어' : 'English'}</span><span>{t('Run created', '실행 생성')}: {boundedText(controlled.created_at) || '—'}</span></div>
       {typeof controlled.progress_percent === 'number' && Number.isFinite(controlled.progress_percent) && <progress aria-label={t('AI interpretation progress', 'AI 해석 진행률')} max="100" value={Math.max(0, Math.min(100, controlled.progress_percent))}/>}
@@ -160,7 +161,7 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
       {failureLabel && <p className="error-text">{failureLabel}</p>}
       {current.status === 'COMPLETED' && !result && <p role="alert">{t('No validated interpretation is available for this run.', '이 실행의 검증된 해석 결과가 없습니다.')}</p>}
     </>}
-      {active && <button type="button" className="secondary" disabled={cancel.blocked || cancel.capacity || run.isError} onClick={() => { if (currentOwner() && controlled) admissionOwner.requestCancellation(controlled, currentOwner); }}>{cancel.pending ? t('Requesting cancellation…', '취소 요청 중…') : t('Cancel AI run', 'AI 실행 취소')}</button>}
+      {active && <RoleControl><button type="button" className="secondary" disabled={cancel.blocked || cancel.capacity || run.isError} onClick={() => { if (currentOwner() && controlled) admissionOwner.requestCancellation(controlled, currentOwner); }}>{cancel.pending ? t('Requesting cancellation…', '취소 요청 중…') : t('Cancel AI run', 'AI 실행 취소')}</button></RoleControl>}
     {open && v2 && <NetworkNumericEvidence value={numeric} allowed={numericAllowed} navigate={(id, reference) => { if (navigationOwner.current !== navigationToken || !numericAllowed) return; const target = citationTarget(evidence, current, selectedId ?? latest?.id ?? displaySaved?.id, id); if (target.index !== undefined) { setFullOwner(undefined); evidence?.navigate(target.index, { exampleIndex: typeof reference.example_index === 'number' ? reference.example_index : undefined, measurement: reference.kind === 'measurement' ? reference.metric === 'ttl_observed' ? 'ttl' : reference.metric === 'interarrival_variation_ms' ? 'spacing' : 'rtt' : undefined }); } }}/> }
     {open && result && <><p>{v2 ? t('AI prose — numerical claims are unverified.', 'AI 원문 — 수치 주장은 검증되지 않았습니다.') : t('Legacy AI output — no verified numeric evidence.', '이전 AI 출력 — 검증된 수치 근거 없음.')}</p><p className="muted">{t('AI-generated interpretation — analyst review required; not a confirmed diagnosis.', 'AI 생성 해석 — 분석가 검토 필요; 확정 진단이 아닙니다.')}</p>
       <InterpretationProse initialPosition={prosePosition.current} onPositionChange={value => { prosePosition.current = value; }} key={resultKey} summary={proseText(result.summary)} language={result.language} full={fullOwner === resultKey} setFull={value => setFullOwner(value ? resultKey : undefined)} title={t('Full AI interpretation', 'AI 해석 전체 원문')} sections={[
@@ -175,8 +176,8 @@ export default function NetworkAIInterpretation({ jobId, completed }: { jobId: s
         <p>{t('Existing AI output is not automatically translated. Changing report language changes labels only; use the manual button for a new interpretation.', '기존 AI 출력은 자동 번역되지 않습니다. 보고서 언어 변경은 항목명만 바꾸며 새 해석은 버튼으로 직접 요청하세요.')}</p>
       </>}</details>
     </>}
-    {open && <button type="button" className="secondary" aria-expanded={newOpen} onClick={() => setNewOpen(!newOpen)}>{t('New AI interpretation', '새 AI 해석')}</button>}
-    {open && newOpen && <><div className="header-actions"><div><p className="eyebrow">{t('BOUNDED REPORT EVIDENCE', '제한된 보고서 증거')}</p></div><div className="ai-run-controls"><button type="button" disabled={!canStart || start.isPending || start.isError} onClick={() => { if (currentOwner() && canStart && !admission.current) { admission.current = true; start.mutate({ destination: config ? { remote: config.remote, destination: config.destination, provider: config.provider, model_name: config.model_name } : undefined, current: admissionOwner.current, knownRunId: latest?.id, body: { idempotency_key: `web-${jobId}-${crypto.randomUUID()}`, analysis_kind: 'NETWORK_ANOMALY', language, allow_remote: allowRemote } }); } }}>{start.isPending ? t('Starting…', '시작 중…') : t('AI interpretation', 'AI 해석')}</button></div></div>
+    {open && <RoleControl><button type="button" className="secondary" aria-expanded={newOpen} onClick={() => setNewOpen(!newOpen)}>{t('New AI interpretation', '새 AI 해석')}</button></RoleControl>}
+    {hasRole('ANALYST') && open && newOpen && <><div className="header-actions"><div><p className="eyebrow">{t('BOUNDED REPORT EVIDENCE', '제한된 보고서 증거')}</p></div><div className="ai-run-controls"><button type="button" disabled={!canStart || start.isPending || start.isError} onClick={() => { if (currentOwner() && canStart && !admission.current) { admission.current = true; start.mutate({ destination: config ? { remote: config.remote, destination: config.destination, provider: config.provider, model_name: config.model_name } : undefined, current: admissionOwner.current, knownRunId: latest?.id, body: { idempotency_key: `web-${jobId}-${crypto.randomUUID()}`, analysis_kind: 'NETWORK_ANOMALY', language, allow_remote: allowRemote } }); } }}>{start.isPending ? t('Starting…', '시작 중…') : t('AI interpretation', 'AI 해석')}</button></div></div>
     <p>{t('Observed facts are in the deterministic report above. AI offers possible causes and next checks, not proven root causes or attack classifications.', '관찰된 사실은 위의 결정론적 보고서에 있습니다. AI는 가능한 원인과 다음 확인 사항을 제안하며 근본 원인이나 공격 여부를 확정하지 않습니다.')}</p>
     <p className="muted">{t('Manual only. The server sends a bounded report context to the configured model, not raw packets or payload. No inference runs on page load or language change.', '수동 실행 전용입니다. 서버는 원시 패킷이나 페이로드 대신 제한된 보고서 문맥을 설정된 모델에 보냅니다. 페이지 로드나 언어 변경으로 AI가 실행되지 않습니다.')}</p>
     {config && <p>{t('Provider / model / destination', '제공자 / 모델 / 전송 대상')}: {config.provider} · {config.model_name} · {config.destination ?? t('Not reported', '보고되지 않음')}</p>}

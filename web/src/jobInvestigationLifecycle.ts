@@ -1,4 +1,4 @@
-import { captureAuthentication, currentAuthentication } from './authentication';
+import { accountState, captureAuthentication, currentAuthentication } from './authentication';
 import { jobSHA256 } from './jobInvestigationHash';
 import { InvestigationOwner } from './investigationLifecycle';
 import { assertJobIdentity, decodeJobJSON, JobContractError, parseJobWire } from './jobInvestigationContract';
@@ -22,11 +22,18 @@ const KEY='c2hunter-job-investigation-pending-v1';
 /** One bounded, tab-local unresolved admission. No eviction/rebinding/retry on mount.
  * Storage failures block fresh admission; history remains independent.
  */
+function receiptAuthority() {
+  const a = captureAuthentication();
+  if (a.authKind === 'session' && a.identityScope && a.sessionId) return jobSHA256(JSON.stringify(['job-intent-account-v2', a.identityScope]));
+  if (accountState().status !== 'legacy' && !a.token) throw new Error('Server identity is not confirmed; admission recovery is unavailable');
+  return jobSHA256(JSON.stringify(['job-intent-authority-v1', a.token]));
+}
 export class JobIntent {
-  private authority=jobSHA256(JSON.stringify(['job-intent-authority-v1',captureAuthentication().token]));
+  private authentication=captureAuthentication();
+  private authority=receiptAuthority();
   constructor(private storage:StoragePort){}
   pending():Pending|null{
-    if(this.authority!==jobSHA256(JSON.stringify(['job-intent-authority-v1',captureAuthentication().token])))throw new Error('Authentication changed; reopen the investigation');
+    if(!currentAuthentication(this.authentication)||this.authority!==receiptAuthority())throw new Error('Authentication changed; reopen the investigation');
     const raw=this.storage.getItem(KEY);if(raw===null)return null;
     const value=decodeJobJSON(raw,32768);
     if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).sort().join(',')!=='authority,body,job')throw new JobContractError();

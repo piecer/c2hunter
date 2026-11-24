@@ -2,13 +2,13 @@ services:
   postgres:
     image: postgres:16.6-alpine3.21@sha256:1d04b9ba1d4996401f2552b51beda8187f175c0645c091e4781134fc9c9a3eef
     environment: { POSTGRES_DB: "${POSTGRES_DB:-c2hunter}", POSTGRES_USER: "${POSTGRES_USER:-c2hunter}", POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}" }
-    volumes: [postgres-data:/var/lib/postgresql/data]
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
     healthcheck: { test: [CMD-SHELL, "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"], interval: 10s, timeout: 5s, retries: 10 }
     restart: unless-stopped
   redis:
     image: redis:7.4.2-alpine3.21@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952
     command: [redis-server, --appendonly, "yes"]
-    volumes: [redis-data:/data]
+    volumes: ["redis-data:/data"]
     networks:
       default:
         ipv4_address: 172.30.0.11
@@ -17,20 +17,21 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:24.8.12.28-alpine@sha256:7347456e171a6ec64650eb53000d682b8484192b9adeae1f9642699963b5879f
     environment: { CLICKHOUSE_DB: "${CLICKHOUSE_DB:-c2hunter}", CLICKHOUSE_USER: "${CLICKHOUSE_USER:-c2hunter}", CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}" }
-    volumes: [clickhouse-data:/var/lib/clickhouse]
+    volumes: ["clickhouse-data:/var/lib/clickhouse"]
     healthcheck: { test: [CMD-SHELL, "wget -q -O- 'http://127.0.0.1:8123/ping' | grep -q Ok"], interval: 10s, timeout: 5s, retries: 15 }
     restart: unless-stopped
   minio:
     image: quay.io/minio/minio:RELEASE.2025-02-07T23-21-09Z@sha256:640c22768ed5dbc92eacc14502a1b06a1c708fa60431345c78dfc22917062e93
     command: server /data --console-address :9001
     environment: { MINIO_ROOT_USER: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER}", MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}" }
-    volumes: [minio-data:/data]
-    healthcheck: { test: [CMD, curl, -f, http://127.0.0.1:9000/minio/health/live], interval: 10s, timeout: 5s, retries: 15 }
+    volumes: ["minio-data:/data"]
+    healthcheck: { test: [CMD, curl, -f, "http://127.0.0.1:9000/minio/health/live"], interval: 10s, timeout: 5s, retries: 15 }
     restart: unless-stopped
   postgres-migrate:
     build: { context: ., dockerfile: scripts/controller.Dockerfile }
     command: [python, -m, c2hunter_controller.migrate]
     environment:
+      C2HUNTER_ACCOUNT_AUTH_ENABLED: "${C2HUNTER_ACCOUNT_AUTH_ENABLED:-true}"
       C2HUNTER_DATABASE_URL: "postgresql://${POSTGRES_USER:-c2hunter}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-c2hunter}"
     depends_on: { postgres: { condition: service_healthy } }
     restart: "no"
@@ -39,7 +40,9 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
+      C2HUNTER_AUTH_AUDIT_RETENTION_DAYS: "${C2HUNTER_AUTH_AUDIT_RETENTION_DAYS:-180}"
       C2HUNTER_ENVIRONMENT: "${C2HUNTER_ENVIRONMENT:-development}"
+      C2HUNTER_ACCOUNT_AUTH_ENABLED: "${C2HUNTER_ACCOUNT_AUTH_ENABLED:-true}"
       C2HUNTER_DATABASE_URL: "postgresql://${POSTGRES_USER:-c2hunter}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-c2hunter}"
       C2HUNTER_REDIS_URL: redis://redis:6379/0
       C2HUNTER_CLICKHOUSE_URL: http://clickhouse:8123
@@ -53,6 +56,8 @@ services:
       C2HUNTER_PCAP_PREPARATION_LEASE_SECONDS: "${C2HUNTER_PCAP_PREPARATION_LEASE_SECONDS:-120}"
       C2HUNTER_PCAP_PREPARATION_LEASE_RENEW_SECONDS: "${C2HUNTER_PCAP_PREPARATION_LEASE_RENEW_SECONDS:-30}"
       C2HUNTER_PCAP_PREPARATION_MAX_ATTEMPTS: "${C2HUNTER_PCAP_PREPARATION_MAX_ATTEMPTS:-3}"
+      C2HUNTER_AUTH_PUBLIC_ORIGIN: "${C2HUNTER_AUTH_PUBLIC_ORIGIN:-}"
+      C2HUNTER_AUTH_INSECURE_LOOPBACK_HTTP: "${C2HUNTER_AUTH_INSECURE_LOOPBACK_HTTP:-false}"
       C2HUNTER_DEV_LOGIN_ENABLED: "${C2HUNTER_DEV_LOGIN_ENABLED:-false}"
       C2HUNTER_DEV_TOKEN_TTL_SECONDS: "${C2HUNTER_DEV_TOKEN_TTL_SECONDS:-28800}"
       C2HUNTER_API_AUTH_REQUIRED: "${C2HUNTER_API_AUTH_REQUIRED:-true}"
@@ -133,7 +138,7 @@ services:
     restart: unless-stopped
   worker:
     build: { context: ., dockerfile: scripts/worker.Dockerfile }
-    environment: { C2HUNTER_REDIS_URL: redis://redis:6379/0, C2HUNTER_DATABASE_URL: "postgresql://${POSTGRES_USER:-c2hunter}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-c2hunter}" }
+    environment: { C2HUNTER_REDIS_URL: "redis://redis:6379/0", C2HUNTER_DATABASE_URL: "postgresql://${POSTGRES_USER:-c2hunter}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-c2hunter}" }
     depends_on: { postgres-migrate: { condition: service_completed_successfully }, controller: { condition: service_healthy }, redis: { condition: service_healthy } }
     healthcheck: { test: [CMD, python, -m, c2hunter_worker, healthcheck, --max-age, "30"], interval: 15s, timeout: 5s, retries: 5 }
     restart: unless-stopped
@@ -142,6 +147,7 @@ services:
     command: [python, -m, c2hunter_controller.pcap_export_worker, run]
     environment:
       C2HUNTER_ENVIRONMENT: "${C2HUNTER_ENVIRONMENT:-development}"
+      C2HUNTER_ACCOUNT_AUTH_ENABLED: "${C2HUNTER_ACCOUNT_AUTH_ENABLED:-true}"
       C2HUNTER_DATABASE_URL: "postgresql://${POSTGRES_USER:-c2hunter}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-c2hunter}"
       C2HUNTER_S3_ENDPOINT: http://minio:9000
       C2HUNTER_S3_ACCESS_KEY: "${MINIO_ROOT_USER}"
@@ -181,6 +187,7 @@ services:
     command: [python, -m, c2hunter_controller.pcap_offset_index_worker, run]
     environment:
       C2HUNTER_ENVIRONMENT: "${C2HUNTER_ENVIRONMENT:-development}"
+      C2HUNTER_ACCOUNT_AUTH_ENABLED: "${C2HUNTER_ACCOUNT_AUTH_ENABLED:-true}"
       C2HUNTER_DATABASE_URL: "postgresql://${POSTGRES_USER:-c2hunter}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-c2hunter}"
       C2HUNTER_S3_ENDPOINT: http://minio:9000
       C2HUNTER_S3_ACCESS_KEY: "${MINIO_ROOT_USER}"
@@ -244,6 +251,7 @@ services:
     command: [python, -m, c2hunter_controller.ai_worker, run]
     environment:
       C2HUNTER_ENVIRONMENT: "${C2HUNTER_ENVIRONMENT:-development}"
+      C2HUNTER_ACCOUNT_AUTH_ENABLED: "${C2HUNTER_ACCOUNT_AUTH_ENABLED:-true}"
       C2HUNTER_DATABASE_URL: "postgresql://${POSTGRES_USER:-c2hunter}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-c2hunter}"
       C2HUNTER_REDIS_URL: redis://redis:6379/0
       C2HUNTER_S3_ENDPOINT: http://minio:9000
@@ -268,7 +276,7 @@ services:
     build: ./web
     ports: ["${WEB_PORT:-8080}:8080"]
     depends_on: { controller: { condition: service_healthy } }
-    healthcheck: { test: [CMD, wget, -q, -O-, http://127.0.0.1:8080/healthz], interval: 10s, timeout: 3s, retries: 10 }
+    healthcheck: { test: [CMD, wget, -q, -O-, "http://127.0.0.1:8080/healthz"], interval: 10s, timeout: 3s, retries: 10 }
     networks:
       default:
         ipv4_address: 172.30.0.10

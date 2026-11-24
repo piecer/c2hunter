@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { installApiFixture } from './route-fixture';
 
@@ -17,7 +18,7 @@ const run = {
 
 async function installSelectionFixture(page: Page) {
   await installApiFixture(page);
-  await page.route('**/api/v1/**', async route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
     const url = new URL(route.request().url());
     const path = url.pathname.replace('/api/v1', '');
     let body: unknown;
@@ -41,7 +42,7 @@ async function installSelectionFixture(page: Page) {
       };
     } else return route.fallback();
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
-  });
+  }));
 }
 
 async function expectWithinViewport(locator: Locator) {
@@ -68,8 +69,8 @@ for (const width of [1280, 390]) {
     page.on('pageerror', error => errors.push(error.message));
     await installSelectionFixture(page);
     await page.goto('/login');
-    await page.getByLabel('Username').fill('analyst');
-    await page.getByRole('button', { name: 'Development login' }).click();
+    await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+    await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
     await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
     await page.goto('/analyses/job-1');
     await page.getByRole('button', { name: 'AI 조사', exact: true }).click();

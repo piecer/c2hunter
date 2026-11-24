@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test } from '@playwright/test';
 import { historyListing, historyProducer, historyUnavailable } from '../tests/stage5HistoryFixture';
 import { installApiFixture } from './route-fixture';
@@ -11,7 +12,7 @@ for (const width of [1280, 390]) test(`Real DDoS list availability and opaque de
   const errors: string[] = [], writes: string[] = [], detailReads: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await installApiFixture(page);
-  await page.route('**/api/v1/**', async route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
     const request = route.request(), url = new URL(request.url());
     if (request.method() !== 'GET') { writes.push(url.pathname); return route.abort(); }
     if (url.pathname === '/api/v1/analysis-jobs') {
@@ -26,7 +27,7 @@ for (const width of [1280, 390]) test(`Real DDoS list availability and opaque de
       return route.fulfill({ contentType: 'application/json', body: historyProducer.detail_wire });
     }
     return route.fallback();
-  });
+  }));
   const listURL = '/analyses?search=Producer%20limited%20DDoS&status=COMPLETED&sort=name&page=1';
   await page.goto(listURL);
   const produced = historyListing.items[0];
