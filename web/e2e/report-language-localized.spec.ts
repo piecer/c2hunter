@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -71,7 +72,7 @@ for (const kind of ['ip', 'job', 'network', 'ddos'] as const) for (const width o
     await page.setViewportSize({ width, height: 900 });
     await page.addInitScript(value => { localStorage.setItem('c2hunter-token', 'localized-fixture'); localStorage.setItem('c2hunter-report-language', value); }, locale);
     page.on('pageerror', error => errors.push(error.message));
-    await page.route('**/api/v1/**', async route => {
+    await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
       const request = route.request(), url = new URL(request.url()), path = url.pathname;
       if (request.method() === 'POST' && path === admissionPath + '/source-preview') {
         expect(kind).toBe('ip');
@@ -97,7 +98,7 @@ for (const kind of ['ip', 'job', 'network', 'ddos'] as const) for (const width o
       else if (path.endsWith('/older')) body = older;
       else if (path.endsWith('/admitted') || path.endsWith('/' + 'c'.repeat(64))) body = accepted;
       await route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
-    });
+    }));
     const button = (en: string, ko: string, language = locale) => page.getByRole('button', { name: text(language, en, ko), exact: true });
     const savedView = (language: Locale) => page.getByRole('region', { name: text(language, kind === 'ip' ? 'Selected investigation' : 'Saved job investigation', kind === 'ip' ? '선택 조사' : '저장된 작업 조사'), exact: true });
     const assertProse = async (language: Locale) => {

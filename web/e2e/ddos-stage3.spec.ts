@@ -1,3 +1,5 @@
+import { withLegacyAuthentication } from './auth-fixture';
+import { installNamedSession } from './named-session-fixture';
 import { test, expect, type Locator, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -13,7 +15,7 @@ async function install(page: Page, language: string) {
   const errors: string[] = [], writes: { path: string; body: unknown }[] = [];
   page.on('pageerror', e => errors.push(e.message));
   await page.addInitScript(lang => { localStorage.setItem('c2hunter-token', 'owned-browser-fixture'); localStorage.setItem('c2hunter-report-language', lang); }, language);
-  await page.route('**/api/v1/**', async route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
     const req = route.request(), url = new URL(req.url()), path = url.pathname.replace('/api/v1', '');
     let body: unknown = { items: [] };
     if (req.method() !== 'GET') {
@@ -30,7 +32,7 @@ async function install(page: Page, language: string) {
       body = Object.values(fixture.jobs).find((job: unknown) => (job as { id: string }).id === id) ?? { ...fixture.jobs.unmeasured, id, ddos_attack: fixture.reports[id] };
     } else if (path === '/ai-capabilities') body = { available: false, ddos_interpretation: false, reason: 'No model calls in fixture' };
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
-  });
+  }));
   return { errors, writes };
 }
 const geometry = (page: Page) => page.evaluate(() => ({ width: innerWidth, body: document.body.scrollWidth, document: document.documentElement.scrollWidth, nodes: document.querySelectorAll('*').length }));
@@ -159,9 +161,10 @@ async function activate(button: Locator, initiallyCollapsed = false) {
   // but skip navigation synchronization; the caller asserts each UI transition.
   await button.press('Enter', { noWaitAfter: true });
 }
-for (const width of [1280, 390]) for (const language of ['ko', 'en']) test(`maximum cumulative every-finding selection ${width} ${language} retains one report owner`, async ({ page }, info) => {
+for (const named of [false, true]) for (const width of [1280, 390]) for (const language of ['ko', 'en']) test(`maximum cumulative every-finding selection ${width} ${language} retains one report owner${named ? ' named-cookie' : ''}`, async ({ page }, info) => {
   await page.setViewportSize({ width, height: 900 });
   const { errors, writes } = await install(page, language);
+  const checkSession = named ? await installNamedSession(page) : undefined;
   const navigations: string[] = [];
   // Frame navigation events also include the router's same-document history
   // initialization; count document navigation requests rather than history events.
@@ -252,15 +255,17 @@ for (const width of [1280, 390]) for (const language of ['ko', 'en']) test(`maxi
     await activate(width < 600 ? close : toggles.first());
     await Promise.all([expect(evidence).toHaveCount(0), expect(detail).toHaveCount(0)]);
     expect(peak).toBeLessThan(900); expect(errors).toEqual([]); expect(writes).toEqual([]);
+    await checkSession?.();
   } finally {
     await info.attach('maximum-cumulative-trajectory', { body: JSON.stringify({ width, language, initial, navigations, selected: [...selected], observations, peak }), contentType: 'application/json' });
     await owner.dispose();
   }
 });
 
-for (const width of [1280, 390]) for (const language of ['ko', 'en']) test(`maximum selection retention across every finding page ${width} ${language}`, async ({ page }, info) => {
+for (const named of [false, true]) for (const width of [1280, 390]) for (const language of ['ko', 'en']) test(`maximum selection retention across every finding page ${width} ${language}${named ? ' named-cookie' : ''}`, async ({ page }, info) => {
   await page.setViewportSize({ width, height: 900 });
   const { errors, writes } = await install(page, language);
+  const checkSession = named ? await installNamedSession(page) : undefined;
   await page.goto('/analyses/maximum');
   await expect(page.getByRole('region', { name: language === 'en' ? 'DDoS at a glance' : 'DDoS 한눈에 보기' })).toBeVisible();
   const navigation = page.getByRole('navigation', { name: language === 'en' ? 'DDoS finding pages' : 'DDoS 발견 항목 페이지' });
@@ -297,6 +302,7 @@ for (const width of [1280, 390]) for (const language of ['ko', 'en']) test(`maxi
     }
   }
   expect(selections).toHaveLength(pageCount); expect(errors).toEqual([]); expect(writes).toEqual([]);
+  await checkSession?.();
   await info.attach('maximum-selection-retention', { body: JSON.stringify(observations), contentType: 'application/json' });
 });
 

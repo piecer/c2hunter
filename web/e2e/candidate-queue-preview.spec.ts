@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
@@ -14,7 +15,7 @@ const rows = Array.from({ length: 101 }, (_, i) => ({
 async function fixture(page: Page) {
   const reads: string[] = []; const writes: string[] = [];
   await page.addInitScript(() => localStorage.setItem('c2hunter-token', 'queue-fixture'));
-  await page.route('**/api/v1/**', async route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
     const url = new URL(route.request().url()); const path = url.pathname.replace('/api/v1', '');
     if (route.request().method() !== 'GET') writes.push(path); else reads.push(path + url.search);
     if (path === '/analysis-jobs/queue-job') return route.fulfill({ json: { id: 'queue-job', name: 'Queue investigation', status: 'COMPLETED', analysis: { module: 'c2' }, candidate_count: rows.length, warnings: ['Limited observation coverage.'] } });
@@ -24,7 +25,7 @@ async function fixture(page: Page) {
     }
     const row = rows.find(row => path === `/candidates/${encodeURIComponent(row.id)}` || path === `/analysis-jobs/queue-job/candidates/${encodeURIComponent(row.id)}`);
     return route.fulfill({ json: row ?? { items: [], total: 0 } });
-  });
+  }));
   return { reads, writes };
 }
 async function geometry(page: Page) {

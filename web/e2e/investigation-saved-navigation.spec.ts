@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test, type Page } from '@playwright/test';
 import { savedNavigation } from '../tests/investigationSavedNavigationFixtures';
 import { fixture } from '../tests/investigationFixtures';
@@ -12,7 +13,7 @@ async function install(page: Page, kind: Kind, locale: Locale, configured = fals
   await page.addInitScript(value => { localStorage.setItem('c2hunter-token', 'saved-navigation-fixture'); localStorage.setItem('c2hunter-report-language', value); }, locale);
   const saved = kind === 'ip' ? savedNavigation.ip : savedNavigation.job;
   const older = kind === 'ip' ? fixture('run_failed') : JSON.parse(producer.additional.run_three_facts);
-  await page.route('**/api/v1/**', async route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname;
     if (request.method() !== 'GET') writes.push(request.postData() ?? path); else reads.push(path + url.search);
     let body: unknown;
@@ -35,7 +36,7 @@ async function install(page: Page, kind: Kind, locale: Locale, configured = fals
     else if (path.endsWith('/ai-capabilities')) body = { available: false };
     else body = { items: [], total: 0 };
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
-  });
+  }));
   await page.goto('/analyses/job');
   await page.getByRole('button', { name: locale === 'ko' ? 'AI 조사' : 'AI investigation', exact: true }).click();
   await page.getByRole('button', { name: kind === 'ip' ? locale === 'ko' ? 'IP 조사 열기' : 'Open IP investigation' : locale === 'ko' ? '실험적 조사 열기' : 'Open experimental investigation', exact: true }).click();

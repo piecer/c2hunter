@@ -278,12 +278,15 @@ def test_controller_persists_worker_result_before_ack() -> None:
 
 
 def test_operational_app_rejects_inline_flow_records() -> None:
+    analyst_token = "durable-inline-flow-guard-token"
     client = TestClient(
         create_app(
             Settings(
                 environment="production",
                 inline_flow_records_enabled=False,
-                api_auth_required=False,
+                account_auth_enabled=False,
+                api_auth_required=True,
+                analyst_token_sha256=hashlib.sha256(analyst_token.encode()).hexdigest(),
             ),
             MemoryRepository(),
             flow_store=MemoryFlowStore(),
@@ -293,6 +296,10 @@ def test_operational_app_rejects_inline_flow_records() -> None:
     register_sensor(client)
     request = job_payload()
     request["flow_records"] = [flow()]
-    response = client.post("/api/v1/analysis-jobs", json=request)
+    response = client.post(
+        "/api/v1/analysis-jobs",
+        json=request,
+        headers={"Authorization": f"Bearer {analyst_token}"},
+    )
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "INLINE_FLOWS_DISABLED"

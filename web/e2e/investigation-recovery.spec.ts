@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import { fixture } from '../tests/investigationFixtures';
 import { producer } from '../tests/jobInvestigationFixtures';
@@ -29,7 +30,7 @@ for (const width of [1280, 390]) for (const locale of ['ko', 'en'] as const) {
     let release!: () => void;
     const held = new Promise<void>(yes => { release = yes; });
     page.on('requestfailed', request => { if (request.url().endsWith('/cancel')) failedCancels.push(request.url()); });
-    await page.route('**/api/v1/**', async route => {
+    await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
       const request = route.request(), url = new URL(request.url()), path = url.pathname;
       if (request.method() !== 'GET') writes.push(path);
       if (path === '/api/v1/analysis-jobs/job' && !sourceAvailable) return route.fulfill({ status: 503, body: JSON.stringify({ error: { message: 'Source unavailable' } }) });
@@ -45,7 +46,7 @@ for (const width of [1280, 390]) for (const locale of ['ko', 'en'] as const) {
       else if (path.endsWith('/capabilities')) body = fixture('capabilities');
       else if (path.endsWith('/ai-capabilities')) body = { available: false };
       await route.fulfill({ json: body });
-    });
+    }));
     await page.goto('/analyses/job');
     await page.getByRole('button', { name: text(locale, 'IP 조사 열기', 'Open IP investigation'), exact: true }).click();
     const choose = () => page.getByRole('button', { name: new RegExp('2001:db8::1 · QUEUED') });
@@ -90,7 +91,7 @@ for (const width of [1280, 390]) for (const locale of ['ko', 'en'] as const) {
     const saved = { ...(ip ? savedNavigation.ip : savedNavigation.job), id: 'e'.repeat(64) };
     let history = queued;
     const writes: string[] = [];
-    await page.route('**/api/v1/**', async route => {
+    await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
       const request = route.request(), path = new URL(request.url()).pathname;
       if (request.method() !== 'GET') writes.push(path);
       if (path.endsWith('/cancel')) return route.fulfill({ status: 503, body: '{}' });
@@ -102,7 +103,7 @@ for (const width of [1280, 390]) for (const locale of ['ko', 'en'] as const) {
       else if (path.endsWith('/capabilities')) body = ip ? fixture('capabilities') : JSON.parse(producer.fixtures.capabilities);
       else if (path.endsWith('/ai-capabilities')) body = { available: false };
       await route.fulfill({ json: body });
-    });
+    }));
     await page.goto('/analyses/job');
     await page.getByRole('button', { name: text(locale, 'AI 조사', 'AI investigation'), exact: true }).click();
     await page.getByRole('button', { name: ip ? text(locale, 'IP 조사 열기', 'Open IP investigation') : text(locale, '실험적 조사 열기', 'Open experimental investigation'), exact: true }).click();

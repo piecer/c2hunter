@@ -6,6 +6,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, expect, it, vi } from 'vitest';
 import App from '../src/App';
+import { setAuthentication } from '../src/authentication';
 const python = process.env.C2HUNTER_TEST_PYTHON ?? resolve('../.venv/bin/python');
 const network = JSON.parse(execFileSync(python, ['tests/network_report_fixture.py', '--pagination'], { encoding: 'utf8' }))['20'];
 const ddos = JSON.parse(readFileSync('tests/fixtures/ddos-report-contract.json', 'utf8'));
@@ -15,7 +16,7 @@ const variants = [{ module: 'network_anomaly', kind: 'NETWORK_ANOMALY', report: 
 function deferred() { let resolve!: (r: Response) => void; const promise = new Promise<Response>(r => { resolve = r; }); return { promise, resolve }; }
 async function setup(variant: typeof variants[number]) {
   const { module, kind, report, open } = variant;
-  localStorage.setItem('c2hunter-token', 'fixture'); localStorage.setItem('c2hunter-report-language', 'en');
+  setAuthentication('fixture'); localStorage.setItem('c2hunter-report-language', 'en');
   const job = { id: 'owned', status: 'COMPLETED', name: 'Owned job', dataset_id: 'dataset', analysis: { module }, [module]: report };
   const a = { id: 'A', analysis_kind: kind, status: 'ANALYZING', language: 'en', analysis_job_id: 'owned', dataset_id: 'dataset', created_at: '2026-11-01T00:00:00Z' };
   const b = { ...a, id: 'B', created_at: '2026-11-02T00:00:00Z' };

@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test, type Page } from '@playwright/test';
 
 const id = (index: number) => `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
@@ -12,14 +13,14 @@ async function setup(page: Page) {
     new MutationObserver(measure).observe(document, { childList: true, subtree: true });
   });
   const writes: string[] = [];
-  await page.route('**/api/v1/**', async route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
     const url = new URL(route.request().url());
     if (route.request().method() !== 'GET') writes.push(`${route.request().method()} ${url.pathname}`);
     if (url.pathname.endsWith('/integration-settings')) return route.fulfill({ json: settings });
     const all = url.pathname.endsWith('/payload-signatures') ? signatures : entries;
     const current = Number(url.searchParams.get('page') || 1), size = Number(url.searchParams.get('page_size') || 50);
     await route.fulfill({ json: { items: all.slice((current - 1) * size, current * size), page: current, page_size: size, total: all.length } });
-  });
+  }));
   return writes;
 }
 async function geometry(page: Page, width: number) {

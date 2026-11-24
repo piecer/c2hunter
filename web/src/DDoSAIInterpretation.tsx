@@ -4,7 +4,8 @@ import { createPortal } from 'react-dom';
 import { useLayoutEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from './api';
-import { captureAuthentication, currentAuthentication } from './authentication';
+import { captureAuthentication, currentAuthentication, hasRole } from './authentication';
+import RoleControl from './RoleControl';
 import { useInterpretationAdmission } from './interpretationAdmission';
 import InterpretationHistory from './InterpretationHistory';
 import { useInterpretationRuns } from './useInterpretationRuns';
@@ -63,7 +64,7 @@ export default function DDoSAIInterpretation({ jobId, completed }: { jobId: stri
   const currentOwner = () => mounted.current && ownerJob === jobId && currentAuthentication(authentication) && (!shared || shared.current());
   const setOpen = (value: boolean) => { if (currentOwner()) { if (shared) shared.select(value ? detailKey : undefined); else setLocalOpen(value); } };
   const [consentedDestination, setConsentedDestination] = useState<string | null>(null);
-  const capabilities = useQuery<Capabilities, Error>({ queryKey: ['ai-capabilities'], queryFn: () => api.get('/ai-capabilities'), retry: false });
+  const capabilities = useQuery<Capabilities, Error>({ queryKey: ['ai-capabilities'], queryFn: () => api.get('/ai-capabilities'), enabled: hasRole('ANALYST'), retry: false });
   const config = capabilities.data;
   const allowRemote = Boolean(config?.remote && config.destination && consentedDestination === config.destination);
   const runs = useInterpretationRuns<Run>(jobId, 'DDOS_ATTACK');
@@ -102,7 +103,7 @@ export default function DDoSAIInterpretation({ jobId, completed }: { jobId: stri
     {start.isError && <p role="status">{t('AI admission unconfirmed. Review the request before trying again.', 'AI 접수 미확인. 재시도 전에 요청을 확인하세요.')}</p>}
     {!open && (start.isPending || start.isError || current) && <button type="button" className="secondary" onClick={() => setOpen(true)}>{t('Return to DDoS AI interpretation', 'DDoS AI 해석으로 돌아가기')}</button>}
     {start.error && <p role="alert" className="error-text">{boundedText(start.error.message)}</p>}
-    {controlled && <div className="ai-run-summary" role="status" aria-label={t('Latest AI run', '최신 AI 실행')}><span className={`badge ${active ? 'medium' : ''}`}>{language === 'ko' ? ({ QUEUED: '대기 중', PREPARING: '준비 중', ANALYZING: '해석 중', VALIDATING: '검증 중', COMPLETED: '완료', FAILED: '실패', CANCELLED: '취소됨' } as Record<string, string>)[controlled.status] ?? boundedText(controlled.status) : boundedText(controlled.status)}</span>{typeof controlled.progress_percent === 'number' && <progress max="100" value={Math.max(0, Math.min(100, controlled.progress_percent))}/>} {active && <button type="button" className="secondary" disabled={cancel.blocked || cancel.capacity || detail.isError} onClick={() => { if (currentOwner() && controlled) admissionOwner.requestCancellation(controlled, currentOwner); }}>{t('Cancel AI run', 'AI 실행 취소')}</button>}</div>}
+    {controlled && <div className="ai-run-summary" role="status" aria-label={t('Latest AI run', '최신 AI 실행')}><span className={`badge ${active ? 'medium' : ''}`}>{language === 'ko' ? ({ QUEUED: '대기 중', PREPARING: '준비 중', ANALYZING: '해석 중', VALIDATING: '검증 중', COMPLETED: '완료', FAILED: '실패', CANCELLED: '취소됨' } as Record<string, string>)[controlled.status] ?? boundedText(controlled.status) : boundedText(controlled.status)}</span>{typeof controlled.progress_percent === 'number' && <progress max="100" value={Math.max(0, Math.min(100, controlled.progress_percent))}/>} {active && <RoleControl><button type="button" className="secondary" disabled={cancel.blocked || cancel.capacity || detail.isError} onClick={() => { if (currentOwner() && controlled) admissionOwner.requestCancellation(controlled, currentOwner); }}>{t('Cancel AI run', 'AI 실행 취소')}</button></RoleControl>}</div>}
     {current?.error_code && <p role="alert" className="error-text">{boundedText(current.error_code)}: {boundedText(current.error_message)}</p>}
   </>;
   return <section className="panel" aria-labelledby="ai-ddos-heading">
@@ -134,8 +135,8 @@ export default function DDoSAIInterpretation({ jobId, completed }: { jobId: stri
         <p>{t('Existing AI output is not automatically translated. Changing report language changes labels only; use the manual button for a new interpretation.', '기존 AI 출력은 자동 번역되지 않습니다. 보고서 언어 변경은 항목명만 바꾸며 새 해석은 버튼으로 직접 요청하세요.')}</p>
       </>}</details>
     </>}
-    {open && <button type="button" className="secondary" aria-expanded={newOpen} onClick={() => setNewOpen(!newOpen)}>{t('New AI interpretation', '새 AI 해석')}</button>}
-    {open && newOpen && <>
+    {open && <RoleControl><button type="button" className="secondary" aria-expanded={newOpen} onClick={() => setNewOpen(!newOpen)}>{t('New AI interpretation', '새 AI 해석')}</button></RoleControl>}
+    {hasRole('ANALYST') && open && newOpen && <>
       <p>{t('AI explains the saved deterministic report; it cannot change the verdict, attribute an actor, prove impact, or execute a response.', 'AI는 저장된 결정론적 보고서를 설명할 뿐 판정 변경, 공격자 귀속, 영향 입증, 대응 실행을 할 수 없습니다.')}</p>
       <p className="muted">{t('Manual only. Only a bounded report projection is sent; raw packets and payloads are excluded.', '수동 실행 전용입니다. 제한된 보고서 투영만 전송하며 원시 패킷과 페이로드는 제외합니다.')}</p>
       {config && <p>{config.provider} · {config.model_name} · {config.destination ?? t('Local or not reported', '로컬 또는 보고되지 않음')}</p>}

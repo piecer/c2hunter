@@ -1,7 +1,7 @@
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, ApiError } from './api';
-import { captureAuthentication, currentAuthentication } from './authentication';
+import { captureAuthentication, currentAuthentication, hasAuthentication, hasRole } from './authentication';
 import { PolicyDeleteContext, type PolicyDeleteReceipt, type PolicyDeleteTarget } from './policyDeleteContext';
 
 function Confirmation({ target, cancel, confirm }: { target: PolicyDeleteTarget; cancel: () => void; confirm: () => void }) {
@@ -35,7 +35,7 @@ export default function PolicyDeletionOwner({ children }: { children: ReactNode 
   const [authority] = useState(captureAuthentication);
   const live = useRef(false);
   useEffect(() => { live.current = true; return () => { live.current = false; }; }, []);
-  const current = () => live.current && Boolean(authority.token) && currentAuthentication(authority);
+  const current = () => live.current && hasAuthentication(authority) && hasRole('ANALYST') && currentAuthentication(authority);
   const records = useRef<PolicyDeleteReceipt[]>([]);
   const [receipts, setReceipts] = useState<PolicyDeleteReceipt[]>([]);
   const [confirmation, setConfirmation] = useState<PolicyDeleteTarget>();

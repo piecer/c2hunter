@@ -104,7 +104,7 @@ def test_worker_command_does_not_report_success_for_undrained_ownership(monkeypa
     monkeypatch.setattr(
         ai_worker, "create_model_gateway", lambda **_: SimpleNamespace(ready=lambda: True)
     )
-    monkeypatch.setattr(ai_worker, "AIAnalysisService", lambda *_: object())
+    monkeypatch.setattr(ai_worker, "AIAnalysisService", lambda *_: SimpleNamespace())
     monkeypatch.setattr(ai_worker, "RedisAIAnalysisWorkerQueue", lambda *_a, **_k: object())
     monkeypatch.setattr(ai_worker, "start_http_server", lambda *_a, **_k: None)
     monkeypatch.setattr(ai_worker.signal, "signal", lambda *_: None)

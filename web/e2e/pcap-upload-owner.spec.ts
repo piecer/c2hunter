@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { test, expect, type Page, type Locator } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -14,14 +15,14 @@ async function install(page: Page) {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(() => { localStorage.setItem('c2hunter-token', 'owned-browser-fixture'); localStorage.setItem('c2hunter-report-language', 'en'); });
-  await page.route('**/api/v1/**', async route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
     const path = new URL(route.request().url()).pathname.replace('/api/v1', '');
     let body: unknown = { items: [] };
     if (path === '/analysis-jobs') body = { items: [N, N2], page: 1, page_size: 20, total: 2 };
     else if (/^\/analysis-jobs\/[^/]+$/.test(path)) body = { ...A, id: path.split('/').at(-1), name: 'Accepted result' };
     else if (path === '/ai-capabilities') body = { available: false, ddos_interpretation: false };
     await route.fulfill({ json: body });
-  });
+  }));
   return { errors };
 }
 async function form(page: Page, route = '/analyses/upload', module = 'ddos_attack') {

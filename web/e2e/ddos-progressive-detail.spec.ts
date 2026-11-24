@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { test, expect, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -18,11 +19,11 @@ async function install(page: Page, language: string, name = 'positive') {
   const job = envelope(name), writes: string[] = [], errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(lang => { localStorage.setItem('c2hunter-token', 'owned-fixture'); localStorage.setItem('c2hunter-report-language', lang); }, language);
-  await page.route('**/api/v1/**', async route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
     const request = route.request(), path = new URL(request.url()).pathname.replace('/api/v1', '');
     if (request.method() !== 'GET') writes.push(path);
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(path === `/analysis-jobs/${job.id}` ? job : path === '/ai-capabilities' ? { available: false, ddos_interpretation: false, reason: 'Offline fixture' } : { items: [], current_page: 1, page_size: 50, total: 0 }) });
-  });
+  }));
   await page.goto(`/analyses/${job.id}`);
   return { job, writes, errors };
 }

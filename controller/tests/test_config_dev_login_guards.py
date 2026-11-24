@@ -9,7 +9,12 @@ from c2hunter_controller.config import Settings
 
 def test_dev_login_allowed_in_development() -> None:
     """Dev login must work when environment is development and the flag is set."""
-    settings = Settings(environment="development", dev_login_enabled=True)
+    settings = Settings(
+        environment="development",
+        dev_login_enabled=True,
+        account_auth_enabled=False,
+        api_auth_required=True,
+    )
     assert settings.dev_login_enabled is True
     assert settings.environment == "development"
 

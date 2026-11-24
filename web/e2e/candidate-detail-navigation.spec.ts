@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test } from '@playwright/test';
 import { installApiFixture } from './route-fixture';
 
@@ -24,15 +25,15 @@ for (const width of [1280, 390]) {
     const writes: string[] = []; const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
     await installApiFixture(page);
-    await page.route('**/api/v1/**', async route => {
+    await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
       const path = new URL(route.request().url()).pathname.replace('/api/v1', '');
       if (route.request().method() !== 'GET' && path !== '/auth/dev-login') writes.push(path);
       if (path === `/candidates/${encodedId}`) return route.fulfill({ json: candidate });
       return route.fallback();
-    });
+    }));
     await page.goto('/login');
-    await page.getByLabel('Username').fill('analyst');
-    await page.getByRole('button', { name: 'Development login' }).click();
+    await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+    await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
     await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
     await page.goto(`/candidates/${encodedId}?q=retained&page=4`);
     const summary = page.getByRole('region', { name: 'Candidate result summary' });
@@ -88,8 +89,8 @@ test('ordinary Back and Forward restore candidate selection, overview focus and 
   await installApiFixture(page);
   await page.route(`**/api/v1/candidates/${encodedId}`, route => route.fulfill({ json: candidate }));
   await page.goto('/login');
-  await page.getByLabel('Username').fill('analyst');
-  await page.getByRole('button', { name: 'Development login' }).click();
+  await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+  await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
   await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
   await page.goto(`/candidates/${encodedId}?q=context&page=4`);
   const opener = page.getByRole('button', { name: '근거 1 · 주기적 비콘', exact: true });
@@ -122,8 +123,8 @@ test('a delayed deep-link read never steals an interaction already made in the s
   const delayed = new Promise<void>(resolve => { release = resolve; });
   await page.route(`**/api/v1/candidates/${encodedId}`, async route => { await delayed; await route.fulfill({ json: candidate }); });
   await page.goto('/login');
-  await page.getByLabel('Username').fill('analyst');
-  await page.getByRole('button', { name: 'Development login' }).click();
+  await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+  await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
   await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
   await page.goto(`/candidates/${encodedId}?detail=evidence&evidence=29`);
   const menu = page.getByRole('button', { name: '메뉴 / Menu' });
@@ -143,7 +144,7 @@ test('ordinary flow history preserves requested pages and an uncertain label acr
   let release!: () => void;
   const pending = new Promise<void>(resolve => { release = resolve; });
   const writes: { path: string; body: unknown }[] = []; const reads: string[] = [];
-  await page.route('**/api/v1/**', async route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
     const url = new URL(route.request().url()); const path = url.pathname.replace('/api/v1', '');
     if (path === `/candidates/${encodedId}`) return route.fulfill({ json: candidate });
     if (path === '/analysis-jobs/job-1/flows') {
@@ -152,10 +153,10 @@ test('ordinary flow history preserves requested pages and an uncertain label acr
     }
     if (path === '/analysis-jobs/job-1/flow-labels') { writes.push({ path, body: route.request().postDataJSON() }); await pending; return route.fulfill({ status: 503, json: { error: { message: 'Uncertain label outcome' } } }); }
     return route.fallback();
-  });
+  }));
   await page.goto('/login');
-  await page.getByLabel('Username').fill('analyst');
-  await page.getByRole('button', { name: 'Development login' }).click();
+  await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+  await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
   await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
   await page.goto(`/candidates/${encodedId}?q=context&detail=flows&flow_page=2&flow=flow-b`);
   await page.getByRole('button', { name: 'Mark benign flow-b' }).click();
@@ -185,8 +186,8 @@ test('Escape retires candidate modality synchronously while the URL transition i
   await installApiFixture(page);
   await page.route(`**/api/v1/candidates/${encodedId}`, route => route.fulfill({ json: candidate }));
   await page.goto('/login');
-  await page.getByLabel('Username').fill('analyst');
-  await page.getByRole('button', { name: 'Development login' }).click();
+  await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+  await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
   await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
   await page.goto(`/candidates/${encodedId}`);
   await page.getByRole('button', { name: 'Network context', exact: true }).click();
@@ -208,7 +209,7 @@ for (const width of [1280, 390]) {
       const pending = new Promise<void>(resolve => { release = resolve; });
       const reads: string[] = []; const writes: string[] = []; const errors: string[] = [];
       page.on('pageerror', error => errors.push(error.message));
-      await page.route('**/api/v1/**', async route => {
+      await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
         const url = new URL(route.request().url()); const path = url.pathname.replace('/api/v1', '');
         if (route.request().method() !== 'GET' && path !== '/auth/dev-login') writes.push(path);
         if (path === `/candidates/${encodedId}`) { await pending; return route.fulfill({ json: candidate }); }
@@ -217,10 +218,10 @@ for (const width of [1280, 390]) {
           return route.fulfill({ json: { page: result === 'wrong-page' ? 1 : 2, page_size: 50, total: 51, items: [{ flow_id: result === 'missing' ? 'other-flow' : 'flow-b', job_id: result === 'wrong-job' ? 'other-job' : 'job-1', timestamp: candidate.first_seen, source_ip: '10.0.0.5', destination_ip: candidate.candidate_ip, protocol: 'TCP', direction: 'OUTBOUND', has_payload: true }] } });
         }
         return route.fallback();
-      });
+      }));
       await page.goto('/login');
-      await page.getByLabel('Username').fill('analyst');
-      await page.getByRole('button', { name: 'Development login' }).click();
+      await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+      await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
       await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
       const search = `?q=keep&page=4&${result === 'evidence' ? 'detail=evidence&evidence=29' : 'detail=flows&flow_page=2&flow=flow-b'}#context`;
       await page.goto(`/candidates/${encodedId}${search}`);

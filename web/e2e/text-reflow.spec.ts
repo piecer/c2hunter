@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { test, expect, type Page, type TestInfo } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { installApiFixture } from './route-fixture';
@@ -22,7 +23,7 @@ async function setup(page: Page, language: string, width: number) {
     await page.setViewportSize({ width, height: width === 640 ? 450 : 900 });
     await page.addInitScript(lang => { localStorage.setItem('c2hunter-token', 'stage6-readonly-fixture'); localStorage.setItem('c2hunter-report-language', lang); }, language);
     await installApiFixture(page);
-    await page.route('**/api/v1/**', r => r.request().method() === 'GET' ? r.fallback() : r.abort('blockedbyclient'));
+    await page.route('**/api/v1/**', withLegacyAuthentication(r => r.request().method() === 'GET' ? r.fallback() : r.abort('blockedbyclient')));
     return record;
 }
 async function stress(page: Page) { await page.addStyleTag({ content: 'html { font-size: 200%; }' }); }
@@ -99,8 +100,8 @@ for (const width of [640, 390])
 for (const width of [640, 390])
     test(`maximum sensor text-200 keyboard reflow ${width}`, async ({ page }, info) => {
         const record = await setup(page, 'en', width);
-        await page.route('**/api/v1/**', r => { const u = new URL(r.request().url()); if (r.request().method() !== 'GET')
-            return r.abort(); return r.fulfill({ json: u.pathname === `/api/v1/sensors/${sensorProducer.maximum.sensor_id}` ? sensorProducer.maximum : sensorProducerPage(u.pathname + u.search) ?? { items: [] } }); });
+        await page.route('**/api/v1/**', withLegacyAuthentication(r => { const u = new URL(r.request().url()); if (r.request().method() !== 'GET')
+            return r.abort(); return r.fulfill({ json: u.pathname === `/api/v1/sensors/${sensorProducer.maximum.sensor_id}` ? sensorProducer.maximum : sensorProducerPage(u.pathname + u.search) ?? { items: [] } }); }));
         try {
             await page.goto('/sensors/' + sensorProducer.maximum.sensor_id);
             await expect(page.getByText('synthetic-error-0', { exact: true })).toBeVisible();
@@ -137,10 +138,10 @@ for (const width of [640, 390])
 for (const width of [640, 390])
     test(`producer history warning and Back text-200 ${width}`, async ({ page }, info) => {
         const record = await setup(page, 'en', width);
-        await page.route('**/api/v1/**', r => { const p = new URL(r.request().url()).pathname; if (p === '/api/v1/analysis-jobs')
+        await page.route('**/api/v1/**', withLegacyAuthentication(r => { const p = new URL(r.request().url()).pathname; if (p === '/api/v1/analysis-jobs')
             return r.fulfill({ contentType: 'application/json', body: historyProducer.list_wire }); if (p === historyProducer.detail_path + '/ai-runs')
             return r.fulfill({ contentType: 'application/json', body: historyProducer.ai_runs_wire }); if (p === historyProducer.detail_path)
-            return r.fulfill({ contentType: 'application/json', body: historyProducer.detail_wire }); return r.fallback(); });
+            return r.fulfill({ contentType: 'application/json', body: historyProducer.detail_wire }); return r.fallback(); }));
         try {
             await page.goto('/analyses?search=Producer%20limited%20DDoS&status=COMPLETED&sort=name&page=1');
             const invoker = page.getByRole('link', { name: historyListing.items[0].name, exact: true });

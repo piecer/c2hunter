@@ -26,6 +26,7 @@ from .ai_job_investigation import JobInvestigationService
 from .ai_job_investigation_runtime_schema import JobCapabilities
 from .ai_job_investigation_schema import JobRequest, Reason
 from .ai_job_investigation_store import JobInvestigationRunStore, initialize_job_investigation_store
+from .auth_store import AuthStore
 from .repositories import MemoryRepository, SQLiteRepository
 from .security import SecurityError
 
@@ -62,12 +63,18 @@ def job_failure(
 
 
 def configured_job_service(
-    repository: Any, configured: object, *, enabled: bool, bootstrap_local: bool = False
+    repository: Any,
+    configured: object,
+    *,
+    enabled: bool,
+    bootstrap_local: bool = False,
+    auth_store: AuthStore | None = None,
 ) -> tuple[JobInvestigationService | None, str | None]:
     try:
         if bootstrap_local and isinstance(repository, MemoryRepository | SQLiteRepository):
             initialize_job_investigation_store(repository)
         store = JobInvestigationRunStore(repository)
+        store.auth_store = auth_store
     except InvestigationStoreError as exc:
         return None, exc.code if exc.code == "STORE_NOT_INITIALIZED" else "UNAVAILABLE"
     except InvestigationStorageError:

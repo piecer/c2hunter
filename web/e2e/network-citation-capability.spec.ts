@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { expect, test } from '@playwright/test';
@@ -15,7 +16,7 @@ for (const width of [1280, 390]) for (const language of ['en', 'ko']) {
     page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
     await page.addInitScript(lang => { localStorage.setItem('c2hunter-token', 'synthetic-fixture-token'); localStorage.setItem('c2hunter-report-language', lang); }, language);
     const job = (id: string) => ({ id, dataset_id: 'citation-dataset', name: id === 'citation-job' ? 'Citation A' : 'Citation B', status: 'COMPLETED', source_type: id === 'citation-job' ? 'PCAP_UPLOAD' : 'SENSOR_CAPTURE', mode: id === 'citation-job' ? 'PCAP_UPLOAD' : 'LIVE', analysis: { module: 'network_anomaly' }, network_anomaly: fixture.many });
-    await page.route('**/api/v1/**', async route => {
+    await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
       const path = new URL(route.request().url()).pathname.replace('/api/v1', '');
       requests.push(`${route.request().method()} ${path}`);
       let body: unknown = { items: [] };
@@ -25,7 +26,7 @@ for (const width of [1280, 390]) for (const language of ['en', 'ko']) {
       else if (path === '/analysis-jobs/citation-job/ai-runs') body = { items: [fixture.run] };
       else if (path === '/ai-runs/citation-run') body = fixture.run;
       await route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
-    });
+    }));
     const ko = language === 'ko';
     const measurements: { phase: string; nodes: number; width: number; body: number; document: number }[] = [];
     const measure = async (phase: string) => {
@@ -83,12 +84,12 @@ test('actual native HISTORICAL public wire and same-PCAP control capability', as
   const errors: string[] = [], writes: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(() => { localStorage.setItem('c2hunter-token', 'synthetic-fixture-token'); localStorage.setItem('c2hunter-report-language', 'en'); });
-  await page.route('**/api/v1/**', async route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
     if (route.request().method() !== 'GET') writes.push(new URL(route.request().url()).pathname);
     const path = new URL(route.request().url()).pathname;
     const job = [bundle.native.job, bundle.pcap.job].find(j => path === `/api/v1/analysis-jobs/${j.id}`);
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(job ?? { items: [] }) });
-  });
+  }));
   expect(bundle.native.job.mode).toBe('HISTORICAL'); expect(bundle.native.job.network_anomaly.summary).toMatchObject({ evaluated_records: 0, incomplete_records: 2 });
   await page.goto(`/analyses/${bundle.native.job.id}`);
   await expect(page.getByRole('heading', { name: 'Insufficient data', exact: true })).toBeVisible();

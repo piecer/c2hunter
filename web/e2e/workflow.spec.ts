@@ -4,8 +4,8 @@ import { installApiFixture } from './route-fixture';
 test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', async ({ page }) => {
   await installApiFixture(page);
   await page.goto('/login');
-  await page.getByLabel('Username').fill('analyst');
-  await page.getByRole('button', { name: 'Development login' }).click();
+  await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+  await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
   await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '지금 확인할 항목' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '분석 및 조치 필요 후보' })).toBeVisible();
@@ -94,9 +94,9 @@ test('analyst workflow: login, inspect, analyze, export, allowlist, reanalyze', 
 test('administrator validates a candidate with TI and exports it to MISP', async ({ page }) => {
   await installApiFixture(page);
   await page.goto('/login');
-  await page.getByLabel('Username').fill('admin');
-  await page.getByRole('button', { name: 'Development login' }).click();
-  await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+  await page.getByLabel(/^(Username|사용자 이름)$/).fill('admin');
+  await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
+  await expect(page.getByRole('button', { name: /^(Sign out|로그아웃)$/ })).toBeVisible();
   await page.goto('/candidates/candidate-1');
 
   await page.getByRole('button', { name: '판정 및 외부 검증', exact: true }).click();
@@ -131,8 +131,8 @@ test('administrator validates a candidate with TI and exports it to MISP', async
 test('administrator configures automation and triages candidates from the queue', async ({ page }) => {
   await installApiFixture(page);
   await page.goto('/login');
-  await page.getByLabel('Username').fill('admin');
-  await page.getByRole('button', { name: 'Development login' }).click();
+  await page.getByLabel(/^(Username|사용자 이름)$/).fill('admin');
+  await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
 
   await page.getByRole('link', { name: 'Integration settings' }).click();
   await page.getByRole('button', { name: 'Edit integration settings' }).click();
@@ -162,8 +162,8 @@ test('administrator configures automation and triages candidates from the queue'
 test('analyst can manage history and upload an offline PCAP', async ({ page }) => {
   await installApiFixture(page);
   await page.goto('/login');
-  await page.getByLabel('Username').fill('analyst');
-  await page.getByRole('button', { name: 'Development login' }).click();
+  await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+  await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
 
   await page.getByRole('link', { name: 'Analysis history' }).click();
   await expect(page.getByRole('table', { name: 'Analysis history' })).toBeVisible();
@@ -188,8 +188,8 @@ test('analyst can manage history and upload an offline PCAP', async ({ page }) =
 test('analyst can download an archived sensor PCAP', async ({ page }) => {
   await installApiFixture(page);
   await page.goto('/login');
-  await page.getByLabel('Username').fill('analyst');
-  await page.getByRole('button', { name: 'Development login' }).click();
+  await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+  await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
 
   await page.getByRole('link', { name: 'Sensor PCAPs' }).click();
   await expect(page.getByRole('table', { name: 'Sensor PCAP archives' })).toBeVisible();
@@ -217,8 +217,8 @@ test('analyst can run bounded AI analysis and inspect the candidate assessment',
     });
   });
   await page.goto('/login');
-  await page.getByLabel('Username').fill('analyst');
-  await page.getByRole('button', { name: 'Development login' }).click();
+  await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+  await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
   await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
   await page.goto('/analyses/job-1');
 
@@ -244,9 +244,9 @@ test('analyst can run bounded AI analysis and inspect the candidate assessment',
 test('analysis configuration is structured and responsive', async ({ page }) => {
   await installApiFixture(page);
   await page.goto('/login');
-  await page.getByLabel('Username').fill('analyst');
-  await page.getByRole('button', { name: 'Development login' }).click();
-  await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+  await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+  await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
+  await expect(page.getByRole('button', { name: /^(Sign out|로그아웃)$/ })).toBeVisible();
   await page.goto('/analyses/job-1');
 
   await page.getByRole('button', { name: '작업 정보', exact: true }).click();
@@ -273,8 +273,8 @@ test('analysis configuration is structured and responsive', async ({ page }) => 
 test('analyst can combine multiple flow filters and filter-out patterns', async ({ page }) => {
   await installApiFixture(page);
   await page.goto('/login');
-  await page.getByLabel('Username').fill('analyst');
-  await page.getByRole('button', { name: 'Development login' }).click();
+  await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+  await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
   await page.getByRole('link', { name: 'Analysis history' }).click();
   await page.getByRole('link', { name: 'E2E investigation' }).click();
 
@@ -306,8 +306,8 @@ test('analyst can combine multiple flow filters and filter-out patterns', async 
 test('candidate queue exposes workflow status and defaults to latest activity', async ({ page }) => {
   await installApiFixture(page);
   await page.goto('/login');
-  await page.getByLabel('Username').fill('analyst');
-  await page.getByRole('button', { name: 'Development login' }).click();
+  await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+  await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
   await page.getByRole('link', { name: 'Candidates', exact: true }).click();
 
   const summary = page.getByRole('region', { name: 'Candidate 처리 현황' });
@@ -326,9 +326,9 @@ test('analyst reviews a bounded bilingual DDoS report with isolated AI output', 
   const requested: string[] = [];
   page.on('request', request => requested.push(new URL(request.url()).pathname));
   await page.goto('/login');
-  await page.getByLabel('Username').fill('analyst');
-  await page.getByRole('button', { name: 'Development login' }).click();
-  await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+  await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+  await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
+  await expect(page.getByRole('button', { name: /^(Sign out|로그아웃)$/ })).toBeVisible();
   await page.goto('/analyses/ddos-job');
 
   await expect(page.getByRole('heading', { name: '의심스러운 DDoS 형태 관찰' })).toBeVisible();

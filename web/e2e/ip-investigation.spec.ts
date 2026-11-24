@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test } from '@playwright/test';
 import { fixture } from '../tests/investigationFixtures';
 import type { InvestigationRequest, InvestigationRun } from '../src/investigationTypes';
@@ -16,7 +17,7 @@ for (const width of [1280, 390]) {
     const completed = fixture('run_completed') as InvestigationRun;
     let captured: InvestigationRequest | undefined;
     let reads = 0;
-    await page.route('**/api/v1/**', async route => {
+    await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
       const request = route.request();
       const url = new URL(request.url());
       const path = url.pathname;
@@ -49,7 +50,7 @@ for (const width of [1280, 390]) {
       else if (path === '/api/v1/ai-capabilities') body = { available: false };
       else body = { items: [] };
       await route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
-    });
+    }));
     await page.goto('/analyses/job');
     // The retained run owner and editable form are sibling regions in this entry.
     const investigation = page.locator('#ip-investigation-entry');

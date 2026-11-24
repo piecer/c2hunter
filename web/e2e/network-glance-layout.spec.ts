@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
@@ -15,7 +16,7 @@ for (const width of [1280, 390]) {
       const writes: string[] = [];
       page.on('pageerror', error => errors.push(error.message));
       await installApiFixture(page);
-      await page.route('**/api/v1/**', async route => {
+      await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
         const path = new URL(route.request().url()).pathname.replace('/api/v1', '');
         if (route.request().method() !== 'GET' && path !== '/auth/dev-login') writes.push(path);
         let body: unknown;
@@ -24,10 +25,10 @@ for (const width of [1280, 390]) {
         else if (path === '/ai-capabilities') body = { available: false, network_interpretation: false, reason: 'Fixture: no inference' };
         else return route.fallback();
         await route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
-      });
+      }));
       await page.goto('/login');
-      await page.getByLabel('Username').fill('analyst');
-      await page.getByRole('button', { name: 'Development login' }).click();
+      await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+      await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
       await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
       await page.goto('/analyses/glance-layout');
       await page.getByRole('combobox', { name: /^(보고서 언어|Report language)$/ }).selectOption(language);

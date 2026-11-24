@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -19,14 +20,14 @@ for (const width of [1280, 390])
             page.on('console', m => consoleMessages.push({ type: m.type(), text: m.text() }));
             await page.setViewportSize({ width, height: 900 });
             await page.addInitScript(lang => { localStorage.setItem('c2hunter-token', 'test'); localStorage.setItem('c2hunter-report-language', lang); }, language);
-            await page.route('**/api/v1/**', r => {
+            await page.route('**/api/v1/**', withLegacyAuthentication(r => {
                 if (r.request().method() !== 'GET') return r.abort();
                 const path = new URL(r.request().url()).pathname;
                 const detailPath = '/api/v1/analysis-jobs/' + job.id;
                 if (path === detailPath) return r.fulfill({ contentType: 'application/json', body: producer.job_wire });
                 if (path === detailPath + '/candidates') return r.fulfill({ contentType: 'application/json', body: producer.candidates_wire });
                 return r.fulfill({ status: 404, json: { error: { code: 'FIXTURE_ROUTE_MISSING', message: path } } });
-            });
+            }));
             try {
                 await page.goto('/analyses/' + job.id);
                 const summary = page.getByRole('region', { name: language === 'en' ? 'C2 result summary' : 'C2 결과 요약', exact: true });
@@ -50,7 +51,7 @@ for (const width of [1280, 390])
                 await next.focus();
                 await page.keyboard.press('Enter');
                 await expect(page.getByRole('heading', { name: language === 'en' ? 'Detected candidates' : '탐지 후보', exact: true })).toBeFocused();
-                expect(requests.filter(r => r.url.includes('/api/v1/')).map(r => new URL(r.url).pathname)).toEqual(['/api/v1/analysis-jobs/' + job.id, '/api/v1/analysis-jobs/' + job.id + '/candidates']);
+                expect(requests.filter(r => r.url.includes('/api/v1/')).map(r => new URL(r.url).pathname)).toEqual(['/api/v1/auth/csrf', '/api/v1/auth/me', '/api/v1/analysis-jobs/' + job.id, '/api/v1/analysis-jobs/' + job.id + '/candidates']);
                 await info.attach('bounds', { body: JSON.stringify({ bounds, geometry }), contentType: 'application/json' });
             }
             finally {

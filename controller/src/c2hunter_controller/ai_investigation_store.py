@@ -18,6 +18,10 @@ from threading import RLock
 from typing import Any
 from weakref import WeakKeyDictionary
 
+from .auth_job_context import current_job_audit
+from .auth_job_runtime import repair_job_audit
+from .auth_models import AuthError
+from .auth_store import AuthStore
 from .repositories import MemoryRepository, SQLiteRepository
 
 RUN_KIND = "ai_investigation_run_v1"
@@ -194,7 +198,7 @@ def _sql_transaction(
                 _QUARANTINED[repository] = True
                 if isinstance(exc, Exception):
                     raise InvestigationOutcomeUnknown("STORAGE_OUTCOME_UNKNOWN") from None
-            if isinstance(exc, InvestigationStoreError):
+            if isinstance(exc, InvestigationStoreError | AuthError):
                 raise
             if isinstance(exc, Exception):
                 raise InvestigationStorageError("STORAGE_UNAVAILABLE") from None
@@ -290,6 +294,8 @@ class InvestigationRunStore:
         self.__profile = _profile
         backend = _backend(repository)
         self.repository = repository
+        self.auth_store: AuthStore | None = None
+        self._audit_writes: set[str] = set()
         self.clock = clock
         self._memory = backend == "memory"
         self._postgres = backend == "postgres"
@@ -318,21 +324,45 @@ class InvestigationRunStore:
 
     @contextmanager
     def _transaction(self, fence: Callable[[], None] | None = None) -> Iterator[Any]:
+        changed: set[str] = set()
         with self.repository._lock:
-            if self._memory:
-                current = _MEMORY[self.repository]
-                pending = _MemoryRows(
-                    dict(current.rows),
-                    {k: set(v) for k, v in current.index.items()},
-                    set(current.initialized),
-                )
-                yield pending
-                if fence is not None:
-                    fence()
-                _MEMORY[self.repository] = pending
-            else:
-                with _sql_transaction(self.repository, self._postgres, fence) as tx:
-                    yield tx
+            previous = self._audit_writes
+            self._audit_writes = changed
+            try:
+                if self._memory:
+                    current = _MEMORY[self.repository]
+                    pending = _MemoryRows(
+                        dict(current.rows),
+                        {k: set(v) for k, v in current.index.items()},
+                        set(current.initialized),
+                    )
+                    yield pending
+                    if fence is not None:
+                        fence()
+                    _MEMORY[self.repository] = pending
+                else:
+                    with _sql_transaction(self.repository, self._postgres, fence) as tx:
+                        yield tx
+            finally:
+                self._audit_writes = previous
+        # Only after COMMIT and lock retirement. Read the winner, not the attempted state.
+        for identifier in changed:
+            self.repair_audit(identifier)
+
+    @property
+    def audit_family(self) -> str:
+        return "job_investigation" if self._profile is _JOB_PROFILE else "ip_investigation"
+
+    def audit_status(self, run_id: str) -> str | None:
+        """Internal authoritative reader; never returns private stored evidence."""
+        with self._transaction() as tx:
+            state = self._read(tx, self._profile.state, run_id)
+            return str(state["status"]) if state is not None else None
+
+    def repair_audit(self, run_id: str) -> str:
+        return repair_job_audit(
+            self.auth_store, self.audit_family, run_id, lambda: self.audit_status(run_id)
+        )
 
     def _now(self) -> float:
         now = self.clock()
@@ -390,6 +420,8 @@ class InvestigationRunStore:
         )
 
     def _write(self, tx: Any, kind: str, identifier: str, value: dict[str, Any]) -> None:
+        if kind == self._profile.state and value.get("status") in TERMINAL:
+            self._audit_writes.add(identifier)
         text = _encode(value)
         _require(
             len(text.encode()) <= (600000 if kind == self._profile.run else 70000), "STORAGE_LIMIT"
@@ -609,6 +641,7 @@ class InvestigationRunStore:
         request_json: bytes,
         binding_json: bytes,
         snapshot_json: bytes,
+        before_publish: Callable[[str], object] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         _header(owner_id, job_id, idempotency_key)
         request_text = _document(request_json, 16384)
@@ -657,6 +690,14 @@ class InvestigationRunStore:
             if self._profile is _JOB_PROFILE:
                 state.update(selected_peer_ids=None, selection_reserved=False, evidence_bytes=0)
                 state["budgets"]["planning_responses"] = 0
+            authority = current_job_audit()
+            if before_publish is not None:
+                before_publish(identifier)
+            elif authority is not None:
+                authority.reserve(
+                    "job_investigation" if self._profile is _JOB_PROFILE else "ip_investigation",
+                    identifier,
+                )
             self._write(tx, self._profile.run, identifier, record)
             self._write(tx, self._profile.state, identifier, state)
             return self._public_state(state), True
@@ -860,6 +901,7 @@ class InvestigationRunStore:
             state = self._read(tx, self._profile.state, run_id, owner=owner_id, job=job_id)
             if state is None or (state["owner_id"], state["job_id"]) != (owner_id, job_id):
                 return None
+            self._audit_writes.add(run_id)
             if state["status"] not in TERMINAL:
                 state.update(status="CANCELLED", reason="USER_CANCELLED")
                 self._save_state(tx, state)

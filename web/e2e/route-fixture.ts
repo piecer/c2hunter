@@ -1,3 +1,4 @@
+import { enableDevelopmentLogin, withLegacyAuthentication } from './auth-fixture';
 import type { Page, Route } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 
@@ -9,6 +10,7 @@ const flow = { flow_id: 'e2e-flow', job_id: 'job-1', sensor_id: 'sensor-a', time
 async function fulfill(route: Route, body: unknown, status = 200) { await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) }); }
 
 export async function installApiFixture(page: Page, { aiAvailable = false }: { aiAvailable?: boolean } = {}) {
+  enableDevelopmentLogin(page);
   let allowlist: Array<{ id: string; type: string; value: string; description: string }> = [];
   let integrationSettings = {
     version: 1, virustotal_enabled: true, abuseipdb_enabled: true, misp_enabled: true,
@@ -70,7 +72,7 @@ export async function installApiFixture(page: Page, { aiAvailable = false }: { a
       limitations: ['FakeGateway milestone output'],
     },
   };
-  await page.route('**/api/v1/**', async route => {
+  await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
     const request = route.request(); const path = new URL(request.url()).pathname.replace('/api/v1', ''); const method = request.method();
     if (path === '/auth/dev-login' && method === 'POST') return fulfill(route, { access_token: 'deterministic-e2e-token' });
     if (path === '/integration-settings' && method === 'GET') return fulfill(route, integrationSettings);
@@ -163,5 +165,5 @@ export async function installApiFixture(page: Page, { aiAvailable = false }: { a
     if (path === '/allowlist' && method === 'POST') { const body = request.postDataJSON(); allowlist.push({ id: 'allow-1', type: body.type, value: body.value, description: body.description }); return fulfill(route, allowlist[0], 201); }
     if (path === '/allowlist/allow-1' && method === 'DELETE') { allowlist = []; return fulfill(route, undefined, 204); }
     return fulfill(route, { error: { code: 'FIXTURE_ROUTE_MISSING', message: `${method} ${path}` } }, 404);
-  });
+  }));
 }

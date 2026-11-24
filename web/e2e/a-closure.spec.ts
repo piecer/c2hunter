@@ -20,8 +20,8 @@ test('narrow validation keeps freshness warning and retry accessible with stable
     await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
   });
   await page.goto('/login');
-  await page.getByLabel('Username').fill('analyst');
-  await page.getByRole('button', { name: 'Development login' }).click();
+  await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+  await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
   await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
   await page.goto('/candidates/candidate-1');
   await page.getByRole('button', { name: '판정 및 외부 검증', exact: true }).click();
@@ -51,8 +51,8 @@ for (const width of [1280, 390]) {
     await page.setViewportSize({ width, height: 900 });
     await installApiFixture(page);
     await page.goto('/login');
-    await page.getByLabel('Username').fill('analyst');
-    await page.getByRole('button', { name: 'Development login' }).click();
+    await page.getByLabel(/^(Username|사용자 이름)$/).fill('analyst');
+    await page.getByRole('button', { name: /^(Development login|개발 로그인)$/ }).click();
     await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
     await page.goto('/candidates/candidate-1');
     const actions = page.getByRole('button', { name: '점수 조정 및 작업', exact: true });

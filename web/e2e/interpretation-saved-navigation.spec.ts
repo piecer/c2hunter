@@ -1,3 +1,4 @@
+import { withLegacyAuthentication } from './auth-fixture';
 import { expect, test } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -23,7 +24,7 @@ for (const width of [1280, 390]) for (const language of ['en', 'ko']) for (const
     const latest = { ...older, id: 'latest', status: 'ANALYZING', network_interpretation: undefined, ddos_interpretation: undefined };
     const errors: string[] = [], writes: string[] = [], reads: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
-    await page.route('**/api/v1/**', async route => {
+    await page.route('**/api/v1/**', withLegacyAuthentication(async route => {
       const request = route.request(), url = new URL(request.url()), path = url.pathname.replace('/api/v1', '');
       if (request.method() !== 'GET') writes.push(path); else reads.push(path + url.search);
       let body: unknown = { items: [] };
@@ -37,7 +38,7 @@ for (const width of [1280, 390]) for (const language of ['en', 'ko']) for (const
       else if (path === '/ai-runs/latest') body = latest;
       else if (path === '/ai-runs/older') body = older;
       await route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
-    });
+    }));
     const measurements: unknown[] = [];
     const measure = async (phase: string, ceiling = 2500) => {
       const geometry = await page.evaluate(() => ({ nodes: document.querySelectorAll('*').length, body: document.body.scrollWidth, document: document.documentElement.scrollWidth }));
