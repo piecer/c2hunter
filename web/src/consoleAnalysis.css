@@ -1,0 +1,149 @@
+/* Analysis-only presentation. Load after the existing component styles.
+   Keep disclosure, selection ownership, warning semantics and table overflow
+   with their existing components; these rules change only visual hierarchy. */
+.c2-result-summary .c2-key-facts li {
+  border: 0;
+  background: var(--surface-raised, #20242a);
+  border-radius: 4px;
+  padding: .6rem .75rem;
+}
+.c2-result-summary .c2-next-check {
+  border-left: 0;
+  border-top: 1px solid var(--border, #30363d);
+  padding: .65rem 0 0;
+}
+.c2-purpose-nav {
+  gap: .25rem;
+  padding-bottom: .5rem;
+  border-bottom: 1px solid var(--border, #30363d);
+}
+.c2-purpose-nav button {
+  border: 1px solid transparent;
+  border-radius: 5px;
+  font-weight: 600;
+}
+.c2-purpose-nav button[aria-pressed="false"] {
+  background: transparent;
+  color: var(--muted, #a5adb7);
+}
+.c2-purpose-nav button[aria-pressed="true"] {
+  background: var(--surface-raised, #20242a);
+  border-color: var(--border, #30363d);
+  color: var(--accent, #77d8b3);
+}
+.c2-purpose-nav button:hover {
+  background: var(--surface-raised, #20242a);
+  color: var(--text, #edf0f4);
+}
+
+/* The candidate is one document; metrics are insets, not nested cards. */
+.candidate-result .metrics.compact {
+  gap: .5rem;
+  margin-block: .75rem;
+}
+.candidate-result .metrics.compact article {
+  border: 0;
+  border-radius: 4px;
+  background: var(--surface-raised, #20242a);
+  padding: .65rem .75rem;
+}
+.candidate-result .metrics.compact strong {
+  font-size: 1.3rem;
+  font-variant-numeric: tabular-nums;
+}
+.candidate-result .candidate-navigation {
+  gap: .35rem;
+  border-bottom: 1px solid var(--border, #30363d);
+  padding-bottom: .75rem;
+}
+.candidate-result .candidate-navigation button {
+  background: transparent;
+  color: var(--muted, #a5adb7);
+  border: 1px solid var(--border, #30363d);
+  border-radius: 5px;
+  font-weight: 600;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.candidate-result .candidate-navigation button[aria-expanded="true"],
+.candidate-result .candidate-navigation button:hover {
+  background: var(--surface-raised, #20242a);
+  color: var(--accent, #77d8b3);
+}
+.candidate-detail-surface {
+  background: var(--panel, #181b1f);
+  border-radius: 6px;
+}
+.candidate-detail-surface > .section-heading {
+  border-bottom: 1px solid var(--border, #30363d);
+  padding-bottom: .75rem;
+}
+.candidate-detail-surface > .section-heading > button {
+  background: var(--surface-raised, #20242a);
+  color: var(--text, #edf0f4);
+  border: 1px solid var(--border, #30363d);
+  font-weight: 600;
+  max-width: 100%;
+  white-space: normal;
+}
+.candidate-detail-surface > .panel {
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+}
+.candidate-detail-surface .evidence-metrics > span,
+.candidate-detail-surface .evidence-metric-details {
+  background: var(--surface-raised, #20242a);
+  border-color: var(--border, #30363d);
+}
+
+/* Conclusions and the next check lead; retained findings read as a document.
+   Severity badges, warning text and existing focus outlines stay untouched. */
+.network-report .network-glance,
+.ddos-report .ddos-glance {
+  border-top: 0;
+  border-left: 0;
+  padding-left: 0;
+}
+.network-report .network-next-action,
+.ddos-report .ddos-next {
+  border: 0;
+  border-radius: 5px;
+  background: var(--surface-raised, #20242a);
+}
+.network-report .network-totals > div {
+  border: 0;
+  border-radius: 4px;
+  background: var(--surface-raised, #20242a);
+}
+.network-report .network-key-patterns > li {
+  border: 0;
+  border-top: 1px solid var(--border, #30363d);
+  border-radius: 0;
+  background: transparent;
+  padding-inline: 0;
+}
+.network-report > article.panel,
+.ddos-report > article.panel {
+  border: 0;
+  border-top: 1px solid var(--border, #30363d);
+  border-radius: 0;
+  background: transparent;
+  padding-inline: 0;
+}
+.network-report .network-example-detail,
+.ddos-responsive-detail {
+  background: var(--surface-raised, #20242a);
+  border-color: var(--border, #30363d);
+  border-radius: 6px;
+}
+.network-report .network-example-heading {
+  border-bottom: 1px solid var(--border, #30363d);
+  padding-bottom: .75rem;
+}
+.ddos-responsive-detail > h3 {
+  margin-top: 0;
+  padding-bottom: .75rem;
+  border-bottom: 1px solid var(--border, #30363d);
+}

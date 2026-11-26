@@ -340,8 +340,8 @@ function Shell({ children }: { children: ReactNode }) {
   const forced = captureAuthentication().user?.must_change_password;
   const [navigationOpen, setNavigationOpen] = useState(false);
   const navigationButton = useRef<HTMLButtonElement>(null);
-  return <div className="shell"><aside onKeyDown={event => { if (event.key === 'Escape' && navigationOpen) { setNavigationOpen(false); navigationButton.current?.focus(); } }}>
-    <div className="brand">C2<span>Hunter</span></div>
+  return <div className="shell"><a className="skip-to-content" href="#main-content">본문으로 건너뛰기 / Skip to content</a><aside onKeyDown={event => { if (event.key === 'Escape' && navigationOpen) { setNavigationOpen(false); navigationButton.current?.focus(); } }}>
+    <div className="brand"><span className="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M9 5 3 12l6 7M15 5l6 7-6 7M14 9l-4 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg></span><span className="brand-name">C2<span>Hunter</span></span></div>
     <button ref={navigationButton} type="button" className="navigation-toggle secondary" aria-expanded={navigationOpen} aria-controls="shell-navigation" onClick={() => setNavigationOpen(!navigationOpen)}>메뉴 / Menu</button>
     <div id="shell-navigation" className={`shell-navigation${navigationOpen ? ' is-open' : ''}`} onClick={event => { if ((event.target as HTMLElement).closest('a')) { setNavigationOpen(false); if (window.matchMedia('(max-width: 800px)').matches) navigationButton.current?.focus(); } }}>
       {!forced && <><nav aria-label="Primary">
@@ -354,7 +354,7 @@ function Shell({ children }: { children: ReactNode }) {
       </nav>
       </>}<AccountNavigation/>
     </div>
-  </aside><main className="content"><PolicyDeletionOwner>{children}</PolicyDeletionOwner></main></div>;
+  </aside><main id="main-content" className="content" tabIndex={-1}><PolicyDeletionOwner>{children}</PolicyDeletionOwner></main></div>;
 }
 
 function Dashboard() {
@@ -364,7 +364,7 @@ function Dashboard() {
     refetchInterval: 30_000,
   });
   return <>
-<header className="header-actions">
+<header className="header-actions dashboard-header">
 <div>
 <p className="eyebrow">OPERATIONS OVERVIEW</p>
 <h1>Dashboard</h1>
@@ -387,7 +387,7 @@ function Dashboard() {
 <p className="muted">집계 시각은 개별 관측의 최신성을 보장하지 않습니다. 후보의 마지막 관측과 센서 heartbeat를 함께 확인하세요.</p>
 </section>
 <section className="dashboard-action-grid">
-<article className="panel">
+<article className="panel dashboard-review-panel">
 <div className="section-heading">
 <div>
 <p className="eyebrow">REVIEW QUEUE</p>
@@ -418,7 +418,7 @@ function Dashboard() {
 </Link>
 </li>)}</ul> : <div className="state compact-state">즉시 확인할 운영 경고가 없습니다.</div>}</article>
 </section>
-<section className="dashboard-overview-grid">
+<section className="dashboard-overview-grid dashboard-operations">
 <article className="panel">
 <div className="section-heading">
 <div>
@@ -447,6 +447,37 @@ function Dashboard() {
 <small>수신 {sensor.received_packets.toLocaleString()} · 누락 {sensor.dropped_packets.toLocaleString()} · 드롭률 {sensor.drop_rate_percent.toFixed(2)}%</small>{sensor.last_error && <small className="error-text">{sensor.last_error}</small>}</Link>
 </li>)}</ul> : <div className="state compact-state">등록된 센서가 없습니다.</div>}</article>
 </section>
+<section className="panel dashboard-recent">
+<div className="section-heading">
+<div>
+<p className="eyebrow">RECENT ACTIVITY</p>
+<h2>최근 분석</h2>
+</div>
+<Link to="/analyses">분석 기록 보기</Link>
+</div>{d.recent_analyses.length ? <div className="table-wrap">
+<table aria-label="최근 분석">
+<thead>
+<tr>
+<th>분석</th>
+<th>상태</th>
+<th>후보</th>
+<th>Packets / Flows</th>
+<th>생성</th>
+</tr>
+</thead>
+<tbody>{d.recent_analyses.map(job => <tr key={job.id}>
+<td>
+<Link to={`/analyses/${job.id}`}>{job.name}</Link>
+</td>
+<td>
+<span className={`badge ${job.status.toLowerCase()}`}>{job.status}</span>
+</td>
+<td>{job.candidate_count ?? 0}</td>
+<td>{(job.packet_count ?? 0).toLocaleString()} / {(job.flow_count ?? 0).toLocaleString()}</td>
+<td>{fmt(job.created_at)}</td>
+</tr>)}</tbody>
+</table>
+</div> : <div className="state compact-state">아직 생성된 분석이 없습니다.</div>}</section>
 <section className="metrics dashboard-metrics" aria-label="운영 핵심 지표">
 <article className="metric">
 <span>온라인 센서</span>
@@ -514,37 +545,6 @@ function Dashboard() {
 </div>; })}</div>
 </article>
 </section>
-<section className="panel">
-<div className="section-heading">
-<div>
-<p className="eyebrow">RECENT ACTIVITY</p>
-<h2>최근 분석</h2>
-</div>
-<Link to="/analyses">분석 기록 보기</Link>
-</div>{d.recent_analyses.length ? <div className="table-wrap">
-<table aria-label="최근 분석">
-<thead>
-<tr>
-<th>분석</th>
-<th>상태</th>
-<th>후보</th>
-<th>Packets / Flows</th>
-<th>생성</th>
-</tr>
-</thead>
-<tbody>{d.recent_analyses.map(job => <tr key={job.id}>
-<td>
-<Link to={`/analyses/${job.id}`}>{job.name}</Link>
-</td>
-<td>
-<span className={`badge ${job.status.toLowerCase()}`}>{job.status}</span>
-</td>
-<td>{job.candidate_count ?? 0}</td>
-<td>{(job.packet_count ?? 0).toLocaleString()} / {(job.flow_count ?? 0).toLocaleString()}</td>
-<td>{fmt(job.created_at)}</td>
-</tr>)}</tbody>
-</table>
-</div> : <div className="state compact-state">아직 생성된 분석이 없습니다.</div>}</section>
 </div>}</AsyncState>
 </>;
 }

@@ -4,6 +4,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App';
 import { initializeAccountAuthentication } from './authentication';
+import './consoleTheme.css';
+import './consoleAnalysis.css';
 // Start the fail-closed identity bootstrap before any protected UI mounts.
 void initializeAccountAuthentication();
 
