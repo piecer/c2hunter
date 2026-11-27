@@ -51,13 +51,16 @@ function Content({ report, detailOwner, setDetailOwner, ownerPrefix, current, jo
   const t = (en: string, ko: string) => language === 'ko' ? ko : en;
   const [page, setPage] = useState(0);
   const [observedOwner, setObservedOwner] = useState(detailOwner);
+  const [coverageExpanded, setCoverageExpanded] = useState(false);
+  const [nextExpanded, setNextExpanded] = useState(false);
   if (observedOwner !== detailOwner) {
     setObservedOwner(detailOwner);
     const index = report.findings.findIndex(item => detailOwner === `${ownerPrefix}:finding:${item.id}`);
     if (index >= 0) setPage(Math.floor(index / 8));
+    // React restarts this render before committing children. Keep all hooks
+    // above the restart and validate/build the report only in the next render.
+    return null;
   }
-  const [coverageExpanded, setCoverageExpanded] = useState(false);
-  const [nextExpanded, setNextExpanded] = useState(false);
   if (!isDDoSAttackReport(report)) return <section className="panel ddos-report" role="alert">{t('Unsupported DDoS report. Review coverage and update the client.', '지원되지 않는 DDoS 보고서입니다. 분석 범위를 확인하고 클라이언트를 업데이트하세요.')}</section>;
   const coverageKey = `${ownerPrefix}:coverage`;
   const coverageOpen = coverageExpanded;
@@ -96,7 +99,7 @@ function Content({ report, detailOwner, setDetailOwner, ownerPrefix, current, jo
 
         </> : <p>{t('Review analysis coverage, protected-side networks and capture visibility. No retained finding is not proof of normal traffic.', '분석 범위, 보호 측 네트워크 및 캡처 관측 범위를 검토하세요. 보존된 발견 항목 부재는 정상 트래픽의 증명이 아닙니다.')}</p>}
       </section>
-      <button type="button" className="secondary" aria-expanded={scopeOpen} onClick={() => { if (current()) setDetailOwner(scopeOpen ? undefined : scopeKey); }}>{t('Interpretation scope and caveats', '해석 범위와 주의 사항')}</button>
+      <button type="button" className="secondary" aria-expanded={scopeOpen} onClick={() => setDetailOwner(scopeOpen ? undefined : scopeKey)}>{t('Interpretation scope and caveats', '해석 범위와 주의 사항')}</button>
       {scopeOpen && <section role="region" aria-label={t('Interpretation scope and caveats', '해석 범위와 주의 사항')}>
         <p>{report.verdict === 'no_clear_attack' ? t('No supported DDoS shape was observed; this does not prove a healthy service.', '지원되는 DDoS 형태가 관찰되지 않았지만 서비스가 정상임을 입증하지는 않습니다.') : t('This is a defensive traffic-shape assessment, not actor attribution or proof of service impact.', '이는 방어 목적의 트래픽 형태 평가이며 공격자 귀속이나 서비스 영향의 입증이 아닙니다.')}</p>
         {primary && <><p><strong>{t('Observed role', '관찰 역할')}</strong> — {choose(language, roles[primary.attack_role])}</p>
@@ -127,7 +130,7 @@ function Content({ report, detailOwner, setDetailOwner, ownerPrefix, current, jo
       return <DDoSCandidateInspection key={item.id} finding={item} report={report} job={job} current={current} visible={open && Math.floor(index / 8) === page}>{inspection => Math.floor(index / 8) !== page ? null : <article className="panel compact"><h4>{choose(language, attackTypes[item.attack_type])}</h4>
         <p><span className={`badge ${item.severity.toLowerCase()}`}>{item.likelihood} · {item.severity}</span> <code>{item.target.ip}{item.target.port == null ? '' : `:${item.target.port}`}</code></p>
         <p>{choose(language, objectives[item.objective])}</p>
-        <button className="secondary" aria-expanded={open} onClick={() => { if (current()) setDetailOwner(open ? undefined : findingKey); }}>{open ? t('Hide detailed evidence', '상세 근거 숨기기') : t('Show detailed evidence', '상세 근거 보기')} — {choose(language, attackTypes[item.attack_type])}</button>
+        <button className="secondary" aria-expanded={open} onClick={() => setDetailOwner(open ? undefined : findingKey)}>{open ? t('Hide detailed evidence', '상세 근거 숨기기') : t('Show detailed evidence', '상세 근거 보기')} — {choose(language, attackTypes[item.attack_type])}</button>
         {open && <DDoSResponsiveDetail title={t('DDoS detail', 'DDoS 상세')} onClose={() => setDetailOwner(undefined)}><section role="region" aria-label={t('DDoS finding evidence', 'DDoS 발견 근거')}>
           <h5>{t('Measured facts', '측정 사실')}</h5><dl>{Object.entries(item.metrics).map(([key, value]) => <div key={key}><dt>{choose(language, metricLabels[key])}</dt><dd>{format(value, language)}</dd></div>)}</dl>
           {item.classification?.axes && <div>{axisNames.map(name => {
