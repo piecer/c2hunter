@@ -71,7 +71,22 @@ const typeRecommendationCodes: Record<string, string[]> = {
   TCP_RST_FLOOD: ['APPLY_STATEFUL_TCP_VALIDATION', 'RATE_LIMIT_INVALID_TCP_FLAGS', 'CHECK_MIDDLEBOX_RESET_SOURCES'],
   MULTI_VECTOR: ['ENGAGE_SCRUBBING_OR_FLOWSPEC'],
 };
+// Repeated report validation hashes the same short identities and predicates.
+// Cache only immutable text, never report validity or mutable object identity.
+// At most 512 * 1024 UTF-16 code units of keys; large snapshots are not retained.
+const digestCache = new Map<string, string>();
+const DIGEST_CACHE_ENTRIES = 512;
+const DIGEST_CACHE_CHARACTERS = 1024;
 export const sha256 = (text: string) => {
+  const cacheable = typeof text === 'string' && text.length <= DIGEST_CACHE_CHARACTERS;
+  if (cacheable) {
+    const cached = digestCache.get(text);
+    if (cached !== undefined) {
+      digestCache.delete(text);
+      digestCache.set(text, cached);
+      return cached;
+    }
+  }
   const primes: number[] = [];
   for (let candidate = 2; primes.length < 64; candidate += 1) {
     if (primes.every(prime => candidate % prime !== 0)) primes.push(candidate);
@@ -105,7 +120,12 @@ export const sha256 = (text: string) => {
     }
     [a, b, c, d, e, f, g, h].forEach((value, index) => { hash[index] = (hash[index] + value) >>> 0; });
   }
-  return hash.map(value => value.toString(16).padStart(8, '0')).join('');
+  const digest = hash.map(value => value.toString(16).padStart(8, '0')).join('');
+  if (cacheable) {
+    if (digestCache.size >= DIGEST_CACHE_ENTRIES) digestCache.delete(digestCache.keys().next().value!);
+    digestCache.set(text, digest);
+  }
+  return digest;
 };
 const metricMaximum: Record<string, number> = {
   packet_count: Number.MAX_SAFE_INTEGER, byte_count: Number.MAX_SAFE_INTEGER,
